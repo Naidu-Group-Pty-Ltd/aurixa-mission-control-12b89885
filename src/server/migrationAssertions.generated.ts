@@ -986,4 +986,16 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20261011090100",
     assertions: [{ kind: "cron", jobname: "voice-stack-drain" }],
   },
+  {
+    migration: "20261012100000_email_campaign_attachments_and_mailboxes.sql",
+    version: "20261012100000",
+    assertions: [
+      { kind: "table", table: "email_campaign_attachments" },
+      { kind: "column", table: "email_campaign_messages", column: "attachments" },
+      { kind: "column", table: "email_campaign_messages", column: "attachment_count" },
+      { kind: "column", table: "email_campaign_messages", column: "attachment_bytes" },
+      { kind: "column", table: "email_campaign_messages", column: "graph_draft_id" },
+      { kind: "table", table: "email_campaign_sending_mailboxes" },
+    ],
+  },
 ];

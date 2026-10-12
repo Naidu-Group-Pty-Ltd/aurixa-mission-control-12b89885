@@ -47,6 +47,7 @@ import {
   listInboxSince,
   type GraphMailMessage,
 } from "@/server/graph-client";
+import { knownMailboxes } from "@/server/email-mailboxes.server";
 
 const DEFAULT_BUDGET_MS = 20_000;
 /** How far back a mailbox with no successful scan on record starts. */
@@ -65,22 +66,22 @@ export type BounceScanSummary = {
   notes: string[];
 };
 
-/** Every mailbox this deployment sends from: the configured one, plus overrides. */
+/**
+ * Every mailbox this deployment sends from: the configured default, every
+ * mailbox a non-draft campaign names, and every mailbox a message has actually
+ * left from in the last month.
+ *
+ * The last of those matters once a campaign can be moved to another mailbox.
+ * Bounces for what it sent from the old one keep arriving there for days, and
+ * reading only the mailboxes campaigns name TODAY would stop reading them the
+ * moment somebody changed the field — rule 2 losing its data with nothing
+ * reporting it.
+ */
 async function sendingMailboxes(): Promise<string[]> {
   const mailboxes = new Set<string>();
   const configured = defaultMailbox();
-  if (configured) mailboxes.add(configured.toLowerCase());
-
-  const { data, error } = await supabaseAdmin
-    .from("email_campaigns")
-    .select("from_mailbox")
-    .not("from_mailbox", "is", null)
-    .neq("status", "draft");
-  if (error) throw error;
-  for (const row of data ?? []) {
-    const value = (row.from_mailbox as string | null)?.trim();
-    if (value) mailboxes.add(value.toLowerCase());
-  }
+  if (configured) mailboxes.add(configured.trim().toLowerCase());
+  for (const entry of await knownMailboxes(supabaseAdmin)) mailboxes.add(entry.address);
   return [...mailboxes];
 }
 

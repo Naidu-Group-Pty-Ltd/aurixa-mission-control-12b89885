@@ -27,8 +27,40 @@
  * service said no BEFORE accepting, so no message exists), `throttled` (a 429,
  * which is a refusal to start and safe to try again later), or `unconfirmed`
  * (we do not know, and nothing may resend on that). Only the reads retry.
+ *
+ * ## Attachments, and the second way to send
+ *
+ * `sendMail` carries attachments inside its one request, as base64, and that
+ * request is capped at about 4 MB — so a message whose files total more than
+ * about 2.9 MB cannot be sent that way at all. Such a message is built as a
+ * DRAFT: created, each file attached (a file of 3 MB or more through an upload
+ * session, in pieces), then sent. Everything before the final `send` call
+ * creates a draft and sends nothing, so a failure there is `refused`,
+ * `throttled` or `deferred` — never `unconfirmed` — and the draft is deleted.
+ * The final call is classified exactly as `sendMail` is. When it ends
+ * unconfirmed the draft is KEPT and its id returned: a draft still sitting in
+ * Drafts is proof that it never left, and that is a person's to check.
+ *
+ * ## Which mailbox
+ *
+ * `MICROSOFT_MAILBOX_EMAIL` is a default, not a limit: an application
+ * permission reaches every mailbox the tenant's Exchange policy allows. So
+ * this also lists the tenant's mailboxes (`listDirectoryUsers`, which needs a
+ * directory permission) and asks which of them this application can actually
+ * use (`probeMailboxes`, one inbox-folder read each, batched twenty to a
+ * request). `src/lib/email/mailboxes.pure.ts` says why "can read its inbox" is
+ * the test.
  */
 import { withRetry, isTransientHttpError } from "@/lib/with-retry";
+import {
+  UPLOAD_SESSION_MIN_BYTES,
+  bytesToBase64,
+  deliveryPath,
+  estimateSendMailBytes,
+  uploadRanges,
+  type DeliveryPath,
+} from "@/lib/email/attachments.pure";
+import { tokenRoles, type DirectoryUser } from "@/lib/email/mailboxes.pure";
 
 const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
 const LOGIN_BASE = "https://login.microsoftonline.com";
@@ -152,7 +184,24 @@ export function forgetToken(): void {
   cachedToken = null;
 }
 
+/**
+ * The application permissions this deployment's token carries, or null when
+ * the token is not a readable JWT. Advisory — see `tokenRoles`.
+ */
+export async function grantedRoles(): Promise<string[] | null> {
+  return tokenRoles(await accessToken());
+}
+
 export type GraphRecipient = { emailAddress: { address: string; name?: string } };
+
+export type GraphFileAttachment = {
+  "@odata.type": "#microsoft.graph.fileAttachment";
+  name: string;
+  contentType: string;
+  contentBytes: string;
+  isInline?: boolean;
+  contentId?: string;
+};
 
 export type GraphMessage = {
   subject: string;
@@ -161,6 +210,7 @@ export type GraphMessage = {
   bccRecipients?: GraphRecipient[];
   replyTo?: GraphRecipient[];
   from?: GraphRecipient;
+  attachments?: GraphFileAttachment[];
 };
 
 export type SendOutcome =
@@ -168,6 +218,69 @@ export type SendOutcome =
   | { kind: "refused"; status: number; message: string; code: string | null }
   | { kind: "throttled"; retryAfterMs: number }
   | { kind: "unconfirmed"; message: string };
+
+/**
+ * Nothing was sent, and the cause looks temporary — a 5xx or a dropped
+ * connection while a DRAFT was being built, before anything was asked to
+ * leave. As safe to retry as a throttle. Only the draft path produces it, so
+ * it is not part of `SendOutcome`, which every other sender here narrows.
+ */
+export type DeferredOutcome = { kind: "deferred"; message: string };
+
+type PreSendOutcome = SendOutcome | DeferredOutcome;
+
+/** Graph's error body, read without trusting it to be JSON. */
+async function readGraphError(response: Response): Promise<{ code: string | null; text: string }> {
+  const detail = await response.text().catch(() => "");
+  try {
+    const parsed = JSON.parse(detail) as { error?: { code?: string; message?: string } };
+    return { code: parsed?.error?.code ?? null, text: parsed?.error?.message ?? "" };
+  } catch {
+    return { code: null, text: detail.slice(0, 300) };
+  }
+}
+
+function retryAfterMs(response: Response): number {
+  const retryAfter = Number(response.headers.get("retry-after") ?? "");
+  return Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 30_000;
+}
+
+/**
+ * What the answer to a SEND means — `sendMail`, or a draft's `send`. The one
+ * place the three-outcome rule is written down.
+ */
+async function classifySendResponse(response: Response): Promise<SendOutcome> {
+  const requestId = response.headers.get("request-id");
+
+  if (response.status === 202 || response.status === 200 || response.status === 204) {
+    return { kind: "sent", status: response.status, requestId };
+  }
+
+  if (response.status === 429 || response.status === 503) {
+    return { kind: "throttled", retryAfterMs: retryAfterMs(response) };
+  }
+
+  if (response.status === 401) forgetToken();
+
+  const { code, text: readable } = await readGraphError(response);
+
+  // A 5xx from Graph is the ambiguous case: the service may have accepted the
+  // message and failed on the way back. It is recorded as unconfirmed rather
+  // than as a failure, because a failure is retried and this must not be.
+  if (response.status >= 500) {
+    return {
+      kind: "unconfirmed",
+      message: `Graph answered ${response.status}${readable ? `: ${readable.slice(0, 200)}` : ""}`,
+    };
+  }
+
+  return {
+    kind: "refused",
+    status: response.status,
+    message: readable.slice(0, 400) || `Graph refused the message (${response.status})`,
+    code,
+  };
+}
 
 /**
  * Hand one message to Graph.
@@ -204,49 +317,313 @@ export async function sendMail(
     };
   }
 
-  const requestId = response.headers.get("request-id");
+  return classifySendResponse(response);
+}
 
-  if (response.status === 202 || response.status === 200 || response.status === 204) {
-    return { kind: "sent", status: response.status, requestId };
+/** A file to send, already read and verified by the caller. */
+export type OutboundAttachment = {
+  name: string;
+  contentType: string;
+  bytes: Uint8Array;
+  /** Shown in the body through `cid:<contentId>` rather than listed as a file. */
+  isInline: boolean;
+  contentId: string;
+};
+
+export type DeliveryOutcome = PreSendOutcome & {
+  path: DeliveryPath;
+  /**
+   * The draft's id, kept only when a draft send ended `unconfirmed` (or
+   * `sent`): that is when a person may need to look for it. Null whenever the
+   * draft was deleted or never existed.
+   */
+  draftId: string | null;
+};
+
+// One message per contact re-sends the same files many times a tick; the
+// base64 is computed once per set of bytes rather than once per message.
+const base64Memo = new WeakMap<Uint8Array, string>();
+
+function toFileAttachment(attachment: OutboundAttachment): GraphFileAttachment {
+  let contentBytes = base64Memo.get(attachment.bytes);
+  if (contentBytes === undefined) {
+    contentBytes = bytesToBase64(attachment.bytes);
+    base64Memo.set(attachment.bytes, contentBytes);
+  }
+  return {
+    "@odata.type": "#microsoft.graph.fileAttachment",
+    name: attachment.name,
+    contentType: attachment.contentType,
+    contentBytes,
+    isInline: attachment.isInline,
+    ...(attachment.isInline ? { contentId: attachment.contentId } : {}),
+  };
+}
+
+/**
+ * Send one message with its files, by whichever path fits.
+ *
+ * With no files, or files small enough to ride inside one request, this IS
+ * `sendMail`. Larger, it builds a draft — see the header. Either way the
+ * outcome means what `sendMail`'s means, plus `deferred`.
+ */
+export async function deliverMessage(
+  mailbox: string,
+  message: GraphMessage,
+  attachments: OutboundAttachment[] = [],
+): Promise<DeliveryOutcome> {
+  if (attachments.length === 0) {
+    return { ...(await sendMail(mailbox, message)), path: "sendmail", draftId: null };
   }
 
-  if (response.status === 429 || response.status === 503) {
-    const retryAfter = Number(response.headers.get("retry-after") ?? "");
+  const bareBytes = new TextEncoder().encode(
+    JSON.stringify({ message, saveToSentItems: true }),
+  ).length;
+  const estimate = estimateSendMailBytes(
+    bareBytes,
+    attachments.map((attachment) => ({ size: attachment.bytes.length, name: attachment.name })),
+  );
+
+  if (deliveryPath(estimate, attachments.length) === "sendmail") {
+    const outcome = await sendMail(mailbox, {
+      ...message,
+      attachments: attachments.map(toFileAttachment),
+    });
+    return { ...outcome, path: "sendmail", draftId: null };
+  }
+
+  return sendThroughDraft(mailbox, message, attachments);
+}
+
+type Step<T> = { ok: true; value: T } | { ok: false; outcome: PreSendOutcome };
+
+/**
+ * One call while a draft is being built. Nothing it does sends anything, so
+ * no failure here is `unconfirmed`: a 4xx is `refused`, a 429/503 is
+ * `throttled`, and a 5xx or a dropped connection is `deferred`.
+ */
+async function draftStep<T>(method: "POST", path: string, body: unknown): Promise<Step<T>> {
+  let token: string;
+  try {
+    token = await accessToken();
+  } catch (error) {
     return {
-      kind: "throttled",
-      retryAfterMs: Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 30_000,
+      ok: false,
+      outcome: {
+        kind: "deferred",
+        message: error instanceof Error ? error.message : "could not obtain a Microsoft token",
+      },
     };
   }
 
-  if (response.status === 401) forgetToken();
-
-  const detail = await response.text().catch(() => "");
-  let code: string | null = null;
-  let readable = "";
+  let response: Response;
   try {
-    const parsed = JSON.parse(detail) as { error?: { code?: string; message?: string } };
-    code = parsed?.error?.code ?? null;
-    readable = parsed?.error?.message ?? "";
-  } catch {
-    readable = detail.slice(0, 300);
+    response = await fetch(`${GRAPH_BASE}${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      outcome: {
+        kind: "deferred",
+        message: `building the draft: ${error instanceof Error ? error.message : String(error)}`,
+      },
+    };
   }
 
-  // A 5xx from Graph is the ambiguous case: the service may have accepted the
-  // message and failed on the way back. It is recorded as unconfirmed rather
-  // than as a failure, because a failure is retried and this must not be.
+  if (response.ok) {
+    return { ok: true, value: (await response.json().catch(() => null)) as T };
+  }
+  return { ok: false, outcome: await preSendFailure(response, "building the draft") };
+}
+
+async function preSendFailure(response: Response, during: string): Promise<PreSendOutcome> {
+  if (response.status === 429 || response.status === 503) {
+    return { kind: "throttled", retryAfterMs: retryAfterMs(response) };
+  }
+  if (response.status === 401) forgetToken();
+  const { code, text } = await readGraphError(response);
   if (response.status >= 500) {
     return {
-      kind: "unconfirmed",
-      message: `Graph answered ${response.status}${readable ? `: ${readable.slice(0, 200)}` : ""}`,
+      kind: "deferred",
+      message: `${during}: Graph answered ${response.status}${text ? `: ${text.slice(0, 200)}` : ""}`,
     };
   }
-
   return {
     kind: "refused",
     status: response.status,
-    message: readable.slice(0, 400) || `Graph refused the message (${response.status})`,
+    message: text.slice(0, 400) || `Graph refused ${during} (${response.status})`,
     code,
   };
+}
+
+/** Delete a draft that will not be sent. Best effort: a stray draft sends nothing. */
+async function discardDraft(draftPath: string): Promise<void> {
+  try {
+    const token = await accessToken();
+    const response = await fetch(`${GRAPH_BASE}${draftPath}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok && response.status !== 404) {
+      console.error(`[graph] could not delete an unsent draft (${response.status})`);
+    }
+  } catch (error) {
+    console.error(
+      "[graph] could not delete an unsent draft:",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
+/**
+ * Attach a file of 3 MB or more through an upload session.
+ *
+ * The upload URL is pre-authenticated on outlook.office.com and must NOT carry
+ * our bearer token. A range is idempotent — the session says which bytes it
+ * expects next — so a range that fails on the way is retried; nothing in this
+ * function can send a message.
+ */
+async function uploadLargeAttachment(
+  draftPath: string,
+  attachment: OutboundAttachment,
+): Promise<Step<null>> {
+  const size = attachment.bytes.length;
+  const session = await draftStep<{ uploadUrl?: string }>(
+    "POST",
+    `${draftPath}/attachments/createUploadSession`,
+    {
+      AttachmentItem: {
+        attachmentType: "file",
+        name: attachment.name,
+        size,
+        contentType: attachment.contentType,
+        isInline: attachment.isInline,
+        ...(attachment.isInline ? { contentId: attachment.contentId } : {}),
+      },
+    },
+  );
+  if (!session.ok) return session;
+  const uploadUrl = session.value?.uploadUrl;
+  if (!uploadUrl) {
+    return {
+      ok: false,
+      outcome: { kind: "deferred", message: "Microsoft opened an upload session with no URL" },
+    };
+  }
+
+  for (const range of uploadRanges(size)) {
+    let lastFailure: PreSendOutcome | null = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      let response: Response;
+      try {
+        response = await fetch(uploadUrl, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/octet-stream",
+            "Content-Range": `bytes ${range.start}-${range.end}/${size}`,
+          },
+          body: attachment.bytes.subarray(range.start, range.end + 1) as unknown as BodyInit,
+        });
+      } catch (error) {
+        lastFailure = {
+          kind: "deferred",
+          message: `uploading ${attachment.name}: ${error instanceof Error ? error.message : String(error)}`,
+        };
+        continue;
+      }
+      if (response.ok) {
+        lastFailure = null;
+        break;
+      }
+      lastFailure = await preSendFailure(response, `uploading ${attachment.name}`);
+      // Only a server-side hiccup is worth another go; a refusal or a throttle
+      // will answer the same way a moment later.
+      if (lastFailure.kind !== "deferred") break;
+    }
+    if (lastFailure) return { ok: false, outcome: lastFailure };
+  }
+  return { ok: true, value: null };
+}
+
+async function sendThroughDraft(
+  mailbox: string,
+  message: GraphMessage,
+  attachments: OutboundAttachment[],
+): Promise<DeliveryOutcome> {
+  const messages = `/users/${encodeURIComponent(mailbox)}/messages`;
+  const created = await draftStep<{ id?: string }>("POST", messages, message);
+  if (!created.ok) return { ...created.outcome, path: "draft", draftId: null };
+  const draftId = created.value?.id;
+  if (!draftId) {
+    return {
+      kind: "deferred",
+      message: "Microsoft created a draft but did not say which",
+      path: "draft",
+      draftId: null,
+    };
+  }
+  const draftPath = `${messages}/${encodeURIComponent(draftId)}`;
+
+  for (const attachment of attachments) {
+    const attached =
+      attachment.bytes.length < UPLOAD_SESSION_MIN_BYTES
+        ? await draftStep<unknown>("POST", `${draftPath}/attachments`, toFileAttachment(attachment))
+        : await uploadLargeAttachment(draftPath, attachment);
+    if (!attached.ok) {
+      await discardDraft(draftPath);
+      return { ...attached.outcome, path: "draft", draftId: null };
+    }
+  }
+
+  // Taken before the send, so a credential failure here is "not sent" rather
+  // than being caught below and recorded as "may have been sent".
+  let token: string;
+  try {
+    token = await accessToken();
+  } catch (error) {
+    await discardDraft(draftPath);
+    return {
+      kind: "deferred",
+      message: error instanceof Error ? error.message : "could not obtain a Microsoft token",
+      path: "draft",
+      draftId: null,
+    };
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(`${GRAPH_BASE}${draftPath}/send`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  } catch (error) {
+    // The send left and no answer came back. The draft stays where it is: if
+    // it is still in Drafts, it never went.
+    return {
+      kind: "unconfirmed",
+      message: `${error instanceof Error ? error.message : String(error)} — if draft ${draftId} is still in the mailbox's Drafts folder, it was not sent`,
+      path: "draft",
+      draftId,
+    };
+  }
+
+  const outcome = await classifySendResponse(response);
+  if (outcome.kind === "refused" || outcome.kind === "throttled") {
+    await discardDraft(draftPath);
+    return { ...outcome, path: "draft", draftId: null };
+  }
+  if (outcome.kind === "unconfirmed") {
+    return {
+      ...outcome,
+      message: `${outcome.message} — if draft ${draftId} is still in the mailbox's Drafts folder, it was not sent`,
+      path: "draft",
+      draftId,
+    };
+  }
+  return { ...outcome, path: "draft", draftId };
 }
 
 export type GraphMailMessage = {
@@ -326,10 +703,104 @@ async function readMailPage(path: string): Promise<MailPage> {
   return { messages: payload.value ?? [], nextLink: payload["@odata.nextLink"] ?? null };
 }
 
-/** Confirm a mailbox exists and this credential can reach it. */
-export async function probeMailbox(mailbox: string): Promise<{ displayName: string | null }> {
-  const payload = await graphGet<{ displayName?: string }>(
-    `/users/${encodeURIComponent(mailbox)}?$select=displayName,mail`,
-  );
-  return { displayName: payload.displayName ?? null };
+/**
+ * The tenant's users, enough of each to offer it as a mailbox.
+ *
+ * Needs a directory permission (`User.ReadBasic.All` is the least of them);
+ * without one Graph answers 403 and this throws, which the caller turns into
+ * "the directory cannot be listed" rather than an empty list — an empty list
+ * would read as "this tenant has no mailboxes".
+ *
+ * Only basic profile fields are asked for, so `User.ReadBasic.All` suffices.
+ */
+export async function listDirectoryUsers(
+  limit = 2000,
+): Promise<{ users: DirectoryUser[]; truncated: boolean }> {
+  const users: DirectoryUser[] = [];
+  let next: string | null = `/users?${new URLSearchParams({
+    $select: "id,displayName,mail,userPrincipalName",
+    $top: "999",
+  }).toString()}`;
+  while (next) {
+    const page: { value?: DirectoryUser[]; "@odata.nextLink"?: string } = await graphGet(next);
+    users.push(...(page.value ?? []));
+    if (users.length >= limit) return { users: users.slice(0, limit), truncated: true };
+    next = page["@odata.nextLink"] ?? null;
+  }
+  return { users, truncated: false };
+}
+
+export type MailboxProbe = { address: string; status: number; code: string | null };
+
+/** Graph's JSON batching ceiling. */
+const BATCH_SIZE = 20;
+/** Batches in flight at once — gentle enough that a probe never trips throttling. */
+const BATCH_CONCURRENCY = 3;
+
+/**
+ * Can this application use each of these mailboxes? One inbox-folder read
+ * apiece, twenty to a `$batch`.
+ *
+ * Reports the raw status and code per address and judges nothing —
+ * `describeMailboxAccess` does that. A batch that fails as a whole (network,
+ * throttle) reports its status against every address in it, so the caller
+ * sees "unknown" rather than a verdict nobody reached.
+ */
+export async function probeMailboxes(addresses: string[]): Promise<MailboxProbe[]> {
+  const unique = [...new Set(addresses.map((address) => address.trim()).filter(Boolean))];
+  const chunks: string[][] = [];
+  for (let at = 0; at < unique.length; at += BATCH_SIZE) {
+    chunks.push(unique.slice(at, at + BATCH_SIZE));
+  }
+
+  const results: MailboxProbe[] = [];
+  for (let at = 0; at < chunks.length; at += BATCH_CONCURRENCY) {
+    const settled = await Promise.all(chunks.slice(at, at + BATCH_CONCURRENCY).map(probeBatch));
+    for (const batch of settled) results.push(...batch);
+  }
+  return results;
+}
+
+async function probeBatch(addresses: string[]): Promise<MailboxProbe[]> {
+  const everyone = (status: number, code: string | null = null) =>
+    addresses.map((address) => ({ address, status, code }));
+
+  let token: string;
+  try {
+    token = await accessToken();
+  } catch (error) {
+    return everyone(error instanceof GraphError ? error.status : 0, "token");
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(`${GRAPH_BASE}/$batch`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        requests: addresses.map((address, index) => ({
+          id: String(index),
+          method: "GET",
+          url: `/users/${encodeURIComponent(address)}/mailFolders/inbox?$select=id`,
+        })),
+      }),
+    });
+  } catch {
+    return everyone(0);
+  }
+  if (response.status === 401) forgetToken();
+  if (!response.ok) return everyone(response.status);
+
+  const payload = (await response.json().catch(() => null)) as {
+    responses?: { id?: string; status?: number; body?: { error?: { code?: string } } }[];
+  } | null;
+  const byId = new Map((payload?.responses ?? []).map((entry) => [String(entry.id), entry]));
+  return addresses.map((address, index) => {
+    const entry = byId.get(String(index));
+    return {
+      address,
+      status: typeof entry?.status === "number" ? entry.status : 0,
+      code: entry?.body?.error?.code ?? null,
+    };
+  });
 }

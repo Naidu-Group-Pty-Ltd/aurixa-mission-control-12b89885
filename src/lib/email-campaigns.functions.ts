@@ -14,6 +14,12 @@
  * than of the Worker in front of it: the file itself never passes through a
  * server function, so the request-body ceiling never applies to it, and a
  * 200 MB workbook is a storage question instead of a 413.
+ *
+ * Attachments travel the same way: the browser puts the file in the
+ * `email-attachments` bucket, and `registerCampaignAttachment` reads it back
+ * with the service role (a third marked exception) to measure and hash it
+ * itself. A hash the browser computed would be a claim; the dispatcher checks
+ * every file against this one before it claims a single contact.
  */
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
@@ -28,8 +34,31 @@ import {
   renderTemplate,
   requiresOneRecipient,
 } from "@/lib/email/mergeTemplate.pure";
+import {
+  admissionProblem,
+  attachmentReadiness,
+  contentIdFor,
+  contentTypeFor,
+  isImageType,
+  isInline,
+  previewInlineImages,
+  sha256Hex,
+  type DeliveryPath,
+} from "@/lib/email/attachments.pure";
+import { mayChoose, sameMailbox, type MailboxAccess } from "@/lib/email/mailboxes.pure";
 
 const uuid = z.string().uuid();
+
+/** The bucket a campaign's attachments live in. Mirrors the migration. */
+export const ATTACHMENT_BUCKET = "email-attachments";
+
+/**
+ * A campaign's files may change only while nothing is sending them. A file
+ * swapped mid-run splits one campaign into two messages with no record of who
+ * got which, and a file removed while a tick holds it in memory goes out
+ * anyway.
+ */
+export const ATTACHMENT_EDITABLE_STATUSES = ["draft", "paused"] as const;
 
 export const CAMPAIGN_STATUSES = ["draft", "running", "paused", "completed", "cancelled"] as const;
 
@@ -131,7 +160,7 @@ export const getCampaign = createServerFn({ method: "POST" })
     if (error) throw error;
     if (!campaign) throw new Error("campaign_not_found");
 
-    const [quotas, imports, messages, recipientStatuses] = await Promise.all([
+    const [quotas, imports, messages, recipientStatuses, attachments] = await Promise.all([
       context.supabase
         .from("email_campaign_quotas")
         .select("*")
@@ -153,11 +182,18 @@ export const getCampaign = createServerFn({ method: "POST" })
         .from("email_campaign_recipient_counts")
         .select("status, recipients")
         .eq("campaign_id", data.id),
+      context.supabase
+        .from("email_campaign_attachments")
+        .select("id, file_name, content_type, size_bytes, content_id, position, created_at")
+        .eq("campaign_id", data.id)
+        .order("position", { ascending: true })
+        .order("created_at", { ascending: true }),
     ]);
     if (quotas.error) throw quotas.error;
     if (imports.error) throw imports.error;
     if (messages.error) throw messages.error;
     if (recipientStatuses.error) throw recipientStatuses.error;
+    if (attachments.error) throw attachments.error;
 
     const counts: Record<string, number> = {};
     for (const row of recipientStatuses.data ?? []) {
@@ -171,6 +207,7 @@ export const getCampaign = createServerFn({ method: "POST" })
       quotas: quotas.data ?? [],
       imports: imports.data ?? [],
       messages: messages.data ?? [],
+      attachments: attachments.data ?? [],
       counts,
     };
   });
@@ -225,7 +262,42 @@ export const updateCampaign = createServerFn({ method: "POST" })
     const patch: Database["public"]["Tables"]["email_campaigns"]["Update"] = {};
     if (data.name !== undefined) patch.name = data.name;
     if (data.description !== undefined) patch.description = data.description;
-    if (data.fromMailbox !== undefined) patch.from_mailbox = data.fromMailbox || null;
+
+    // The sending mailbox is checked against the tenant when it CHANGES, and
+    // the check is fresh rather than cached: this is the moment an operator
+    // commits to it, and a mailbox an access policy excludes is refused here
+    // rather than discovered by the first contact's message.
+    let mailboxChange: { from: string | null; to: string | null } | null = null;
+    if (data.fromMailbox !== undefined) {
+      const next = data.fromMailbox?.trim() ? emailKey(data.fromMailbox) : null;
+      const { data: current, error: currentError } = await context.supabase
+        .from("email_campaigns")
+        .select("from_mailbox")
+        .eq("id", data.id)
+        .maybeSingle();
+      if (currentError) throw currentError;
+      if (!current) throw new Error("campaign_not_found");
+      if (!sameMailbox(current.from_mailbox as string | null, next)) {
+        if (next) {
+          const { isGraphConfigured } = await import("@/server/graph-client");
+          // Unconfigured, nothing can be checked and nothing can send either;
+          // readiness blocks the start, and checks again once it is set.
+          if (isGraphConfigured()) {
+            const { checkMailbox } = await import("@/server/email-mailboxes.server");
+            const access = await checkMailbox(next, true);
+            if (!mayChoose(access)) {
+              throw new Error(
+                access.state === "unknown"
+                  ? `${next} could not be checked just now: ${access.reason}`
+                  : `${next} cannot be used: ${access.reason}`,
+              );
+            }
+          }
+        }
+        mailboxChange = { from: (current.from_mailbox as string | null) ?? null, to: next };
+      }
+      patch.from_mailbox = next;
+    }
     if (data.fromName !== undefined) patch.from_name = data.fromName || null;
     if (data.replyTo !== undefined) patch.reply_to = data.replyTo || null;
     if (data.subjectTemplate !== undefined) patch.subject_template = data.subjectTemplate;
@@ -258,6 +330,19 @@ export const updateCampaign = createServerFn({ method: "POST" })
       .update(patch)
       .eq("id", data.id);
     if (error) throw error;
+
+    if (mailboxChange) {
+      // Which mailbox a campaign speaks as is an identity decision, and an
+      // application permission can reach mailboxes nobody meant to share.
+      const { writeAuditLog } = await import("@/server/audit.server");
+      await writeAuditLog({
+        action: "email_campaign_mailbox_changed",
+        entityType: "email_campaign",
+        entityId: data.id,
+        actorUserId: context.userId,
+        metadata: mailboxChange,
+      });
+    }
     return { ok: true };
   });
 
@@ -340,6 +425,9 @@ export type Readiness = {
   personalising: string[];
   batchSize: number;
   pending: number;
+  /** The mailbox the next message would leave from, and whether it can. */
+  mailbox: { address: string | null; isDefault: boolean; access: MailboxAccess | null };
+  attachments: { count: number; totalBytes: number; path: DeliveryPath };
 };
 
 /** The column profile an import carried, whatever shape the jsonb holds. */
@@ -375,10 +463,45 @@ async function assessReadiness(
   if (pending === 0) blocking.push("no contacts are waiting — attach a list first");
 
   const { isGraphConfigured, defaultMailbox } = await import("@/server/graph-client");
-  if (!isGraphConfigured()) {
+  const configured = isGraphConfigured();
+  const effectiveMailbox =
+    (campaign.from_mailbox as string | null)?.trim() || defaultMailbox() || null;
+  let mailboxAccess: MailboxAccess | null = null;
+  let canBuildDrafts: boolean | null = null;
+  if (!configured) {
     blocking.push("Microsoft Graph is not configured on this deployment");
-  } else if (!campaign.from_mailbox && !defaultMailbox()) {
-    blocking.push("no sending mailbox is configured");
+  } else if (!effectiveMailbox) {
+    blocking.push("no sending mailbox is chosen — pick one on the Message tab");
+  } else {
+    const { checkMailbox, graphCapabilities } = await import("@/server/email-mailboxes.server");
+    const [access, capabilities] = await Promise.all([
+      checkMailbox(effectiveMailbox),
+      graphCapabilities(),
+    ]);
+    mailboxAccess = access;
+    canBuildDrafts = capabilities.readWrite;
+    if (access.state === "denied" || access.state === "no_mailbox") {
+      blocking.push(`${effectiveMailbox} cannot be used: ${access.reason}`);
+    } else if (access.state === "unknown") {
+      warnings.push(
+        `${effectiveMailbox} could not be checked just now (${access.reason}) — if it cannot be used, the first message will be refused and the campaign will pause`,
+      );
+    } else if (access.state === "unverifiable") {
+      warnings.push(`${effectiveMailbox} cannot be checked: ${access.reason}`);
+    }
+    // From the token's roles, which Exchange's RBAC for Applications does not
+    // populate — so these warn and never block. The probe above is the
+    // authority on the mailbox itself.
+    if (capabilities.send === false) {
+      warnings.push(
+        "this application's token does not carry the Mail.Send permission — unless Exchange grants it another way, every message will be refused",
+      );
+    }
+    if (capabilities.read === false && access.state !== "unverifiable") {
+      warnings.push(
+        "this application's token does not carry Mail.Read — the bounce scan may not be able to read the mailbox, and a bounce it cannot read never reaches the do-not-send register",
+      );
+    }
   }
 
   // Which fields the attached lists can actually supply — read from each
@@ -431,7 +554,45 @@ async function assessReadiness(
     warnings.push("no reply-to address is set, so replies go to the sending mailbox");
   }
 
-  return { blocking, warnings, tokens, personalising, batchSize, pending };
+  const { data: attachmentRows, error: attachmentError } = await supabase
+    .from("email_campaign_attachments")
+    .select("file_name, size_bytes, content_id, content_type")
+    .eq("campaign_id", campaignId);
+  if (attachmentError) throw attachmentError;
+  const attached = attachmentReadiness({
+    attachments: (attachmentRows ?? []).map((row) => ({
+      contentId: row.content_id,
+      fileName: row.file_name,
+      sizeBytes: Number(row.size_bytes),
+      contentType: row.content_type,
+    })),
+    body: String(campaign.body_template ?? ""),
+    bodyFormat: String(campaign.body_format ?? "html"),
+    minGapSeconds: Number(campaign.min_gap_seconds) || 0,
+    maxMessagesPerRun: Number(campaign.max_messages_per_run) || 1,
+    canBuildDrafts,
+  });
+  blocking.push(...attached.blocking);
+  warnings.push(...attached.warnings);
+
+  return {
+    blocking,
+    warnings,
+    tokens,
+    personalising,
+    batchSize,
+    pending,
+    mailbox: {
+      address: effectiveMailbox ? emailKey(effectiveMailbox) : null,
+      isDefault: !(campaign.from_mailbox as string | null)?.trim(),
+      access: mailboxAccess,
+    },
+    attachments: {
+      count: (attachmentRows ?? []).length,
+      totalBytes: attached.totalBytes,
+      path: attached.path,
+    },
+  };
 }
 
 export const campaignReadiness = createServerFn({ method: "POST" })
@@ -474,11 +635,52 @@ export const previewCampaign = createServerFn({ method: "POST" })
       unsubscribe_url: "https://example.invalid/unsubscribe?t=preview",
     };
 
+    const { data: attachmentRows, error: attachmentError } = await context.supabase
+      .from("email_campaign_attachments")
+      .select("id, file_name, content_type, size_bytes, content_id, storage_path")
+      .eq("campaign_id", data.id)
+      .order("position", { ascending: true })
+      .order("created_at", { ascending: true });
+    if (attachmentError) throw attachmentError;
+
+    const bodyTemplate = String(campaign.body_template ?? "");
+    const bodyFormat = String(campaign.body_format ?? "html");
+    const attachments = (attachmentRows ?? []).map((row) => ({
+      id: row.id,
+      fileName: row.file_name,
+      contentType: row.content_type,
+      sizeBytes: Number(row.size_bytes),
+      contentId: row.content_id,
+      inline: isInline(row.content_id, bodyTemplate, bodyFormat),
+      storagePath: row.storage_path,
+    }));
+
+    let body = renderTemplate(bodyTemplate, fields, { html });
+    if (html) {
+      // A mail client resolves `cid:` against the attachment; a browser cannot.
+      // The preview swaps each inline image for a short-lived link so the
+      // operator sees what the reader will — the message itself keeps `cid:`.
+      const urls = new Map<string, string>();
+      for (const attachment of attachments) {
+        if (!attachment.inline || !isImageType(attachment.contentType)) continue;
+        const { data: signed, error: signError } = await context.supabase.storage
+          .from(ATTACHMENT_BUCKET)
+          .createSignedUrl(attachment.storagePath, 600);
+        if (signError) {
+          console.error("[email] could not sign an inline preview image:", signError.message);
+          continue;
+        }
+        if (signed?.signedUrl) urls.set(attachment.contentId, signed.signedUrl);
+      }
+      body = previewInlineImages(body, urls);
+    }
+
     return {
       recipient: lead?.email ?? null,
       subject: renderTemplate(campaign.subject_template as string, fields, { html: false }),
-      body: renderTemplate(campaign.body_template as string, fields, { html }),
+      body,
       html,
+      attachments: attachments.map(({ storagePath: _path, ...rest }) => rest),
     };
   });
 
@@ -505,9 +707,25 @@ export const sendTestEmail = createServerFn({ method: "POST" })
     if (error) throw error;
     if (!campaign) throw new Error("campaign_not_found");
 
-    const { defaultMailbox, sendMail } = await import("@/server/graph-client");
+    const { defaultMailbox, deliverMessage } = await import("@/server/graph-client");
     const mailbox = (campaign.from_mailbox as string | null)?.trim() || defaultMailbox();
-    if (!mailbox) throw new Error("no sending mailbox is configured");
+    if (!mailbox) throw new Error("no sending mailbox is chosen");
+
+    // The same files, read and verified the same way the dispatcher reads
+    // them, so a test that arrives proves the campaign's message can be built.
+    const { prepareCampaignAttachments } = await import("@/server/email-attachments.server");
+    let attachments;
+    try {
+      attachments = await prepareCampaignAttachments({
+        id: campaign.id as string,
+        body_template: String(campaign.body_template ?? ""),
+        body_format: String(campaign.body_format ?? "html"),
+      });
+    } catch (error) {
+      throw new Error(
+        `the attachments could not be prepared: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
 
     const html = campaign.body_format !== "text";
     const preview: Record<string, string> = {
@@ -517,14 +735,24 @@ export const sendTestEmail = createServerFn({ method: "POST" })
       today: new Date().toISOString().slice(0, 10),
       unsubscribe_url: "https://example.invalid/unsubscribe?t=test",
     };
-    const outcome = await sendMail(mailbox, {
-      subject: `[TEST] ${renderTemplate(campaign.subject_template as string, preview, { html: false })}`,
-      body: {
-        contentType: html ? "HTML" : "Text",
-        content: renderTemplate(campaign.body_template as string, preview, { html }),
+    const outcome = await deliverMessage(
+      mailbox,
+      {
+        subject: `[TEST] ${renderTemplate(campaign.subject_template as string, preview, { html: false })}`,
+        body: {
+          contentType: html ? "HTML" : "Text",
+          content: renderTemplate(campaign.body_template as string, preview, { html }),
+        },
+        toRecipients: [{ emailAddress: { address } }],
+        ...(campaign.reply_to
+          ? { replyTo: [{ emailAddress: { address: campaign.reply_to as string } }] }
+          : {}),
+        ...(campaign.from_name
+          ? { from: { emailAddress: { address: mailbox, name: campaign.from_name as string } } }
+          : {}),
       },
-      toRecipients: [{ emailAddress: { address } }],
-    });
+      attachments.outbound,
+    );
 
     if (outcome.kind !== "sent") {
       throw new Error(
@@ -535,38 +763,340 @@ export const sendTestEmail = createServerFn({ method: "POST" })
             : "the test message could not be sent",
       );
     }
-    return { ok: true, mailbox };
+    return {
+      ok: true,
+      mailbox,
+      attachments: attachments.snapshot.length,
+      attachmentBytes: attachments.totalBytes,
+      path: outcome.path,
+    };
   });
 
-/** Whether this deployment can send, and from where. */
+/**
+ * Whether this deployment can send, its default mailbox, and what the
+ * application was granted.
+ *
+ * The default is checked by reading its inbox folder — the same test every
+ * mailbox in the picker gets — rather than by reading its directory entry,
+ * which needs a directory permission sending does not and failed with
+ * "insufficient privileges" on a deployment that could send perfectly well.
+ */
 export const mailboxStatus = createServerFn({ method: "POST" })
   .middleware([requireOperator])
   .handler(async () => {
-    const { isGraphConfigured, defaultMailbox, probeMailbox, GraphError } =
-      await import("@/server/graph-client");
+    const { isGraphConfigured, defaultMailbox } = await import("@/server/graph-client");
     if (!isGraphConfigured()) {
-      return { configured: false, mailbox: null, reachable: false, detail: null as string | null };
+      return {
+        configured: false,
+        mailbox: null as string | null,
+        reachable: false,
+        detail: null as string | null,
+        capabilities: null,
+      };
     }
+    const { checkMailbox, displayNameFor, graphCapabilities } =
+      await import("@/server/email-mailboxes.server");
+    const capabilities = await graphCapabilities();
     const mailbox = defaultMailbox();
     if (!mailbox) {
       return {
         configured: true,
-        mailbox: null,
+        mailbox: null as string | null,
         reachable: false,
-        detail: "MICROSOFT_MAILBOX_EMAIL is not set, so campaigns must name their own mailbox",
+        detail:
+          "MICROSOFT_MAILBOX_EMAIL is not set — that is fine: each campaign chooses its mailbox from the tenant",
+        capabilities,
       };
     }
+    const access = await checkMailbox(mailbox);
+    const reachable = access.state === "reachable";
+    return {
+      configured: true,
+      mailbox,
+      reachable,
+      detail: reachable ? await displayNameFor(mailbox) : access.reason,
+      capabilities,
+    };
+  });
+
+/**
+ * Every mailbox in the tenant a campaign might send from, each marked with
+ * whether this application can use it. `refresh` re-reads the directory and
+ * re-checks access instead of answering from the five-minute cache.
+ */
+export const listMailboxes = createServerFn({ method: "POST" })
+  .middleware([requireOperator])
+  .inputValidator((input) => z.object({ refresh: z.boolean().default(false) }).parse(input ?? {}))
+  .handler(async ({ data, context }) => {
+    const { mailboxDirectory } = await import("@/server/email-mailboxes.server");
+    return mailboxDirectory(context.supabase, data.refresh);
+  });
+
+/** Check one address the operator typed, against the tenant, now. */
+export const verifyMailbox = createServerFn({ method: "POST" })
+  .middleware([requireOperator])
+  .inputValidator((input) => z.object({ address: z.string().min(3).max(320) }).parse(input))
+  .handler(async ({ data }) => {
+    const address = emailKey(data.address);
+    if (!address) throw new Error("that is not a valid email address");
+    const { checkMailbox, displayNameFor } = await import("@/server/email-mailboxes.server");
+    const access = await checkMailbox(address, true);
+    return {
+      address,
+      access,
+      displayName: access.state === "reachable" ? await displayNameFor(address) : null,
+    };
+  });
+
+// ── Attachments ─────────────────────────────────────────────────────────────
+
+async function editableCampaign(
+  supabase: SupabaseClient<Database>,
+  campaignId: string,
+): Promise<{ id: string; status: string }> {
+  const { data: campaign, error } = await supabase
+    .from("email_campaigns")
+    .select("id, status")
+    .eq("id", campaignId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!campaign) throw new Error("campaign_not_found");
+  if (!(ATTACHMENT_EDITABLE_STATUSES as readonly string[]).includes(campaign.status)) {
+    throw new Error(
+      campaign.status === "running"
+        ? "attachments cannot change while the campaign is sending — pause it first"
+        : `attachments cannot change on a ${campaign.status} campaign`,
+    );
+  }
+  return campaign;
+}
+
+/**
+ * Record a file the browser has just put in the attachments bucket.
+ *
+ * The bytes are read back here, with the service role, and it is THEIR size
+ * and THEIR hash that are recorded — never figures the browser sent. A file
+ * refused for any reason is removed from the bucket on the way out, so a
+ * refusal leaves nothing behind that a later registration could pick up.
+ */
+export const registerCampaignAttachment = createServerFn({ method: "POST" })
+  .middleware([requireOperator])
+  .inputValidator((input) =>
+    z
+      .object({
+        campaignId: uuid,
+        attachmentId: uuid,
+        storagePath: z.string().min(1).max(600),
+        fileName: z.string().min(1).max(255),
+        contentType: z.string().max(200).nullable().optional(),
+      })
+      .parse(input),
+  )
+  .handler(async ({ data, context }) => {
+    const prefix = `${data.campaignId}/${data.attachmentId}/`;
+    const rest = data.storagePath.slice(prefix.length);
+    if (
+      !data.storagePath.startsWith(prefix) ||
+      !rest ||
+      rest.includes("/") ||
+      rest.includes("..")
+    ) {
+      throw new Error("storage_path_outside_campaign");
+    }
+
+    // A refusal below deletes the object at this path with the service role.
+    // That is only safe for a FRESH upload: an id an attachment row or a sent
+    // message already knows names a file somebody received, and registering
+    // it again must never become a way to delete that record — so it is
+    // refused here, before anything is removed.
+    const [{ count: rows, error: rowError }, { count: carried, error: carriedError }] =
+      await Promise.all([
+        context.supabase
+          .from("email_campaign_attachments")
+          .select("id", { count: "exact", head: true })
+          // The id alone is enough: every row is created here, with its path
+          // under `<campaign>/<its own id>/`, so a known id covers its path.
+          .eq("id", data.attachmentId),
+        context.supabase
+          .from("email_campaign_messages")
+          .select("id", { count: "exact", head: true })
+          .eq("campaign_id", data.campaignId)
+          .filter("attachments", "cs", JSON.stringify([{ id: data.attachmentId }])),
+      ]);
+    if (rowError) throw rowError;
+    if (carriedError) throw carriedError;
+    if ((rows ?? 0) > 0 || (carried ?? 0) > 0) throw new Error("attachment_already_registered");
+
+    const { downloadStoredObject, removeStoredObject } =
+      await import("@/server/email-attachments.server");
+    const refuse = async (message: string): Promise<never> => {
+      await removeStoredObject(data.storagePath);
+      throw new Error(message);
+    };
+
     try {
-      const probe = await probeMailbox(mailbox);
-      return { configured: true, mailbox, reachable: true, detail: probe.displayName };
+      await editableCampaign(context.supabase, data.campaignId);
     } catch (error) {
-      return {
-        configured: true,
-        mailbox,
-        reachable: false,
-        detail: error instanceof GraphError ? error.message : "the mailbox could not be reached",
-      };
+      return refuse(error instanceof Error ? error.message : String(error));
     }
+
+    const { data: existing, error: existingError } = await context.supabase
+      .from("email_campaign_attachments")
+      .select("id, file_name, size_bytes, content_id, position, sha256")
+      .eq("campaign_id", data.campaignId);
+    if (existingError) throw existingError;
+    const others = existing ?? [];
+
+    let bytes: Uint8Array;
+    try {
+      bytes = await downloadStoredObject(data.storagePath);
+    } catch (error) {
+      return refuse(`the uploaded file ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    const problem = admissionProblem(
+      { fileName: data.fileName, sizeBytes: bytes.length },
+      others.map((row) => ({ sizeBytes: Number(row.size_bytes) })),
+    );
+    if (problem) return refuse(problem);
+
+    const sha256 = await sha256Hex(bytes);
+    const twin = others.find((row) => row.sha256 === sha256);
+    if (twin) return refuse(`that file is already attached, as ${twin.file_name}`);
+
+    const row = {
+      id: data.attachmentId,
+      campaign_id: data.campaignId,
+      file_name: data.fileName.trim(),
+      content_type: contentTypeFor(data.fileName, data.contentType),
+      size_bytes: bytes.length,
+      storage_path: data.storagePath,
+      sha256,
+      content_id: contentIdFor(
+        data.fileName,
+        others.map((other) => other.content_id),
+      ),
+      position: others.reduce((max, other) => Math.max(max, Number(other.position) + 1), 0),
+      created_by: context.userId,
+    };
+    const { data: inserted, error: insertError } = await context.supabase
+      .from("email_campaign_attachments")
+      .insert(row)
+      .select("id, file_name, content_type, size_bytes, content_id, position, created_at")
+      .single();
+    if (insertError) return refuse(insertError.message);
+
+    const { writeAuditLog } = await import("@/server/audit.server");
+    await writeAuditLog({
+      action: "email_campaign_attachment_added",
+      entityType: "email_campaign",
+      entityId: data.campaignId,
+      actorUserId: context.userId,
+      metadata: {
+        attachment_id: row.id,
+        file_name: row.file_name,
+        size_bytes: row.size_bytes,
+        sha256,
+      },
+    });
+    return inserted;
+  });
+
+/**
+ * Take a file off a campaign.
+ *
+ * The ROW always goes. The stored FILE goes only when no message carried it:
+ * once a file has been sent, it is the record of what those people received,
+ * and every message that carried it still names its storage path.
+ */
+export const removeCampaignAttachment = createServerFn({ method: "POST" })
+  .middleware([requireOperator])
+  .inputValidator((input) => z.object({ id: uuid }).parse(input))
+  .handler(async ({ data, context }) => {
+    const { data: row, error } = await context.supabase
+      .from("email_campaign_attachments")
+      .select("id, campaign_id, file_name, storage_path")
+      .eq("id", data.id)
+      .maybeSingle();
+    if (error) throw error;
+    if (!row) throw new Error("attachment_not_found");
+    await editableCampaign(context.supabase, row.campaign_id);
+
+    const { count, error: carriedError } = await context.supabase
+      .from("email_campaign_messages")
+      .select("id", { count: "exact", head: true })
+      .eq("campaign_id", row.campaign_id)
+      .filter("attachments", "cs", JSON.stringify([{ id: row.id }]));
+    if (carriedError) throw carriedError;
+    const carried = (count ?? 0) > 0;
+
+    const { error: deleteError } = await context.supabase
+      .from("email_campaign_attachments")
+      .delete()
+      .eq("id", row.id);
+    if (deleteError) throw deleteError;
+
+    const { forgetAttachment, removeStoredObject } =
+      await import("@/server/email-attachments.server");
+    forgetAttachment(row.id);
+    if (!carried) await removeStoredObject(row.storage_path);
+
+    const { writeAuditLog } = await import("@/server/audit.server");
+    await writeAuditLog({
+      action: "email_campaign_attachment_removed",
+      entityType: "email_campaign",
+      entityId: row.campaign_id,
+      actorUserId: context.userId,
+      metadata: { attachment_id: row.id, file_name: row.file_name, file_kept: carried },
+    });
+    return { ok: true, fileKept: carried };
+  });
+
+/**
+ * A short-lived link to an attachment's file — a campaign's current one, or,
+ * with `messageId`, one a sent message carried even if it has since been
+ * removed from the campaign.
+ */
+export const attachmentDownloadUrl = createServerFn({ method: "POST" })
+  .middleware([requireOperator])
+  .inputValidator((input) =>
+    z.object({ attachmentId: uuid, messageId: uuid.optional() }).parse(input),
+  )
+  .handler(async ({ data, context }) => {
+    let path: string | null = null;
+    let fileName: string | null = null;
+    if (data.messageId) {
+      const { data: message, error } = await context.supabase
+        .from("email_campaign_messages")
+        .select("attachments")
+        .eq("id", data.messageId)
+        .maybeSingle();
+      if (error) throw error;
+      const carried = Array.isArray(message?.attachments)
+        ? (message.attachments as { id?: string; storage_path?: string; file_name?: string }[])
+        : [];
+      const entry = carried.find((item) => item?.id === data.attachmentId);
+      path = entry?.storage_path ?? null;
+      fileName = entry?.file_name ?? null;
+    } else {
+      const { data: row, error } = await context.supabase
+        .from("email_campaign_attachments")
+        .select("storage_path, file_name")
+        .eq("id", data.attachmentId)
+        .maybeSingle();
+      if (error) throw error;
+      path = row?.storage_path ?? null;
+      fileName = row?.file_name ?? null;
+    }
+    if (!path) throw new Error("attachment_not_found");
+
+    const { data: signed, error: signError } = await context.supabase.storage
+      .from(ATTACHMENT_BUCKET)
+      .createSignedUrl(path, 120, { download: fileName ?? true });
+    if (signError || !signed?.signedUrl) {
+      throw new Error(`the file could not be opened: ${signError?.message ?? "no link"}`);
+    }
+    return { url: signed.signedUrl };
   });
 
 // ── Lists ───────────────────────────────────────────────────────────────────

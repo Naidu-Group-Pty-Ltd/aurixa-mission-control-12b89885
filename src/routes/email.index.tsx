@@ -9,6 +9,7 @@ import {
   AlertTriangle,
   Ban,
   CheckCircle2,
+  Info,
   Mail,
   Plus,
   ShieldOff,
@@ -281,12 +282,26 @@ function EmailCampaignsPage() {
   );
 }
 
+type Capabilities = {
+  roles: string[] | null;
+  send: boolean | null;
+  read: boolean | null;
+  readWrite: boolean | null;
+  directory: boolean | null;
+} | null;
+
 function MailboxStrip({
   status,
   loading,
 }: {
   status:
-    | { configured: boolean; mailbox: string | null; reachable: boolean; detail: string | null }
+    | {
+        configured: boolean;
+        mailbox: string | null;
+        reachable: boolean;
+        detail: string | null;
+        capabilities: Capabilities;
+      }
     | undefined;
   loading: boolean;
 }) {
@@ -297,11 +312,10 @@ function MailboxStrip({
       <div className="glass-inset spine spine-bad flex items-start gap-3 px-4 py-3">
         <Ban className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
         <p className="text-sm text-muted-foreground">
-          <span className="text-foreground">No mailbox is configured.</span> Set{" "}
+          <span className="text-foreground">Microsoft Graph is not configured.</span> Set{" "}
           <code className="font-mono text-xs">MICROSOFT_TENANT_ID</code>,{" "}
-          <code className="font-mono text-xs">MICROSOFT_CLIENT_ID</code>,{" "}
-          <code className="font-mono text-xs">MICROSOFT_CLIENT_SECRET</code> and{" "}
-          <code className="font-mono text-xs">MICROSOFT_MAILBOX_EMAIL</code> on this deployment —
+          <code className="font-mono text-xs">MICROSOFT_CLIENT_ID</code> and{" "}
+          <code className="font-mono text-xs">MICROSOFT_CLIENT_SECRET</code> on this deployment —
           the same application registration the property dashboard sends from. Campaigns can be
           written and lists uploaded meanwhile; nothing will send.
         </p>
@@ -309,26 +323,81 @@ function MailboxStrip({
     );
   }
 
+  const noDefault = !status.mailbox;
   return (
-    <div className={cnSpine(status.reachable)}>
-      {status.reachable ? (
-        <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-success" />
-      ) : (
-        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
-      )}
-      <p className="text-sm text-muted-foreground">
-        {status.reachable ? (
-          <>
-            Sending as <span className="text-foreground">{status.mailbox}</span>
-            {status.detail ? ` (${status.detail})` : ""} through Microsoft Graph.
-          </>
+    <div className="space-y-2">
+      <div className={cnSpine(status.reachable || noDefault)}>
+        {status.reachable || noDefault ? (
+          <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-success" />
         ) : (
-          <>
-            <span className="text-foreground">{status.mailbox ?? "The mailbox"}</span> could not be
-            reached: {status.detail ?? "no detail"}.
-          </>
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
         )}
-      </p>
+        <p className="text-sm text-muted-foreground">
+          {noDefault ? (
+            <>
+              Connected to the Microsoft tenant. No default mailbox is set, so each campaign chooses
+              the mailbox it sends from on its Message tab.
+            </>
+          ) : status.reachable ? (
+            <>
+              Campaigns send from <span className="text-foreground">{status.mailbox}</span>
+              {status.detail ? ` (${status.detail})` : ""} unless they choose another mailbox in the
+              tenant on their Message tab.
+            </>
+          ) : (
+            <>
+              The default mailbox <span className="text-foreground">{status.mailbox}</span> cannot
+              be used: {status.detail ?? "no detail"}. Campaigns can choose another mailbox in the
+              tenant on their Message tab.
+            </>
+          )}
+        </p>
+      </div>
+      <PermissionStrip capabilities={status.capabilities} />
+    </div>
+  );
+}
+
+/**
+ * What the application's token says it was granted, against what each part of
+ * the scheduler needs. Advisory: Exchange's RBAC for Applications grants
+ * mailbox access without putting a role in the token, so a missing role is
+ * said plainly and never treated as a fault.
+ */
+function PermissionStrip({ capabilities }: { capabilities: Capabilities }) {
+  if (!capabilities || capabilities.roles === null) return null;
+  const rows: { role: string; held: boolean | null; why: string }[] = [
+    { role: "Mail.Send", held: capabilities.send, why: "send campaign messages" },
+    { role: "Mail.Read", held: capabilities.read, why: "read bounces, check mailboxes" },
+    {
+      role: "Mail.ReadWrite",
+      held: capabilities.readWrite,
+      why: "attachments over about 2.9 MB",
+    },
+    {
+      role: "User.ReadBasic.All",
+      held: capabilities.directory,
+      why: "list the tenant's mailboxes",
+    },
+  ];
+  const missing = rows.filter((row) => row.held === false);
+  if (missing.length === 0) return null;
+  return (
+    <div className="glass-inset spine spine-idle flex items-start gap-3 px-4 py-3">
+      <Info className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+      <div className="space-y-1 text-sm text-muted-foreground">
+        <p>
+          This application&apos;s token does not carry{" "}
+          {missing.map((row, index) => (
+            <span key={row.role}>
+              {index > 0 ? (index === missing.length - 1 ? " or " : ", ") : ""}
+              <code className="font-mono text-xs text-foreground">{row.role}</code> ({row.why})
+            </span>
+          ))}
+          . Grant the application permissions with admin consent in Microsoft Entra — or ignore this
+          if Exchange&apos;s RBAC for Applications grants mailbox access instead.
+        </p>
+      </div>
     </div>
   );
 }

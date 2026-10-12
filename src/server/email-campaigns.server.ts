@@ -30,8 +30,27 @@
  * from the ledger means the number cannot drift from what was sent; claiming
  * within the tick means a single tick planning forty messages against an
  * allowance of twenty does not read "twenty already sent" forty times over.
+ *
+ * Two more follow from campaigns carrying files and choosing their mailbox.
+ *
+ * **Attachments are read and verified before anything is claimed**, like the
+ * token and for the same reason. A message without its file is a different
+ * message, and once it has gone the never-twice rule makes it permanent: the
+ * contact cannot be sent the right one afterwards. So a file that cannot be
+ * read, or no longer hashes to what was attached, costs a tick and touches no
+ * recipient.
+ *
+ * **A refusal that is about the mailbox or the message pauses the campaign.**
+ * Access withdrawn from the chosen mailbox, or a message too large for it, is
+ * the same answer for every contact. Recording it against each contact in
+ * turn converts one configuration fault into a whole list of "refused" rows a
+ * person must release one at a time. Nothing was sent, so those contacts go
+ * back in the queue and the campaign stops with the reason on it. Three
+ * refusals in a row of any kind do the same, because a fault this file has no
+ * name for looks exactly like that.
  */
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
+import type { Json } from "@/integrations/supabase/types";
 import {
   claimQuota,
   planTick,
@@ -42,22 +61,29 @@ import {
 } from "@/lib/email/campaignRules.pure";
 import { bodyPreview, renderTemplate, requiresOneRecipient } from "@/lib/email/mergeTemplate.pure";
 import { jsonPathColumn, pgInList } from "@/lib/email/quotaFilter.pure";
+import { refusalPauseReason, refusalScope } from "@/lib/email/mailboxes.pure";
 import { resolveMissionControlOrigin } from "@/server/missionControlLink.pure";
 import {
   defaultMailbox,
   isGraphConfigured,
   accessToken,
-  sendMail,
+  deliverMessage,
   GraphError,
   type GraphMessage,
   type GraphRecipient,
 } from "@/server/graph-client";
+import {
+  prepareCampaignAttachments,
+  type PreparedAttachments,
+} from "@/server/email-attachments.server";
 
 /** Wall clock one invocation may spend. Well inside a Worker's allowance. */
 const DEFAULT_BUDGET_MS = 20_000;
 /** Candidates read per message, so quota-blocked contacts can be stepped over. */
 const CANDIDATE_MULTIPLIER = 4;
 const MAX_CANDIDATES = 2000;
+/** Refusals in a row, within one tick, that pause a campaign whatever their cause. */
+export const REFUSALS_BEFORE_PAUSE = 3;
 
 export type DispatchSummary = {
   campaigns: number;
@@ -66,6 +92,7 @@ export type DispatchSummary = {
   failed: number;
   unconfirmed: number;
   completed: number;
+  paused: number;
   skipped: string[];
 };
 
@@ -188,6 +215,7 @@ export async function dispatchDueCampaigns(
     failed: 0,
     unconfirmed: 0,
     completed: 0,
+    paused: 0,
     skipped: [],
   };
 
@@ -231,6 +259,7 @@ export async function dispatchDueCampaigns(
       summary.failed += outcome.failed;
       summary.unconfirmed += outcome.unconfirmed;
       if (outcome.completed) summary.completed += 1;
+      if (outcome.paused) summary.paused += 1;
       if (outcome.note) summary.skipped.push(`${campaign.name}: ${outcome.note}`);
     } catch (error) {
       // One campaign's fault must not stop the others: they share nothing but
@@ -250,8 +279,36 @@ type TickOutcome = {
   failed: number;
   unconfirmed: number;
   completed: boolean;
+  paused: boolean;
   note: string | null;
 };
+
+/**
+ * Stop a running campaign and say why. Only a `running` campaign is touched,
+ * so an operator who paused or cancelled it meanwhile keeps their own reason.
+ */
+async function pauseCampaign(campaignId: string, reason: string): Promise<boolean> {
+  const { data, error } = await supabaseAdmin
+    .from("email_campaigns")
+    .update({ status: "paused", paused_reason: reason.slice(0, 1000) })
+    .eq("id", campaignId)
+    .eq("status", "running")
+    .select("id");
+  if (error) {
+    console.error(`[email] could not pause campaign ${campaignId}:`, error.message);
+    return false;
+  }
+  if ((data ?? []).length === 0) return false;
+  const { writeAuditLog } = await import("@/server/audit.server");
+  await writeAuditLog({
+    action: "email_campaign_paused_by_dispatcher",
+    entityType: "email_campaign",
+    entityId: campaignId,
+    actorUserId: null,
+    metadata: { reason },
+  });
+  return true;
+}
 
 async function runCampaignTick(
   campaign: CampaignRow,
@@ -263,6 +320,7 @@ async function runCampaignTick(
     failed: 0,
     unconfirmed: 0,
     completed: false,
+    paused: false,
     note: null,
   };
 
@@ -338,9 +396,20 @@ async function runCampaignTick(
     return outcome;
   }
 
+  // Before anything is claimed — see the header.
+  let attachments: PreparedAttachments;
+  try {
+    attachments = await prepareCampaignAttachments(campaign);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    outcome.note = `its attachments could not be prepared, so nothing was claimed: ${message}`;
+    return outcome;
+  }
+
   const origin = resolveMissionControlOrigin({ PUBLIC_APP_URL: process.env.PUBLIC_APP_URL });
   let recipientsLeft = plan.recipientAllowance;
   let delayMs = plan.initialDelayMs;
+  let refusalsInARow = 0;
   // Contacts a quota has stepped over this tick, so the next page does not
   // hand back the same ones for ever.
   const stepOver = new Set<string>();
@@ -365,17 +434,45 @@ async function runCampaignTick(
       break;
     }
 
-    const sent = await sendOneMessage({ campaign, mailbox, origin, recipients: chosen });
+    const sent = await sendOneMessage({
+      campaign,
+      mailbox,
+      origin,
+      recipients: chosen,
+      attachments,
+    });
 
     outcome.messages += 1;
     if (sent.kind === "sent") {
+      refusalsInARow = 0;
       outcome.recipients += chosen.length;
       recipientsLeft -= chosen.length;
       for (const recipient of chosen) claimQuota(quotas, taken, recipient.attributes_norm ?? {});
     } else if (sent.kind === "failed") {
       outcome.failed += chosen.length;
+      refusalsInARow += 1;
+      if (refusalsInARow >= REFUSALS_BEFORE_PAUSE) {
+        const reason = `${REFUSALS_BEFORE_PAUSE} messages in a row were refused by Microsoft — the last said: ${sent.detail}. Paused so the rest of the list is not refused the same way; the refused contacts can be retried from the Audience tab.`;
+        outcome.paused = await pauseCampaign(campaign.id, reason);
+        outcome.note = reason;
+        break;
+      }
     } else if (sent.kind === "unconfirmed") {
+      refusalsInARow = 0;
       outcome.unconfirmed += chosen.length;
+    } else if (sent.kind === "halted") {
+      // A refusal about the mailbox or the message. Nothing was sent, the
+      // claim was released, and the campaign has been paused.
+      outcome.messages -= 1;
+      outcome.paused = sent.paused;
+      outcome.note = sent.detail;
+      break;
+    } else if (sent.kind === "deferred") {
+      // Nothing was sent and the claim was released; whatever went wrong
+      // while the draft was being built will be tried again next tick.
+      outcome.messages -= 1;
+      outcome.note = `nothing was sent this tick: ${sent.detail}`;
+      break;
     } else {
       // Throttled: the claim was released, nothing was sent, and pressing on
       // this tick would only earn another 429.
@@ -513,7 +610,21 @@ async function claimRecipients(rows: RecipientRow[]): Promise<RecipientRow[]> {
   return claimed;
 }
 
-type MessageResult = { kind: "sent" | "failed" | "unconfirmed" | "throttled" };
+type MessageResult =
+  | { kind: "sent" | "unconfirmed" | "throttled" }
+  | { kind: "failed"; detail: string }
+  | { kind: "deferred"; detail: string }
+  | { kind: "halted"; detail: string; paused: boolean };
+
+/** Return claimed contacts to the queue. Only ever after a send that did not happen. */
+async function releaseClaims(ids: string[], why: string): Promise<void> {
+  const { error } = await supabaseAdmin
+    .from("email_campaign_recipients")
+    .update({ status: "pending", claimed_at: null })
+    .in("id", ids)
+    .eq("status", "claimed");
+  if (error) console.error(`[email] could not release a claim (${why}):`, error.message);
+}
 
 /** Compose, record, send, record again. */
 async function sendOneMessage(input: {
@@ -521,8 +632,9 @@ async function sendOneMessage(input: {
   mailbox: string;
   origin: string;
   recipients: RecipientRow[];
+  attachments: PreparedAttachments;
 }): Promise<MessageResult> {
-  const { campaign, mailbox, origin, recipients } = input;
+  const { campaign, mailbox, origin, recipients, attachments } = input;
   const html = campaign.body_format !== "text";
   const lead = recipients[0];
 
@@ -585,13 +697,18 @@ async function sendOneMessage(input: {
       to_address: toRecipients[0]?.emailAddress.address ?? null,
       recipient_count: recipients.length,
       bcc_count: bccRecipients?.length ?? 0,
+      // Written BEFORE the send: the record of what this message carried must
+      // exist whatever happens on the wire.
+      attachments: attachments.snapshot as unknown as Json,
+      attachment_count: attachments.snapshot.length,
+      attachment_bytes: attachments.totalBytes,
     })
     .select("id")
     .single();
   if (messageError) throw messageError;
   const messageId = messageRow.id as string;
 
-  const outcome = await sendMail(mailbox, message);
+  const outcome = await deliverMessage(mailbox, message, attachments.outbound);
   const durationMs = Date.now() - started;
   const ids = recipients.map((recipient) => recipient.id);
   const finishedAt = new Date().toISOString();
@@ -619,6 +736,7 @@ async function sendOneMessage(input: {
         duration_ms: durationMs,
         graph_status: outcome.status,
         graph_request_id: outcome.requestId,
+        graph_draft_id: outcome.draftId,
       })
       .eq("id", messageId);
     if (error) console.error("[email] could not record a sent message:", error.message);
@@ -639,23 +757,43 @@ async function sendOneMessage(input: {
     return { kind: "sent" };
   }
 
-  if (outcome.kind === "throttled") {
+  if (outcome.kind === "throttled" || outcome.kind === "deferred") {
+    const detail =
+      outcome.kind === "throttled" ? "throttled by Microsoft" : `not sent: ${outcome.message}`;
     const { error } = await supabaseAdmin
       .from("email_campaign_messages")
-      .update({ status: "failed", error: "throttled by Microsoft", duration_ms: durationMs })
+      .update({ status: "failed", error: detail.slice(0, 500), duration_ms: durationMs })
       .eq("id", messageId);
-    if (error) console.error("[email] could not record a throttled message:", error.message);
+    if (error) console.error("[email] could not record an unsent message:", error.message);
 
-    // Nothing was accepted, so returning these to the queue is safe — and it
-    // is the only outcome here for which that is true.
-    const { error: releaseError } = await supabaseAdmin
-      .from("email_campaign_recipients")
-      .update({ status: "pending", claimed_at: null })
-      .in("id", ids)
-      .eq("status", "claimed");
-    if (releaseError)
-      console.error("[email] could not release a throttled claim:", releaseError.message);
-    return { kind: "throttled" };
+    // Nothing was accepted, so returning these to the queue is safe — and
+    // these are the only outcomes, with a halt below, for which that is true.
+    await releaseClaims(ids, outcome.kind);
+    return outcome.kind === "throttled"
+      ? { kind: "throttled" }
+      : { kind: "deferred", detail: outcome.message };
+  }
+
+  if (outcome.kind === "refused") {
+    const scope = refusalScope(outcome.status, outcome.code);
+    if (scope !== "recipient") {
+      // The same answer for every contact this campaign has. Refused BEFORE
+      // acceptance, so nothing exists: release, and stop the campaign.
+      const reason = refusalPauseReason(scope, mailbox, outcome.message, outcome.path);
+      const { error } = await supabaseAdmin
+        .from("email_campaign_messages")
+        .update({
+          status: "failed",
+          error: outcome.message.slice(0, 500),
+          duration_ms: durationMs,
+          graph_status: outcome.status,
+        })
+        .eq("id", messageId);
+      if (error) console.error("[email] could not record a refused message:", error.message);
+      await releaseClaims(ids, `refused: ${scope}`);
+      const paused = await pauseCampaign(campaign.id, reason);
+      return { kind: "halted", detail: reason, paused };
+    }
   }
 
   const failed = outcome.kind === "refused";
@@ -666,7 +804,8 @@ async function sendOneMessage(input: {
       status: failed ? "failed" : "unconfirmed",
       error: detail,
       duration_ms: durationMs,
-      ...(failed && "status" in outcome ? { graph_status: outcome.status } : {}),
+      graph_draft_id: outcome.draftId,
+      ...(outcome.kind === "refused" ? { graph_status: outcome.status } : {}),
     })
     .eq("id", messageId);
   if (error) console.error("[email] could not record a failed message:", error.message);
@@ -683,5 +822,5 @@ async function sendOneMessage(input: {
     console.error("[email] could not record recipient failures:", failureError.message);
   }
 
-  return { kind: failed ? "failed" : "unconfirmed" };
+  return failed ? { kind: "failed", detail } : { kind: "unconfirmed" };
 }

@@ -1,11 +1,13 @@
 # The email scheduler
 
 Read this before touching `src/lib/email/*`, `src/server/email-campaigns.server.ts`,
-`src/server/email-bounces.server.ts`, `src/server/graph-client.ts`, or the
+`src/server/email-bounces.server.ts`, `src/server/email-attachments.server.ts`,
+`src/server/email-mailboxes.server.ts`, `src/server/graph-client.ts`, or the
 `email_*` tables.
 
 Mission Control can now run a scheduled email campaign: upload a contact list as
-a spreadsheet, write a message, set the rules that govern how fast it goes and
+a spreadsheet, write a message, attach files to it, choose which mailbox in the
+Microsoft tenant it leaves from, set the rules that govern how fast it goes and
 who gets how much of it, and let a per-minute dispatcher work through it against
 the same Microsoft tenant the prime property dashboard sends from.
 
@@ -88,18 +90,38 @@ Two rules carry that scan:
 `sendMail` answers `202 Accepted` with no body. Three outcomes are therefore not
 two:
 
-| outcome       | what it means                                                   | what happens                             |
-| ------------- | --------------------------------------------------------------- | ---------------------------------------- |
-| `sent`        | Graph accepted the message                                      | terminal                                 |
-| `failed`      | Graph refused it **before** accepting (4xx) — no message exists | may be released by a person              |
-| `unconfirmed` | the request left and no answer arrived (network error, 5xx)     | **never** retried automatically          |
-| throttled     | 429/503 — a refusal to start, so nothing was sent               | the claim is released, retried next tick |
+| outcome       | what it means                                                    | what happens                             |
+| ------------- | ---------------------------------------------------------------- | ---------------------------------------- |
+| `sent`        | Graph accepted the message                                       | terminal                                 |
+| `failed`      | Graph refused it **before** accepting (4xx) — no message exists  | may be released by a person              |
+| `unconfirmed` | the request left and no answer arrived (network error, 5xx)      | **never** retried automatically          |
+| throttled     | 429/503 — a refusal to start, so nothing was sent                | the claim is released, retried next tick |
+| deferred      | a draft could not be BUILT (5xx, dropped connection) — see below | the claim is released, retried next tick |
 
 `unconfirmed` is the one that matters. "We do not know whether this arrived",
 resolved by sending it again, is exactly the duplicate rule 1 exists to prevent.
 Releasing an unconfirmed recipient is a person's decision, made on the Audience
 tab, and the confirmation says what is being traded: the chance of a second copy
 against the certainty of a first.
+
+### When a refusal is about the campaign, not the contact
+
+A `failed` recipient is one Graph refused — usually something about that
+address. But some refusals are the same answer for every contact: access to the
+chosen mailbox withdrawn (401/403, `ErrorAccessDenied`, `ErrorSendAsDenied`),
+the mailbox gone (404), or the message too large for it (413,
+`ErrorMessageSizeExceeded`). Recording those against each contact in turn turns
+one configuration fault into a whole list of "refused" rows a person must
+release one by one.
+
+So `refusalScope` (`mailboxes.pure.ts`) sorts a refusal into `recipient`,
+`mailbox` or `message`. Only `recipient` marks the contact failed. The other two
+were refused **before** acceptance, so nothing exists: the claim is released,
+the campaign is paused, and `paused_reason` says what Microsoft said and what to
+do — shown at the top of the campaign page. Three refusals in a row of any kind
+pause the campaign too, because a fault this code has no name for looks exactly
+like that. Each pause is written to the audit log as
+`email_campaign_paused_by_dispatcher`.
 
 ---
 
@@ -223,6 +245,163 @@ and each is a silent failure if missed:
 
 ---
 
+## Attachments
+
+Every message of a campaign carries the same files — up to ten, **20 MB in
+total**. The ceiling is the receiving server's, not ours: Exchange will send 35
+MB, but a gateway that refuses 25 MB refuses the whole message, and that comes
+back as a bounce that puts a good address on the register.
+
+### The file goes to Storage from the browser, then the server measures it
+
+Like a contact list, an attachment never passes through a Worker: the browser
+uploads it to the private `email-attachments` bucket at
+`<campaign>/<attachment id>/<name>`, then calls `registerCampaignAttachment`,
+which reads the object back with the service role and records **its own** size
+and SHA-256. A hash the browser computed would be a claim. Anything refused —
+a blocked type, over the ceiling, a duplicate, a running campaign — is removed
+from the bucket on the way out. A path whose id already belongs to a row or a
+sent message is refused before anything is removed, so registration can never
+be used to delete the record of a file somebody received.
+
+### What a message carries is exactly what was attached, or nothing is claimed
+
+The dispatcher reads and **re-hashes** every file before it claims a single
+contact, the same rule as the token: a message missing its file is a different
+message, and once it has gone the never-twice rule makes it permanent. A file
+that cannot be read, or no longer hashes to what was registered, costs one tick
+and touches no recipient. The bucket grants no UPDATE, so an object cannot be
+replaced in place; the hash is the second wall. Verified bytes are cached per
+isolate (48 MB, keyed by id **and** hash), so a running campaign does not
+download the same file every minute.
+
+Each message row snapshots what it carried (`email_campaign_messages.attachments`:
+id, name, type, size, hash, storage path, inline) **before** the send. Removing an
+attachment deletes its row; the stored file is deleted only when no message
+carried it — once sent, it is the record of what those people received, and the
+Activity tab links to it from every message.
+
+Attachments can change only while a campaign is a draft or paused. A file
+swapped mid-send would split one campaign into two messages with no record of
+who received which.
+
+### Two ways out of Graph
+
+`sendMail` carries attachments inside its one request, as base64, and that
+request is capped at about 4 MB. So `deliverMessage` estimates the request and
+picks:
+
+- **one `sendMail`** when it fits (files totalling up to about 2.9 MB);
+- **a draft** otherwise: create it, attach each file — a POST for files under 3
+  MB, an **upload session** in ~3 MB ranges for larger ones (Graph refuses an
+  upload session below 3 MB and a POST above it, so the threshold is not a
+  knob) — then `send`. The upload URL is pre-authenticated on
+  `outlook.office.com` and never carries our bearer token.
+
+Everything before the draft's `send` creates a draft and sends nothing, so a
+failure there is `refused`, `throttled` or `deferred` — never `unconfirmed` —
+and the draft is deleted. The `send` itself is classified exactly as `sendMail`
+is. When it ends `unconfirmed`, the draft is **kept** and its id recorded as
+`graph_draft_id`: a draft still sitting in the mailbox's Drafts folder is proof
+the message never left, which is what a person needs before releasing it.
+
+The draft path needs **`Mail.ReadWrite`** as well as `Mail.Send`. Readiness says
+so when a campaign's files are large enough to need it, and louder when the
+token visibly lacks it; if it is missing, the first message is refused, the
+campaign pauses, and the pause reason names the permission.
+
+### Inline images
+
+There is no "inline" toggle. A file is inline when the HTML body refers to it
+as `cid:<name>` — `<img src="cid:logo.png">` — and an ordinary attachment
+otherwise. A toggle could disagree with the body, and both ways round that is a
+visible defect. The name is derived from the file name and shown beside each
+file, with a button that copies the tag. Readiness **blocks** a body that shows
+a `cid:` no attachment provides (every reader would see a broken image), and the
+preview swaps each inline image for a short-lived signed URL so the operator
+sees what the reader will.
+
+### What is refused, and what is warned
+
+Refused at upload, by the browser and again by the server: executables,
+scripts, disk images and the rest of Outlook's blocked list (`BLOCKED_EXTENSIONS`
+in `attachments.pure.ts`, read from the **last** extension, so `invoice.pdf.exe`
+is the executable it is), an eleventh file, and anything taking the total past
+20 MB.
+
+Warned before Start: a message over 10 MB (receiving servers), the draft path
+and its permission, and a pace that will outrun Exchange's per-mailbox upload
+allowance of **150 MB in any five minutes** — a 10 MB file on every message
+meets it at fifteen messages. A 429 there is the ordinary throttle (claim
+released, retried next tick), so the cap slows a campaign and never loses or
+repeats a message; the warning says how fast it will really go.
+
+---
+
+## Choosing the mailbox
+
+`MICROSOFT_MAILBOX_EMAIL` used to be the only mailbox a campaign could send
+from in practice (the field existed but was free text, checked against
+nothing). It is now a **default**: each campaign picks its mailbox on the
+Message tab from the tenant `MICROSOFT_TENANT_ID` names.
+
+An application permission is not tied to one mailbox — `Mail.Send` reaches
+every mailbox the tenant's Exchange policy allows. So the picker lists the
+tenant's directory (users and shared mailboxes with a mail address, guests
+excluded) and marks each entry with whether **this application can actually
+use it**, read from Exchange rather than assumed:
+
+| badge        | meaning                                                                              |
+| ------------ | ------------------------------------------------------------------------------------ |
+| can send     | its inbox can be read, so the access policy admits this application                  |
+| blocked      | Exchange refused — an application access policy excludes it, or Mail.Read is missing |
+| no mailbox   | no Exchange Online mailbox (unlicensed, inactive, on-premises) or no such user       |
+| not answered | throttled or unreachable just now — not a verdict, never cached                      |
+| can't check  | the token holds Mail.Send but no Mail.Read, so no inbox can be read; choosable       |
+| unchecked    | listed but not yet checked — checked the moment it is chosen                         |
+
+**Why "can read its inbox" is the test.** Exchange applies the same access policy
+to reading and sending, and there is no way to ask "may I send as X" without
+sending something; reading one folder id is free. And a mailbox that cannot be
+read cannot have its bounces read — a campaign sending from it would report
+rule 2 as enforced with no data at all.
+
+The probe is `GET /users/{address}/mailFolders/inbox?$select=id`, twenty to a
+`$batch`. The default, the mailboxes this deployment already uses and the first
+200 directory entries are checked when the picker opens; the rest when chosen.
+Answers are cached per isolate for five minutes; "not answered" is never cached.
+
+Saving a **changed** mailbox checks it again, fresh, and refuses one that is
+blocked or has no mailbox; the change is audited as
+`email_campaign_mailbox_changed`. Readiness checks the effective mailbox
+(the campaign's own, or the default) and blocks Start on a blocked one.
+Leaving the field on "Deployment default" keeps the campaign following
+`MICROSOFT_MAILBOX_EMAIL` rather than pinning today's address.
+
+**Listing the directory needs a directory permission** — `User.ReadBasic.All` is
+the least of them. Without one the picker says so, still offers every mailbox
+this deployment already uses, and accepts any address typed and checked.
+
+**The token's roles are advisory.** A client-credentials token lists its
+granted application permissions in its `roles` claim, and the console reads it
+to say what is missing (the strip on the campaigns page). Exchange's RBAC for
+Applications grants mailbox access without putting any role in the token, so a
+missing role is a warning, never a block — the probe is the authority. The one
+place roles change a verdict: a token that carries roles but no read role is
+refused every inbox, so its probes become "can't check" rather than "blocked",
+and campaigns that send today are not stopped by a check that could never pass.
+
+### The bounce scan follows the mailboxes that actually sent
+
+Once a campaign can move between mailboxes, reading only the mailboxes campaigns
+name **today** would stop reading a mailbox's bounces the moment somebody
+changed the field — while they keep arriving there for days. The scan now reads
+the default, every mailbox a non-draft campaign names, **and** every mailbox a
+message has left from in the last 30 days (`email_campaign_sending_mailboxes`, a
+view over the message ledger).
+
+---
+
 ## Personalisation, and what it costs
 
 Merge fields are `{{column_key}}` — any column from an attached list — plus
@@ -269,15 +448,23 @@ and the warning says so at the moment it is worth noticing.
 ## Credentials
 
 The same application registration the prime property dashboard sends from:
-`MICROSOFT_TENANT_ID`, `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET`,
-`MICROSOFT_MAILBOX_EMAIL`. A client-credentials identity needing **`Mail.Send`**
-and **`Mail.Read`** with admin consent — the second is the bounce scan, without
-which rule 2 has no data.
+`MICROSOFT_TENANT_ID`, `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET`, and
+optionally `MICROSOFT_MAILBOX_EMAIL` as the default mailbox. A client-credentials
+identity with admin consent for:
+
+| permission           | needed for                                                    |
+| -------------------- | ------------------------------------------------------------- |
+| `Mail.Send`          | sending (required)                                            |
+| `Mail.Read`          | the bounce scan — rule 2's only data — and checking mailboxes |
+| `Mail.ReadWrite`     | messages whose attachments exceed ~2.9 MB (built as drafts)   |
+| `User.ReadBasic.All` | listing the tenant's mailboxes in the picker                  |
 
 An application permission reaches **every** mailbox in the tenant unless an
-Exchange `ApplicationAccessPolicy` scopes it. Scoping it to the sending mailbox
-is strongly recommended, and it is why the mailbox a campaign sends from is a
-stored, operator-set field rather than something a request may name.
+Exchange `ApplicationAccessPolicy` (or RBAC for Applications) scopes it.
+Scoping it to the mailboxes campaigns should use is strongly recommended: the
+picker reads that policy, so a mailbox outside it shows as blocked and cannot
+be chosen. That is why the mailbox a campaign sends from is a stored,
+operator-set, checked field rather than something a request may name.
 
 All unset is a supported state: campaigns can be written and lists uploaded, and
 the page says the deployment cannot send rather than offering a Start button
@@ -330,9 +517,15 @@ cron.
 | `src/lib/email/campaignRules.pure.ts`        | window, gap, caps, quotas                    |
 | `src/lib/email/mergeTemplate.pure.ts`        | merge fields and escaping                    |
 | `src/lib/email/bounceReport.pure.ts`         | delivery reports → verdicts                  |
+| `src/lib/email/attachments.pure.ts`          | what may be attached, and the delivery path  |
+| `src/lib/email/mailboxes.pure.ts`            | mailbox access, refusal scope, token roles   |
 | `src/server/graph-client.ts`                 | the only place this talks to Microsoft       |
 | `src/server/email-campaigns.server.ts`       | the dispatcher                               |
+| `src/server/email-attachments.server.ts`     | verified attachment bytes                    |
+| `src/server/email-mailboxes.server.ts`       | the tenant directory and access probes       |
 | `src/server/email-bounces.server.ts`         | the mailbox scan                             |
 | `src/lib/email-campaigns.functions.ts`       | the operator's API                           |
 | `src/routes/email.*`                         | the console                                  |
+| `src/components/email/mailbox-picker.tsx`    | choosing the mailbox                         |
+| `src/components/email/attachment-panel.tsx`  | attaching files                              |
 | `src/routes/api.public.email.unsubscribe.ts` | the unsubscribe facility                     |

@@ -10,6 +10,7 @@ import {
   ArrowLeft,
   CheckCircle2,
   Info,
+  Paperclip,
   Pause,
   Play,
   Plus,
@@ -50,8 +51,12 @@ import {
 import { useConfirm } from "@/components/confirm-dialog";
 import { cn } from "@/lib/utils";
 import { auStateSiblings, type ColumnProfile } from "@/lib/email/listProfile.pure";
+import { humanBytes } from "@/lib/email/attachments.pure";
+import { MailboxPicker } from "@/components/email/mailbox-picker";
+import { AttachmentPanel, type AttachmentListRow } from "@/components/email/attachment-panel";
 import {
   attachListToCampaign,
+  attachmentDownloadUrl,
   campaignReadiness,
   cancelRecipient,
   deleteQuota,
@@ -203,7 +208,11 @@ function CampaignWorkspace() {
         }
       />
 
-      <ReadinessPanel readiness={readiness.data} status={campaign.status as string} />
+      <ReadinessPanel
+        readiness={readiness.data}
+        status={campaign.status as string}
+        pausedReason={(campaign.paused_reason as string | null) ?? null}
+      />
 
       <div className="glass grid grid-cols-2 overflow-hidden sm:grid-cols-6">
         <MetricCell label="contacts" value={total.toLocaleString()} />
@@ -238,7 +247,11 @@ function CampaignWorkspace() {
         </TabsList>
 
         <TabsContent value="message" className="mt-4">
-          <MessageEditor campaign={campaign} campaignId={campaignId} />
+          <MessageEditor
+            campaign={campaign}
+            campaignId={campaignId}
+            attachments={(detail.data?.attachments ?? []) as AttachmentListRow[]}
+          />
         </TabsContent>
         <TabsContent value="rules" className="mt-4">
           <RulesEditor campaign={campaign} campaignId={campaignId} />
@@ -264,28 +277,55 @@ function CampaignWorkspace() {
 function ReadinessPanel({
   readiness,
   status,
+  pausedReason,
 }: {
   readiness:
-    | { blocking: string[]; warnings: string[]; batchSize: number; pending: number }
+    | {
+        blocking: string[];
+        warnings: string[];
+        batchSize: number;
+        pending: number;
+        mailbox?: { address: string | null; isDefault: boolean };
+        attachments?: { count: number; totalBytes: number };
+      }
     | undefined;
   status: string;
+  pausedReason: string | null;
 }) {
-  if (!readiness) return null;
+  // A pause the dispatcher made says why on the campaign itself; shown first,
+  // because it is the reason nothing is going out.
+  const paused =
+    status === "paused" && pausedReason ? (
+      <div className="glass-inset spine spine-warn flex items-start gap-3 px-4 py-3">
+        <Pause className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+        <p className="text-sm text-muted-foreground">
+          <span className="text-foreground">Paused:</span> {pausedReason}
+        </p>
+      </div>
+    ) : null;
+  if (!readiness) return paused;
   const { blocking, warnings } = readiness;
   if (blocking.length === 0 && warnings.length === 0) {
-    if (status !== "draft") return null;
+    if (status !== "draft") return paused;
+    const files = readiness.attachments?.count ?? 0;
     return (
       <div className="glass-inset spine spine-ok flex items-start gap-3 px-4 py-3">
         <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-success" />
         <p className="text-sm text-muted-foreground">
           Ready to send — {readiness.pending.toLocaleString()} contacts waiting,{" "}
-          {readiness.batchSize === 1 ? "one at a time" : `${readiness.batchSize} to a message`}.
+          {readiness.batchSize === 1 ? "one at a time" : `${readiness.batchSize} to a message`}
+          {readiness.mailbox?.address ? `, from ${readiness.mailbox.address}` : ""}
+          {files
+            ? `, with ${files} attachment${files === 1 ? "" : "s"} (${humanBytes(readiness.attachments?.totalBytes ?? 0)})`
+            : ""}
+          .
         </p>
       </div>
     );
   }
   return (
     <div className="space-y-2">
+      {paused}
       {blocking.map((reason) => (
         <div key={reason} className="glass-inset spine spine-bad flex items-start gap-3 px-4 py-3">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
@@ -309,9 +349,11 @@ function ReadinessPanel({
 function MessageEditor({
   campaign,
   campaignId,
+  attachments,
 }: {
   campaign: Record<string, unknown>;
   campaignId: string;
+  attachments: AttachmentListRow[];
 }) {
   const qc = useQueryClient();
   const [subject, setSubject] = useState((campaign.subject_template as string) ?? "");
@@ -348,85 +390,92 @@ function MessageEditor({
 
   return (
     <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_22rem]">
-      <div className="glass space-y-5 p-5">
-        <div className="grid gap-4 sm:grid-cols-3">
+      <div className="space-y-6">
+        <div className="glass space-y-5 p-5">
+          <div className="grid gap-4 sm:grid-cols-3">
+            <div className="space-y-2">
+              <Label htmlFor="from-name">Sender name</Label>
+              <Input
+                id="from-name"
+                value={fromName}
+                onChange={(event) => setFromName(event.target.value)}
+                placeholder="Aurixa Systems"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="from-mailbox">Send from</Label>
+              <MailboxPicker id="from-mailbox" value={fromMailbox} onChange={setFromMailbox} />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="reply-to">Reply to</Label>
+              <Input
+                id="reply-to"
+                value={replyTo}
+                onChange={(event) => setReplyTo(event.target.value)}
+                placeholder="replies go to the sender otherwise"
+              />
+            </div>
+          </div>
+
           <div className="space-y-2">
-            <Label htmlFor="from-name">Sender name</Label>
+            <Label htmlFor="subject">Subject</Label>
             <Input
-              id="from-name"
-              value={fromName}
-              onChange={(event) => setFromName(event.target.value)}
-              placeholder="Aurixa Systems"
+              id="subject"
+              value={subject}
+              onChange={(event) => setSubject(event.target.value)}
+              placeholder="A quick note for {{first_name}}"
             />
           </div>
+
           <div className="space-y-2">
-            <Label htmlFor="from-mailbox">Send from</Label>
-            <Input
-              id="from-mailbox"
-              value={fromMailbox}
-              onChange={(event) => setFromMailbox(event.target.value)}
-              placeholder="the deployment's mailbox"
+            <div className="flex items-center justify-between">
+              <Label htmlFor="body">Body</Label>
+              <Select value={bodyFormat} onValueChange={setBodyFormat}>
+                <SelectTrigger className="h-8 w-32">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="html">HTML</SelectItem>
+                  <SelectItem value="text">Plain text</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <Textarea
+              id="body"
+              value={body}
+              onChange={(event) => setBody(event.target.value)}
+              rows={16}
+              className="font-mono text-xs"
+              placeholder={
+                '<p>Hi {{first_name}},</p>\n<p>…</p>\n<p><a href="{{unsubscribe_url}}">Unsubscribe</a></p>'
+              }
             />
+            <p className="font-mono text-[11px] text-muted-foreground">
+              Merge fields are <code>{"{{column_key}}"}</code> — any column from an attached list,
+              plus <code>{"{{email}}"}</code>, <code>{"{{campaign_name}}"}</code>,{" "}
+              <code>{"{{sender_name}}"}</code>, <code>{"{{today}}"}</code> and{" "}
+              <code>{"{{unsubscribe_url}}"}</code>. Anything a value is substituted into is escaped,
+              so a contact's own text cannot break the page. Using any per-recipient field sends one
+              message per contact whatever the batch size says. To show an attached image in the
+              body, write <code>{'<img src="cid:logo.png">'}</code> with the name shown beside the
+              file below.
+            </p>
           </div>
-          <div className="space-y-2">
-            <Label htmlFor="reply-to">Reply to</Label>
-            <Input
-              id="reply-to"
-              value={replyTo}
-              onChange={(event) => setReplyTo(event.target.value)}
-              placeholder="replies go to the sender otherwise"
-            />
+
+          <div className="flex justify-end">
+            <Button onClick={() => save.mutate()} disabled={save.isPending}>
+              Save message
+            </Button>
           </div>
         </div>
 
-        <div className="space-y-2">
-          <Label htmlFor="subject">Subject</Label>
-          <Input
-            id="subject"
-            value={subject}
-            onChange={(event) => setSubject(event.target.value)}
-            placeholder="A quick note for {{first_name}}"
-          />
-        </div>
-
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <Label htmlFor="body">Body</Label>
-            <Select value={bodyFormat} onValueChange={setBodyFormat}>
-              <SelectTrigger className="h-8 w-32">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="html">HTML</SelectItem>
-                <SelectItem value="text">Plain text</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <Textarea
-            id="body"
-            value={body}
-            onChange={(event) => setBody(event.target.value)}
-            rows={16}
-            className="font-mono text-xs"
-            placeholder={
-              '<p>Hi {{first_name}},</p>\n<p>…</p>\n<p><a href="{{unsubscribe_url}}">Unsubscribe</a></p>'
-            }
-          />
-          <p className="font-mono text-[11px] text-muted-foreground">
-            Merge fields are <code>{"{{column_key}}"}</code> — any column from an attached list,
-            plus <code>{"{{email}}"}</code>, <code>{"{{campaign_name}}"}</code>,{" "}
-            <code>{"{{sender_name}}"}</code>, <code>{"{{today}}"}</code> and{" "}
-            <code>{"{{unsubscribe_url}}"}</code>. Anything a value is substituted into is escaped,
-            so a contact's own text cannot break the page. Using any per-recipient field sends one
-            message per contact whatever the batch size says.
-          </p>
-        </div>
-
-        <div className="flex justify-end">
-          <Button onClick={() => save.mutate()} disabled={save.isPending}>
-            Save message
-          </Button>
-        </div>
+        <AttachmentPanel
+          campaignId={campaignId}
+          status={campaign.status as string}
+          attachments={attachments}
+          body={body}
+          bodyFormat={bodyFormat}
+        />
       </div>
 
       <div className="glass space-y-3 p-5">
@@ -449,6 +498,22 @@ function MessageEditor({
                 <pre className="whitespace-pre-wrap font-mono text-xs">{preview.data.body}</pre>
               )}
             </div>
+            {preview.data.attachments.some((file) => !file.inline) && (
+              <ul className="space-y-1">
+                {preview.data.attachments
+                  .filter((file) => !file.inline)
+                  .map((file) => (
+                    <li
+                      key={file.id}
+                      className="flex items-center gap-2 font-mono text-[11px] text-muted-foreground"
+                    >
+                      <Paperclip className="h-3 w-3 shrink-0" />
+                      <span className="min-w-0 flex-1 truncate">{file.fileName}</span>
+                      <span>{humanBytes(file.sizeBytes)}</span>
+                    </li>
+                  ))}
+              </ul>
+            )}
             <Button
               variant="outline"
               size="sm"
@@ -474,7 +539,13 @@ function TestSendDialog({ campaignId }: { campaignId: string }) {
   const send = useMutation({
     mutationFn: () => sendTestEmail({ data: { id: campaignId, to } }),
     onSuccess: (result) => {
-      toast.success("Test sent", { description: `from ${result.mailbox}` });
+      toast.success("Test sent", {
+        description:
+          `from ${result.mailbox}` +
+          (result.attachments
+            ? ` with ${result.attachments} attachment${result.attachments === 1 ? "" : "s"} (${humanBytes(result.attachmentBytes)})`
+            : ""),
+      });
       setOpen(false);
     },
     onError: (error: Error) => toast.error("Test failed", { description: error.message }),
@@ -492,7 +563,8 @@ function TestSendDialog({ campaignId }: { campaignId: string }) {
           <DialogTitle>Send a test message</DialogTitle>
           <DialogDescription>
             Goes to one address you name, outside the campaign entirely — no recipient is consumed,
-            no cap is spent, and the ledger is untouched.
+            no cap is spent, and the ledger is untouched. It is built exactly as a campaign message
+            is, attachments included, from the campaign's chosen mailbox.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2">
@@ -1225,6 +1297,17 @@ function AudiencePanel({
 // ── Activity ────────────────────────────────────────────────────────────────
 
 function ActivityPanel({ messages }: { messages: Record<string, unknown>[] }) {
+  const openCarried = async (messageId: string, attachmentId: string) => {
+    try {
+      const { url } = await attachmentDownloadUrl({ data: { attachmentId, messageId } });
+      window.open(url, "_blank", "noopener,noreferrer");
+    } catch (error) {
+      toast.error("Could not open the file", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+
   if (messages.length === 0) {
     return (
       <EmptyState
@@ -1236,40 +1319,71 @@ function ActivityPanel({ messages }: { messages: Record<string, unknown>[] }) {
   }
   return (
     <div className="space-y-2">
-      {messages.map((message) => (
-        <RecordRow
-          key={message.id as string}
-          spine={
-            message.status === "sent"
-              ? "ok"
-              : message.status === "failed"
-                ? "bad"
-                : message.status === "unconfirmed"
-                  ? "warn"
-                  : "live"
-          }
-          className="flex items-center gap-3 px-4 py-3"
-        >
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-medium">{message.subject as string}</p>
-            <p className="truncate font-mono text-xs text-muted-foreground">
-              {message.status as string} · {(message.recipient_count as number).toLocaleString()}{" "}
-              contact{message.recipient_count === 1 ? "" : "s"}
-              {message.bcc_count ? ` (${message.bcc_count} bcc)` : ""}
-              {message.sent_at
-                ? ` · ${formatDistanceToNow(new Date(message.sent_at as string), { addSuffix: true })}`
-                : ` · queued ${formatDistanceToNow(new Date(message.queued_at as string), { addSuffix: true })}`}
-              {message.duration_ms ? ` · ${message.duration_ms}ms` : ""}
-              {message.error ? ` · ${message.error}` : ""}
-            </p>
-          </div>
-          {message.graph_status ? (
-            <Badge variant="outline" className="font-mono text-[10px]">
-              {message.graph_status as number}
-            </Badge>
-          ) : null}
-        </RecordRow>
-      ))}
+      {messages.map((message) => {
+        // What this message carried, as recorded before it was sent — the
+        // file each person received, even if it has since been removed.
+        const carried = Array.isArray(message.attachments)
+          ? (message.attachments as { id: string; file_name: string; inline?: boolean }[])
+          : [];
+        return (
+          <RecordRow
+            key={message.id as string}
+            spine={
+              message.status === "sent"
+                ? "ok"
+                : message.status === "failed"
+                  ? "bad"
+                  : message.status === "unconfirmed"
+                    ? "warn"
+                    : "live"
+            }
+            className="flex items-center gap-3 px-4 py-3"
+          >
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-medium">{message.subject as string}</p>
+              <p className="truncate font-mono text-xs text-muted-foreground">
+                {message.status as string} · {(message.recipient_count as number).toLocaleString()}{" "}
+                contact{message.recipient_count === 1 ? "" : "s"}
+                {message.bcc_count ? ` (${message.bcc_count} bcc)` : ""}
+                {message.mailbox ? ` · from ${message.mailbox as string}` : ""}
+                {message.sent_at
+                  ? ` · ${formatDistanceToNow(new Date(message.sent_at as string), { addSuffix: true })}`
+                  : ` · queued ${formatDistanceToNow(new Date(message.queued_at as string), { addSuffix: true })}`}
+                {message.duration_ms ? ` · ${message.duration_ms}ms` : ""}
+                {message.error ? ` · ${message.error}` : ""}
+              </p>
+              {carried.length > 0 && (
+                <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-muted-foreground">
+                  <Paperclip className="h-3 w-3" />
+                  {carried.map((file) => (
+                    <button
+                      key={file.id}
+                      type="button"
+                      className="hover:underline"
+                      onClick={() => void openCarried(message.id as string, file.id)}
+                    >
+                      {file.file_name}
+                      {file.inline ? " (inline)" : ""}
+                    </button>
+                  ))}
+                  <span>· {humanBytes(Number(message.attachment_bytes ?? 0))}</span>
+                </p>
+              )}
+              {message.graph_draft_id && message.status === "unconfirmed" ? (
+                <p className="mt-1 font-mono text-[11px] text-warning">
+                  Built as a draft — if it is still in the mailbox&apos;s Drafts folder, it was not
+                  sent.
+                </p>
+              ) : null}
+            </div>
+            {message.graph_status ? (
+              <Badge variant="outline" className="font-mono text-[10px]">
+                {message.graph_status as number}
+              </Badge>
+            ) : null}
+          </RecordRow>
+        );
+      })}
     </div>
   );
 }
