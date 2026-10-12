@@ -1033,4 +1033,12 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "cron", jobname: "email-warmup-2min" },
     ],
   },
+  {
+    migration: "20261012150000_microsoft_tenant_atomic_writes.sql",
+    version: "20261012150000",
+    assertions: [
+      { kind: "rpc", fn: "microsoft_tenant_add" },
+      { kind: "rpc", fn: "microsoft_tenant_update" },
+    ],
+  },
 ];

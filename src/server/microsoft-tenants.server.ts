@@ -21,6 +21,16 @@
  * refused at the form with Microsoft's reason, not discovered when the first
  * campaign pauses.
  *
+ * ## One write, one transaction
+ *
+ * Adding a tenant and changing one each go through a single database function
+ * (`microsoft_tenant_add`, `microsoft_tenant_update`) that stores the
+ * credentials and the row together under the row's lock, so the row's hints
+ * always describe the secret in the Vault and a refused save leaves nothing
+ * behind. New credentials carry the `credentials_version` they were merged
+ * from: if another edit stored credentials in between, this one is refused
+ * rather than overwriting them with values read before that edit.
+ *
  * ## Caching
  *
  * A resolved tenant is cached per isolate for a minute. The dispatcher asks
@@ -63,6 +73,27 @@ import {
 } from "@/server/graph-client";
 
 type TenantRow = Database["public"]["Tables"]["microsoft_tenants"]["Row"];
+
+/**
+ * The columns an add or an edit may set. `microsoft_tenant_add` and
+ * `microsoft_tenant_update` refuse any other key, so this type is what keeps a
+ * new field from reaching them unannounced.
+ */
+type TenantColumns = Partial<
+  Pick<
+    TenantRow,
+    | "label"
+    | "default_mailbox"
+    | "secret_expires_on"
+    | "directory_hint"
+    | "client_hint"
+    | "secret_hint"
+    | "fingerprint"
+    | "granted_roles"
+    | "verified_at"
+    | "verify_error"
+  >
+>;
 
 const CONFIG_TTL_MS = 60_000;
 const configCache = new Map<string, { at: number; config: GraphConfig | null }>();
@@ -236,25 +267,6 @@ async function assertNotRegistered(
   }
 }
 
-/**
- * Refuse a name another live tenant already has — asked before anything is
- * stored, so a clash cannot leave new credentials in the Vault behind a
- * rename that failed. The unique index stays the authority; this is so a
- * person's typo never gets as far as it.
- */
-async function assertNameFree(label: string, exceptId: string): Promise<void> {
-  const { data, error } = await supabaseAdmin
-    .from("microsoft_tenants")
-    .select("id, label")
-    .is("removed_at", null)
-    .neq("id", exceptId);
-  if (error) throw error;
-  const wanted = label.trim().toLowerCase();
-  if ((data ?? []).some((other) => other.label.trim().toLowerCase() === wanted)) {
-    throw new Error(tenantErrorMessage("microsoft_tenants_label_live"));
-  }
-}
-
 // ── Listing ──────────────────────────────────────────────────────────────────
 
 export type TenantSummary = {
@@ -381,49 +393,33 @@ export async function addTenant(
   if (mailbox) await refuseUnusableMailbox(trial, mailbox, verification.capabilities);
 
   const hints = credentialHints(credentials);
-  const { data: row, error } = await supabaseAdmin
-    .from("microsoft_tenants")
-    .insert({
-      label,
-      default_mailbox: mailbox,
-      directory_hint: hints.directory,
-      client_hint: hints.client,
-      secret_hint: hints.secret,
-      secret_expires_on: input.secretExpiresOn || null,
-      fingerprint,
-      granted_roles: verification.roles,
-      verified_at: new Date().toISOString(),
-      created_by: actorUserId,
-    })
-    .select("id")
-    .single();
-  if (error) throw new Error(tenantErrorMessage(error.message));
-
-  const { error: putError } = await supabaseAdmin.rpc("microsoft_tenant_credentials_put", {
-    p_tenant: row.id,
+  const details: TenantColumns & { created_by: string } = {
+    label,
+    default_mailbox: mailbox,
+    directory_hint: hints.directory,
+    client_hint: hints.client,
+    secret_hint: hints.secret,
+    secret_expires_on: input.secretExpiresOn || null,
+    fingerprint,
+    granted_roles: verification.roles,
+    verified_at: new Date().toISOString(),
+    created_by: actorUserId,
+  };
+  // The row and its credentials in one transaction: a tenant that cannot send
+  // never exists, not even between two writes.
+  const { data: id, error } = await supabaseAdmin.rpc("microsoft_tenant_add", {
+    p_details: details,
     p_credentials: JSON.stringify(credentials),
   });
-  if (putError) {
-    // Without its credentials the row is a tenant that can never send. Take
-    // it back out rather than leave a trap in the picker.
-    const { error: undoError } = await supabaseAdmin
-      .from("microsoft_tenants")
-      .delete()
-      .eq("id", row.id);
-    if (undoError)
-      console.error(
-        "[tenants] could not remove a tenant whose credentials failed to store:",
-        undoError.message,
-      );
-    throw new Error(`the credentials could not be stored: ${putError.message}`);
-  }
+  if (error) throw new Error(tenantErrorMessage(error.message));
+  if (!id) throw new Error("the tenant could not be added");
 
-  await audit("microsoft_tenant_added", row.id, actorUserId, {
+  await audit("microsoft_tenant_added", id, actorUserId, {
     label,
     hints,
     defaultMailbox: mailbox,
   });
-  return { id: row.id, verification };
+  return { id, verification };
 }
 
 export type TenantChange = Partial<Omit<TenantInput, "defaultMailbox" | "secretExpiresOn">> & {
@@ -436,10 +432,11 @@ export type TenantChange = Partial<Omit<TenantInput, "defaultMailbox" | "secretE
  * a secret left blank keeps the stored one, exactly as a deployment secret
  * does — and replaced credentials are tried before they are stored.
  *
- * The Vault and the row are two writes. A new name is checked before either,
- * and if the row still cannot be saved once new credentials are in, the
- * previous ones are put back: a refused change leaves the tenant as it was,
- * not sending with a secret its hints do not describe.
+ * The credentials and the row are stored by one call, in one transaction. New
+ * credentials are stored against the `credentials_version` read at the start:
+ * if another edit stored credentials since, this one is refused
+ * (`microsoft_tenant_changed`) instead of overwriting them with values merged
+ * from before it.
  */
 export async function updateTenant(
   tenantId: string,
@@ -468,13 +465,8 @@ export async function updateTenant(
   );
   if (problems.length > 0) throw new Error(problems.join("; "));
 
-  const patch: Database["public"]["Tables"]["microsoft_tenants"]["Update"] = {
-    updated_at: new Date().toISOString(),
-  };
+  const patch: TenantColumns = {};
   if (change.label !== undefined) patch.label = change.label.trim();
-  if (patch.label !== undefined && patch.label.toLowerCase() !== row.label.trim().toLowerCase()) {
-    await assertNameFree(patch.label, tenantId);
-  }
   if (change.secretExpiresOn !== undefined)
     patch.secret_expires_on = change.secretExpiresOn || null;
   const mailbox =
@@ -487,20 +479,12 @@ export async function updateTenant(
 
   let verification: Verification | null = null;
   let credentials: TenantCredentials | null = null;
-  // What the Vault held before, to put back if the row cannot follow.
-  let previous: TenantCredentials | null = null;
   if (newCredentialValues) {
     // Read from the Vault, not this isolate's minute-old copy: these are the
-    // values blank fields keep and a failed save puts back.
+    // values blank fields keep. If anything is stored after the row above was
+    // read, the save below is refused, so a later change is never undone.
     forgetTenantConfig(tenantId);
     const current = await graphConfigFor(tenantId);
-    previous = current
-      ? {
-          tenantId: current.tenantId,
-          clientId: current.clientId,
-          clientSecret: current.clientSecret,
-        }
-      : null;
     const merged = {
       directoryTenantId: change.directoryTenantId?.trim() || current?.tenantId || "",
       clientId: change.clientId?.trim() || current?.clientId || "",
@@ -543,44 +527,16 @@ export async function updateTenant(
     if (check.ok) await refuseUnusableMailbox(config, mailbox, check.capabilities);
   }
 
-  // The new credentials go in first: a row whose hints describe a secret the
-  // Vault does not hold would be worse than a rename that did not happen.
-  if (credentials) {
-    const { error: putError } = await supabaseAdmin.rpc("microsoft_tenant_credentials_put", {
-      p_tenant: tenantId,
-      p_credentials: JSON.stringify(credentials),
-    });
-    if (putError) throw new Error(`the credentials could not be stored: ${putError.message}`);
-  }
-  const { error: updateError } = await supabaseAdmin
-    .from("microsoft_tenants")
-    .update(patch)
-    .eq("id", tenantId);
-  if (updateError) {
-    const reason = tenantErrorMessage(updateError.message);
-    // The row could not follow the Vault. Put the old credentials back, so
-    // "nothing was saved" stays true and the hints describe what is in use.
-    if (credentials) {
-      const restored = previous
-        ? await supabaseAdmin.rpc("microsoft_tenant_credentials_put", {
-            p_tenant: tenantId,
-            p_credentials: JSON.stringify(previous),
-          })
-        : { error: { message: "there were no previous credentials to restore" } };
-      forgetTenantConfig(tenantId);
-      if (restored.error) {
-        console.error(
-          "[tenants] could not restore credentials after a failed update:",
-          restored.error.message,
-        );
-        throw new Error(
-          `the new credentials were stored but the tenant's details could not be (${reason}), and the previous credentials could not be put back — save the tenant again`,
-        );
-      }
-    }
-    throw new Error(reason);
-  }
+  // One call, one transaction: the credentials (when there are new ones) and
+  // the row land together or not at all.
+  const { error: saveError } = await supabaseAdmin.rpc("microsoft_tenant_update", {
+    p_tenant: tenantId,
+    p_patch: patch,
+    p_credentials: credentials ? JSON.stringify(credentials) : undefined,
+    p_expected_version: credentials ? row.credentials_version : undefined,
+  });
   forgetTenantConfig(tenantId);
+  if (saveError) throw new Error(tenantErrorMessage(saveError.message));
 
   // The names of what changed, never a value: the secret is in this object.
   const fields = Object.entries(change)
@@ -593,8 +549,25 @@ export async function updateTenant(
   return { verification };
 }
 
-/** Try a tenant's stored credentials again and record the answer. */
+/**
+ * Try a tenant's stored credentials again and record the answer — against the
+ * credentials it is about. If new ones are stored while Microsoft is being
+ * asked, their save recorded their own verification, and this answer about
+ * the old ones is not written over it.
+ */
 export async function verifyTenant(tenantId: string | null): Promise<Verification> {
+  // Read before the credentials are, so that anything stored after this point
+  // turns the record below into a no-op.
+  let version: number | null = null;
+  if (tenantId) {
+    const { data, error } = await supabaseAdmin
+      .from("microsoft_tenants")
+      .select("credentials_version")
+      .eq("id", tenantId)
+      .maybeSingle();
+    if (error) throw error;
+    version = data?.credentials_version ?? null;
+  }
   forgetTenantConfig(tenantId);
   const config = await graphConfigFor(tenantId);
   const verification: Verification = config
@@ -605,7 +578,7 @@ export async function verifyTenant(tenantId: string | null): Promise<Verificatio
         roles: null,
         capabilities: capabilitiesFrom(null),
       };
-  if (tenantId) {
+  if (tenantId && version !== null) {
     const { error } = await supabaseAdmin
       .from("microsoft_tenants")
       .update({
@@ -614,7 +587,8 @@ export async function verifyTenant(tenantId: string | null): Promise<Verificatio
         granted_roles: verification.ok ? verification.roles : undefined,
         updated_at: new Date().toISOString(),
       })
-      .eq("id", tenantId);
+      .eq("id", tenantId)
+      .eq("credentials_version", version);
     if (error) throw error;
   }
   return verification;
