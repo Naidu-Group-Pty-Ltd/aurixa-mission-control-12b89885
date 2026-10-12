@@ -15786,6 +15786,10 @@ export type Database = {
         Args: { _error?: string; _ok: boolean; _submission_id: string }
         Returns: undefined
       }
+      microsoft_tenant_add: {
+        Args: { p_credentials: string; p_details: Json }
+        Returns: string
+      }
       microsoft_tenant_credentials: {
         Args: { p_tenant: string }
         Returns: string
@@ -15797,6 +15801,15 @@ export type Database = {
       microsoft_tenant_remove: {
         Args: { p_actor: string; p_tenant: string }
         Returns: undefined
+      }
+      microsoft_tenant_update: {
+        Args: {
+          p_credentials?: string
+          p_expected_version?: number
+          p_patch: Json
+          p_tenant: string
+        }
+        Returns: number
       }
       migration_queue_state: { Args: never; Returns: Json }
       prune_repo_blob_analysis: { Args: never; Returns: number }

@@ -421,12 +421,17 @@ secret does:
   A default mailbox, if given, is probed the same way.
 - **Blank keeps the stored value.** Editing a tenant with the secret left empty
   changes nothing about the secret, exactly as leaving a deployment secret alone.
-- **An edit lands whole or not at all.** New credentials and the tenant's
-  details are two writes (the Vault, then the row). A name another tenant
-  already has is refused before either. If the row still cannot be saved once
-  new credentials are in, the previous credentials are put back, so a refused
-  edit leaves the tenant as it was. If even that fails, the error says so and
-  asks for the tenant to be saved again.
+- **A save lands whole or not at all.** Adding a tenant and editing one each
+  happen in one database transaction (`microsoft_tenant_add`,
+  `microsoft_tenant_update`): the credentials and the row are stored together
+  under the tenant's row lock, so the hints always describe the secret in use
+  and a refused save — a name already taken, say — leaves nothing behind.
+- **Two admins, one tenant.** Saves of the same tenant queue on its lock. New
+  credentials are stored against the version the edit started from: if someone
+  else saved credentials in the meantime, the later save is refused ("someone
+  else saved new credentials for this tenant…") rather than overwriting theirs
+  with values merged from before. A "Verify" that new credentials overtake is
+  not recorded over their own verification.
 - **One row per app registration.** A SHA-256 of `tenant:client` is unique among
   live tenants, and the deployment's own registration cannot be added twice.
 - **Removal destroys the Vault secret** and keeps the row (`removed_at`) so the

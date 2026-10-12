@@ -134,5 +134,9 @@ describe("explaining refusals", () => {
   it("says what the database refused in words", () => {
     expect(tenantErrorMessage('violates "microsoft_tenants_label_live"')).toMatch(/name/);
     expect(tenantErrorMessage("microsoft_tenant_in_use")).toMatch(/running campaign/);
+    expect(tenantErrorMessage("microsoft_tenant_changed")).toMatch(
+      /someone else saved new credentials .* open it again/,
+    );
+    expect(tenantErrorMessage("microsoft_tenant_not_found")).toMatch(/does not exist/);
   });
 });

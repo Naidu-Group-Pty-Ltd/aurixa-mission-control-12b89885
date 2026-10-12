@@ -269,6 +269,9 @@ export function tenantErrorMessage(raw: string): string {
   }
   if (raw.includes("microsoft_tenant_not_found"))
     return "that tenant does not exist or was removed";
+  if (raw.includes("microsoft_tenant_changed")) {
+    return "someone else saved new credentials for this tenant while you were editing it — open it again and re-enter your change";
+  }
   if (raw.includes("microsoft_tenants_fingerprint_live")) {
     return "this application registration is already added";
   }
