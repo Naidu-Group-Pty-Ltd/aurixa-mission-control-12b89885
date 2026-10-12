@@ -7320,6 +7320,56 @@ export type Database = {
         }
         Relationships: []
       }
+      email_campaign_attachments: {
+        Row: {
+          campaign_id: string
+          content_id: string
+          content_type: string
+          created_at: string
+          created_by: string | null
+          file_name: string
+          id: string
+          position: number
+          sha256: string
+          size_bytes: number
+          storage_path: string
+        }
+        Insert: {
+          campaign_id: string
+          content_id: string
+          content_type?: string
+          created_at?: string
+          created_by?: string | null
+          file_name: string
+          id?: string
+          position?: number
+          sha256: string
+          size_bytes: number
+          storage_path: string
+        }
+        Update: {
+          campaign_id?: string
+          content_id?: string
+          content_type?: string
+          created_at?: string
+          created_by?: string | null
+          file_name?: string
+          id?: string
+          position?: number
+          sha256?: string
+          size_bytes?: number
+          storage_path?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "email_campaign_attachments_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "email_campaigns"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       email_campaign_imports: {
         Row: {
           campaign_id: string
@@ -7379,11 +7429,15 @@ export type Database = {
       }
       email_campaign_messages: {
         Row: {
+          attachment_bytes: number
+          attachment_count: number
+          attachments: Json
           bcc_count: number
           body_preview: string | null
           campaign_id: string
           duration_ms: number | null
           error: string | null
+          graph_draft_id: string | null
           graph_request_id: string | null
           graph_status: number | null
           id: string
@@ -7396,11 +7450,15 @@ export type Database = {
           to_address: string | null
         }
         Insert: {
+          attachment_bytes?: number
+          attachment_count?: number
+          attachments?: Json
           bcc_count?: number
           body_preview?: string | null
           campaign_id: string
           duration_ms?: number | null
           error?: string | null
+          graph_draft_id?: string | null
           graph_request_id?: string | null
           graph_status?: number | null
           id?: string
@@ -7413,11 +7471,15 @@ export type Database = {
           to_address?: string | null
         }
         Update: {
+          attachment_bytes?: number
+          attachment_count?: number
+          attachments?: Json
           bcc_count?: number
           body_preview?: string | null
           campaign_id?: string
           duration_ms?: number | null
           error?: string | null
+          graph_draft_id?: string | null
           graph_request_id?: string | null
           graph_status?: number | null
           id?: string
@@ -14997,6 +15059,14 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      email_campaign_sending_mailboxes: {
+        Row: {
+          last_used_at: string | null
+          mailbox: string | null
+          messages: number | null
+        }
+        Relationships: []
       }
     }
     Functions: {
