@@ -23,7 +23,7 @@ Tests: `headRedelivery.test.ts` (47), `passOrder.test.ts`, `passProgress.test.ts
 
 ## Still owed, in order
 
-1. **Land the Mission Control PR for this branch.**
+1. **Land the Mission Control PR for this branch** (Naidu-Group-Pty-Ltd/aurixa-mission-control-12b89885#334).
    - Drive CI to green, merge, then publish with Lovable `deploy_project` on project `0fb4d803-5071-4093-be25-5afbcf116476`.
 2. **Verify the redelivery after deploy.**
    - Within a tick or two, a `cascade_events` row with `trigger = 'scheduled'` and `scope_filter->>'redelivers_head_event'` naming the head event should appear for prime `9b5e472`, with queued `cascade_results` for every clone.
@@ -37,8 +37,9 @@ Tests: `headRedelivery.test.ts` (47), `passOrder.test.ts`, `passProgress.test.ts
      ```
    - The audit trail is `audit_log.action = 'cascade.head_redelivered'`.
    - If nothing appears, read the drain logs for `[cascade-drain] head redelivery`; `decideHeadRedelivery` returns its refusal reason.
-3. **Land CD #348** (`Naidu-Group-Pty-Ltd/npc-client-dashboard`, branch `aurixa/cascade-50fabdf-mv2dj9lb`, head `b7537a5c2b`).
-   - Failing: agent specs. Reconcile `src/App.tsx` and the client-facing files at one prime revision, and carry the 12 held specs with their subjects.
+3. **Land CD #348** (`Naidu-Group-Pty-Ltd/npc-client-dashboard`, branch `aurixa/cascade-50fabdf-mv2dj9lb`).
+   - At 23:12 UTC on 12 Oct the engine re-proposed it as head `c8e261fb05`, cascading 691 files from prime `0a792ac`. On that head every check had passed except `verify`, which was still running at handoff. If `verify` passes, merge it. If it fails, read its job log first.
+   - The earlier head (`b7537a5c2b`) failed agent specs. Reconcile `src/App.tsx` and the client-facing files at one prime revision, and carry the 12 held specs with their subjects.
    - A body draft existed in the previous session's scratchpad and is not preserved; rewrite it from the PR diff.
    - Rule: a spec and its subject travel together. Never fork a shared module on a clone; fix at prime.
 4. **Land CRM #114** (`Naidu-Group-Pty-Ltd/npc-crm-independent-6505dc`, branch `aurixa/cascade-06e4630-mv59b309`, head `92715d2c8e`).
