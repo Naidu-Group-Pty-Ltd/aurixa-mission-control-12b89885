@@ -4,10 +4,14 @@ import {
   PROGRESS_FLUSH_EVERY,
   describePreparePause,
   describeProbePause,
+  describeVariantMergePause,
+  ledgerGrew,
   readProgress,
   resumableBlobs,
   resumableDeletionEvidence,
   resumableHeldEvidence,
+  resumableVariantEvidence,
+  variantRetryPaths,
   type CascadeProgress,
 } from "./passProgress.pure";
 
@@ -37,6 +41,28 @@ const record: CascadeProgress = {
     "src/App.tsx": {
       clone: sha(61),
       evidence: { kind: "prime_versions", versions: [sha(62), sha(63)], versionsExhaustive: false },
+    },
+  },
+  variant_evidence: {
+    "supabase/functions/x/index.ts": {
+      clone: sha(81),
+      prime: sha(82),
+      verdict: { act: "write", base: sha(83), fromPrime: 3, fromClone: 2, blob: sha(84) },
+    },
+    "src/lib/crm.ts": {
+      clone: sha(85),
+      prime: sha(86),
+      verdict: { act: "current", base: sha(87) },
+    },
+    "src/App.tsx": {
+      clone: sha(61),
+      prime: sha(88),
+      verdict: { act: "hold", why: "the line edited both sides" },
+    },
+    "src/flaky.ts": {
+      clone: sha(89),
+      prime: sha(90),
+      verdict: { act: "hold", why: "HTTP 502 reading the base", transient: true },
     },
   },
   total: 353,
@@ -77,11 +103,12 @@ describe("readProgress", () => {
 
   it("reads an OLD record with no evidence at all", () => {
     /* Every ledger written before the evidence fields existed. */
-    const { deletion_evidence: _e, held_evidence: _h, ...legacy } = record;
+    const { deletion_evidence: _e, held_evidence: _h, variant_evidence: _v, ...legacy } = record;
     expect(readProgress(legacy)).toEqual({
       ...legacy,
       deletion_evidence: {},
       held_evidence: {},
+      variant_evidence: {},
     });
   });
 
@@ -249,5 +276,186 @@ describe("the sentence", () => {
     expect(describeProbePause({ settled: 180, total: 442 })).toBe(
       "Paused at the invocation budget — deletion evidence settled for 180 of 442 candidate(s); the rest resume next tick",
     );
+  });
+});
+
+describe("variant merge verdicts", () => {
+  /* Measured 11–12 Oct 2026 on the CRM line: four consecutive events spent
+     their whole window re-merging the same ~30 held variants (≈130 requests
+     each pass), recorded nothing, and were retired after three attempts. A
+     verdict is now remembered, keyed to the two blobs it was computed from. */
+  const VARIANT = "supabase/functions/x/index.ts";
+  const trees = () => ({
+    clone: new Map([
+      [VARIANT, sha(81)],
+      ["src/lib/crm.ts", sha(85)],
+      ["src/App.tsx", sha(61)],
+      ["src/flaky.ts", sha(89)],
+    ]),
+    prime: new Map([
+      [VARIANT, sha(82)],
+      ["src/lib/crm.ts", sha(86)],
+      ["src/App.tsx", sha(88)],
+      ["src/flaky.ts", sha(90)],
+    ]),
+  });
+
+  it("reuses a settled verdict only while BOTH blobs it read are unchanged", () => {
+    const { clone, prime } = trees();
+    expect([...resumableVariantEvidence(record, clone, prime).keys()].sort()).toEqual(
+      ["src/App.tsx", "src/lib/crm.ts", VARIANT].sort(),
+    );
+    // The clone moved the file — the base is read off the clone's history, so
+    // a new question.
+    const cloneMoved = new Map(clone).set(VARIANT, sha(99));
+    expect(resumableVariantEvidence(record, cloneMoved, prime).has(VARIANT)).toBe(false);
+    // Prime moved it — theirs changed, so a new question.
+    const primeMoved = new Map(prime).set(VARIANT, sha(99));
+    expect(resumableVariantEvidence(record, clone, primeMoved).has(VARIANT)).toBe(false);
+  });
+
+  it("never reuses a transient hold as an answer — only as 'already asked'", () => {
+    const { clone, prime } = trees();
+    expect(resumableVariantEvidence(record, clone, prime).has("src/flaky.ts")).toBe(false);
+    expect([...variantRetryPaths(record, clone, prime).keys()]).toEqual(["src/flaky.ts"]);
+    // At different blobs it is never-asked again, not asked-last.
+    const moved = new Map(clone).set("src/flaky.ts", sha(99));
+    expect(variantRetryPaths(record, moved, prime).size).toBe(0);
+  });
+
+  it("reuses nothing without both listings to check against", () => {
+    const { clone, prime } = trees();
+    expect(resumableVariantEvidence(record, null, prime).size).toBe(0);
+    expect(resumableVariantEvidence(record, clone, null).size).toBe(0);
+    expect(resumableVariantEvidence(null, clone, prime).size).toBe(0);
+    expect(variantRetryPaths(record, null, prime).size).toBe(0);
+  });
+
+  it("drops a malformed verdict alone — one re-merge, never bytes nobody merged", () => {
+    const dirty = {
+      ...record,
+      variant_evidence: {
+        ...record.variant_evidence,
+        "src/no-blob.ts": {
+          clone: sha(1),
+          prime: sha(2),
+          verdict: { act: "write", base: sha(3), fromPrime: 1, fromClone: 1 },
+        },
+        "src/bad-count.ts": {
+          clone: sha(1),
+          prime: sha(2),
+          verdict: { act: "write", base: sha(3), fromPrime: -1, fromClone: 1, blob: sha(4) },
+        },
+        "src/bad-act.ts": { clone: sha(1), prime: sha(2), verdict: { act: "merge" } },
+        "src/bad-prime.ts": {
+          clone: sha(1),
+          prime: "x",
+          verdict: { act: "current", base: sha(3) },
+        },
+        "src/no-why.ts": { clone: sha(1), prime: sha(2), verdict: { act: "hold" } },
+      },
+    };
+    expect(readProgress(dirty)).toEqual(record);
+  });
+
+  it("says how far the merge phase got", () => {
+    expect(describeVariantMergePause({ settled: 12, total: 30 })).toBe(
+      "Paused at the invocation budget — line variant merges asked for 12 of 30 held path(s); the rest resume next tick",
+    );
+  });
+});
+
+describe("ledgerGrew", () => {
+  /* A paused pass is judged by whether it moved its ledger. The old measure
+     was a COUNT of prepared + deletion evidence, which stood still while a
+     pass recorded dozens of variant verdicts and held probes — so the pass
+     spent an attempt and the event was retired with its work thrown away. */
+  const parsed = () => readProgress(record) as CascadeProgress;
+
+  it("is false for no ledger at all, and for a ledger that says exactly what it said", () => {
+    expect(ledgerGrew(parsed(), null)).toBe(false);
+    expect(ledgerGrew(null, null)).toBe(false);
+    expect(ledgerGrew(parsed(), parsed())).toBe(false);
+  });
+
+  it("is true for a first ledger with anything in it", () => {
+    expect(ledgerGrew(null, parsed())).toBe(true);
+  });
+
+  it("sees a new answer in EVERY section, not only the two the count read", () => {
+    const base = parsed();
+    const grow = (patch: Partial<CascadeProgress>) => ledgerGrew(base, { ...base, ...patch });
+    expect(
+      grow({ prepared: { ...base.prepared, "src/c.ts": { blob: sha(3), prime: sha(13) } } }),
+    ).toBe(true);
+    expect(
+      grow({
+        deletion_evidence: {
+          ...base.deletion_evidence,
+          "src/new.ts": { clone: sha(5), evidence: { kind: "never_primes" } },
+        },
+      }),
+    ).toBe(true);
+    expect(
+      grow({
+        held_evidence: {
+          ...base.held_evidence,
+          "src/held.ts": {
+            clone: sha(6),
+            evidence: { kind: "prime_versions", versions: [sha(7)], versionsExhaustive: true },
+          },
+        },
+      }),
+    ).toBe(true);
+    expect(
+      grow({
+        variant_evidence: {
+          ...base.variant_evidence,
+          "src/new-variant.ts": {
+            clone: sha(8),
+            prime: sha(9),
+            verdict: { act: "current", base: sha(10) },
+          },
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it("sees a changed answer at the same path", () => {
+    const base = parsed();
+    const changed: CascadeProgress = {
+      ...base,
+      variant_evidence: {
+        ...base.variant_evidence,
+        "src/flaky.ts": {
+          clone: sha(89),
+          prime: sha(90),
+          verdict: { act: "current", base: sha(91) },
+        },
+      },
+    };
+    expect(ledgerGrew(base, changed)).toBe(true);
+  });
+
+  it("does NOT refund a pass that only re-asked a transient path — its prose is not compared", () => {
+    const base = parsed();
+    const reworded: CascadeProgress = {
+      ...base,
+      variant_evidence: {
+        ...base.variant_evidence,
+        "src/flaky.ts": {
+          clone: sha(89),
+          prime: sha(90),
+          verdict: { act: "hold", why: "HTTP 503 reading the base", transient: true },
+        },
+      },
+    };
+    expect(ledgerGrew(base, reworded)).toBe(false);
+  });
+
+  it("does not count a size change with no new identity — a re-prepared spec re-enters unchanged", () => {
+    const base = parsed();
+    const { "src/b.ts": _b, ...fewer } = base.prepared;
+    expect(ledgerGrew(base, { ...base, prepared: fewer })).toBe(false);
   });
 });

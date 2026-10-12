@@ -121,12 +121,19 @@ import {
 import { judgingWorkflowHold } from "./cascade/judgingWorkflow.pure";
 import {
   describeVariantMerges,
+  MAX_VARIANT_MERGE_CANDIDATES,
   MAX_VARIANT_MERGES,
   orderVariantMergeCandidates,
   variantMergeSuffixFor,
   type VariantMergeOutcome,
+  type VariantMergeSettled,
+  type VariantMergeVerdict,
 } from "./cascade/variantMerge.pure";
-import { mergeHeldVariant } from "./cascade/variantMergeRead.server";
+import {
+  mergeHeldVariant,
+  readMergedVariant,
+  storeMergedVariant,
+} from "./cascade/variantMergeRead.server";
 import { declaredFunctionSourcesOwed } from "./cascade/declaredFunctionSources.pure";
 import {
   carriesHumanWork,
@@ -222,19 +229,25 @@ import {
 } from "./cascade/syncExclusions.pure";
 import { isBlockedByApproval } from "./cascade-approvals.server";
 import { validateClonePinsServer } from "./library-validation.server";
+import { leastRecentlyTouchedFirst } from "./cascade/passOrder.pure";
 import { validateModuleGlobs } from "@/lib/module-globs";
 import { mapWithConcurrency, mapWithConcurrencyUntil } from "@/lib/concurrency";
 import {
   PROGRESS_FLUSH_EVERY,
   describePreparePause,
   describeProbePause,
+  describeVariantMergePause,
+  ledgerGrew,
   readProgress,
   resumableBlobs,
   resumableDeletionEvidence,
   resumableHeldEvidence,
+  resumableVariantEvidence,
+  variantRetryPaths,
   type CascadeProgress,
   type DeletionEvidenceEntry,
   type HeldEvidenceEntry,
+  type VariantEvidenceEntry,
 } from "./cascade/passProgress.pure";
 
 type CascadeResultUpdate = Database["public"]["Tables"]["cascade_results"]["Update"];
@@ -830,17 +843,24 @@ export async function executeCascade(
     until: string;
   }> = [];
 
-  // Parents first, so a pass can deliver a parent and then its child in the
-  // same run rather than holding the child for the next tick. With lineage off
-  // the order is the query's, unchanged.
+  // The clone touched least recently first, so a clone that paused last tick
+  // goes to the back and no clone waits behind another's long pass
+  // (`passOrder.pure.ts` carries the measurement). Then parents first, so a
+  // pass can deliver a parent and then its child in the same run rather than
+  // holding the child for the next tick — stable within a depth, so the round
+  // robin holds among clones at the same depth.
+  const roundRobin = leastRecentlyTouchedFirst(
+    queuedRows,
+    (r) => (r as { updated_at?: string | null }).updated_at ?? null,
+  );
   const orderedRows = followsLineage
     ? orderByLineageDepth(
-        queuedRows.map((r) => {
+        roundRobin.map((r) => {
           const c = (r as { clones: { id: string; parent_clone_id: string | null } | null }).clones;
           return { id: c?.id ?? "", parent_clone_id: c?.parent_clone_id ?? null, row: r };
         }),
       ).map((entry) => entry.row)
-    : queuedRows;
+    : roundRobin;
 
   for (const r of orderedRows) {
     if (attempted > 0 && opts?.budget?.isPastDeadline(slowestMs)) {
@@ -1006,15 +1026,14 @@ export async function executeCascade(
       // the App's hourly budget went to work already done.
       const ownRecord = (r as { progress?: unknown }).progress ?? null;
       const priorRecord = ownRecord ?? (await borrowLatestProgress(supabase, clone.id, r.id));
-      // Progress is the LEDGER growing, not the blob count alone: a pass that
-      // spent its whole tick settling deletion evidence prepared no blobs and
-      // still moved the sweep forward. Counting only `prepared` made exactly
-      // that pass read as "no progress", spend its attempt, and after three
-      // ticks die inside a healthy convergence.
-      const ledgerSize = (p: CascadeProgress | null) =>
-        Object.keys(p?.prepared ?? {}).length + Object.keys(p?.deletion_evidence ?? {}).length;
-      const priorPrepared = ledgerSize(readProgress(priorRecord));
-      let preparedNow = priorPrepared;
+      // Progress is the LEDGER moving, by identity (`ledgerGrew`): a pass that
+      // spent its whole tick settling deletion evidence, probing held paths or
+      // merging line variants prepared no blobs and still moved the sweep
+      // forward. Counting only `prepared` made exactly those passes read as
+      // "no progress", spend their attempt, and after three ticks die inside
+      // a healthy convergence — four CRM events in a row on 11–12 Oct 2026.
+      const priorLedger = readProgress(priorRecord);
+      let lastLedger: CascadeProgress | null = null;
       const patch = await processClone({
         octokit,
         // The ref this clone READS. `primeRef`/`sourceSha` unless its recorded
@@ -1032,7 +1051,7 @@ export async function executeCascade(
         resume: {
           progress: priorRecord,
           onProgress: async (progress) => {
-            preparedNow = ledgerSize(progress);
+            lastLedger = progress;
             const { error: progressError } = await supabase
               .from("cascade_results")
               .update({ progress: progress as unknown as Json })
@@ -1059,9 +1078,16 @@ export async function executeCascade(
             `cascade ${event.id}: could not pause ${clone.name}: ${pauseError.message}`,
           );
         }
-        if (preparedNow > priorPrepared) progressed = true;
+        if (ledgerGrew(priorLedger, lastLedger)) progressed = true;
         stoppedEarly = true;
-        break;
+        // On to the next clone if the window allows: a clone pauses on its
+        // own bound (the variant merges ask at most `MAX_VARIANT_MERGES` a
+        // pass) as well as on the clock, and one clone's bound is no reason
+        // for the others to wait a tick. The check at the top of the loop
+        // decides, against the slowest clone so far — this one.
+        attempted++;
+        slowestMs = Math.max(slowestMs, Date.now() - cloneStartedAt);
+        continue;
       }
 
       // A finished pass KEEPS its list. The blobs it prepared exist in the
@@ -2164,14 +2190,26 @@ export async function processClone(args: {
   const knownHeldEvidence = resume
     ? resumableHeldEvidence(priorProgress, cloneShaByPath ?? null)
     : new Map<string, SettledHeldEvidence>();
+  // A line variant's merge verdict, at the pair of blobs it read. A settled
+  // one is taken as it stands; a transient hold is carried as "asked" so the
+  // path is retried after every path never asked at all, and never pauses a
+  // pass by itself (`resumableVariantEvidence`, `variantRetryPaths`).
+  const knownVariantEvidence = resume
+    ? resumableVariantEvidence(priorProgress, cloneShaByPath ?? null, primeShaByPath)
+    : new Map<string, VariantEvidenceEntry>();
+  const variantRetry = resume
+    ? variantRetryPaths(priorProgress, cloneShaByPath ?? null, primeShaByPath)
+    : new Map<string, VariantEvidenceEntry>();
   const evidenceLedger: Record<string, DeletionEvidenceEntry> = {};
   const heldLedger: Record<string, HeldEvidenceEntry> = {};
+  const variantLedger: Record<string, VariantEvidenceEntry> = {};
   const progress: CascadeProgress = {
     version: 1,
     source_sha: sourceSha,
     prepared: {},
     deletion_evidence: evidenceLedger,
     held_evidence: heldLedger,
+    variant_evidence: variantLedger,
     // The write list is not final until the hold releases below have run;
     // set once `primeFiles` exists.
     total: 0,
@@ -2187,6 +2225,28 @@ export async function processClone(args: {
   for (const [path, evidence] of knownHeldEvidence) {
     const clone = cloneShaByPath?.get(path);
     if (clone) heldLedger[path] = { clone, evidence };
+  }
+  for (const [path, entry] of [...knownVariantEvidence, ...variantRetry]) {
+    variantLedger[path] = entry;
+  }
+  /**
+   * Whether an earlier pass PREPARED a merged variant's blob — uploaded it and
+   * passed it through every content hold. `prepareOne` records a merge as
+   * `{ blob, prime: blob }` (the merge stands in for prime's copy), which no
+   * prime blob matches, so `resumableBlobs` never hands it out as prime's
+   * copy; it is reused only where the variant's own verdict still holds and
+   * names this blob. Never a spec, for the reason `prepareOne` gives.
+   */
+  const variantBlobPrepared = (path: string, blob: string): boolean => {
+    if (isSpecPath(path)) return false;
+    const was = priorProgress?.prepared[path];
+    return was !== undefined && was.blob === blob && was.prime === blob;
+  };
+  for (const [path, entry] of knownVariantEvidence) {
+    const v = entry.verdict;
+    if (v.act === "write" && variantBlobPrepared(path, v.blob)) {
+      progress.prepared[path] = { blob: v.blob, prime: v.blob };
+    }
   }
 
   // ── An Edge Function this clone carries is kept current ──────────────────
@@ -2530,13 +2590,32 @@ export async function processClone(args: {
   // every content hold (the membrane, the backend identity, the judging
   // workflow) like any other write. Not on a conversion: a line change is a
   // replacement by design, never a merge.
+  //
+  // A verdict is decided ONCE per pair of blobs and kept on the row's ledger
+  // like a probe's answer (`passProgress.pure.ts`): a later pass takes a
+  // settled one as it stands, and a write's merged text is stored as a blob
+  // in the clone so the next pass reuses it rather than merging again. The
+  // CRM line once re-ran the same thirty-two merges on every tick, spent the
+  // window on them, prepared four files of 368, and was retired after three
+  // attempts with the verdicts thrown away — four events in a row, and every
+  // clone queued behind it with them.
   const variantMerges = new Map<
     string,
-    { text: string; base: string; fromPrime: number; fromClone: number }
+    {
+      /** `null` only where the stored blob is reused and the text is never needed. */
+      text: string | null;
+      blob: string;
+      base: string;
+      fromPrime: number;
+      fromClone: number;
+    }
   >();
   const variantOutcomes: VariantMergeOutcome[] = [];
   const variantCurrent = new Set<string>();
   let variantMergesAsked = 0;
+  let variantVerdictsRecorded = 0;
+  /** Named prime revision → full SHA, shared by this pass's merges. */
+  const variantRevisions = new Map<string, string>();
   const PUMPED_PATHS = new Set([
     CONFIG_TOML_PATH,
     SECURITY_REGISTRY_PATH,
@@ -2546,14 +2625,81 @@ export async function processClone(args: {
     DEPLOY_WORKFLOW_PATH,
     EDGE_TYPECHECK_BASELINE_PATH,
   ]);
-  const tryVariantMerge = async (path: string): Promise<"write" | "current" | "hold"> => {
-    // A file a reconcile pump composes is the pump's, never a merge's: the
-    // pump rewrites it from both sides below, and two writers of one path is
-    // how a summary comes to name a merge the tree does not carry.
-    if (PUMPED_PATHS.has(path)) return "hold";
-    const asked = variantOutcomes.find((o) => o.path === path);
-    if (asked) return asked.verdict.act;
-    if (conversion || variantMergesAsked >= MAX_VARIANT_MERGES) return "hold";
+  /** A verdict can be kept only where both blobs it read are known. */
+  const variantRecordable = (path: string): boolean =>
+    resume !== undefined &&
+    cloneShaByPath?.get(path) !== undefined &&
+    primeShaByPath?.get(path) !== undefined;
+  const settleVariant = (
+    path: string,
+    verdict: VariantMergeSettled,
+    write: { text: string | null; blob: string } | null,
+  ): "write" | "current" | "hold" => {
+    variantOutcomes.push({ path, verdict });
+    if (verdict.act === "write" && write) {
+      variantMerges.set(path, {
+        text: write.text,
+        blob: write.blob,
+        base: verdict.base,
+        fromPrime: verdict.fromPrime,
+        fromClone: verdict.fromClone,
+      });
+      return "write";
+    }
+    if (verdict.act === "current") {
+      variantCurrent.add(path);
+      return "current";
+    }
+    return "hold";
+  };
+  const recordVariant = async (path: string, verdict: VariantMergeVerdict): Promise<void> => {
+    const clone = cloneShaByPath?.get(path);
+    const prime = primeShaByPath?.get(path);
+    if (!variantRecordable(path) || !clone || !prime) return;
+    let kept: VariantEvidenceEntry["verdict"];
+    if (verdict.act === "write") {
+      const blob = await storeMergedVariant(octokit, cloneRef, verdict.text);
+      kept = blob
+        ? {
+            act: "write",
+            base: verdict.base,
+            fromPrime: verdict.fromPrime,
+            fromClone: verdict.fromClone,
+            blob,
+          }
+        : // Merged and used by THIS pass, but not kept: asked again later.
+          { act: "hold", why: "the merged text could not be stored for a later pass", transient: true };
+    } else if (verdict.act === "current") {
+      kept = { act: "current", base: verdict.base };
+    } else {
+      kept = verdict.transient
+        ? { act: "hold", why: verdict.why, transient: true }
+        : { act: "hold", why: verdict.why };
+    }
+    variantLedger[path] = { clone, prime, verdict: kept };
+    variantVerdictsRecorded += 1;
+  };
+  /**
+   * A verdict settled on an earlier pass, taken as it stands. A write whose
+   * blob is already prepared needs nothing read; any other write reads its
+   * stored text back, and a read that fails is `null` — merged again.
+   */
+  const reuseVariant = async (path: string): Promise<"write" | "current" | "hold" | null> => {
+    const entry = knownVariantEvidence.get(path);
+    if (!entry) return null;
+    const v = entry.verdict;
+    if (v.act === "write") {
+      const settled = { act: "write" as const, base: v.base, fromPrime: v.fromPrime, fromClone: v.fromClone };
+      if (variantBlobPrepared(path, v.blob)) {
+        return settleVariant(path, settled, { text: null, blob: v.blob });
+      }
+      const text = await readMergedVariant(octokit, cloneRef, v.blob);
+      if (text === null) return null;
+      return settleVariant(path, settled, { text, blob: v.blob });
+    }
+    return settleVariant(path, v, null);
+  };
+  const askVariant = async (path: string): Promise<"write" | "current" | "hold"> => {
     variantMergesAsked += 1;
     const verdict = await mergeHeldVariant({
       octokit,
@@ -2561,37 +2707,93 @@ export async function processClone(args: {
       primeRef,
       path,
       maxBytes: CASCADE_MAX_FILE_BYTES,
+      revisions: variantRevisions,
     });
-    variantOutcomes.push({ path, verdict });
-    if (verdict.act === "write") {
-      variantMerges.set(path, {
-        text: verdict.text,
-        base: verdict.base,
-        fromPrime: verdict.fromPrime,
-        fromClone: verdict.fromClone,
-      });
-    } else if (verdict.act === "current") {
-      variantCurrent.add(path);
-    }
-    return verdict.act;
+    await recordVariant(path, verdict);
+    return settleVariant(
+      path,
+      verdict,
+      verdict.act === "write" ? { text: verdict.text, blob: gitBlobSha(verdict.text) } : null,
+    );
+  };
+  const tryVariantMerge = async (path: string): Promise<"write" | "current" | "hold"> => {
+    // A file a reconcile pump composes is the pump's, never a merge's: the
+    // pump rewrites it from both sides below, and two writers of one path is
+    // how a summary comes to name a merge the tree does not carry.
+    if (PUMPED_PATHS.has(path)) return "hold";
+    const asked = variantOutcomes.find((o) => o.path === path);
+    if (asked) return asked.verdict.act;
+    if (conversion) return "hold";
+    const reused = await reuseVariant(path);
+    if (reused !== null) return reused;
+    if (variantMergesAsked >= MAX_VARIANT_MERGES) return "hold";
+    return askVariant(path);
   };
   {
     // Most consequential first, so a budget that runs out never runs out on a
-    // workflow while the agent waits (#104, 10 Oct 2026).
-    const merging = orderVariantMergeCandidates(approvableHeld(partition.held)).slice(
-      0,
-      MAX_VARIANT_MERGES,
-    );
+    // workflow while the agent waits (#104, 10 Oct 2026). Bounded, so the
+    // number of passes a held list can take is bounded too.
+    const candidates = conversion
+      ? []
+      : orderVariantMergeCandidates(
+          approvableHeld(partition.held).filter((h) => !PUMPED_PATHS.has(h.path)),
+        ).slice(0, MAX_VARIANT_MERGE_CANDIDATES);
     const merged = new Set<string>();
-    for (const held of merging) {
-      // The pass's own deadline, asked directly: `shouldStop` is defined with
-      // the prepare loop below and counts files that loop has read.
-      if (resume?.budget?.isPastDeadline(0)) break;
-      if ((await tryVariantMerge(held.path)) === "write") merged.add(held.path);
+    const outcomeOf = new Map<string, "write" | "current" | "hold">();
+    // 1. Settled on an earlier pass: taken whatever the clock says, because
+    //    a settled verdict costs at most one read and refusing it would make
+    //    a pass that had already decided a path decide it again.
+    const settledPaths = candidates.filter((h) => knownVariantEvidence.has(h.path)).map((h) => h.path);
+    const reread: string[] = [];
+    await mapWithConcurrency(settledPaths, 8, async (path) => {
+      const act = await reuseVariant(path);
+      if (act === null) reread.push(path);
+      else outcomeOf.set(path, act);
+    });
+    // 2. Never asked, then settled ones whose stored text could not be read
+    //    back, then transient holds — each asked fresh, at least one per
+    //    pass, at most `MAX_VARIANT_MERGES`, and never past the deadline once
+    //    one has been asked.
+    const neverAsked = candidates
+      .filter((h) => !knownVariantEvidence.has(h.path) && !variantRetry.has(h.path))
+      .map((h) => h.path);
+    const retries = candidates.filter((h) => variantRetry.has(h.path)).map((h) => h.path);
+    // A path whose answer cannot be kept is asked last: it is asked again on
+    // every pass, so it may not take the turn of one that would be decided.
+    const keepable = neverAsked.filter(variantRecordable);
+    const unkeepable = neverAsked.filter((p) => !variantRecordable(p));
+    let freshAsked = 0;
+    for (const path of [...keepable, ...reread, ...retries, ...unkeepable]) {
+      if (variantMergesAsked >= MAX_VARIANT_MERGES) break;
+      if (freshAsked > 0 && resume?.budget?.isPastDeadline(0)) break;
+      freshAsked += 1;
+      outcomeOf.set(path, await askVariant(path));
     }
+    for (const [path, act] of outcomeOf) if (act === "write") merged.add(path);
     if (merged.size > 0) {
       partition.write = [...partition.write, ...merged];
       partition.held = partition.held.filter((h) => !merged.has(h.path));
+    }
+    const unasked = keepable.filter((p) => !outcomeOf.has(p));
+    if (resume && (variantVerdictsRecorded > 0 || unasked.length > 0)) {
+      await resume.onProgress(progress);
+    }
+    // A path never asked that a later pass could ask and KEEP the answer to
+    // is not left held for a person: the pass stops here and resumes next
+    // tick, where everything decided so far is taken as it stands. Each
+    // pause records at least one verdict, so the ledger grows and the pass is
+    // refunded — and the candidates are bounded, so this ends. A path whose
+    // answer could not be kept (no blob listing) is never waited for.
+    if (resume && unasked.length > 0) {
+      return {
+        status: "queued",
+        started_at: null,
+        diff_summary: describeVariantMergePause({
+          settled: candidates.length - unasked.length,
+          total: candidates.length,
+        }),
+        progress: progress as unknown as Json,
+      };
     }
   }
 
@@ -2980,9 +3182,17 @@ export async function processClone(args: {
     // never re-asked. Specs are a small share of any cascade; the saving
     // this gives up is a file read, and what it buys is a verdict about the
     // delivery that is actually being made.
-    // Nor a merged variant: the ledger's blob is prime's copy, and what this
-    // path carries is the merge of prime's copy into the clone's.
-    const reusable = isSpecPath(path) || variantMerges.has(path) ? undefined : known.get(path);
+    // A merged variant is reused only where the prepared blob IS its merge
+    // (`variantBlobPrepared`): the ledger's blob for a path is otherwise
+    // prime's copy, and what this path carries is the merge into the clone's.
+    const merge = variantMerges.get(path);
+    const reusable = isSpecPath(path)
+      ? undefined
+      : merge
+        ? merge.text === null || variantBlobPrepared(path, merge.blob)
+          ? merge.blob
+          : undefined
+        : known.get(path);
     if (reusable !== undefined) {
       return {
         kind: "blob",
@@ -3005,7 +3215,12 @@ export async function processClone(args: {
     // cache holds only files far below `CASCADE_MAX_FILE_BYTES`, so nothing it
     // answers could have been refused as oversize.
     const batched = exactPrimeText.get(path);
-    if (batched !== undefined) {
+    if (merge && merge.text !== null) {
+      // A held variant merged above travels as the merge, never as prime's
+      // copy, and meets every content hold below exactly as prime's text
+      // would. Prime's copy is not read: the merge already holds it.
+      primeFile = repoFileFromExactText(merge.blob, merge.text);
+    } else if (batched !== undefined) {
       primeFile = repoFileFromExactText(batched.sha, batched.text);
     } else {
       try {
@@ -3030,12 +3245,6 @@ export async function processClone(args: {
     }
     if (!primeFile) return null;
 
-    // A held variant merged above travels as the merge, never as prime's copy,
-    // and meets every content hold below exactly as prime's text would.
-    const variantMerge = variantMerges.get(path);
-    if (variantMerge) {
-      primeFile = repoFileFromExactText(gitBlobSha(variantMerge.text), variantMerge.text);
-    }
 
     // A mirror already knows this path differs -- the blob SHAs said so -- and
     // re-reading the clone's copy to confirm it would double the request count

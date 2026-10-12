@@ -31,6 +31,16 @@ import {
 import { CREATION_ARM_GRACE_MS } from "@/server/cascade/armGrace.pure";
 import { planGateReassessment, type RecordedGate } from "@/server/cascade/gateReassessment.pure";
 import { beaconSummary, decideDriftBeacon } from "@/server/cascade/driftBeacon.pure";
+import {
+  HEAD_REDELIVERY_AUDIT_ACTION,
+  HEAD_REDELIVERY_MAX,
+  decideHeadRedelivery,
+  findSupersedingCarrier,
+  isSupersededSummary,
+  redeliveryEvent,
+  type PriorRedeliveries,
+  type RedeliveryEventReading,
+} from "@/server/cascade/headRedelivery.pure";
 import { decideExhaustedEvent, retirementSummary } from "@/server/cascade/exhaustedEvents.pure";
 import {
   createCascadeForAllClones,
@@ -607,13 +617,27 @@ async function raiseDriftBeacon(): Promise<string | null> {
       }
     }
     let headEventExists: boolean | null = null;
+    let headEventId: string | null = null;
     if (headSha) {
       const existing = await findCommitCascadeForSha(admin, headSha);
       headEventExists = existing.failed ? null : existing.eventId !== null;
+      headEventId = existing.failed ? null : existing.eventId;
     }
 
     const verdict = decideDriftBeacon({ claimableCommitEvents, headSha, headEventExists });
-    if (!verdict.fire || !headSha) return null;
+    if (!verdict.fire || !headSha) {
+      // The beacon is silent once prime's head HAS an event. Whether that
+      // event ever delivered is a separate question, and the one the fleet
+      // stopped following prime over — headRedelivery.pure.ts.
+      if (headSha && headEventId && claimableCommitEvents === 0) {
+        return await redeliverHead({
+          headSha,
+          headEventId,
+          sourceBranch: prime.default_branch || "main",
+        });
+      }
+      return null;
+    }
 
     const created = await createCascadeForAllClones({
       supabase: admin,
@@ -637,6 +661,224 @@ async function raiseDriftBeacon(): Promise<string | null> {
   } catch (e) {
     console.error(
       "[cascade-drain] drift beacon failed:",
+      e instanceof Error ? e.message : String(e),
+    );
+    return null;
+  }
+}
+
+/**
+ * Mint a new delivery of prime's head when its event failed automatically —
+ * its own failure, or the failure of the carrier it was folded into. The
+ * failed event is never touched. See headRedelivery.pure.ts for the rule and
+ * its four bounds; this function owns the reads and the writes.
+ *
+ * Order is the bound. The audit row is the redelivery COUNTER, so it is
+ * written first and a failed write refuses: a delivery that could not be
+ * counted could not be stopped at the ceiling. The event is inserted with
+ * the id the audit row already names, so the count and the event cannot
+ * disagree about which redelivery they describe.
+ *
+ * Every read that fails refuses, and every failure is logged and answered
+ * `null` — this runs inside the beacon, which must never take down the tick.
+ */
+async function redeliverHead(input: {
+  headSha: string;
+  headEventId: string;
+  sourceBranch: string;
+}): Promise<string | null> {
+  try {
+    const EVENT_COLUMNS =
+      "id, status, mode, summary, requires_approval, approved_at, worker_finished_at, completed_at, updated_at, created_at";
+
+    const { data: head, error: headErr } = await admin
+      .from("cascade_events")
+      .select(EVENT_COLUMNS)
+      .eq("id", input.headEventId)
+      .maybeSingle();
+    if (headErr || !head) return null;
+
+    // The carrier, only when the head's summary says it was folded. The
+    // survivor of a fold is the OLDEST queued commit event, so it is never
+    // younger than the head; the summary carries only an 8-character prefix of
+    // its id, so candidates are matched by recomposing the summary whole.
+    let carrier: RedeliveryEventReading | null = null;
+    let carrierUnreadable = false;
+    if (isSupersededSummary(head.summary)) {
+      const { data: candidates, error: candErr } = await admin
+        .from("cascade_events")
+        .select(EVENT_COLUMNS)
+        .eq("trigger", "commit")
+        .lte("created_at", head.created_at)
+        .neq("id", head.id)
+        .order("created_at", { ascending: false })
+        .limit(200);
+      if (candErr) carrierUnreadable = true;
+      else carrier = findSupersedingCarrier(head.summary, candidates ?? []);
+    }
+
+    // Deliveries the drain still owns, on ANY event: pending and not waiting
+    // on a person (ungated, or gated and approved), or running. Attempts are
+    // deliberately NOT filtered — an event claimed on its last attempt is
+    // still in flight, and a deferred one still delivers prime's head.
+    // Three queries, never an `.or()` string.
+    const live = await Promise.all([
+      admin
+        .from("cascade_events")
+        .select("id", { count: "exact", head: true })
+        .eq("status", "pending")
+        .eq("requires_approval", false),
+      admin
+        .from("cascade_events")
+        .select("id", { count: "exact", head: true })
+        .eq("status", "pending")
+        .eq("requires_approval", true)
+        .not("approved_at", "is", null),
+      admin
+        .from("cascade_events")
+        .select("id", { count: "exact", head: true })
+        .eq("status", "running"),
+    ]);
+    const liveDeliveries = live.some((r) => r.error || r.count === null)
+      ? null
+      : live.reduce((n, r) => n + (r.count ?? 0), 0);
+
+    // The prior redeliveries of THIS head, counted from the audit log.
+    const { data: audits, error: auditErr } = await admin
+      .from("audit_log")
+      .select("created_at, metadata")
+      .eq("action", HEAD_REDELIVERY_AUDIT_ACTION)
+      .eq("entity_type", "cascade_event")
+      .eq("entity_id", head.id)
+      .order("created_at", { ascending: false })
+      .limit(50);
+    let prior: PriorRedeliveries | null = null;
+    if (!auditErr) {
+      const rows = audits ?? [];
+      const newest = rows[0];
+      const meta =
+        newest && newest.metadata && typeof newest.metadata === "object" && !Array.isArray(newest.metadata)
+          ? (newest.metadata as Record<string, unknown>)
+          : null;
+      prior = {
+        count: rows.length,
+        lastAt: newest?.created_at ?? null,
+        lastEventId:
+          meta && typeof meta.redelivery_event_id === "string" ? meta.redelivery_event_id : null,
+      };
+    }
+
+    let lastRedelivery: RedeliveryEventReading | null = null;
+    let lastRedeliveryUnreadable = false;
+    if (prior?.lastEventId) {
+      const { data: last, error: lastErr } = await admin
+        .from("cascade_events")
+        .select(EVENT_COLUMNS)
+        .eq("id", prior.lastEventId)
+        .maybeSingle();
+      if (lastErr) lastRedeliveryUnreadable = true;
+      else lastRedelivery = last ?? null;
+    }
+
+    const verdict = decideHeadRedelivery({
+      head,
+      carrier,
+      carrierUnreadable,
+      liveDeliveries,
+      prior,
+      lastRedelivery,
+      lastRedeliveryUnreadable,
+      nowMs: Date.now(),
+    });
+    if (!verdict.redeliver) {
+      // Silent on the ordinary answers — a delivered head, or one in flight —
+      // and loud on the ones an operator would want to see in the logs.
+      if (verdict.why !== "the head's event delivered" && !verdict.why.startsWith("a delivery is already")) {
+        console.log(
+          `[cascade-drain] prime@${input.headSha.slice(0, 7)} not redelivered: ${verdict.why}`,
+        );
+      }
+      return null;
+    }
+
+    const { data: clones, error: cloneErr } = await admin.from("clones").select("id");
+    if (cloneErr || !clones || clones.length === 0) return null;
+
+    const newId = crypto.randomUUID();
+    const { error: countErr } = await admin.from("audit_log").insert({
+      action: HEAD_REDELIVERY_AUDIT_ACTION,
+      entity_type: "cascade_event",
+      entity_id: head.id,
+      actor_user_id: null,
+      metadata: {
+        redelivery_event_id: newId,
+        redelivery: verdict.redelivery,
+        cause: verdict.cause,
+        failed_delivery_id: verdict.failedDeliveryId,
+        source_sha: input.headSha,
+        head_summary: head.summary,
+      },
+    });
+    if (countErr) {
+      console.error(
+        "[cascade-drain] head redelivery refused: the counter could not be written:",
+        countErr.message,
+      );
+      return null;
+    }
+
+    const { error: eventErr } = await admin.from("cascade_events").insert({
+      id: newId,
+      ...redeliveryEvent({
+        headEventId: head.id,
+        failedDeliveryId: verdict.failedDeliveryId,
+        cause: verdict.cause,
+        mode: verdict.mode,
+        redelivery: verdict.redelivery,
+        headSha: input.headSha,
+        sourceBranch: input.sourceBranch,
+      }),
+    });
+    if (eventErr) {
+      // The counter already names this redelivery; a missing event is read
+      // as one that delivered nothing, and the cooldown still applies.
+      console.error("[cascade-drain] head redelivery event insert failed:", eventErr.message);
+      return null;
+    }
+
+    const { error: rowsErr } = await admin.from("cascade_results").insert(
+      clones.map((c) => ({
+        cascade_event_id: newId,
+        clone_id: c.id,
+        status: "queued" as const,
+      })),
+    );
+    if (rowsErr) {
+      // An event with no rows would complete "(of 0)" and read as delivered.
+      // Close it as failed so the next redelivery (after the cooldown) asks
+      // again rather than believing it.
+      await admin
+        .from("cascade_events")
+        .update({
+          status: "failed",
+          summary: `Redelivery could not queue its clones: ${rowsErr.message}`,
+          completed_at: new Date().toISOString(),
+        })
+        .eq("id", newId)
+        .eq("status", "pending")
+        .is("worker_started_at", null);
+      console.error("[cascade-drain] head redelivery rows insert failed:", rowsErr.message);
+      return null;
+    }
+
+    console.log(
+      `[cascade-drain] prime@${input.headSha.slice(0, 7)} redelivered as ${newId} ` +
+        `(${verdict.cause}, ${verdict.redelivery} of ${HEAD_REDELIVERY_MAX})`,
+    );
+    return newId;
+  } catch (e) {
+    console.error(
+      "[cascade-drain] head redelivery failed:",
       e instanceof Error ? e.message : String(e),
     );
     return null;
