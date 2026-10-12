@@ -39,6 +39,7 @@ import {
 } from "@/components/ui/dialog";
 import { useConfirm } from "@/components/confirm-dialog";
 import { ListDropzone } from "@/components/email/list-dropzone";
+import { MicrosoftTenantsPanel } from "@/components/email/microsoft-tenants-panel";
 import {
   campaignRulesFromRow,
   formatInZone,
@@ -53,7 +54,13 @@ import {
   mailboxStatus,
 } from "@/lib/email-campaigns.functions";
 
+const TABS = ["campaigns", "lists", "tenants"] as const;
+type EmailTab = (typeof TABS)[number];
+
 export const Route = createFileRoute("/email/")({
+  validateSearch: (search: Record<string, unknown>): { tab?: EmailTab } => ({
+    tab: TABS.includes(search.tab as EmailTab) ? (search.tab as EmailTab) : undefined,
+  }),
   component: () => (
     <ProtectedRoute>
       <EmailCampaignsPage />
@@ -86,6 +93,8 @@ const STATUS_SPINE: Record<string, SpineTone> = {
 function EmailCampaignsPage() {
   const qc = useQueryClient();
   const confirm = useConfirm();
+  const { tab = "campaigns" } = Route.useSearch();
+  const navigate = Route.useNavigate();
 
   const campaignsQuery = useQuery({
     queryKey: ["email", "campaigns"],
@@ -169,10 +178,19 @@ function EmailCampaignsPage() {
         />
       </div>
 
-      <Tabs defaultValue="campaigns">
+      <Tabs
+        value={tab}
+        onValueChange={(next) =>
+          void navigate({
+            search: { tab: next === "campaigns" ? undefined : (next as EmailTab) },
+            replace: true,
+          })
+        }
+      >
         <TabsList>
           <TabsTrigger value="campaigns">Campaigns</TabsTrigger>
           <TabsTrigger value="lists">Contact lists</TabsTrigger>
+          <TabsTrigger value="tenants">Microsoft tenants</TabsTrigger>
         </TabsList>
 
         <TabsContent value="campaigns" className="mt-4 space-y-2">
@@ -286,6 +304,10 @@ function EmailCampaignsPage() {
             </div>
           )}
         </TabsContent>
+
+        <TabsContent value="tenants" className="mt-4">
+          <MicrosoftTenantsPanel />
+        </TabsContent>
       </Tabs>
     </div>
   );
@@ -335,12 +357,19 @@ function MailboxStrip({
       <div className="glass-inset spine spine-bad flex items-start gap-3 px-4 py-3">
         <Ban className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
         <p className="text-sm text-muted-foreground">
-          <span className="text-foreground">Microsoft Graph is not configured.</span> Set{" "}
-          <code className="font-mono text-xs">MICROSOFT_TENANT_ID</code>,{" "}
+          <span className="text-foreground">
+            The deployment&apos;s Microsoft tenant is not configured.
+          </span>{" "}
+          Set <code className="font-mono text-xs">MICROSOFT_TENANT_ID</code>,{" "}
           <code className="font-mono text-xs">MICROSOFT_CLIENT_ID</code> and{" "}
-          <code className="font-mono text-xs">MICROSOFT_CLIENT_SECRET</code> on this deployment —
-          the same application registration the property dashboard sends from. Campaigns can be
-          written and lists uploaded meanwhile; nothing will send.
+          <code className="font-mono text-xs">MICROSOFT_CLIENT_SECRET</code> as Lovable secrets —
+          the same application registration the property dashboard sends from — or add a tenant
+          under{" "}
+          <Link to="/email" search={{ tab: "tenants" }} className="text-foreground underline">
+            Microsoft tenants
+          </Link>{" "}
+          and choose it on a campaign&apos;s Message tab. Campaigns on this deployment&apos;s own
+          tenant will not send until then.
         </p>
       </div>
     );
@@ -358,8 +387,8 @@ function MailboxStrip({
         <p className="text-sm text-muted-foreground">
           {noDefault ? (
             <>
-              Connected to the Microsoft tenant. No default mailbox is set, so each campaign chooses
-              the mailbox it sends from on its Message tab.
+              Connected to the deployment&apos;s Microsoft tenant. No default mailbox is set, so
+              each campaign chooses the mailbox it sends from on its Message tab.
             </>
           ) : status.reachable ? (
             <>

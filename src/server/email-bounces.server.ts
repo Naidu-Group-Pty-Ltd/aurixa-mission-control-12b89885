@@ -40,14 +40,16 @@ import {
   readDeliveryReport,
   type BounceFinding,
 } from "@/lib/email/bounceReport.pure";
+import { emailKey } from "@/lib/email/emailAddress.pure";
 import {
-  defaultMailbox,
-  isGraphConfigured,
+  defaultGraphConfig,
   listInboxPage,
   listInboxSince,
+  type GraphConfig,
   type GraphMailMessage,
 } from "@/server/graph-client";
 import { knownMailboxes } from "@/server/email-mailboxes.server";
+import { graphConfigFor, tenantProblem } from "@/server/microsoft-tenants.server";
 
 const DEFAULT_BUDGET_MS = 20_000;
 /** How far back a mailbox with no successful scan on record starts. */
@@ -66,23 +68,44 @@ export type BounceScanSummary = {
   notes: string[];
 };
 
+type SendingMailbox = { address: string; tenantId: string | null };
+
 /**
- * Every mailbox this deployment sends from: the configured default, every
- * mailbox a non-draft campaign names, and every mailbox a message has actually
- * left from in the last month.
+ * Every mailbox this deployment sends from, with the Microsoft tenant it is
+ * read through: each tenant's default, every mailbox a non-draft campaign
+ * names, and every mailbox a message has actually left from in the last month.
  *
- * The last of those matters once a campaign can be moved to another mailbox.
- * Bounces for what it sent from the old one keep arriving there for days, and
- * reading only the mailboxes campaigns name TODAY would stop reading them the
- * moment somebody changed the field — rule 2 losing its data with nothing
- * reporting it.
+ * The last of those matters once a campaign can be moved to another mailbox
+ * or tenant. Bounces for what it sent from the old one keep arriving there for
+ * days, and reading only the mailboxes campaigns name TODAY would stop reading
+ * them the moment somebody changed the field — rule 2 losing its data with
+ * nothing reporting it.
+ *
+ * One entry per address. Two tenants can only both reach an address when they
+ * are two applications in the same directory, and then either can read it, so
+ * the first one listed is used: defaults, then what campaigns name now, then
+ * history.
  */
-async function sendingMailboxes(): Promise<string[]> {
-  const mailboxes = new Set<string>();
-  const configured = defaultMailbox();
-  if (configured) mailboxes.add(configured.trim().toLowerCase());
-  for (const entry of await knownMailboxes(supabaseAdmin)) mailboxes.add(entry.address);
-  return [...mailboxes];
+async function sendingMailboxes(): Promise<SendingMailbox[]> {
+  const byAddress = new Map<string, SendingMailbox>();
+  const add = (raw: string | null | undefined, tenantId: string | null) => {
+    const address = raw ? emailKey(raw) : null;
+    if (address && !byAddress.has(address)) byAddress.set(address, { address, tenantId });
+  };
+
+  add(defaultGraphConfig()?.mailbox, null);
+  const { data: tenants, error } = await supabaseAdmin
+    .from("microsoft_tenants")
+    .select("id, default_mailbox")
+    .is("removed_at", null)
+    .not("default_mailbox", "is", null);
+  if (error) throw error;
+  for (const tenant of tenants ?? []) add(tenant.default_mailbox, tenant.id);
+
+  const known = await knownMailboxes(supabaseAdmin);
+  for (const entry of known) if (entry.source === "campaign") add(entry.address, entry.tenantId);
+  for (const entry of known) add(entry.address, entry.tenantId);
+  return [...byAddress.values()];
 }
 
 async function resumePoint(mailbox: string): Promise<Date> {
@@ -141,24 +164,34 @@ export async function scanForBounces(
     notes: [],
   };
 
-  if (!isGraphConfigured()) {
-    summary.notes.push("Microsoft Graph is not configured on this deployment");
-    return summary;
-  }
-
   const mailboxes = await sendingMailboxes();
   if (mailboxes.length === 0) {
     summary.notes.push("no sending mailbox is configured");
     return summary;
   }
 
-  for (const mailbox of mailboxes) {
+  // Each tenant's credentials, read once a pass.
+  const configs = new Map<string, Promise<GraphConfig | null>>();
+  const configFor = (tenantId: string | null) => {
+    const key = tenantId ?? "default";
+    if (!configs.has(key)) configs.set(key, graphConfigFor(tenantId));
+    return configs.get(key)!;
+  };
+
+  for (const { address: mailbox, tenantId } of mailboxes) {
     if (Date.now() > deadline) {
       summary.notes.push(`${mailbox}: out of time this tick`);
       break;
     }
     try {
-      const result = await scanMailbox(mailbox, deadline);
+      const config = await configFor(tenantId);
+      if (!config) {
+        summary.notes.push(
+          `${mailbox}: ${(await tenantProblem(tenantId)) ?? "Microsoft Graph is not configured"}`,
+        );
+        continue;
+      }
+      const result = await scanMailbox(mailbox, config, deadline);
       summary.mailboxes += 1;
       summary.examined += result.examined;
       summary.reports += result.reports;
@@ -175,7 +208,7 @@ export async function scanForBounces(
   return summary;
 }
 
-async function scanMailbox(mailbox: string, deadline: number) {
+async function scanMailbox(mailbox: string, config: GraphConfig, deadline: number) {
   const since = await resumePoint(mailbox);
   const { data: scanRow, error: scanError } = await supabaseAdmin
     .from("email_bounce_scans")
@@ -194,7 +227,7 @@ async function scanMailbox(mailbox: string, deadline: number) {
 
   try {
     const findings = new Map<string, BounceFinding>();
-    let page = await listInboxSince(mailbox, since, 50);
+    let page = await listInboxSince(mailbox, since, 50, config);
 
     for (let index = 0; index < MAX_PAGES; index++) {
       for (const message of page.messages) {
@@ -226,7 +259,7 @@ async function scanMailbox(mailbox: string, deadline: number) {
       }
 
       if (!page.nextLink || Date.now() > deadline) break;
-      page = await listInboxPage(page.nextLink);
+      page = await listInboxPage(page.nextLink, config);
     }
 
     if (findings.size > 0) {

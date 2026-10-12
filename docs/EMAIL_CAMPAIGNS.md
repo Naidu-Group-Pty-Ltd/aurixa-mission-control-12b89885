@@ -391,14 +391,70 @@ place roles change a verdict: a token that carries roles but no read role is
 refused every inbox, so its probes become "can't check" rather than "blocked",
 and campaigns that send today are not stopped by a check that could never pass.
 
+## More than one Microsoft tenant
+
+A campaign sends through **one** Microsoft tenant, chosen on its Message tab
+above the mailbox. The deployment's own tenant — the four Lovable secrets
+above — is the default (`tenant_id` NULL everywhere). Others are added on the
+Email Campaigns page under **Microsoft tenants**, by an admin, with the same
+four values: Directory (tenant) ID, Application (client) ID, the client
+secret's **Value**, and an optional default mailbox.
+
+**Why not Lovable secrets.** A Lovable secret is set in the Lovable editor and
+read by the Worker when it is deployed; the running app has no way to create
+one. Added tenants therefore live in **Supabase Vault**, the store this
+deployment already keeps `cron_secret` in, and behave the way a deployment
+secret does:
+
+- **Write-only.** The credentials go in through `addMicrosoftTenant` /
+  `updateMicrosoftTenant` and never come back out. The page shows a hint of each
+  — the last four characters of the two IDs and the first three of the secret,
+  the same hint Azure shows beside a client secret.
+- **One Vault secret per tenant** (`microsoft_tenant_<uuid>`, JSON), reached only
+  through `microsoft_tenant_credentials()` — `SECURITY DEFINER`, executable by
+  the service role and nobody else. `public.microsoft_tenants` holds the label,
+  the hints, the fingerprint and the verification record; operators can read it,
+  nothing in it is a credential.
+- **Tried before saved.** A token is requested with new credentials before
+  anything is stored, and a refusal comes back with Microsoft's reason in words
+  (`AADSTS7000215` → "the client secret is wrong — paste the secret's Value…").
+  A default mailbox, if given, is probed the same way.
+- **Blank keeps the stored value.** Editing a tenant with the secret left empty
+  changes nothing about the secret, exactly as leaving a deployment secret alone.
+- **One row per app registration.** A SHA-256 of `tenant:client` is unique among
+  live tenants, and the deployment's own registration cannot be added twice.
+- **Removal destroys the Vault secret** and keeps the row (`removed_at`) so the
+  messages that went through it still say which tenant they used. Removal is
+  refused while a running campaign uses the tenant.
+
+Every write is audited (`microsoft_tenant_added`, `_updated` with field names
+only, `_removed`), as is moving a campaign between tenants
+(`email_campaign_tenant_changed`). A campaign's tenant can change only while it
+is not running; changing it resets the mailbox to the new tenant's default,
+and a named mailbox is re-checked against the new tenant before it is saved.
+
+**Everything that talks to Microsoft is per tenant.** Tokens are cached per
+tenant and per credentials version, so a rotated secret never reuses the old
+token; the mailbox directory, the access probes and the token's roles are
+cached per tenant; the dispatcher takes each tenant's token once a pass, before
+claiming anything, and a tenant whose credentials fail holds up only its own
+campaigns. Every message row records `tenant_id`, and the bounce scan reads
+each mailbox through the tenant that sent from it. A resolved tenant is cached
+for a minute per isolate, which bounds how long an isolate keeps using a
+secret that was just replaced.
+
+Lead-stage emails, payment links and CRM journeys still send through the
+deployment's own tenant only.
+
 ### The bounce scan follows the mailboxes that actually sent
 
 Once a campaign can move between mailboxes, reading only the mailboxes campaigns
 name **today** would stop reading a mailbox's bounces the moment somebody
 changed the field — while they keep arriving there for days. The scan now reads
-the default, every mailbox a non-draft campaign names, **and** every mailbox a
-message has left from in the last 30 days (`email_campaign_sending_mailboxes`, a
-view over the message ledger).
+every tenant's default, every mailbox a non-draft campaign names, **and** every
+mailbox a message has left from in the last 30 days
+(`email_campaign_sending_mailboxes`, a view over the message ledger) — each read
+through the tenant it was used with.
 
 ---
 
@@ -565,26 +621,30 @@ are what the page and the dispatcher both use to say when the next message goes.
 
 ## Where things live
 
-|                                              |                                              |
-| -------------------------------------------- | -------------------------------------------- |
-| `src/lib/email/emailAddress.pure.ts`         | one identity per address                     |
-| `src/lib/email/tabular.pure.ts`              | RFC 4180 delimited text, delimiter sniffing  |
-| `src/lib/email/zip.pure.ts`                  | ZIP central directory, ZIP64, deflate        |
-| `src/lib/email/xlsx.pure.ts`                 | workbook parts → a grid                      |
-| `src/lib/email/workbook.pure.ts`             | the format router                            |
-| `src/lib/email/listProfile.pure.ts`          | column profiles, address detection, contacts |
-| `src/lib/email/campaignRules.pure.ts`        | window, gap, caps, quotas                    |
-| `src/lib/email/mergeTemplate.pure.ts`        | merge fields and escaping                    |
-| `src/lib/email/bounceReport.pure.ts`         | delivery reports → verdicts                  |
-| `src/lib/email/attachments.pure.ts`          | what may be attached, and the delivery path  |
-| `src/lib/email/mailboxes.pure.ts`            | mailbox access, refusal scope, token roles   |
-| `src/server/graph-client.ts`                 | the only place this talks to Microsoft       |
-| `src/server/email-campaigns.server.ts`       | the dispatcher                               |
-| `src/server/email-attachments.server.ts`     | verified attachment bytes                    |
-| `src/server/email-mailboxes.server.ts`       | the tenant directory and access probes       |
-| `src/server/email-bounces.server.ts`         | the mailbox scan                             |
-| `src/lib/email-campaigns.functions.ts`       | the operator's API                           |
-| `src/routes/email.*`                         | the console                                  |
-| `src/components/email/mailbox-picker.tsx`    | choosing the mailbox                         |
-| `src/components/email/attachment-panel.tsx`  | attaching files                              |
-| `src/routes/api.public.email.unsubscribe.ts` | the unsubscribe facility                     |
+|                                                    |                                              |
+| -------------------------------------------------- | -------------------------------------------- |
+| `src/lib/email/emailAddress.pure.ts`               | one identity per address                     |
+| `src/lib/email/tabular.pure.ts`                    | RFC 4180 delimited text, delimiter sniffing  |
+| `src/lib/email/zip.pure.ts`                        | ZIP central directory, ZIP64, deflate        |
+| `src/lib/email/xlsx.pure.ts`                       | workbook parts → a grid                      |
+| `src/lib/email/workbook.pure.ts`                   | the format router                            |
+| `src/lib/email/listProfile.pure.ts`                | column profiles, address detection, contacts |
+| `src/lib/email/campaignRules.pure.ts`              | window, gap, caps, quotas                    |
+| `src/lib/email/mergeTemplate.pure.ts`              | merge fields and escaping                    |
+| `src/lib/email/bounceReport.pure.ts`               | delivery reports → verdicts                  |
+| `src/lib/email/attachments.pure.ts`                | what may be attached, and the delivery path  |
+| `src/lib/email/mailboxes.pure.ts`                  | mailbox access, refusal scope, token roles   |
+| `src/lib/email/microsoftTenants.pure.ts`           | added tenants: validation, hints, refusals   |
+| `src/server/microsoft-tenants.server.ts`           | tenant credentials from Vault, add/rotate    |
+| `src/lib/microsoft-tenants.functions.ts`           | the tenant API (admin writes)                |
+| `src/components/email/microsoft-tenants-panel.tsx` | the Microsoft tenants tab                    |
+| `src/server/graph-client.ts`                       | the only place this talks to Microsoft       |
+| `src/server/email-campaigns.server.ts`             | the dispatcher                               |
+| `src/server/email-attachments.server.ts`           | verified attachment bytes                    |
+| `src/server/email-mailboxes.server.ts`             | the tenant directory and access probes       |
+| `src/server/email-bounces.server.ts`               | the mailbox scan                             |
+| `src/lib/email-campaigns.functions.ts`             | the operator's API                           |
+| `src/routes/email.*`                               | the console                                  |
+| `src/components/email/mailbox-picker.tsx`          | choosing the mailbox                         |
+| `src/components/email/attachment-panel.tsx`        | attaching files                              |
+| `src/routes/api.public.email.unsubscribe.ts`       | the unsubscribe facility                     |

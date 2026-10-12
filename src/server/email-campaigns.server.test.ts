@@ -68,6 +68,7 @@ describe("rulesFor", () => {
     id: "c1",
     name: "Test",
     status: "running",
+    tenant_id: null,
     from_mailbox: null,
     from_name: null,
     reply_to: null,

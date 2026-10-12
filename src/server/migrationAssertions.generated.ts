@@ -1010,4 +1010,14 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "cron", jobname: "email-campaign-dispatch-1min" },
     ],
   },
+  {
+    migration: "20261012120000_microsoft_tenants.sql",
+    version: "20261012120000",
+    assertions: [
+      { kind: "table", table: "microsoft_tenants" },
+      { kind: "column", table: "email_campaigns", column: "tenant_id" },
+      { kind: "column", table: "email_campaign_messages", column: "tenant_id" },
+      { kind: "column", table: "email_campaign_sending_mailboxes", column: "tenant_id" },
+    ],
+  },
 ];

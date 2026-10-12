@@ -11,7 +11,10 @@
  * **The token is taken before anything is claimed.** A credential failure that
  * happens after a claim leaves rows marked `claimed` with nothing to release
  * them, and a queue that looks like it is working. Taken first, a credential
- * failure costs one tick and touches no recipient.
+ * failure costs one tick and touches no recipient. Each campaign sends through
+ * its own Microsoft tenant — the deployment's, or one added in the console —
+ * so the token is taken per tenant, once a pass, and a tenant whose
+ * credentials fail holds up only the campaigns that use it.
  *
  * **The suppression register is re-read between the claim and the send.** A
  * bounce can arrive at any moment, including after a recipient was imported
@@ -89,14 +92,15 @@ import { jsonPathColumn, pgInList } from "@/lib/email/quotaFilter.pure";
 import { refusalPauseReason, refusalScope } from "@/lib/email/mailboxes.pure";
 import { resolveMissionControlOrigin } from "@/server/missionControlLink.pure";
 import {
-  defaultMailbox,
-  isGraphConfigured,
   accessToken,
   deliverMessage,
   GraphError,
+  type GraphConfig,
   type GraphMessage,
   type GraphRecipient,
 } from "@/server/graph-client";
+import { tenantKey } from "@/lib/email/microsoftTenants.pure";
+import { graphConfigFor, tenantProblem } from "@/server/microsoft-tenants.server";
 import {
   prepareCampaignAttachments,
   type PreparedAttachments,
@@ -152,6 +156,8 @@ type CampaignRow = {
   id: string;
   name: string;
   status: string;
+  /** The Microsoft tenant it sends through; null is the deployment's own. */
+  tenant_id: string | null;
   from_mailbox: string | null;
   from_name: string | null;
   reply_to: string | null;
@@ -264,21 +270,18 @@ export async function dispatchDueCampaigns(
     skipped: [],
   };
 
-  if (!isGraphConfigured()) {
-    summary.skipped.push("Microsoft Graph is not configured on this deployment");
-    return summary;
-  }
-
-  // Before anything is claimed. A credential failure now costs a tick; the
-  // same failure after a claim costs a queue that never moves.
-  try {
-    await accessToken();
-  } catch (error) {
-    summary.skipped.push(
-      error instanceof GraphError ? error.message : "could not obtain a Microsoft Graph token",
-    );
-    return summary;
-  }
+  // Each tenant's credentials are read and tried once a pass, however many
+  // of its campaigns are due, and only when one of them is about to send.
+  const checked = new Map<string, Promise<TenantAccess>>();
+  const credentials = (tenantId: string | null) => {
+    const key = tenantKey(tenantId);
+    let access = checked.get(key);
+    if (!access) {
+      access = tenantAccess(tenantId);
+      checked.set(key, access);
+    }
+    return access;
+  };
 
   const { data: campaigns, error: campaignError } = await supabaseAdmin
     .from("email_campaigns")
@@ -302,7 +305,7 @@ export async function dispatchDueCampaigns(
         continue;
       }
       try {
-        const outcome = await runCampaignTick(campaign, { clock, deadline });
+        const outcome = await runCampaignTick(campaign, { clock, deadline, credentials });
         if (outcome.leased) {
           summary.leased += 1;
           continue;
@@ -345,7 +348,41 @@ type TickOutcome = {
   note: string | null;
 };
 
-type TickContext = { clock: () => Date; deadline: number };
+type TenantAccess = { config: GraphConfig; problem: null } | { config: null; problem: string };
+
+type TickContext = {
+  clock: () => Date;
+  deadline: number;
+  /** A tenant's credentials with a token already taken, or why there are none. */
+  credentials: (tenantId: string | null) => Promise<TenantAccess>;
+};
+
+/**
+ * A tenant's credentials, proven by taking a token with them. Before anything
+ * is claimed: a credential failure now costs a tick; the same failure after a
+ * claim costs a queue that never moves.
+ */
+async function tenantAccess(tenantId: string | null): Promise<TenantAccess> {
+  try {
+    const config = await graphConfigFor(tenantId);
+    if (!config) {
+      return {
+        config: null,
+        problem: (await tenantProblem(tenantId)) ?? "Microsoft Graph is not configured",
+      };
+    }
+    await accessToken(config);
+    return { config, problem: null };
+  } catch (error) {
+    return {
+      config: null,
+      problem:
+        error instanceof GraphError
+          ? error.message
+          : `could not obtain a Microsoft Graph token: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
 
 /**
  * Stop a running campaign and say why. Only a `running` campaign is touched,
@@ -624,7 +661,13 @@ async function workCampaign(
   const taken = new Map<string, number>();
 
   const perMessage = messageBatchSize(campaign);
-  const mailbox = campaign.from_mailbox?.trim() || defaultMailbox();
+  const tenant = await context.credentials(campaign.tenant_id ?? null);
+  if (!tenant.config) {
+    outcome.note = `nothing was claimed: ${tenant.problem}`;
+    return { outcome, nextSendAt: null };
+  }
+  const config = tenant.config;
+  const mailbox = campaign.from_mailbox?.trim() || config.mailbox;
   if (!mailbox) {
     outcome.note = "no sending mailbox is configured";
     return { outcome, nextSendAt: null };
@@ -683,13 +726,15 @@ async function workCampaign(
 
     const sent = await sendOneMessage({
       campaign,
+      config,
       mailbox,
       origin,
       recipients: chosen,
       attachments,
     });
-    // `last_message_at` is stamped for every attempt; so is this pass's copy.
-    lastMessageAt = new Date().toISOString();
+    // `last_message_at` is stamped for every attempt; so is this pass's copy,
+    // with the same instant, so the next send time is measured from it.
+    lastMessageAt = sent.at;
 
     outcome.messages += 1;
     if (sent.kind === "sent") {
@@ -864,11 +909,15 @@ async function claimRecipients(rows: RecipientRow[]): Promise<RecipientRow[]> {
   return claimed;
 }
 
-type MessageResult =
+type MessageResult = (
   | { kind: "sent" | "unconfirmed" | "throttled" }
   | { kind: "failed"; detail: string }
   | { kind: "deferred"; detail: string }
-  | { kind: "halted"; detail: string; paused: boolean };
+  | { kind: "halted"; detail: string; paused: boolean }
+) & {
+  /** The `last_message_at` this attempt stamped on the campaign. */
+  at: string;
+};
 
 /** Return claimed contacts to the queue. Only ever after a send that did not happen. */
 async function releaseClaims(ids: string[], why: string): Promise<void> {
@@ -883,12 +932,14 @@ async function releaseClaims(ids: string[], why: string): Promise<void> {
 /** Compose, record, send, record again. */
 async function sendOneMessage(input: {
   campaign: CampaignRow;
+  /** The campaign's tenant's credentials. */
+  config: GraphConfig;
   mailbox: string;
   origin: string;
   recipients: RecipientRow[];
   attachments: PreparedAttachments;
 }): Promise<MessageResult> {
-  const { campaign, mailbox, origin, recipients, attachments } = input;
+  const { campaign, config, mailbox, origin, recipients, attachments } = input;
   const html = campaign.body_format !== "text";
   const lead = recipients[0];
 
@@ -948,6 +999,8 @@ async function sendOneMessage(input: {
       subject,
       body_preview: bodyPreview(content),
       mailbox,
+      // Which tenant's mailbox: the bounce scan reads it through the same one.
+      tenant_id: campaign.tenant_id ?? null,
       to_address: toRecipients[0]?.emailAddress.address ?? null,
       recipient_count: recipients.length,
       bcc_count: bccRecipients?.length ?? 0,
@@ -962,7 +1015,7 @@ async function sendOneMessage(input: {
   if (messageError) throw messageError;
   const messageId = messageRow.id as string;
 
-  const outcome = await deliverMessage(mailbox, message, attachments.outbound);
+  const outcome = await deliverMessage(mailbox, message, attachments.outbound, config);
   const durationMs = Date.now() - started;
   const ids = recipients.map((recipient) => recipient.id);
   const finishedAt = new Date().toISOString();
@@ -1008,7 +1061,7 @@ async function sendOneMessage(input: {
       );
     }
 
-    return { kind: "sent" };
+    return { kind: "sent", at: finishedAt };
   }
 
   if (outcome.kind === "throttled" || outcome.kind === "deferred") {
@@ -1024,8 +1077,8 @@ async function sendOneMessage(input: {
     // these are the only outcomes, with a halt below, for which that is true.
     await releaseClaims(ids, outcome.kind);
     return outcome.kind === "throttled"
-      ? { kind: "throttled" }
-      : { kind: "deferred", detail: outcome.message };
+      ? { kind: "throttled", at: finishedAt }
+      : { kind: "deferred", detail: outcome.message, at: finishedAt };
   }
 
   if (outcome.kind === "refused") {
@@ -1046,7 +1099,7 @@ async function sendOneMessage(input: {
       if (error) console.error("[email] could not record a refused message:", error.message);
       await releaseClaims(ids, `refused: ${scope}`);
       const paused = await pauseCampaign(campaign.id, reason);
-      return { kind: "halted", detail: reason, paused };
+      return { kind: "halted", detail: reason, paused, at: finishedAt };
     }
   }
 
@@ -1076,5 +1129,7 @@ async function sendOneMessage(input: {
     console.error("[email] could not record recipient failures:", failureError.message);
   }
 
-  return failed ? { kind: "failed", detail } : { kind: "unconfirmed" };
+  return failed
+    ? { kind: "failed", detail, at: finishedAt }
+    : { kind: "unconfirmed", at: finishedAt };
 }

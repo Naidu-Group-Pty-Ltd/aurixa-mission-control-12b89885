@@ -41,6 +41,16 @@
  * unconfirmed the draft is KEPT and its id returned: a draft still sitting in
  * Drafts is proof that it never left, and that is a person's to check.
  *
+ * ## Which tenant
+ *
+ * The deployment's own tenant is the one in its secrets, and every function
+ * here defaults to it — lead-stage emails, payment links and CRM journeys use
+ * nothing else. A campaign can instead send through a tenant added from the
+ * console (`src/server/microsoft-tenants.server.ts`, credentials in Supabase
+ * Vault): those callers pass that tenant's `GraphConfig` as the last argument,
+ * and its token is cached under its own key, so two tenants never share a
+ * token and a rotated secret never reuses the old one.
+ *
  * ## Which mailbox
  *
  * `MICROSOFT_MAILBOX_EMAIL` is a default, not a limit: an application
@@ -61,6 +71,7 @@ import {
   type DeliveryPath,
 } from "@/lib/email/attachments.pure";
 import { tokenRoles, type DirectoryUser } from "@/lib/email/mailboxes.pure";
+import { explainTokenRefusal } from "@/lib/email/microsoftTenants.pure";
 
 const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
 const LOGIN_BASE = "https://login.microsoftonline.com";
@@ -82,6 +93,14 @@ export type GraphConfig = {
   clientId: string;
   clientSecret: string;
   mailbox: string | null;
+  /**
+   * Which tenant this is, for the token cache and for messages: "default" for
+   * the deployment's own, `tenant:<id>:v<credentials version>` for an added
+   * one. Absent, the credentials themselves are the key.
+   */
+  key?: string;
+  /** How a person would name it — "Acme (added tenant)". Absent for the default. */
+  label?: string;
 };
 
 function readConfig(): GraphConfig | null {
@@ -94,7 +113,13 @@ function readConfig(): GraphConfig | null {
     clientId,
     clientSecret,
     mailbox: process.env.MICROSOFT_MAILBOX_EMAIL?.trim() || null,
+    key: "default",
   };
+}
+
+/** The deployment's own tenant, from its secrets — null when they are not all set. */
+export function defaultGraphConfig(): GraphConfig | null {
+  return readConfig();
 }
 
 /**
@@ -124,16 +149,22 @@ export function requireGraphConfig(): GraphConfig {
 }
 
 // A client-credentials token lasts about an hour. Cached per isolate, which is
-// the correct scope: an isolate is one machine's copy of the worker, the cache
-// dies with it, and nothing is shared between tenants because there is only
-// one tenant. Sixty seconds of headroom, so a token cannot expire in flight.
-let cachedToken: { value: string; expiresAt: number } | null = null;
+// the correct scope: an isolate is one machine's copy of the worker and the
+// cache dies with it. One entry per tenant (see `GraphConfig.key`), so a token
+// is only ever presented for the tenant that issued it. Sixty seconds of
+// headroom, so a token cannot expire in flight.
+const tokenCache = new Map<string, { value: string; expiresAt: number }>();
 
-export async function accessToken(): Promise<string> {
+function cacheKey(config: GraphConfig): string {
+  return config.key ?? `${config.tenantId}\n${config.clientId}\n${config.clientSecret}`;
+}
+
+export async function accessToken(config: GraphConfig = requireGraphConfig()): Promise<string> {
   const now = Date.now();
-  if (cachedToken && cachedToken.expiresAt > now) return cachedToken.value;
+  const key = cacheKey(config);
+  const cached = tokenCache.get(key);
+  if (cached && cached.expiresAt > now) return cached.value;
 
-  const config = requireGraphConfig();
   const body = new URLSearchParams({
     client_id: config.clientId,
     client_secret: config.clientSecret,
@@ -155,6 +186,7 @@ export async function accessToken(): Promise<string> {
     expires_in?: number;
     error?: string;
     error_description?: string;
+    error_codes?: number[];
   } | null;
 
   if (!response.ok || !payload?.access_token) {
@@ -165,9 +197,14 @@ export async function accessToken(): Promise<string> {
       response.status,
       payload?.error_description ?? "",
     );
+    const why = explainTokenRefusal(payload?.error_codes);
     throw new GraphError(
       response.status === 401 || response.status === 400
-        ? "Microsoft rejected this deployment's application credentials"
+        ? `${
+            config.label
+              ? `Microsoft rejected the application credentials for ${config.label}`
+              : "Microsoft rejected this deployment's application credentials"
+          }${why ? `: ${why}` : ""}`
         : `Microsoft did not issue a token (${response.status})`,
       response.status,
       payload?.error ?? null,
@@ -175,21 +212,28 @@ export async function accessToken(): Promise<string> {
   }
 
   const lifetime = Math.max(60, Number(payload.expires_in ?? 3600));
-  cachedToken = { value: payload.access_token, expiresAt: now + (lifetime - 60) * 1000 };
-  return cachedToken.value;
-}
-
-/** Drop the cached token. Called when Graph answers 401 on a call that had one. */
-export function forgetToken(): void {
-  cachedToken = null;
+  const entry = { value: payload.access_token, expiresAt: now + (lifetime - 60) * 1000 };
+  tokenCache.set(key, entry);
+  return entry.value;
 }
 
 /**
- * The application permissions this deployment's token carries, or null when
- * the token is not a readable JWT. Advisory — see `tokenRoles`.
+ * Drop a cached token — the tenant's, or every one. Called when Graph answers
+ * 401 on a call that had one.
  */
-export async function grantedRoles(): Promise<string[] | null> {
-  return tokenRoles(await accessToken());
+export function forgetToken(config?: GraphConfig): void {
+  if (config) tokenCache.delete(cacheKey(config));
+  else tokenCache.clear();
+}
+
+/**
+ * The application permissions a tenant's token carries, or null when the
+ * token is not a readable JWT. Advisory — see `tokenRoles`.
+ */
+export async function grantedRoles(
+  config: GraphConfig = requireGraphConfig(),
+): Promise<string[] | null> {
+  return tokenRoles(await accessToken(config));
 }
 
 export type GraphRecipient = { emailAddress: { address: string; name?: string } };
@@ -249,7 +293,7 @@ function retryAfterMs(response: Response): number {
  * What the answer to a SEND means — `sendMail`, or a draft's `send`. The one
  * place the three-outcome rule is written down.
  */
-async function classifySendResponse(response: Response): Promise<SendOutcome> {
+async function classifySendResponse(response: Response, config: GraphConfig): Promise<SendOutcome> {
   const requestId = response.headers.get("request-id");
 
   if (response.status === 202 || response.status === 200 || response.status === 204) {
@@ -260,7 +304,7 @@ async function classifySendResponse(response: Response): Promise<SendOutcome> {
     return { kind: "throttled", retryAfterMs: retryAfterMs(response) };
   }
 
-  if (response.status === 401) forgetToken();
+  if (response.status === 401) forgetToken(config);
 
   const { code, text: readable } = await readGraphError(response);
 
@@ -294,8 +338,9 @@ export async function sendMail(
   mailbox: string,
   message: GraphMessage,
   saveToSentItems = true,
+  config: GraphConfig = requireGraphConfig(),
 ): Promise<SendOutcome> {
-  const token = await accessToken();
+  const token = await accessToken(config);
   const url = `${GRAPH_BASE}/users/${encodeURIComponent(mailbox)}/sendMail`;
 
   let response: Response;
@@ -317,7 +362,7 @@ export async function sendMail(
     };
   }
 
-  return classifySendResponse(response);
+  return classifySendResponse(response, config);
 }
 
 /** A file to send, already read and verified by the caller. */
@@ -371,9 +416,10 @@ export async function deliverMessage(
   mailbox: string,
   message: GraphMessage,
   attachments: OutboundAttachment[] = [],
+  config: GraphConfig = requireGraphConfig(),
 ): Promise<DeliveryOutcome> {
   if (attachments.length === 0) {
-    return { ...(await sendMail(mailbox, message)), path: "sendmail", draftId: null };
+    return { ...(await sendMail(mailbox, message, true, config)), path: "sendmail", draftId: null };
   }
 
   const bareBytes = new TextEncoder().encode(
@@ -385,14 +431,16 @@ export async function deliverMessage(
   );
 
   if (deliveryPath(estimate, attachments.length) === "sendmail") {
-    const outcome = await sendMail(mailbox, {
-      ...message,
-      attachments: attachments.map(toFileAttachment),
-    });
+    const outcome = await sendMail(
+      mailbox,
+      { ...message, attachments: attachments.map(toFileAttachment) },
+      true,
+      config,
+    );
     return { ...outcome, path: "sendmail", draftId: null };
   }
 
-  return sendThroughDraft(mailbox, message, attachments);
+  return sendThroughDraft(mailbox, message, attachments, config);
 }
 
 type Step<T> = { ok: true; value: T } | { ok: false; outcome: PreSendOutcome };
@@ -402,10 +450,15 @@ type Step<T> = { ok: true; value: T } | { ok: false; outcome: PreSendOutcome };
  * no failure here is `unconfirmed`: a 4xx is `refused`, a 429/503 is
  * `throttled`, and a 5xx or a dropped connection is `deferred`.
  */
-async function draftStep<T>(method: "POST", path: string, body: unknown): Promise<Step<T>> {
+async function draftStep<T>(
+  config: GraphConfig,
+  method: "POST",
+  path: string,
+  body: unknown,
+): Promise<Step<T>> {
   let token: string;
   try {
-    token = await accessToken();
+    token = await accessToken(config);
   } catch (error) {
     return {
       ok: false,
@@ -436,14 +489,18 @@ async function draftStep<T>(method: "POST", path: string, body: unknown): Promis
   if (response.ok) {
     return { ok: true, value: (await response.json().catch(() => null)) as T };
   }
-  return { ok: false, outcome: await preSendFailure(response, "building the draft") };
+  return { ok: false, outcome: await preSendFailure(response, "building the draft", config) };
 }
 
-async function preSendFailure(response: Response, during: string): Promise<PreSendOutcome> {
+async function preSendFailure(
+  response: Response,
+  during: string,
+  config: GraphConfig,
+): Promise<PreSendOutcome> {
   if (response.status === 429 || response.status === 503) {
     return { kind: "throttled", retryAfterMs: retryAfterMs(response) };
   }
-  if (response.status === 401) forgetToken();
+  if (response.status === 401) forgetToken(config);
   const { code, text } = await readGraphError(response);
   if (response.status >= 500) {
     return {
@@ -460,9 +517,9 @@ async function preSendFailure(response: Response, during: string): Promise<PreSe
 }
 
 /** Delete a draft that will not be sent. Best effort: a stray draft sends nothing. */
-async function discardDraft(draftPath: string): Promise<void> {
+async function discardDraft(draftPath: string, config: GraphConfig): Promise<void> {
   try {
-    const token = await accessToken();
+    const token = await accessToken(config);
     const response = await fetch(`${GRAPH_BASE}${draftPath}`, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${token}` },
@@ -489,9 +546,11 @@ async function discardDraft(draftPath: string): Promise<void> {
 async function uploadLargeAttachment(
   draftPath: string,
   attachment: OutboundAttachment,
+  config: GraphConfig,
 ): Promise<Step<null>> {
   const size = attachment.bytes.length;
   const session = await draftStep<{ uploadUrl?: string }>(
+    config,
     "POST",
     `${draftPath}/attachments/createUploadSession`,
     {
@@ -538,7 +597,7 @@ async function uploadLargeAttachment(
         lastFailure = null;
         break;
       }
-      lastFailure = await preSendFailure(response, `uploading ${attachment.name}`);
+      lastFailure = await preSendFailure(response, `uploading ${attachment.name}`, config);
       // Only a server-side hiccup is worth another go; a refusal or a throttle
       // will answer the same way a moment later.
       if (lastFailure.kind !== "deferred") break;
@@ -552,9 +611,10 @@ async function sendThroughDraft(
   mailbox: string,
   message: GraphMessage,
   attachments: OutboundAttachment[],
+  config: GraphConfig,
 ): Promise<DeliveryOutcome> {
   const messages = `/users/${encodeURIComponent(mailbox)}/messages`;
-  const created = await draftStep<{ id?: string }>("POST", messages, message);
+  const created = await draftStep<{ id?: string }>(config, "POST", messages, message);
   if (!created.ok) return { ...created.outcome, path: "draft", draftId: null };
   const draftId = created.value?.id;
   if (!draftId) {
@@ -570,10 +630,15 @@ async function sendThroughDraft(
   for (const attachment of attachments) {
     const attached =
       attachment.bytes.length < UPLOAD_SESSION_MIN_BYTES
-        ? await draftStep<unknown>("POST", `${draftPath}/attachments`, toFileAttachment(attachment))
-        : await uploadLargeAttachment(draftPath, attachment);
+        ? await draftStep<unknown>(
+            config,
+            "POST",
+            `${draftPath}/attachments`,
+            toFileAttachment(attachment),
+          )
+        : await uploadLargeAttachment(draftPath, attachment, config);
     if (!attached.ok) {
-      await discardDraft(draftPath);
+      await discardDraft(draftPath, config);
       return { ...attached.outcome, path: "draft", draftId: null };
     }
   }
@@ -582,9 +647,9 @@ async function sendThroughDraft(
   // than being caught below and recorded as "may have been sent".
   let token: string;
   try {
-    token = await accessToken();
+    token = await accessToken(config);
   } catch (error) {
-    await discardDraft(draftPath);
+    await discardDraft(draftPath, config);
     return {
       kind: "deferred",
       message: error instanceof Error ? error.message : "could not obtain a Microsoft token",
@@ -610,9 +675,9 @@ async function sendThroughDraft(
     };
   }
 
-  const outcome = await classifySendResponse(response);
+  const outcome = await classifySendResponse(response, config);
   if (outcome.kind === "refused" || outcome.kind === "throttled") {
-    await discardDraft(draftPath);
+    await discardDraft(draftPath, config);
     return { ...outcome, path: "draft", draftId: null };
   }
   if (outcome.kind === "unconfirmed") {
@@ -636,14 +701,18 @@ export type GraphMailMessage = {
   internetMessageHeaders?: { name: string; value: string }[];
 };
 
-async function graphGet<T>(path: string, headers: Record<string, string> = {}): Promise<T> {
+async function graphGet<T>(
+  path: string,
+  headers: Record<string, string>,
+  config: GraphConfig,
+): Promise<T> {
   return withRetry(
     async () => {
-      const token = await accessToken();
+      const token = await accessToken(config);
       const response = await fetch(path.startsWith("http") ? path : `${GRAPH_BASE}${path}`, {
         headers: { Authorization: `Bearer ${token}`, ...headers },
       });
-      if (response.status === 401) forgetToken();
+      if (response.status === 401) forgetToken(config);
       if (!response.ok) {
         const detail = await response.text().catch(() => "");
         let code: string | null = null;
@@ -679,7 +748,12 @@ async function graphGet<T>(path: string, headers: Record<string, string> = {}): 
  */
 export type MailPage = { messages: GraphMailMessage[]; nextLink: string | null };
 
-export async function listInboxSince(mailbox: string, since: Date, top = 50): Promise<MailPage> {
+export async function listInboxSince(
+  mailbox: string,
+  since: Date,
+  top = 50,
+  config: GraphConfig = requireGraphConfig(),
+): Promise<MailPage> {
   const filter = `receivedDateTime ge ${since.toISOString().replace(/\.\d{3}Z$/, "Z")}`;
   const query = new URLSearchParams({
     $select: "id,subject,receivedDateTime,from,body,internetMessageHeaders",
@@ -688,18 +762,23 @@ export async function listInboxSince(mailbox: string, since: Date, top = 50): Pr
     $top: String(Math.min(Math.max(top, 1), 100)),
   });
   const path = `/users/${encodeURIComponent(mailbox)}/mailFolders/inbox/messages?${query.toString()}`;
-  return readMailPage(path);
+  return readMailPage(path, config);
 }
 
 /** Continue a listing from Graph's own `@odata.nextLink`. */
-export async function listInboxPage(nextLink: string): Promise<MailPage> {
-  return readMailPage(nextLink);
+export async function listInboxPage(
+  nextLink: string,
+  config: GraphConfig = requireGraphConfig(),
+): Promise<MailPage> {
+  return readMailPage(nextLink, config);
 }
 
-async function readMailPage(path: string): Promise<MailPage> {
-  const payload = await graphGet<{ value: GraphMailMessage[]; "@odata.nextLink"?: string }>(path, {
-    Prefer: 'outlook.body-content-type="text"',
-  });
+async function readMailPage(path: string, config: GraphConfig): Promise<MailPage> {
+  const payload = await graphGet<{ value: GraphMailMessage[]; "@odata.nextLink"?: string }>(
+    path,
+    { Prefer: 'outlook.body-content-type="text"' },
+    config,
+  );
   return { messages: payload.value ?? [], nextLink: payload["@odata.nextLink"] ?? null };
 }
 
@@ -715,6 +794,7 @@ async function readMailPage(path: string): Promise<MailPage> {
  */
 export async function listDirectoryUsers(
   limit = 2000,
+  config: GraphConfig = requireGraphConfig(),
 ): Promise<{ users: DirectoryUser[]; truncated: boolean }> {
   const users: DirectoryUser[] = [];
   let next: string | null = `/users?${new URLSearchParams({
@@ -722,7 +802,11 @@ export async function listDirectoryUsers(
     $top: "999",
   }).toString()}`;
   while (next) {
-    const page: { value?: DirectoryUser[]; "@odata.nextLink"?: string } = await graphGet(next);
+    const page: { value?: DirectoryUser[]; "@odata.nextLink"?: string } = await graphGet(
+      next,
+      {},
+      config,
+    );
     users.push(...(page.value ?? []));
     if (users.length >= limit) return { users: users.slice(0, limit), truncated: true };
     next = page["@odata.nextLink"] ?? null;
@@ -746,7 +830,10 @@ const BATCH_CONCURRENCY = 3;
  * throttle) reports its status against every address in it, so the caller
  * sees "unknown" rather than a verdict nobody reached.
  */
-export async function probeMailboxes(addresses: string[]): Promise<MailboxProbe[]> {
+export async function probeMailboxes(
+  addresses: string[],
+  config?: GraphConfig,
+): Promise<MailboxProbe[]> {
   const unique = [...new Set(addresses.map((address) => address.trim()).filter(Boolean))];
   const chunks: string[][] = [];
   for (let at = 0; at < unique.length; at += BATCH_SIZE) {
@@ -755,19 +842,23 @@ export async function probeMailboxes(addresses: string[]): Promise<MailboxProbe[
 
   const results: MailboxProbe[] = [];
   for (let at = 0; at < chunks.length; at += BATCH_CONCURRENCY) {
-    const settled = await Promise.all(chunks.slice(at, at + BATCH_CONCURRENCY).map(probeBatch));
+    const settled = await Promise.all(
+      chunks.slice(at, at + BATCH_CONCURRENCY).map((chunk) => probeBatch(chunk, config)),
+    );
     for (const batch of settled) results.push(...batch);
   }
   return results;
 }
 
-async function probeBatch(addresses: string[]): Promise<MailboxProbe[]> {
+async function probeBatch(addresses: string[], given?: GraphConfig): Promise<MailboxProbe[]> {
   const everyone = (status: number, code: string | null = null) =>
     addresses.map((address) => ({ address, status, code }));
 
   let token: string;
+  let config: GraphConfig;
   try {
-    token = await accessToken();
+    config = given ?? requireGraphConfig();
+    token = await accessToken(config);
   } catch (error) {
     return everyone(error instanceof GraphError ? error.status : 0, "token");
   }
@@ -788,7 +879,7 @@ async function probeBatch(addresses: string[]): Promise<MailboxProbe[]> {
   } catch {
     return everyone(0);
   }
-  if (response.status === 401) forgetToken();
+  if (response.status === 401) forgetToken(config);
   if (!response.ok) return everyone(response.status);
 
   const payload = (await response.json().catch(() => null)) as {

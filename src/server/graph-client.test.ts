@@ -6,6 +6,7 @@
 // went.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  accessToken,
   deliverMessage,
   forgetToken,
   listDirectoryUsers,
@@ -261,5 +262,66 @@ describe("listDirectoryUsers", () => {
     calls = [];
     expect(await listDirectoryUsers(2)).toMatchObject({ truncated: true, users: { length: 2 } });
     expect(calls).toHaveLength(1);
+  });
+});
+
+describe("tokens — one per tenant", () => {
+  const partner = {
+    tenantId: "partner-tenant",
+    clientId: "partner-client",
+    clientSecret: "partner-secret",
+    mailbox: null,
+    key: "tenant:p1:v1",
+    label: "Partner",
+  };
+
+  it("asks each tenant's own directory for a token and presents only that one", async () => {
+    const issued: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init: RequestInit = {}) => {
+        const url = String(input);
+        if (url.includes("login.microsoftonline.com")) {
+          const tenant = new URL(url).pathname.split("/")[1];
+          issued.push(tenant);
+          return json(200, { access_token: `token-for-${tenant}`, expires_in: 3600 });
+        }
+        calls.push({
+          url,
+          method: init.method ?? "GET",
+          headers: Object.fromEntries(new Headers(init.headers ?? {}).entries()),
+          body: init.body,
+        });
+        return new Response(null, { status: 202 });
+      }),
+    );
+
+    await deliverMessage("a@deployment.test", message, []);
+    await deliverMessage("b@partner.test", message, [], partner);
+    await deliverMessage("c@partner.test", message, [], partner);
+
+    // One token each, cached per tenant.
+    expect(issued).toEqual(["tenant", "partner-tenant"]);
+    expect(calls.map((call) => call.headers.authorization)).toEqual([
+      "Bearer token-for-tenant",
+      "Bearer token-for-partner-tenant",
+      "Bearer token-for-partner-tenant",
+    ]);
+  });
+
+  it("says which tenant was refused, and why, from Microsoft's code", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        json(401, {
+          error: "invalid_client",
+          error_description: "AADSTS7000215: Invalid client secret provided.",
+          error_codes: [7000215],
+        }),
+      ),
+    );
+    await expect(accessToken(partner)).rejects.toThrow(
+      /rejected the application credentials for Partner: the client secret is wrong/,
+    );
   });
 });
