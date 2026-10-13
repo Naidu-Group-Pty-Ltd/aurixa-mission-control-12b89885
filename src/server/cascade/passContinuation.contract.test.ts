@@ -590,8 +590,9 @@ describe("a held line variant is merged once, across passes", () => {
   const phase = sliceFrom(engine, "const askVariant = async (path: string)", 6_000);
 
   it("takes a settled verdict before asking anything, whatever the clock says", () => {
-    const settled = phase.indexOf(
-      "const settledPaths = candidates.filter((h) => knownVariantEvidence.has(h.path))",
+    // Whitespace is the formatter's; the pin is the expression.
+    const settled = phase.search(
+      /const settledPaths = candidates\s*\.filter\(\(h\) => knownVariantEvidence\.has\(h\.path\)\)/,
     );
     const asking = phase.indexOf(
       "for (const path of [...keepable, ...reread, ...retries, ...unkeepable])",

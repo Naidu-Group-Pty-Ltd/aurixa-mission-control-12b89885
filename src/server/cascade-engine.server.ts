@@ -1982,6 +1982,13 @@ export async function processClone(args: {
    * a truncated tree cannot say a file is absent, only that it was not listed.
    */
   let cloneShaByPath: ReadonlyMap<string, string> | null = null;
+  /**
+   * The clone head commit `cloneShaByPath` was listed at. Set exactly when
+   * `cloneShaByPath` is. A line variant's merge reads the clone's history of
+   * a path and its copy AT this commit, and its kept verdict names it: the
+   * base can move while the clone's blob stays the same.
+   */
+  let cloneHeadSha: string | null = null;
   /** Prime's blob SHA per path, when its listing was complete. */
   let primeShaByPath: ReadonlyMap<string, string> | null = null;
   /**
@@ -2016,6 +2023,7 @@ export async function processClone(args: {
       if (cloneTree.entries.get(path) !== sha) candidatePaths.push(path);
     }
     cloneShaByPath = cloneTree.entries;
+    cloneHeadSha = cloneTree.headSha;
     primeShaByPath = primeTree.entries;
     primeSizeByPath = primeTree.sizes;
     primeModeByPath = primeTree.modes;
@@ -2107,6 +2115,7 @@ export async function processClone(args: {
         (path) => cloneTree.entries.get(path) !== primeTree.entries.get(path),
       );
       cloneShaByPath = cloneTree.entries;
+      cloneHeadSha = cloneTree.headSha;
       primeShaByPath = primeTree.entries;
       primeSizeByPath = primeTree.sizes;
       primeModeByPath = primeTree.modes;
@@ -2190,15 +2199,16 @@ export async function processClone(args: {
   const knownHeldEvidence = resume
     ? resumableHeldEvidence(priorProgress, cloneShaByPath ?? null)
     : new Map<string, SettledHeldEvidence>();
-  // A line variant's merge verdict, at the pair of blobs it read. A settled
+  // A line variant's merge verdict, at the pair of blobs and the clone head it
+  // read. A settled
   // one is taken as it stands; a transient hold is carried as "asked" so the
   // path is retried after every path never asked at all, and never pauses a
   // pass by itself (`resumableVariantEvidence`, `variantRetryPaths`).
   const knownVariantEvidence = resume
-    ? resumableVariantEvidence(priorProgress, cloneShaByPath ?? null, primeShaByPath)
+    ? resumableVariantEvidence(priorProgress, cloneShaByPath ?? null, primeShaByPath, cloneHeadSha)
     : new Map<string, VariantEvidenceEntry>();
   const variantRetry = resume
-    ? variantRetryPaths(priorProgress, cloneShaByPath ?? null, primeShaByPath)
+    ? variantRetryPaths(priorProgress, cloneShaByPath ?? null, primeShaByPath, cloneHeadSha)
     : new Map<string, VariantEvidenceEntry>();
   const evidenceLedger: Record<string, DeletionEvidenceEntry> = {};
   const heldLedger: Record<string, HeldEvidenceEntry> = {};
@@ -2625,9 +2635,10 @@ export async function processClone(args: {
     DEPLOY_WORKFLOW_PATH,
     EDGE_TYPECHECK_BASELINE_PATH,
   ]);
-  /** A verdict can be kept only where both blobs it read are known. */
+  /** A verdict can be kept only where both blobs and the clone head it read are known. */
   const variantRecordable = (path: string): boolean =>
     resume !== undefined &&
+    cloneHeadSha !== null &&
     cloneShaByPath?.get(path) !== undefined &&
     primeShaByPath?.get(path) !== undefined;
   const settleVariant = (
@@ -2655,7 +2666,8 @@ export async function processClone(args: {
   const recordVariant = async (path: string, verdict: VariantMergeVerdict): Promise<void> => {
     const clone = cloneShaByPath?.get(path);
     const prime = primeShaByPath?.get(path);
-    if (!variantRecordable(path) || !clone || !prime) return;
+    const head = cloneHeadSha;
+    if (!variantRecordable(path) || !clone || !prime || !head) return;
     let kept: VariantEvidenceEntry["verdict"];
     if (verdict.act === "write") {
       const blob = await storeMergedVariant(octokit, cloneRef, verdict.text);
@@ -2668,7 +2680,11 @@ export async function processClone(args: {
             blob,
           }
         : // Merged and used by THIS pass, but not kept: asked again later.
-          { act: "hold", why: "the merged text could not be stored for a later pass", transient: true };
+          {
+            act: "hold",
+            why: "the merged text could not be stored for a later pass",
+            transient: true,
+          };
     } else if (verdict.act === "current") {
       kept = { act: "current", base: verdict.base };
     } else {
@@ -2676,7 +2692,7 @@ export async function processClone(args: {
         ? { act: "hold", why: verdict.why, transient: true }
         : { act: "hold", why: verdict.why };
     }
-    variantLedger[path] = { clone, prime, verdict: kept };
+    variantLedger[path] = { clone, prime, head, verdict: kept };
     variantVerdictsRecorded += 1;
   };
   /**
@@ -2689,7 +2705,12 @@ export async function processClone(args: {
     if (!entry) return null;
     const v = entry.verdict;
     if (v.act === "write") {
-      const settled = { act: "write" as const, base: v.base, fromPrime: v.fromPrime, fromClone: v.fromClone };
+      const settled = {
+        act: "write" as const,
+        base: v.base,
+        fromPrime: v.fromPrime,
+        fromClone: v.fromClone,
+      };
       if (variantBlobPrepared(path, v.blob)) {
         return settleVariant(path, settled, { text: null, blob: v.blob });
       }
@@ -2703,7 +2724,9 @@ export async function processClone(args: {
     variantMergesAsked += 1;
     const verdict = await mergeHeldVariant({
       octokit,
-      cloneRef,
+      // At the head the trees were listed at, so the history the base comes
+      // from and the copy of ours are the ones the kept verdict names.
+      cloneRef: cloneHeadSha ? { ...cloneRef, branch: cloneHeadSha } : cloneRef,
       primeRef,
       path,
       maxBytes: CASCADE_MAX_FILE_BYTES,
@@ -2743,7 +2766,9 @@ export async function processClone(args: {
     // 1. Settled on an earlier pass: taken whatever the clock says, because
     //    a settled verdict costs at most one read and refusing it would make
     //    a pass that had already decided a path decide it again.
-    const settledPaths = candidates.filter((h) => knownVariantEvidence.has(h.path)).map((h) => h.path);
+    const settledPaths = candidates
+      .filter((h) => knownVariantEvidence.has(h.path))
+      .map((h) => h.path);
     const reread: string[] = [];
     await mapWithConcurrency(settledPaths, 8, async (path) => {
       const act = await reuseVariant(path);
@@ -3244,7 +3269,6 @@ export async function processClone(args: {
       }
     }
     if (!primeFile) return null;
-
 
     // A mirror already knows this path differs -- the blob SHAs said so -- and
     // re-reading the clone's copy to confirm it would double the request count

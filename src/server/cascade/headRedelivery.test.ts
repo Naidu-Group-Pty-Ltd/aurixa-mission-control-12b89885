@@ -15,6 +15,7 @@ import { supersededSummary } from "./eventFold.pure";
 import {
   HEAD_REDELIVERY_AUDIT_ACTION,
   HEAD_REDELIVERY_COOLDOWN_MS,
+  HEAD_REDELIVERY_ID_NAMESPACE,
   HEAD_REDELIVERY_MAX,
   HEAD_REDELIVERY_SCOPE,
   REJECTION_SUMMARY_PREFIX,
@@ -23,7 +24,10 @@ import {
   findSupersedingCarrier,
   isReviewerRejection,
   isSupersededSummary,
+  nameBasedUuid,
+  priorRedeliveriesFrom,
   redeliveryEvent,
+  redeliveryEventId,
   redeliverySummary,
   settledAt,
   type PriorRedeliveries,
@@ -488,6 +492,103 @@ describe("redeliveryEvent", () => {
   });
 });
 
+describe("two overlapping ticks mint one redelivery", () => {
+  // The drain holds no lock. Two idle ticks can both read no live delivery
+  // and the same prior count, so both decide the same redelivery. The event
+  // id is what stops both minting: it is derived, so both name one row.
+  const V5 = /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+  it("derives a name-based UUID exactly as RFC 9562 does", async () => {
+    // RFC 9562's own example: the DNS namespace and "www.example.com".
+    expect(await nameBasedUuid("6ba7b810-9dad-11d1-80b4-00c04fd430c8", "www.example.com")).toBe(
+      "2ed6657d-e927-568b-95e1-2665a8aea6a2",
+    );
+    await expect(nameBasedUuid("not-a-uuid", "x")).rejects.toThrow(/not a UUID namespace/);
+  });
+
+  it("names the same row for the same head and redelivery, in this namespace", async () => {
+    const a = await redeliveryEventId(HEAD_ID, 1);
+    expect(a).toBe(await redeliveryEventId(HEAD_ID, 1));
+    expect(a).toMatch(V5);
+    // Pinned: a build that derived it differently would not collide with
+    // one that did not, and two ticks on two builds would both mint.
+    expect(HEAD_REDELIVERY_ID_NAMESPACE).toBe("4b98edb5-2039-4c6c-b63c-ba17a08acf71");
+    expect(a).toBe("089d6a53-e7a0-51d4-b0a1-344617629402");
+  });
+
+  it("names a different row for the next redelivery and for another head", async () => {
+    const ids = await Promise.all([
+      redeliveryEventId(HEAD_ID, 1),
+      redeliveryEventId(HEAD_ID, 2),
+      redeliveryEventId(HEAD_ID, 3),
+      redeliveryEventId(CARRIER_ID, 1),
+    ]);
+    expect(new Set(ids).size).toBe(4);
+    for (const id of ids) expect(id).toMatch(V5);
+  });
+
+  it("gives two ticks that read the same facts the same verdict and the same id", async () => {
+    const [a, b] = [decide(), decide()];
+    if (!a.redeliver || !b.redeliver) throw new Error("expected both ticks to redeliver");
+    expect(await redeliveryEventId(HEAD_ID, a.redelivery)).toBe(
+      await redeliveryEventId(HEAD_ID, b.redelivery),
+    );
+  });
+});
+
+describe("priorRedeliveriesFrom", () => {
+  const row = (at: string, id: string | null, extra: Record<string, unknown> = {}) => ({
+    created_at: at,
+    metadata: id === null ? { ...extra } : { redelivery_event_id: id, ...extra },
+  });
+
+  it("counts nothing from no rows", () => {
+    expect(priorRedeliveriesFrom([])).toEqual(NONE);
+  });
+
+  it("counts the loser's row of an overlapping mint as the same redelivery", () => {
+    const prior = priorRedeliveriesFrom([
+      row(HOURS_AGO(1), REDELIVERY_ID),
+      row(HOURS_AGO(1.0001), REDELIVERY_ID),
+    ]);
+    expect(prior).toEqual({ count: 1, lastAt: HOURS_AGO(1), lastEventId: REDELIVERY_ID });
+  });
+
+  it("counts distinct redeliveries, and reads the newest row for the cooldown", () => {
+    const prior = priorRedeliveriesFrom([
+      row(HOURS_AGO(2), "b"),
+      row(HOURS_AGO(3), "a"),
+      row(HOURS_AGO(3.0001), "a"),
+    ]);
+    expect(prior).toEqual({ count: 2, lastAt: HOURS_AGO(2), lastEventId: "b" });
+  });
+
+  it("counts a row that names no id on its own, so it brings the ceiling nearer", () => {
+    const prior = priorRedeliveriesFrom([
+      row(HOURS_AGO(2), null),
+      { created_at: HOURS_AGO(3), metadata: null },
+      { created_at: HOURS_AGO(4), metadata: ["not", "an", "object"] },
+      row(HOURS_AGO(5), ""),
+      row(HOURS_AGO(6), "a"),
+    ]);
+    expect(prior.count).toBe(5);
+    expect(prior.lastEventId).toBeNull();
+    expect(prior.lastAt).toBe(HOURS_AGO(2));
+  });
+
+  it("reaches the ceiling at three distinct redeliveries, however many rows they wrote", () => {
+    const prior = priorRedeliveriesFrom([
+      row(HOURS_AGO(2), "c"),
+      row(HOURS_AGO(2), "c"),
+      row(HOURS_AGO(4), "b"),
+      row(HOURS_AGO(6), "a"),
+      row(HOURS_AGO(6), "a"),
+    ]);
+    expect(prior.count).toBe(HEAD_REDELIVERY_MAX);
+    expect(refusal(decide({ prior }))).toMatch(/redelivered 3 times already/);
+  });
+});
+
 describe("the drain's redelivery is wired the way the module promises", () => {
   const drain = readFileSync("src/routes/hooks.cascade-drain.tsx", "utf8");
   const start = drain.indexOf("async function raiseDriftBeacon(");
@@ -522,6 +623,23 @@ describe("the drain's redelivery is wired the way the module promises", () => {
     expect(redeliver).toMatch(/if \(countErr\) \{[\s\S]{0,300}return null;/);
     expect(redeliver).toContain("action: HEAD_REDELIVERY_AUDIT_ACTION,");
     expect(HEAD_REDELIVERY_AUDIT_ACTION).toBe("cascade.head_redelivered");
+  });
+
+  it("derives the event id, never draws it, and stops at a conflict before arming a clone", () => {
+    expect(redeliver).not.toContain("randomUUID");
+    expect(redeliver).toContain(
+      "const newId = await redeliveryEventId(head.id, verdict.redelivery);",
+    );
+    const conflict = redeliver.indexOf('eventErr.code === "23505"');
+    const armed = redeliver.indexOf('.from("cascade_results").insert(');
+    expect(conflict).toBeGreaterThan(-1);
+    expect(conflict).toBeLessThan(armed);
+    expect(redeliver.slice(conflict, armed)).toMatch(/23505"\) \{[\s\S]{0,400}return null;/);
+  });
+
+  it("counts prior redeliveries by distinct id, through the module's own reader", () => {
+    expect(redeliver).toContain("priorRedeliveriesFrom(audits ?? [])");
+    expect(redeliver).not.toContain("rows.length");
   });
 
   it("counts from the same audit action it writes, keyed on the head", () => {

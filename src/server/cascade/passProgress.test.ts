@@ -16,6 +16,8 @@ import {
 } from "./passProgress.pure";
 
 const sha = (n: number) => n.toString(16).padStart(40, "0");
+/** The clone head commit the recorded variant verdicts were merged at. */
+const HEAD = sha(0xc0ffee);
 const SOURCE = sha(0xabc);
 
 const record: CascadeProgress = {
@@ -47,21 +49,25 @@ const record: CascadeProgress = {
     "supabase/functions/x/index.ts": {
       clone: sha(81),
       prime: sha(82),
+      head: HEAD,
       verdict: { act: "write", base: sha(83), fromPrime: 3, fromClone: 2, blob: sha(84) },
     },
     "src/lib/crm.ts": {
       clone: sha(85),
       prime: sha(86),
+      head: HEAD,
       verdict: { act: "current", base: sha(87) },
     },
     "src/App.tsx": {
       clone: sha(61),
       prime: sha(88),
+      head: HEAD,
       verdict: { act: "hold", why: "the line edited both sides" },
     },
     "src/flaky.ts": {
       clone: sha(89),
       prime: sha(90),
+      head: HEAD,
       verdict: { act: "hold", why: "HTTP 502 reading the base", transient: true },
     },
   },
@@ -283,7 +289,8 @@ describe("variant merge verdicts", () => {
   /* Measured 11–12 Oct 2026 on the CRM line: four consecutive events spent
      their whole window re-merging the same ~30 held variants (≈130 requests
      each pass), recorded nothing, and were retired after three attempts. A
-     verdict is now remembered, keyed to the two blobs it was computed from. */
+     verdict is now remembered, keyed to the two blobs and the clone head it was
+     computed from. */
   const VARIANT = "supabase/functions/x/index.ts";
   const trees = () => ({
     clone: new Map([
@@ -300,35 +307,72 @@ describe("variant merge verdicts", () => {
     ]),
   });
 
-  it("reuses a settled verdict only while BOTH blobs it read are unchanged", () => {
+  it("reuses a settled verdict only while BOTH blobs it read are unchanged, at the same head", () => {
     const { clone, prime } = trees();
-    expect([...resumableVariantEvidence(record, clone, prime).keys()].sort()).toEqual(
+    expect([...resumableVariantEvidence(record, clone, prime, HEAD).keys()].sort()).toEqual(
       ["src/App.tsx", "src/lib/crm.ts", VARIANT].sort(),
     );
     // The clone moved the file — the base is read off the clone's history, so
     // a new question.
     const cloneMoved = new Map(clone).set(VARIANT, sha(99));
-    expect(resumableVariantEvidence(record, cloneMoved, prime).has(VARIANT)).toBe(false);
+    expect(resumableVariantEvidence(record, cloneMoved, prime, HEAD).has(VARIANT)).toBe(false);
     // Prime moved it — theirs changed, so a new question.
     const primeMoved = new Map(prime).set(VARIANT, sha(99));
-    expect(resumableVariantEvidence(record, clone, primeMoved).has(VARIANT)).toBe(false);
+    expect(resumableVariantEvidence(record, clone, primeMoved, HEAD).has(VARIANT)).toBe(false);
+  });
+
+  it("does not reuse a verdict once the clone's head moved, even at the same two blobs", () => {
+    /* The case the blob pair cannot see: a commit that touches the path and
+       leaves the same bytes behind (a change and its revert, or a reconcile
+       that names a newer prime revision and restores the line's text). The
+       base is read off that history, so it moved while both blobs stood
+       still, and the old verdict merged against a base that is no longer the
+       one variantBaseFrom would choose. */
+    const { clone, prime } = trees();
+    const movedHead = sha(0xbeef);
+    expect(resumableVariantEvidence(record, clone, prime, movedHead).size).toBe(0);
+    expect(variantRetryPaths(record, clone, prime, movedHead).size).toBe(0);
+    // No head to check against is no reuse at all.
+    expect(resumableVariantEvidence(record, clone, prime, null).size).toBe(0);
+    expect(variantRetryPaths(record, clone, prime, null).size).toBe(0);
+  });
+
+  it("drops a verdict recorded before the head was kept — merged again, never reused unchecked", () => {
+    const legacy = {
+      ...record,
+      variant_evidence: {
+        ...record.variant_evidence,
+        "src/legacy.ts": {
+          clone: sha(1),
+          prime: sha(2),
+          verdict: { act: "current", base: sha(3) },
+        },
+        "src/bad-head.ts": {
+          clone: sha(1),
+          prime: sha(2),
+          head: "main",
+          verdict: { act: "current", base: sha(3) },
+        },
+      },
+    };
+    expect(readProgress(legacy)).toEqual(record);
   });
 
   it("never reuses a transient hold as an answer — only as 'already asked'", () => {
     const { clone, prime } = trees();
-    expect(resumableVariantEvidence(record, clone, prime).has("src/flaky.ts")).toBe(false);
-    expect([...variantRetryPaths(record, clone, prime).keys()]).toEqual(["src/flaky.ts"]);
+    expect(resumableVariantEvidence(record, clone, prime, HEAD).has("src/flaky.ts")).toBe(false);
+    expect([...variantRetryPaths(record, clone, prime, HEAD).keys()]).toEqual(["src/flaky.ts"]);
     // At different blobs it is never-asked again, not asked-last.
     const moved = new Map(clone).set("src/flaky.ts", sha(99));
-    expect(variantRetryPaths(record, moved, prime).size).toBe(0);
+    expect(variantRetryPaths(record, moved, prime, HEAD).size).toBe(0);
   });
 
   it("reuses nothing without both listings to check against", () => {
     const { clone, prime } = trees();
-    expect(resumableVariantEvidence(record, null, prime).size).toBe(0);
-    expect(resumableVariantEvidence(record, clone, null).size).toBe(0);
-    expect(resumableVariantEvidence(null, clone, prime).size).toBe(0);
-    expect(variantRetryPaths(record, null, prime).size).toBe(0);
+    expect(resumableVariantEvidence(record, null, prime, HEAD).size).toBe(0);
+    expect(resumableVariantEvidence(record, clone, null, HEAD).size).toBe(0);
+    expect(resumableVariantEvidence(null, clone, prime, HEAD).size).toBe(0);
+    expect(variantRetryPaths(record, null, prime, HEAD).size).toBe(0);
   });
 
   it("drops a malformed verdict alone — one re-merge, never bytes nobody merged", () => {
@@ -339,20 +383,23 @@ describe("variant merge verdicts", () => {
         "src/no-blob.ts": {
           clone: sha(1),
           prime: sha(2),
+          head: HEAD,
           verdict: { act: "write", base: sha(3), fromPrime: 1, fromClone: 1 },
         },
         "src/bad-count.ts": {
           clone: sha(1),
           prime: sha(2),
+          head: HEAD,
           verdict: { act: "write", base: sha(3), fromPrime: -1, fromClone: 1, blob: sha(4) },
         },
-        "src/bad-act.ts": { clone: sha(1), prime: sha(2), verdict: { act: "merge" } },
+        "src/bad-act.ts": { clone: sha(1), prime: sha(2), head: HEAD, verdict: { act: "merge" } },
         "src/bad-prime.ts": {
           clone: sha(1),
           prime: "x",
+          head: HEAD,
           verdict: { act: "current", base: sha(3) },
         },
-        "src/no-why.ts": { clone: sha(1), prime: sha(2), verdict: { act: "hold" } },
+        "src/no-why.ts": { clone: sha(1), prime: sha(2), head: HEAD, verdict: { act: "hold" } },
       },
     };
     expect(readProgress(dirty)).toEqual(record);
@@ -414,6 +461,7 @@ describe("ledgerGrew", () => {
           "src/new-variant.ts": {
             clone: sha(8),
             prime: sha(9),
+            head: HEAD,
             verdict: { act: "current", base: sha(10) },
           },
         },
@@ -430,11 +478,27 @@ describe("ledgerGrew", () => {
         "src/flaky.ts": {
           clone: sha(89),
           prime: sha(90),
+          head: HEAD,
           verdict: { act: "current", base: sha(91) },
         },
       },
     };
     expect(ledgerGrew(base, changed)).toBe(true);
+  });
+
+  it("sees the same answer re-decided at a new clone head as a changed answer", () => {
+    const base = parsed();
+    const rehead: CascadeProgress = {
+      ...base,
+      variant_evidence: {
+        ...base.variant_evidence,
+        "src/lib/crm.ts": {
+          ...base.variant_evidence!["src/lib/crm.ts"],
+          head: sha(0xbeef),
+        },
+      },
+    };
+    expect(ledgerGrew(base, rehead)).toBe(true);
   });
 
   it("does NOT refund a pass that only re-asked a transient path — its prose is not compared", () => {
@@ -446,6 +510,7 @@ describe("ledgerGrew", () => {
         "src/flaky.ts": {
           clone: sha(89),
           prime: sha(90),
+          head: HEAD,
           verdict: { act: "hold", why: "HTTP 503 reading the base", transient: true },
         },
       },

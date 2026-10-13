@@ -6,7 +6,10 @@
  *
  *   1. the commits on the clone's default branch that touched the path,
  *      newest first — the base is the prime revision the newest of them that
- *      names one names (`variantBaseFrom`);
+ *      names one names (`variantBaseFrom`). The engine passes the clone's
+ *      head COMMIT as `cloneRef.branch`, so this history and the copy of ours
+ *      in step 3 are read at the commit the kept verdict is keyed to, never
+ *      at a branch that moved in between;
  *   2. prime's copy at that revision (the base), resolved to a full SHA first
  *      so an abbreviated name is never read as a branch;
  *   3. the clone's copy (ours) and prime's current copy (theirs).

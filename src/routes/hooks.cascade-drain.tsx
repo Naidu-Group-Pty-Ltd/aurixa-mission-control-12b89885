@@ -37,7 +37,9 @@ import {
   decideHeadRedelivery,
   findSupersedingCarrier,
   isSupersededSummary,
+  priorRedeliveriesFrom,
   redeliveryEvent,
+  redeliveryEventId,
   type PriorRedeliveries,
   type RedeliveryEventReading,
 } from "@/server/cascade/headRedelivery.pure";
@@ -679,6 +681,11 @@ async function raiseDriftBeacon(): Promise<string | null> {
  * the id the audit row already names, so the count and the event cannot
  * disagree about which redelivery they describe.
  *
+ * The drain holds no lock, so two idle ticks can both reach the mint. The
+ * id is derived from the head event and the redelivery number, never drawn
+ * at random, so both name the same row: one insert lands, the other reads
+ * 23505 and arms nothing, and the duplicate audit row is counted once.
+ *
  * Every read that fails refuses, and every failure is logged and answered
  * `null` — this runs inside the beacon, which must never take down the tick.
  */
@@ -752,24 +759,9 @@ async function redeliverHead(input: {
       .eq("entity_id", head.id)
       .order("created_at", { ascending: false })
       .limit(50);
-    let prior: PriorRedeliveries | null = null;
-    if (!auditErr) {
-      const rows = audits ?? [];
-      const newest = rows[0];
-      const meta =
-        newest &&
-        newest.metadata &&
-        typeof newest.metadata === "object" &&
-        !Array.isArray(newest.metadata)
-          ? (newest.metadata as Record<string, unknown>)
-          : null;
-      prior = {
-        count: rows.length,
-        lastAt: newest?.created_at ?? null,
-        lastEventId:
-          meta && typeof meta.redelivery_event_id === "string" ? meta.redelivery_event_id : null,
-      };
-    }
+    // Counted by distinct redelivery id: an overlapping tick that lost the
+    // race below still wrote its row, and it is the same redelivery.
+    const prior: PriorRedeliveries | null = auditErr ? null : priorRedeliveriesFrom(audits ?? []);
 
     let lastRedelivery: RedeliveryEventReading | null = null;
     let lastRedeliveryUnreadable = false;
@@ -810,7 +802,9 @@ async function redeliverHead(input: {
     const { data: clones, error: cloneErr } = await admin.from("clones").select("id");
     if (cloneErr || !clones || clones.length === 0) return null;
 
-    const newId = crypto.randomUUID();
+    // Derived, never random: an overlapping tick that decided the same
+    // redelivery names the same row, and the primary key admits one of them.
+    const newId = await redeliveryEventId(head.id, verdict.redelivery);
     const { error: countErr } = await admin.from("audit_log").insert({
       action: HEAD_REDELIVERY_AUDIT_ACTION,
       entity_type: "cascade_event",
@@ -846,6 +840,15 @@ async function redeliverHead(input: {
       }),
     });
     if (eventErr) {
+      if (eventErr.code === "23505") {
+        // An overlapping tick decided the same redelivery and minted it
+        // first. Its event is the delivery; this tick arms nothing.
+        console.log(
+          `[cascade-drain] prime@${input.headSha.slice(0, 7)} redelivery ${verdict.redelivery} ` +
+            `already minted as ${newId} by an overlapping tick`,
+        );
+        return null;
+      }
       // The counter already names this redelivery; a missing event is read
       // as one that delivered nothing, and the cooldown still applies.
       console.error("[cascade-drain] head redelivery event insert failed:", eventErr.message);

@@ -62,10 +62,16 @@
  * paused clone ends the pass, the other line's three clones were never reached
  * at all.
  *
- * So a verdict rides the ledger, keyed to BOTH blobs it was computed from:
- * the clone's copy (ours) and prime's current copy (theirs). The base is read
- * off the clone's history of the path, and a commit that touches the path
- * changes the clone's blob, so the pair is the whole question. A `write`
+ * So a verdict rides the ledger, keyed to what it was computed from: the
+ * clone's copy (ours), prime's current copy (theirs), and the clone's head
+ * commit, whose history of the path decides the base. The two blobs are not
+ * enough on their own: a commit can touch the path and leave the same bytes
+ * behind (a change, then its revert, or a reconcile that names a newer prime
+ * revision and restores the line's text), and the base then moves while both
+ * blobs stand still. The merge reads its history and its copy of ours AT that
+ * head, so the key is exactly what was read; the cost is one re-merge of the
+ * held paths whenever the clone's branch moves, which it does not do while a
+ * cascade is still being proposed to it. A `write`
  * carries the blob SHA its merged text was stored under in the clone's
  * repository, and the next pass reads that blob back rather than merging
  * again. A hold that a RETRY could change (a read that failed, a revision
@@ -111,6 +117,12 @@ export type VariantEvidenceEntry = {
   clone: string;
   /** The prime blob SHA (theirs) the merge read. */
   prime: string;
+  /**
+   * The clone head commit the merge read its history and its copy of ours at.
+   * The base is decided by that history, which can move while both blobs stay
+   * the same, so a verdict is reused only at this same head.
+   */
+  head: string;
   verdict:
     | { act: "hold"; why: string; transient?: true }
     | { act: "current"; base: string }
@@ -216,20 +228,28 @@ export function readProgress(raw: unknown): CascadeProgress | null {
  */
 function readVariantEntry(raw: unknown): VariantEvidenceEntry | null {
   if (!raw || typeof raw !== "object") return null;
-  const { clone, prime, verdict } = raw as { clone?: unknown; prime?: unknown; verdict?: unknown };
+  const { clone, prime, head, verdict } = raw as {
+    clone?: unknown;
+    prime?: unknown;
+    head?: unknown;
+    verdict?: unknown;
+  };
   if (typeof clone !== "string" || !SHA.test(clone)) return null;
   if (typeof prime !== "string" || !SHA.test(prime)) return null;
+  // A verdict recorded before the head was kept names no history, so it is
+  // dropped and merged again rather than reused at a base nobody checked.
+  if (typeof head !== "string" || !SHA.test(head)) return null;
   if (!verdict || typeof verdict !== "object") return null;
   const v = verdict as Record<string, unknown>;
   if (v.act === "hold") {
     if (typeof v.why !== "string") return null;
     return v.transient === true
-      ? { clone, prime, verdict: { act: "hold", why: v.why, transient: true } }
-      : { clone, prime, verdict: { act: "hold", why: v.why } };
+      ? { clone, prime, head, verdict: { act: "hold", why: v.why, transient: true } }
+      : { clone, prime, head, verdict: { act: "hold", why: v.why } };
   }
   if (v.act === "current") {
     if (typeof v.base !== "string" || !SHA.test(v.base)) return null;
-    return { clone, prime, verdict: { act: "current", base: v.base } };
+    return { clone, prime, head, verdict: { act: "current", base: v.base } };
   }
   if (v.act === "write") {
     if (typeof v.base !== "string" || !SHA.test(v.base)) return null;
@@ -239,6 +259,7 @@ function readVariantEntry(raw: unknown): VariantEvidenceEntry | null {
     return {
       clone,
       prime,
+      head,
       verdict: {
         act: "write",
         base: v.base,
@@ -254,43 +275,58 @@ function readVariantEntry(raw: unknown): VariantEvidenceEntry | null {
 /**
  * The variant verdicts a new pass may reuse as ANSWERS: settled ones (never a
  * transient hold) whose clone blob AND prime blob are still the ones the
- * merge read. Without either listing nothing is reused, because nothing can
- * be checked.
+ * merge read, at the clone head commit it read them at. Without either
+ * listing or the head nothing is reused, because nothing can be checked.
  */
 export function resumableVariantEvidence(
   progress: CascadeProgress | null,
   cloneShaByPath: ReadonlyMap<string, string> | null,
   primeShaByPath: ReadonlyMap<string, string> | null,
+  cloneHead: string | null,
 ): Map<string, VariantEvidenceEntry> {
   const out = new Map<string, VariantEvidenceEntry>();
-  if (!progress?.variant_evidence || !cloneShaByPath || !primeShaByPath) return out;
+  if (!progress?.variant_evidence || !cloneShaByPath || !primeShaByPath || !cloneHead) return out;
   for (const [path, entry] of Object.entries(progress.variant_evidence)) {
     if (entry.verdict.act === "hold" && entry.verdict.transient) continue;
-    if (cloneShaByPath.get(path) !== entry.clone) continue;
-    if (primeShaByPath.get(path) !== entry.prime) continue;
+    if (!sameVariantInputs(entry, path, cloneShaByPath, primeShaByPath, cloneHead)) continue;
     out.set(path, entry);
   }
   return out;
+}
+
+/** Whether a kept verdict was decided from exactly what this pass would read. */
+function sameVariantInputs(
+  entry: VariantEvidenceEntry,
+  path: string,
+  cloneShaByPath: ReadonlyMap<string, string>,
+  primeShaByPath: ReadonlyMap<string, string>,
+  cloneHead: string,
+): boolean {
+  return (
+    entry.head === cloneHead &&
+    cloneShaByPath.get(path) === entry.clone &&
+    primeShaByPath.get(path) === entry.prime
+  );
 }
 
 /**
  * The paths a previous pass ASKED and got only a transient answer for — at
  * the same two blobs. They are asked again, but last: a path that keeps
  * failing must not hold the never-asked behind it, and must not hold the pass
- * itself. Keyed like the answers, so a path whose blobs moved is never-asked
- * again rather than last.
+ * itself. Keyed like the answers, so a path whose blobs or clone head moved
+ * is never-asked again rather than last.
  */
 export function variantRetryPaths(
   progress: CascadeProgress | null,
   cloneShaByPath: ReadonlyMap<string, string> | null,
   primeShaByPath: ReadonlyMap<string, string> | null,
+  cloneHead: string | null,
 ): Map<string, VariantEvidenceEntry> {
   const out = new Map<string, VariantEvidenceEntry>();
-  if (!progress?.variant_evidence || !cloneShaByPath || !primeShaByPath) return out;
+  if (!progress?.variant_evidence || !cloneShaByPath || !primeShaByPath || !cloneHead) return out;
   for (const [path, entry] of Object.entries(progress.variant_evidence)) {
     if (!(entry.verdict.act === "hold" && entry.verdict.transient)) continue;
-    if (cloneShaByPath.get(path) !== entry.clone) continue;
-    if (primeShaByPath.get(path) !== entry.prime) continue;
+    if (!sameVariantInputs(entry, path, cloneShaByPath, primeShaByPath, cloneHead)) continue;
     out.set(path, entry);
   }
   return out;
@@ -315,7 +351,7 @@ function variantKey(e: VariantEvidenceEntry): string {
         : v.transient
           ? "transient"
           : "hold";
-  return `${e.clone}:${e.prime}:${what}`;
+  return `${e.clone}:${e.prime}:${e.head}:${what}`;
 }
 
 /**

@@ -63,6 +63,19 @@
  * and nothing else will ask again until prime moves. A clone that landed is
  * cheap to re-ask — its pass finds nothing owed.
  *
+ * ## Two ticks, one redelivery
+ *
+ * The drain holds no lock, so two idle ticks can overlap: both read no live
+ * delivery and the same prior count, and both decide redelivery N. Nothing in
+ * the audit log is unique, so a counter alone cannot stop both minting. The
+ * EVENT id is what stops it: `redeliveryEventId` derives it from the head
+ * event and N, so both ticks name the same row, and `cascade_events`' primary
+ * key admits exactly one. The tick that loses reads 23505 and stops before it
+ * arms a single clone. The loser's audit row still lands, so the count is
+ * taken over distinct redelivery ids (`priorRedeliveriesFrom`): a second row
+ * for the same redelivery is the same redelivery, and it never spends the
+ * ceiling. No migration is needed for any of it.
+ *
  * Client-safe: pure. It decides whether to mint and what to mint; the drain
  * owns every read and write.
  */
@@ -111,6 +124,72 @@ export type PriorRedeliveries = {
   /** The newest redelivery's event id, as its audit row recorded it. */
   lastEventId: string | null;
 };
+
+/**
+ * The prior redeliveries of one head, read from its audit rows NEWEST FIRST.
+ *
+ * Counted by distinct `redelivery_event_id`, because two overlapping ticks can
+ * both write a row for the same redelivery and only one of them minted it. A
+ * row that names no id — none this module writes, but the log is not ours
+ * alone — counts on its own: an uncountable row must make the ceiling nearer,
+ * never further.
+ */
+export function priorRedeliveriesFrom(
+  rows: readonly { created_at: string | null; metadata: unknown }[],
+): PriorRedeliveries {
+  const ids = new Set<string>();
+  let unnamed = 0;
+  for (const row of rows) {
+    const id = redeliveryIdOf(row.metadata);
+    if (id === null) unnamed += 1;
+    else ids.add(id);
+  }
+  const newest = rows[0];
+  return {
+    count: ids.size + unnamed,
+    lastAt: newest?.created_at ?? null,
+    lastEventId: newest ? redeliveryIdOf(newest.metadata) : null,
+  };
+}
+
+function redeliveryIdOf(metadata: unknown): string | null {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return null;
+  const id = (metadata as Record<string, unknown>).redelivery_event_id;
+  return typeof id === "string" && id.length > 0 ? id : null;
+}
+
+/**
+ * The namespace every redelivery id is derived in. Changing it changes every
+ * id this module will ever mint, so a tick running the old build and one
+ * running the new would no longer collide on the same redelivery. Never
+ * change it.
+ */
+export const HEAD_REDELIVERY_ID_NAMESPACE = "4b98edb5-2039-4c6c-b63c-ba17a08acf71";
+
+/**
+ * The event id of redelivery `redelivery` of head event `headEventId`: the
+ * same pair always names the same row, so two ticks that both decide it
+ * insert one event between them. A version-5 (name-based, SHA-1) UUID, per
+ * RFC 9562 §5.5, so it is an ordinary `uuid` to Postgres and to every reader.
+ */
+export async function redeliveryEventId(headEventId: string, redelivery: number): Promise<string> {
+  return nameBasedUuid(HEAD_REDELIVERY_ID_NAMESPACE, `${headEventId}#redelivery-${redelivery}`);
+}
+
+/** RFC 9562 §5.5: SHA-1 over namespace bytes and the UTF-8 name. */
+export async function nameBasedUuid(namespace: string, name: string): Promise<string> {
+  const ns = namespace.replace(/-/g, "");
+  if (!/^[0-9a-f]{32}$/i.test(ns)) throw new Error(`not a UUID namespace: ${namespace}`);
+  const nameBytes = new TextEncoder().encode(name);
+  const input = new Uint8Array(new ArrayBuffer(16 + nameBytes.length));
+  for (let i = 0; i < 16; i += 1) input[i] = Number.parseInt(ns.slice(i * 2, i * 2 + 2), 16);
+  input.set(nameBytes, 16);
+  const bytes = new Uint8Array(await crypto.subtle.digest("SHA-1", input)).slice(0, 16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 
 export type HeadRedeliveryVerdict =
   | {
