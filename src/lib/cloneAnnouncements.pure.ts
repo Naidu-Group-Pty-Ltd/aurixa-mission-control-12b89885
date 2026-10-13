@@ -231,3 +231,135 @@ export function describeAnnouncementState(
       return "Archived. Kept for the record, served to nobody.";
   }
 }
+
+/* ------------------------------------------------------------------------- *
+ * Workspace messages: the three ways an operator addresses the fleet.
+ *
+ * The console offers them as three choices, and they are three views of the
+ * ONE scope the table already stores (`audience_plan_slugs` /
+ * `audience_clone_ids`), so nothing about delivery, reach or the clone's wire
+ * changes with them:
+ *
+ *  - everyone  — every workspace (both columns null);
+ *  - one       — exactly one named workspace (one clone id);
+ *  - selected  — chosen workspaces, or every workspace on chosen plans.
+ *
+ * Every mode is ONE-WAY. A workspace renders the notice to its own staff and
+ * cannot reply to it; Mission Control is never a contact in any workspace's
+ * Messaging Hub.
+ * ------------------------------------------------------------------------- */
+
+export type WorkspaceAudienceMode = "everyone" | "one" | "selected";
+export type SelectedBy = "workspaces" | "plans";
+
+export interface WorkspaceAudienceDraft {
+  mode: WorkspaceAudienceMode;
+  /** For `selected`: whether the operator picked workspaces or plans. */
+  selectedBy: SelectedBy;
+  cloneIds: readonly string[];
+  planSlugs: readonly string[];
+}
+
+/** Read a stored scope back into the choice the console shows. */
+export function audienceDraftOf(
+  row: Pick<AnnouncementFacts, "audience_plan_slugs" | "audience_clone_ids"> | null,
+): WorkspaceAudienceDraft {
+  const cloneIds = row?.audience_clone_ids ?? null;
+  const planSlugs = row?.audience_plan_slugs ?? null;
+  if (cloneIds && cloneIds.length > 0) {
+    return {
+      mode: cloneIds.length === 1 && !planSlugs ? "one" : "selected",
+      selectedBy: "workspaces",
+      cloneIds,
+      planSlugs: planSlugs ?? [],
+    };
+  }
+  if (planSlugs && planSlugs.length > 0) {
+    return { mode: "selected", selectedBy: "plans", cloneIds: [], planSlugs };
+  }
+  return { mode: "everyone", selectedBy: "workspaces", cloneIds: [], planSlugs: [] };
+}
+
+/**
+ * The scope to store for a choice, or the reason it cannot be saved yet.
+ * A selection that names nobody is refused rather than widened to everyone —
+ * an empty list silently meaning "all clones" is the worst reading of it.
+ */
+export function audienceScopeOf(
+  draft: WorkspaceAudienceDraft,
+):
+  | { ok: true; audiencePlanSlugs: string[] | null; audienceCloneIds: string[] | null }
+  | { ok: false; reason: string } {
+  const uniq = (xs: readonly string[]) => [...new Set(xs.filter((x) => x.length > 0))];
+  if (draft.mode === "everyone") {
+    return { ok: true, audiencePlanSlugs: null, audienceCloneIds: null };
+  }
+  if (draft.mode === "one") {
+    const ids = uniq(draft.cloneIds);
+    if (ids.length !== 1) return { ok: false, reason: "Choose the workspace this is for." };
+    return { ok: true, audiencePlanSlugs: null, audienceCloneIds: ids };
+  }
+  if (draft.selectedBy === "plans") {
+    const slugs = uniq(draft.planSlugs);
+    if (slugs.length === 0) return { ok: false, reason: "Choose at least one plan." };
+    return { ok: true, audiencePlanSlugs: slugs, audienceCloneIds: null };
+  }
+  const ids = uniq(draft.cloneIds);
+  if (ids.length === 0) return { ok: false, reason: "Choose at least one workspace." };
+  return { ok: true, audiencePlanSlugs: null, audienceCloneIds: ids };
+}
+
+/** Which of the three a stored message is, for the list's filter and badge. */
+export function audienceModeOf(
+  row: Pick<AnnouncementFacts, "audience_plan_slugs" | "audience_clone_ids">,
+): WorkspaceAudienceMode {
+  return audienceDraftOf(row).mode;
+}
+
+export const AUDIENCE_MODE_LABEL: Record<WorkspaceAudienceMode, string> = {
+  everyone: "All workspaces",
+  one: "One workspace",
+  selected: "Selected workspaces",
+};
+
+/** Who a message is addressed to, in a phrase an operator reads at a glance. */
+export function audienceHeadline(
+  row: Pick<AnnouncementFacts, "audience_plan_slugs" | "audience_clone_ids">,
+  cloneNamesById: Record<string, string> = {},
+  planNamesBySlug: Record<string, string> = {},
+): string {
+  const name = (id: string) => cloneNamesById[id] ?? `${id.slice(0, 8)}…`;
+  const draft = audienceDraftOf(row);
+  if (draft.mode === "everyone") return "All workspaces";
+  if (draft.mode === "one") return `Only ${name(draft.cloneIds[0])}`;
+  const parts: string[] = [];
+  if (draft.planSlugs.length > 0) {
+    const plans = draft.planSlugs.map((s) => planNamesBySlug[s] ?? s);
+    parts.push(`${plans.length === 1 ? "Plan" : "Plans"}: ${plans.join(", ")}`);
+  }
+  if (draft.cloneIds.length > 0) {
+    const names = draft.cloneIds.map(name);
+    parts.push(
+      names.length <= 3
+        ? names.join(", ")
+        : `${names.slice(0, 3).join(", ")} and ${names.length - 3} more`,
+    );
+  }
+  return parts.join(" · ");
+}
+
+/** Case- and accent-insensitive match of a search box against a workspace. */
+export function workspaceMatches(
+  c: { name: string; slug?: string | null; planSlug?: string | null },
+  query: string,
+): boolean {
+  const fold = (s: string) =>
+    s
+      .normalize("NFKD")
+      .replace(/[̀-ͯ]/g, "")
+      .toLocaleLowerCase("en-AU");
+  const words = fold(query).split(/\s+/).filter(Boolean);
+  if (words.length === 0) return true;
+  const hay = fold([c.name, c.slug ?? "", c.planSlug ?? ""].join(" "));
+  return words.every((w) => hay.includes(w));
+}

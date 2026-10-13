@@ -3,11 +3,16 @@ import {
   activeAnnouncementsForClone,
   announcementReachesClone,
   announcementTone,
+  audienceDraftOf,
+  audienceHeadline,
+  audienceModeOf,
+  audienceScopeOf,
   audienceSummary,
   MAX_WIRE_ANNOUNCEMENTS,
   resolveAnnouncementState,
   toCloneWire,
   WIRE_KEYS,
+  workspaceMatches,
   type AnnouncementFacts,
   type AnnouncementState,
 } from "@/lib/cloneAnnouncements.pure";
@@ -202,5 +207,118 @@ describe("console helpers", () => {
         announcementTone(s),
       );
     }
+  });
+});
+
+describe("the three ways a message is addressed", () => {
+  it("reads a stored scope back as the choice the console shows", () => {
+    expect(audienceDraftOf(row()).mode).toBe("everyone");
+    expect(audienceDraftOf(null).mode).toBe("everyone");
+    expect(audienceDraftOf(row({ audience_clone_ids: ["c1"] }))).toMatchObject({
+      mode: "one",
+      cloneIds: ["c1"],
+    });
+    expect(audienceDraftOf(row({ audience_clone_ids: ["c1", "c2"] }))).toMatchObject({
+      mode: "selected",
+      selectedBy: "workspaces",
+    });
+    expect(audienceDraftOf(row({ audience_plan_slugs: ["scale"] }))).toMatchObject({
+      mode: "selected",
+      selectedBy: "plans",
+      planSlugs: ["scale"],
+    });
+    // One workspace AND a plan is narrower than "one workspace" alone, so it is
+    // never shown as the single-workspace choice.
+    expect(
+      audienceModeOf(row({ audience_clone_ids: ["c1"], audience_plan_slugs: ["scale"] })),
+    ).toBe("selected");
+  });
+
+  it("stores everyone as no scope at all", () => {
+    expect(
+      audienceScopeOf({
+        mode: "everyone",
+        selectedBy: "workspaces",
+        cloneIds: ["c1"],
+        planSlugs: ["p"],
+      }),
+    ).toEqual({ ok: true, audiencePlanSlugs: null, audienceCloneIds: null });
+  });
+
+  it("never widens an empty choice to everyone", () => {
+    for (const draft of [
+      { mode: "one", selectedBy: "workspaces", cloneIds: [], planSlugs: [] },
+      { mode: "one", selectedBy: "workspaces", cloneIds: ["c1", "c2"], planSlugs: [] },
+      { mode: "selected", selectedBy: "workspaces", cloneIds: [""], planSlugs: ["p"] },
+      { mode: "selected", selectedBy: "plans", cloneIds: ["c1"], planSlugs: [] },
+    ] as const) {
+      const scope = audienceScopeOf(draft);
+      expect(scope.ok).toBe(false);
+    }
+  });
+
+  it("stores exactly what was chosen, de-duplicated, and nothing from the other list", () => {
+    expect(
+      audienceScopeOf({
+        mode: "one",
+        selectedBy: "plans",
+        cloneIds: ["c1", "c1"],
+        planSlugs: ["p"],
+      }),
+    ).toEqual({ ok: true, audiencePlanSlugs: null, audienceCloneIds: ["c1"] });
+    expect(
+      audienceScopeOf({
+        mode: "selected",
+        selectedBy: "workspaces",
+        cloneIds: ["c1", "c2", "c1"],
+        planSlugs: ["p"],
+      }),
+    ).toEqual({ ok: true, audiencePlanSlugs: null, audienceCloneIds: ["c1", "c2"] });
+    expect(
+      audienceScopeOf({
+        mode: "selected",
+        selectedBy: "plans",
+        cloneIds: ["c1"],
+        planSlugs: ["p", "q"],
+      }),
+    ).toEqual({ ok: true, audiencePlanSlugs: ["p", "q"], audienceCloneIds: null });
+  });
+
+  it("a stored scope round-trips through the console unchanged", () => {
+    for (const r of [
+      row(),
+      row({ audience_clone_ids: ["c1"] }),
+      row({ audience_clone_ids: ["c1", "c2"] }),
+      row({ audience_plan_slugs: ["scale", "growth"] }),
+    ]) {
+      const scope = audienceScopeOf(audienceDraftOf(r));
+      expect(scope).toEqual({
+        ok: true,
+        audiencePlanSlugs: r.audience_plan_slugs,
+        audienceCloneIds: r.audience_clone_ids,
+      });
+    }
+  });
+
+  it("names the audience in a phrase", () => {
+    const names = { c1: "Acme", c2: "Birch", c3: "Cedar", c4: "Dune" };
+    expect(audienceHeadline(row(), names)).toBe("All workspaces");
+    expect(audienceHeadline(row({ audience_clone_ids: ["c1"] }), names)).toBe("Only Acme");
+    expect(audienceHeadline(row({ audience_clone_ids: ["c1", "c2"] }), names)).toBe("Acme, Birch");
+    expect(audienceHeadline(row({ audience_clone_ids: ["c1", "c2", "c3", "c4"] }), names)).toBe(
+      "Acme, Birch, Cedar and 1 more",
+    );
+    expect(audienceHeadline(row({ audience_plan_slugs: ["scale"] }), {}, { scale: "Scale" })).toBe(
+      "Plan: Scale",
+    );
+    expect(audienceHeadline(row({ audience_clone_ids: ["0123456789ab"] }))).toBe("Only 01234567…");
+  });
+
+  it("matches a search ignoring case and accents, every word required", () => {
+    const ws = { name: "Café Réal Estate", slug: "cafe-real", planSlug: "scale" };
+    expect(workspaceMatches(ws, "")).toBe(true);
+    expect(workspaceMatches(ws, "CAFE")).toBe(true);
+    expect(workspaceMatches(ws, "real scale")).toBe(true);
+    expect(workspaceMatches(ws, "real growth")).toBe(false);
   });
 });

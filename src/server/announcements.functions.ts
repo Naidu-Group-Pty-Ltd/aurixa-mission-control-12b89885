@@ -184,6 +184,15 @@ function validateDraft(data: AnnouncementDraftInput): AnnouncementDraftInput {
   if (!(ANNOUNCEMENT_DISPLAYS as readonly string[]).includes(data.display)) {
     throw new Error("Display must be banner or modal");
   }
+  // An explicit empty list names nobody. Storing it would widen to every
+  // workspace (an absent scope means "all"), so it is refused, never read
+  // as "everyone". Everyone is said by sending null.
+  if (Array.isArray(data.audienceCloneIds) && data.audienceCloneIds.length === 0) {
+    throw new Error("Choose at least one workspace, or address it to all workspaces");
+  }
+  if (Array.isArray(data.audiencePlanSlugs) && data.audiencePlanSlugs.length === 0) {
+    throw new Error("Choose at least one plan, or address it to all workspaces");
+  }
   if (data.startsAt && data.endsAt && Date.parse(data.endsAt) <= Date.parse(data.startsAt)) {
     throw new Error("The end time must come after the start time");
   }

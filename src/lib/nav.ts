@@ -109,9 +109,10 @@ export const NAV_SECTIONS: NavSection[] = [
       },
       {
         to: "/announcements",
-        label: "Announcements",
+        label: "Workspace messages",
         icon: Megaphone,
-        keywords: "notice broadcast banner popup message clones plans fleet comms",
+        keywords:
+          "announcements notice broadcast banner popup message clones plans fleet comms individual global selective workspace",
       },
       {
         to: "/schedules",

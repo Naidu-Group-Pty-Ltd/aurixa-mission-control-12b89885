@@ -8,6 +8,7 @@ import {
   ExternalLink,
   Github,
   KeyRound,
+  Megaphone,
   Pencil,
   Plus,
   RefreshCw,
@@ -298,7 +299,19 @@ function CloneDetail() {
             )}
           </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
+          {/*
+            A message to this one workspace is written on the Workspace
+            messages page with this workspace already chosen. It is one-way and
+            reaches staff only — Mission Control is never a contact in the
+            workspace's own Messaging Hub.
+          */}
+          <Button
+            variant="outline"
+            onClick={() => navigate({ to: "/announcements", search: { to: cloneId } })}
+          >
+            <Megaphone className="mr-1.5 h-4 w-4" /> Message this workspace
+          </Button>
           {/*
             The secrets sub-page had no link anywhere in the product — grep for
             its route found only its own definition — so the raw secret list
