@@ -319,8 +319,12 @@ export type VariantMergeVerdict =
   | { act: "write"; text: string; base: string; fromPrime: number; fromClone: number }
   /** The line's copy already holds everything prime changed: nothing is owed. */
   | { act: "current"; base: string }
-  /** Still held for a person, and why. */
-  | { act: "hold"; why: string };
+  /**
+   * Still held for a person, and why. `transient` marks a hold a retry could
+   * change (a read that failed, a revision that could not be resolved for a
+   * reason other than its absence): it is never remembered as an answer.
+   */
+  | { act: "hold"; why: string; transient?: true };
 
 /**
  * What to do with one held path, given the texts the engine read.
@@ -381,6 +385,15 @@ export function decideVariantMerge(args: {
 export const MAX_VARIANT_MERGES = 32;
 
 /**
+ * Held paths a cascade considers for a merge at all, across every pass. The
+ * per-pass bound above caps what one tick asks; this caps how many ticks a
+ * line can spend asking, because a pass pauses only while a candidate within
+ * this many has never been asked (see "A variant merge is decided once" in
+ * `passProgress.pure.ts`). The CRM line holds twenty-six to thirty-two.
+ */
+export const MAX_VARIANT_MERGE_CANDIDATES = 256;
+
+/**
  * The order held paths are offered to the merge, most consequential first:
  * an Edge Function's entrypoint (what a project runs, and what delivered
  * modules and specs are wired into), then other source under `src/` and
@@ -399,7 +412,17 @@ export function orderVariantMergeCandidates<T extends { path: string }>(held: re
     .map((x) => x.h);
 }
 
-export type VariantMergeOutcome = { path: string; verdict: VariantMergeVerdict };
+/**
+ * A verdict as the pass's account needs it: everything but the merged text,
+ * which a verdict settled on an earlier pass and taken from the ledger does
+ * not carry (the blob it names is reused instead — `passProgress.pure.ts`).
+ */
+export type VariantMergeSettled =
+  | { act: "write"; base: string; fromPrime: number; fromClone: number }
+  | { act: "current"; base: string }
+  | { act: "hold"; why: string; transient?: true };
+
+export type VariantMergeOutcome = { path: string; verdict: VariantMergeSettled };
 
 /** The one-line summary suffix: what was merged, and what was found current. */
 export function variantMergeSuffixFor(

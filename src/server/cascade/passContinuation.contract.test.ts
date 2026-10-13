@@ -242,7 +242,18 @@ describe("the order the pass walks", () => {
     // `orderedRows` is a rename only for a fleet that has not switched
     // routing on: same rows, same order, same pass.
     const setup = sliceFrom(engine, "const orderedRows = followsLineage", 700);
-    expect(setup).toContain(": queuedRows;");
+    expect(setup).toContain(": roundRobin;");
+  });
+
+  it("walks the clone touched least recently first", () => {
+    // A clone that paused last tick goes to the back, so one clone's long
+    // convergence can never starve the others: on 11–12 Oct 2026 the CRM
+    // line re-ran the same 32 variant merges every tick while the dependent
+    // line and both its children waited behind it.
+    const setup = sliceFrom(engine, "const roundRobin = leastRecentlyTouchedFirst(", 900);
+    expect(setup).toContain("queuedRows,");
+    expect(setup).toContain("updated_at");
+    expect(setup).toContain("roundRobin.map(");
   });
 
   it("puts parents before children once lineage is on", () => {
@@ -403,10 +414,13 @@ describe("a pass resumes inside a clone", () => {
   const process = sliceFunction(engine, "export async function processClone(");
 
   it("the reuse is consulted before any GitHub call for the path", () => {
-    const worker = sliceFrom(process, "const reusable =", 1_200);
-    expect(worker.indexOf("if (reusable !== undefined)")).toBeLessThan(
-      worker.indexOf("getFileContent(octokit, primeRef, path"),
-    );
+    const worker = sliceFrom(process, "const reusable =", 3_000);
+    const reuse = worker.indexOf("if (reusable !== undefined)");
+    const read = worker.indexOf("getFileContent(octokit, primeRef, path");
+    // Both must be present: an index of -1 would pass `toBeLessThan` vacuously.
+    expect(reuse).toBeGreaterThan(-1);
+    expect(read).toBeGreaterThan(-1);
+    expect(reuse).toBeLessThan(read);
   });
 
   it("but a SPEC is never reused, because its verdict is about THIS delivery", () => {
@@ -419,8 +433,14 @@ describe("a pass resumes inside a clone", () => {
     // cross having been judged against a partial delivery and never re-asked.
     // Nor a held variant merged this pass: the ledger's blob is prime's copy,
     // and the path carries the merge (`variantMerge.pure.ts`).
-    expect(process).toContain(
-      "const reusable = isSpecPath(path) || variantMerges.has(path) ? undefined : known.get(path);",
+    // A merge's blob is reused only where it is the blob an earlier pass
+    // prepared (`variantBlobPrepared`) — or where the reused verdict carried no
+    // text, which `reuseVariant` sets only on exactly that condition.
+    expect(process).toMatch(
+      /const reusable = isSpecPath\(path\)\s*\?\s*undefined\s*:\s*merge\s*\?\s*merge\.text === null \|\| variantBlobPrepared\(path, merge\.blob\)\s*\?\s*merge\.blob\s*:\s*undefined\s*:\s*known\.get\(path\);/,
+    );
+    expect(process).toMatch(
+      /if \(variantBlobPrepared\(path, v\.blob\)\) \{\s*return settleVariant\(path, settled, \{ text: null, blob: v\.blob \}\);/,
     );
   });
 
@@ -469,12 +489,13 @@ describe("a pass resumes inside a clone", () => {
     // A pass that spent its whole tick settling evidence prepared no blobs;
     // counting only `prepared` made it read as no progress, spend its
     // attempt, and die in three ticks inside a healthy convergence.
-    const loop = sliceFrom(engine, "for (const r of orderedRows) {", 9_500);
-    expect(loop).toMatch(
-      /const ledgerSize = \(p: CascadeProgress \| null\) =>\s*Object\.keys\(p\?\.prepared \?\? \{\}\)\.length \+ Object\.keys\(p\?\.deletion_evidence \?\? \{\}\)\.length;/,
-    );
-    expect(loop).toContain("const priorPrepared = ledgerSize(readProgress(priorRecord));");
-    expect(loop).toContain("preparedNow = ledgerSize(progress);");
+    const loop = sliceFrom(engine, "for (const r of orderedRows) {", 11_000);
+    // Measured by identity, not by size (`ledgerGrew`): a variant verdict
+    // replacing a borrowed one leaves the count unchanged and is still
+    // progress.
+    expect(loop).toContain("const priorLedger = readProgress(priorRecord);");
+    expect(loop).toContain("lastLedger = progress;");
+    expect(loop).toContain("if (ledgerGrew(priorLedger, lastLedger)) progressed = true;");
   });
 
   it("asks the budget before each fresh file, never before the first", () => {
@@ -506,7 +527,7 @@ describe("a pass resumes inside a clone", () => {
   });
 
   it("the engine supplies the writer, and only from the real pass", () => {
-    const loop = sliceFrom(engine, "for (const r of orderedRows) {", 9_500);
+    const loop = sliceFrom(engine, "for (const r of orderedRows) {", 11_000);
     expect(loop).toContain("resume: {");
     expect(loop).toMatch(
       /onProgress: async \(progress\) => \{[\s\S]{0,400}\.update\(\{ progress: progress as unknown as Json \}\)/,
@@ -517,9 +538,13 @@ describe("a pass resumes inside a clone", () => {
   });
 
   it("a paused clone stops the pass; a finished one KEEPS its list", () => {
-    const loop = sliceFrom(engine, "for (const r of orderedRows) {", 9_500);
+    const loop = sliceFrom(engine, "for (const r of orderedRows) {", 11_000);
+    // The pass is handed back (`stoppedEarly`), but the loop goes ON to the
+    // next clone: a clone pauses on its own bound as well as on the clock,
+    // and one clone's bound is no reason for the others to wait a tick. The
+    // deadline check at the top of the loop decides whether there is time.
     expect(loop).toMatch(
-      /if \(patch\.status === "queued"\) \{[\s\S]{0,600}stoppedEarly = true;\s*break;/,
+      /if \(patch\.status === "queued"\) \{[\s\S]{0,900}stoppedEarly = true;[\s\S]{0,600}attempted\+\+;\s*slowestMs = Math\.max\(slowestMs, Date\.now\(\) - cloneStartedAt\);\s*continue;/,
     );
     /* The list used to be cleared on every finished status, which made each
        of prime's ~50 daily commits a full ~300-file re-preparation per clone
@@ -532,7 +557,7 @@ describe("a pass resumes inside a clone", () => {
   });
 
   it("a pass with no list of its own borrows the clone's newest one", () => {
-    const loop = sliceFrom(engine, "for (const r of orderedRows) {", 9_500);
+    const loop = sliceFrom(engine, "for (const r of orderedRows) {", 11_000);
     expect(loop).toContain(
       "const priorRecord = ownRecord ?? (await borrowLatestProgress(supabase, clone.id, r.id));",
     );
@@ -551,8 +576,70 @@ describe("a pass resumes inside a clone", () => {
   });
 
   it("progress inside a clone is refunded like a finished clone", () => {
-    const loop = sliceFrom(engine, "for (const r of orderedRows) {", 9_500);
-    expect(loop).toContain("if (preparedNow > priorPrepared) progressed = true;");
+    const loop = sliceFrom(engine, "for (const r of orderedRows) {", 11_000);
+    expect(loop).toContain("if (ledgerGrew(priorLedger, lastLedger)) progressed = true;");
     expect(engine).toContain('{ ok: true, status: "resuming", done, total, progressed }');
+  });
+});
+
+describe("a held line variant is merged once, across passes", () => {
+  /* Measured 11–12 Oct 2026 on `npc-crm-independent-6505dc`: four consecutive
+     events spent their whole window re-merging the same ~30 held variants,
+     recorded nothing, and were retired after three attempts — and the other
+     line's three clones waited behind them. */
+  const phase = sliceFrom(engine, "const askVariant = async (path: string)", 6_000);
+
+  it("takes a settled verdict before asking anything, whatever the clock says", () => {
+    // Whitespace is the formatter's; the pin is the expression.
+    const settled = phase.search(
+      /const settledPaths = candidates\s*\.filter\(\(h\) => knownVariantEvidence\.has\(h\.path\)\)/,
+    );
+    const asking = phase.indexOf(
+      "for (const path of [...keepable, ...reread, ...retries, ...unkeepable])",
+    );
+    expect(settled).toBeGreaterThan(-1);
+    expect(asking).toBeGreaterThan(-1);
+    expect(settled).toBeLessThan(asking);
+  });
+
+  it("asks the never-asked first and a path that keeps failing last", () => {
+    expect(phase).toContain(
+      ".filter((h) => !knownVariantEvidence.has(h.path) && !variantRetry.has(h.path))",
+    );
+    expect(phase).toContain(
+      "for (const path of [...keepable, ...reread, ...retries, ...unkeepable])",
+    );
+  });
+
+  it("always asks ONE, so every pause records a verdict and the pass is refunded", () => {
+    // Only a SECOND ask is refused at the deadline. The ledger then grows on
+    // every pause (`ledgerGrew`), so a pause never spends an attempt for
+    // nothing — the shape that retired four events in a row.
+    expect(phase).toMatch(
+      /if \(variantMergesAsked >= MAX_VARIANT_MERGES\) break;\s*if \(freshAsked > 0 && resume\?\.budget\?\.isPastDeadline\(0\)\) break;\s*freshAsked \+= 1;/,
+    );
+    // …and nothing asked a merge before this phase, so the first ask is never
+    // refused by the per-pass cap.
+    const declared = engine.indexOf("let variantMergesAsked = 0;");
+    const firstAsk = engine.indexOf("variantMergesAsked += 1;");
+    const phaseAt = engine.indexOf("const settledPaths = candidates.filter(");
+    expect(declared).toBeGreaterThan(-1);
+    expect(firstAsk).toBeGreaterThan(declared);
+    expect(engine.indexOf("tryVariantMerge(lb.spec)")).toBeGreaterThan(phaseAt);
+  });
+
+  it("pauses only while a path it could ask and KEEP is unasked, within a bounded list", () => {
+    expect(phase).toContain(".slice(0, MAX_VARIANT_MERGE_CANDIDATES);");
+    expect(phase).toContain("const unasked = keepable.filter((p) => !outcomeOf.has(p));");
+    expect(phase).toMatch(
+      /if \(resume && unasked\.length > 0\) \{\s*return \{\s*status: "queued",/,
+    );
+  });
+
+  it("saves the ledger before it pauses", () => {
+    const save = phase.indexOf("await resume.onProgress(progress);");
+    const pause = phase.indexOf("if (resume && unasked.length > 0) {");
+    expect(save).toBeGreaterThan(-1);
+    expect(pause).toBeGreaterThan(save);
   });
 });
