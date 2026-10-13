@@ -591,17 +591,27 @@ describe("a pass that covers the wait for the next one", () => {
   it("stops mid-pass when the window closes, and records when it reopens", async () => {
     // 23:58:59.4 UTC with a window ending at 23:59: the first message goes,
     // the second would be due after the close.
-    db.tables.email_campaigns = [campaign({ min_gap_seconds: 1 })];
-    const summary = await dispatchDueCampaigns({
-      now: new Date("2026-10-12T23:58:59.400Z"),
-      budgetMs: 5000,
-    });
+    //
+    // The wall clock is pinned to the same instant. A sent message is stamped
+    // with `new Date()` and the next send is measured from that stamp, so on
+    // the real clock this asserted a date that had already passed from
+    // 13 Oct 2026 00:00 UTC onwards. Only `Date` is faked: the pass still
+    // sleeps out its gaps on real timers, and the pinned clock advances with
+    // them.
+    const now = new Date("2026-10-12T23:58:59.400Z");
+    vi.useFakeTimers({ toFake: ["Date"], now, shouldAdvanceTime: true });
+    try {
+      db.tables.email_campaigns = [campaign({ min_gap_seconds: 1 })];
+      const summary = await dispatchDueCampaigns({ now, budgetMs: 5000 });
 
-    expect(summary.messages).toBe(1);
-    const row = db.tables.email_campaigns[0];
-    expect(row.last_tick_note).toMatch(/outside the 00:00–23:59 window \(UTC\)/);
-    // Tomorrow's 00:00 UTC opening.
-    expect(row.next_send_at).toBe("2026-10-13T00:00:00.000Z");
+      expect(summary.messages).toBe(1);
+      const row = db.tables.email_campaigns[0];
+      expect(row.last_tick_note).toMatch(/outside the 00:00–23:59 window \(UTC\)/);
+      // Tomorrow's 00:00 UTC opening.
+      expect(row.next_send_at).toBe("2026-10-13T00:00:00.000Z");
+    } finally {
+      vi.useRealTimers();
+    }
   }, 10_000);
 });
 
