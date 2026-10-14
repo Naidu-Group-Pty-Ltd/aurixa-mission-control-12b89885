@@ -1061,4 +1061,14 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20261014120000",
     assertions: [{ kind: "column", table: "email_campaigns", column: "unsubscribe_token" }],
   },
+  {
+    migration: "20261014140000_email_sender_protection.sql",
+    version: "20261014140000",
+    assertions: [
+      { kind: "table", table: "email_mail_domains" },
+      { kind: "column", table: "email_campaigns", column: "bounce_pause_percent" },
+      { kind: "column", table: "email_campaigns", column: "warmup_guard" },
+      { kind: "table", table: "email_campaign_bounces" },
+    ],
+  },
 ];

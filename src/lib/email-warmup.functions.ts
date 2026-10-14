@@ -15,11 +15,12 @@ import { emailKey } from "@/lib/email/emailAddress.pure";
 import {
   HEALTH_WINDOW_DAYS,
   dailySeries,
-  dailyTarget,
   daysBefore,
   healthScore,
   localDate,
   rampDay,
+  rampEvidence,
+  rampGate,
   scheduleFromRow,
   scheduleProblems,
   totalsBetween,
@@ -116,6 +117,8 @@ export const getWarmupPool = createServerFn({ method: "POST" })
       const own = daysByMailbox.get(row.id) ?? [];
       const todays = totalsBetween(own, today, today);
       const week = totalsBetween(own, daysBefore(today, HEALTH_WINDOW_DAYS - 1), today);
+      // The same brake the engine applies, from the same figures.
+      const gate = rampGate({ schedule, day, evidence: rampEvidence(own, today) });
       return {
         id: row.id,
         mailbox: row.mailbox,
@@ -130,7 +133,11 @@ export const getWarmupPool = createServerFn({ method: "POST" })
         schedule,
         tidySent: row.tidy_sent,
         rampDay: day,
-        targetToday: dailyTarget(schedule, day),
+        targetToday: gate.target,
+        /** What the ramp alone would have it start today. */
+        plannedToday: gate.planned,
+        /** Why the brake is holding it back today; null while it climbs. */
+        brake: gate.state === "climbing" ? null : { state: gate.state, reason: gate.reason },
         startedToday: todays.sent - todays.replies_sent,
         repliesToday: todays.replies_sent,
         receivedToday: todays.received,

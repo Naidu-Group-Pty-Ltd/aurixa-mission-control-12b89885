@@ -77,17 +77,22 @@ import {
   WARMUP_FOLDER_NAME,
   checkDelayMinutes,
   choosePartner,
-  dailyTarget,
+  daysBefore,
   engagementPlan,
+  HEALTH_WINDOW_DAYS,
   localDate,
   minutesBetween,
   nextSendAt,
   rampDay,
+  rampEvidence,
+  rampGate,
   receiveCap,
   scheduleFromRow,
   startOfNextLocalDay,
   warmupRules,
   type PoolMember,
+  type RampGate,
+  type WarmupDay,
   type WarmupScheduleColumns,
 } from "@/lib/email/warmupPlan.pure";
 import {
@@ -264,6 +269,8 @@ type Load = {
   startedToday: Map<string, number>;
   /** Each mailbox's recent partners, oldest first. */
   partners: Map<string, string[]>;
+  /** Each mailbox's daily figures over the health window, for its brake. */
+  days: Map<string, Partial<WarmupDay>[]>;
 };
 
 type Pass = {
@@ -407,7 +414,7 @@ export async function runWarmupTick(
         }
         return access;
       },
-      load: { received: new Map(), startedToday: new Map(), partners: new Map() },
+      load: { received: new Map(), startedToday: new Map(), partners: new Map(), days: new Map() },
       summary,
     };
     summary.paused = pass.paused;
@@ -1025,14 +1032,41 @@ async function readLoad(pass: Pass): Promise<void> {
   }
 }
 
-/** Today's ramp target for a mailbox, in its own zone. */
-function targetToday(row: MailboxRow, now: Date): number {
+/**
+ * Every pool mailbox's daily figures over the health window — where its mail
+ * has been landing, and what has gone missing — for the brake on its ramp.
+ * A day either side covers every mailbox's zone.
+ */
+async function readPlacement(pass: Pass): Promise<void> {
+  const ids = [...pass.pool.keys()];
+  if (ids.length === 0) return;
+  const from = daysBefore(pass.now().toISOString().slice(0, 10), HEALTH_WINDOW_DAYS + 1);
+  const { data, error } = await supabaseAdmin
+    .from("email_warmup_daily")
+    .select("mailbox_id, day, inbox, junk, other, missing")
+    .in("mailbox_id", ids)
+    .gte("day", from);
+  if (error) throw error;
+  for (const row of data ?? []) {
+    if (!row.mailbox_id) continue;
+    const list = pass.load.days.get(row.mailbox_id) ?? [];
+    list.push(row as Partial<WarmupDay>);
+    pass.load.days.set(row.mailbox_id, list);
+  }
+}
+
+/**
+ * Today's ramp for a mailbox, in its own zone: what the ramp planned, and
+ * what the brake lets it send given how its mail has been landing.
+ */
+function gateToday(pass: Pass, row: MailboxRow, now: Date): RampGate {
   const schedule = scheduleFromRow(row);
   const today = localDate(now, schedule.timezone);
-  return dailyTarget(
+  return rampGate({
     schedule,
-    rampDay({ activeDays: row.active_days, lastActiveOn: row.last_active_on, today }),
-  );
+    day: rampDay({ activeDays: row.active_days, lastActiveOn: row.last_active_on, today }),
+    evidence: rampEvidence(pass.load.days.get(row.id) ?? [], today),
+  });
 }
 
 async function startConversations(pass: Pass): Promise<void> {
@@ -1052,6 +1086,7 @@ async function startConversations(pass: Pass): Promise<void> {
   if (due.length === 0) return;
 
   await readLoad(pass);
+  await readPlacement(pass);
   // The pool as partners see it: who is eligible to receive, and how loaded.
   const members: PoolMember[] = [];
   for (const row of pass.pool.values()) {
@@ -1062,7 +1097,10 @@ async function startConversations(pass: Pass): Promise<void> {
       organisationId: access.organisationId ?? row.organisation_id ?? `unknown:${row.id}`,
       eligible: row.status === "active" && Boolean(row.prepared_at) && access.config !== null,
       receivedRecent: pass.load.received.get(row.id) ?? 0,
-      receiveCap: receiveCap(targetToday(row, now)),
+      // From the planned volume, not the braked one: a held mailbox still
+      // reads, rescues and answers its share, and its partners still need
+      // somewhere to write to.
+      receiveCap: receiveCap(gateToday(pass, row, now).planned),
     });
   }
 
@@ -1086,7 +1124,8 @@ async function startConversation(
   const now = pass.now();
   const schedule = scheduleFromRow(row);
   const today = localDate(now, schedule.timezone);
-  const target = targetToday(row, now);
+  const gate = gateToday(pass, row, now);
+  const target = gate.target;
   const startedToday = pass.load.startedToday.get(row.id) ?? 0;
   const later = (sentToday: number) =>
     nextSendAt({ schedule, now, sentToday, target, random: pass.random })?.toISOString() ?? null;
@@ -1208,7 +1247,8 @@ async function startConversation(
       row.id,
       [...(pass.load.partners.get(row.id) ?? []), partner.id].slice(-5),
     );
-    const newDay = row.last_active_on !== today;
+    // A day of ramp is earned only by a day the brake let it climb.
+    const newDay = row.last_active_on !== today && gate.advances;
     await updateMailbox(row.id, {
       next_send_at: later(startedToday + 1),
       consecutive_failures: 0,

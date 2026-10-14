@@ -30,6 +30,14 @@
  * actually warms" — a paused week is not seven days of ramp. Replies are on
  * top of that number: they are the reply rate at work, not new conversations.
  *
+ * The ramp climbs only on evidence that the mail is wanted (`rampGate`). A
+ * mailbox whose warmup mail has started going missing — quarantined or
+ * refused on arrival — or landing mostly in spam is held at its starting
+ * volume, and one whose placement is merely poor sends half its planned
+ * volume; neither earns a day of ramp until placement recovers. Sending more
+ * of what receivers are already junking is how a warming domain ends up
+ * blocklisted instead of trusted.
+ *
  * ## Pacing
  *
  * Sends are spread across the mailbox's own window (its zone, its hours,
@@ -584,4 +592,91 @@ export function dailySeries(days: Partial<WarmupDay>[], today: string, count: nu
     out.push(filled);
   }
   return out;
+}
+
+// ── The brake ───────────────────────────────────────────────────────────────
+
+/** Messages gone missing over today and yesterday that hold a mailbox's ramp. */
+export const MISSING_TO_HOLD = 3;
+/** Inbox placement below this holds a mailbox at its starting volume. */
+export const HOLD_BELOW_PERCENT = 50;
+
+export type RampGate = {
+  /** Climbing as planned, slowed to half, or held at the start. */
+  state: "climbing" | "slowed" | "held";
+  /** What the ramp alone would have it send today. */
+  planned: number;
+  /** What it may start today. */
+  target: number;
+  /** Whether sending today counts as a day of ramp. */
+  advances: boolean;
+  /** Why it is slowed or held; null while climbing. */
+  reason: string | null;
+};
+
+/** What the brake reads: placement over the health window, and mail gone missing lately. */
+export type RampEvidence = { health: number | null; recentMissing: number };
+
+/**
+ * The evidence for a mailbox's brake from its daily figures, in its own days:
+ * placement over the health window, and messages gone missing today and
+ * yesterday — the fast signal, because mail being refused outright shows up
+ * there days before it moves a seven-day average.
+ */
+export function rampEvidence(days: Partial<WarmupDay>[], today: string): RampEvidence {
+  const week = totalsBetween(days, daysBefore(today, HEALTH_WINDOW_DAYS - 1), today);
+  const recent = totalsBetween(days, daysBefore(today, 1), today);
+  return { health: healthScore(week), recentMissing: recent.missing };
+}
+
+/**
+ * How much a mailbox may start today, given how its mail has been landing.
+ *
+ * Warmup only works while the mail is wanted: a mailbox whose messages are
+ * being junked or refused and keeps sending more of them is teaching
+ * receivers the opposite of what it is for. So the ramp is held — the
+ * starting volume, no day of ramp earned — while mail is going missing or
+ * less than half of it reaches the inbox, and slowed to half its planned
+ * volume, still earning nothing, while placement is poor. The engagement that
+ * repairs it (rescuing from Junk, replying) carries on either way; the ramp
+ * resumes from the same day once placement is back in the fair band. With
+ * too little settled mail to judge, it climbs.
+ */
+export function rampGate(input: {
+  schedule: WarmupSchedule;
+  day: number;
+  evidence: RampEvidence;
+}): RampGate {
+  const planned = dailyTarget(input.schedule, input.day);
+  const start = Math.min(planned, Math.max(1, input.schedule.startPerDay));
+  const { health, recentMissing } = input.evidence;
+  if (recentMissing >= MISSING_TO_HOLD) {
+    return {
+      state: "held",
+      planned,
+      target: start,
+      advances: false,
+      reason: `${recentMissing} of its messages went missing since yesterday — quarantined or refused on arrival — so it is held at ${start} a day and its ramp does not advance until its mail arrives again`,
+    };
+  }
+  if (health !== null && health < HOLD_BELOW_PERCENT) {
+    return {
+      state: "held",
+      planned,
+      target: start,
+      advances: false,
+      reason: `only ${health}% of its warmup mail reached the inbox over ${HEALTH_WINDOW_DAYS} days, so it is held at ${start} a day and its ramp does not advance until placement recovers`,
+    };
+  }
+  if (healthTone(health) === "poor") {
+    const half = Math.max(start, Math.ceil(planned / 2));
+    return {
+      state: "slowed",
+      planned,
+      target: half,
+      advances: false,
+      reason: `${health}% inbox placement over ${HEALTH_WINDOW_DAYS} days, so it sends ${half} of its planned ${planned} a day and its ramp does not advance until placement is back to 75%`,
+    };
+  }
+  return { state: "climbing", planned, target: planned, advances: true, reason: null };
 }

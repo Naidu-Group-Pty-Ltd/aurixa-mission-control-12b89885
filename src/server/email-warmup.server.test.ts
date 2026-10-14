@@ -10,7 +10,9 @@
 //   - mail that never arrives is recorded as missing, and a draft that never
 //     left as failed, not as sent;
 //   - the pool's pause stops new mail but still tidies what is in flight;
-//   - a mailbox whose sends keep being refused stops, with the reason.
+//   - a mailbox whose sends keep being refused stops, with the reason;
+//   - a mailbox whose mail is going missing or landing in spam is held back,
+//     and earns no day of ramp until it recovers.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 type Row = Record<string, unknown>;
@@ -602,6 +604,69 @@ describe("pairing", () => {
     expect(summary.sent).toBe(0);
     // Tomorrow from 08:00.
     expect(String(mailboxRow("mb-alex").next_send_at) >= "2026-10-12T21:00:00.000Z").toBe(true);
+  });
+});
+
+describe("the brake on the ramp", () => {
+  // Monday 12 Oct in Sydney; Alex is on day 10 of the ramp, 20 a day planned.
+  const TODAY = "2026-10-12";
+  const onDayTen = () => {
+    Object.assign(mailboxRow("mb-alex"), { active_days: 9, last_active_on: "2026-10-11" });
+  };
+  /** Two conversations Alex already started this morning. */
+  const startedTwo = () => {
+    for (const n of [1, 2]) {
+      db.tables.email_warmup_messages.push({
+        id: `earlier-${n}`,
+        thread_id: `earlier-${n}`,
+        depth: 0,
+        sender_id: "mb-alex",
+        recipient_id: "mb-sam",
+        sender_address: "alex@a.test",
+        recipient_address: "sam@b.test",
+        subject: "earlier",
+        status: "done",
+        placement: "inbox",
+        sent_at: at(-60 + n).toISOString(),
+        created_at: at(-60 + n).toISOString(),
+      });
+    }
+  };
+  const fromAlex = () => messages().filter((row) => row.sender_id === "mb-alex").length;
+
+  it("holds a mailbox whose mail is going missing at its starting volume", async () => {
+    onDayTen();
+    startedTwo();
+    db.tables.email_warmup_daily = [
+      { mailbox_id: "mb-alex", day: TODAY, inbox: 2, junk: 0, other: 0, missing: 3 },
+    ];
+    await tick(0);
+    // Held at two a day, and it has sent two: nothing more today.
+    expect(fromAlex()).toBe(2);
+    expect(String(mailboxRow("mb-alex").next_send_at) >= "2026-10-12T21:00:00.000Z").toBe(true);
+  });
+
+  it("lets the same mailbox climb when its mail is landing", async () => {
+    onDayTen();
+    startedTwo();
+    db.tables.email_warmup_daily = [
+      { mailbox_id: "mb-alex", day: TODAY, inbox: 12, junk: 0, other: 0, missing: 0 },
+    ];
+    await tick(0);
+    expect(fromAlex()).toBe(3);
+    // A day it climbed is a day of ramp.
+    expect(mailboxRow("mb-alex")).toMatchObject({ active_days: 10, last_active_on: TODAY });
+  });
+
+  it("earns no day of ramp while it is slowed for poor placement", async () => {
+    onDayTen();
+    db.tables.email_warmup_daily = [
+      { mailbox_id: "mb-alex", day: "2026-10-09", inbox: 6, junk: 4, other: 0, missing: 0 },
+    ];
+    await tick(0);
+    // Still sending — half its planned twenty — but still on day ten tomorrow.
+    expect(fromAlex()).toBe(1);
+    expect(mailboxRow("mb-alex")).toMatchObject({ active_days: 9, last_active_on: "2026-10-11" });
   });
 });
 

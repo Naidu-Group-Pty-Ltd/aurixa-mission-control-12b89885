@@ -576,7 +576,10 @@ A new domain or mailbox has no sending reputation, and a campaign is a poor
 way to earn one. **Email Campaigns → Warmup** runs an Instantly-style warmup
 pool across your tenants' mailboxes — see [EMAIL_WARMUP.md](EMAIL_WARMUP.md). A
 campaign whose sending mailbox is warming gets a readiness warning while it is
-in its first two weeks, or while its warmup mail is landing in spam.
+in its first two weeks, or while its warmup mail is landing in spam — and one
+whose mailbox is outside the pool is warned that nothing is watching it. While
+it runs, the warmup guard can pause it; see
+[Protecting the sender](#protecting-the-sender).
 
 ### The bounce scan follows the mailboxes that actually sent
 
@@ -587,6 +590,82 @@ every tenant's default, every mailbox a non-draft campaign names, **and** every
 mailbox a message has left from in the last 30 days
 (`email_campaign_sending_mailboxes`, a view over the message ledger) — each read
 through the tenant it was used with.
+
+---
+
+## Protecting the sender
+
+Every rule above is about one contact: never twice, never a bouncer. The
+failures that get a **domain** blocklisted are about the campaign as a whole —
+a list whose addresses bounce by the dozen, sent on regardless, reads to a
+receiver exactly like a spammer's scraped list; a mailbox whose mail has
+started landing in spam, sending more, digs the hole deeper. So a running
+campaign watches itself, from records rather than counters, and stops itself.
+The thresholds are decided in `senderProtection.pure.ts` and tested there.
+
+### The bounce breaker
+
+Before each pass plans anything, the dispatcher counts the contacts sent **since
+the campaign was last started** and how many of them have since gone on the
+do-not-send register as bounced (`email_campaign_bounces`, a view joining the
+recipient ledger to the register — so the count cannot drift from either).
+
+- At or past **`bounce_pause_percent`** (Rules → Protecting the sender; 5% by
+  default) the campaign is **paused**, with the count and the rate as its
+  reason, and audited like any other dispatcher pause.
+- From 2% the heartbeat and readiness say the rate is climbing.
+- Blank switches the pause off; it still warns.
+
+The rate is taken over at least fifty sends, so two bounces among the first ten
+do not stop a campaign but ten among the first ten do. It is counted since the
+last start so that **resuming after cleaning the list starts a fresh count**
+instead of tripping again on the bounces that caused the pause. Bounces reach
+the register through the bounce scan, every fifteen minutes; the breaker reads
+the register at every pass.
+
+### The warmup guard
+
+When the sending mailbox is in the warmup pool, every pass reads its warmup
+placement over the last seven days. Under 75% over at least ten settled
+messages, the campaign is **paused** — its warmup mail is landing in spam, and
+campaign mail from it will too. On by default (`warmup_guard`); switched off on
+the Rules tab. A mailbox outside the pool is never paused by it, and readiness
+says so.
+
+### Domains that take no mail
+
+Immediately before a claim, with the suppression re-check, each contact's
+domain is asked whether it takes mail at all: one that does not exist
+(NXDOMAIN), publishes a null MX (RFC 7505), or has neither an MX nor an address
+record bounces every time. Those contacts are recorded as `suppressed` with the
+reason ("gone.example takes no mail: the domain does not exist") and the next
+contacts are read in their place, so a fifty-contact message still carries
+fifty. Answers are remembered in `email_mail_domains` (thirty days for a domain
+that takes mail, a week for one that does not), and the lookups for one message
+stop starting after eight seconds.
+
+**It fails open.** A resolver that cannot answer is not evidence that a domain
+is dead, and holding a campaign for one would turn every resolver hiccup into a
+missed sending time — so an unanswered domain is sent to, and asked again next
+time. The bounce breaker and the guard fail the same way: a check that cannot
+be made is said in the heartbeat, and the campaign's own rules still hold.
+
+### The sending domain
+
+Readiness reads the sending mailbox's domain from DNS — SPF, both Microsoft
+365 DKIM selectors, DMARC, MX — and lists each problem with the record to
+publish; the Rules tab shows the full report. Warnings, never blocks: a domain
+with `p=none` still delivers, and a resolver's bad minute must not stop a
+start. See [EMAIL_WARMUP.md, "Sending domains"](EMAIL_WARMUP.md#sending-domains).
+
+### What none of this can do
+
+Microsoft Graph sets no `List-Unsubscribe` header — it accepts only `X-`
+headers on a message — so the one-click unsubscribe Gmail and Yahoo ask bulk
+senders for cannot be added from here; the `{{unsubscribe_url}}` link in the
+body is the facility. And volume is the operator's: a mailbox new to sending,
+asked to address a thousand strangers a day, is a risk no check here removes.
+Readiness says what a day at full pace adds up to.
 
 ---
 
@@ -792,6 +871,9 @@ are what the page and the dispatcher both use to say when the next message goes.
 | `src/lib/email/bounceReport.pure.ts`               | delivery reports → verdicts                  |
 | `src/lib/email/attachments.pure.ts`                | what may be attached, and the delivery path  |
 | `src/lib/email/mailboxes.pure.ts`                  | mailbox access, refusal scope, token roles   |
+| `src/lib/email/senderProtection.pure.ts`           | the bounce breaker and the warmup guard      |
+| `src/lib/email/domainAuth.pure.ts`                 | SPF, DKIM, DMARC, MX; recipient domains      |
+| `src/server/email-domain-health.server.ts`         | domain lookups, remembered                   |
 | `src/lib/email/microsoftTenants.pure.ts`           | added tenants: validation, hints, refusals   |
 | `src/server/microsoft-tenants.server.ts`           | tenant credentials from Vault, add/rotate    |
 | `src/lib/microsoft-tenants.functions.ts`           | the tenant API (admin writes)                |

@@ -13,7 +13,10 @@
 //     tenant whose credentials fail holds up only its own campaigns;
 //   - a campaign with sending times sends at them and not between, and a
 //     segmented one sends each segment its own message — one state per BCC
-//     line — and no more than its share of each sending time.
+//     line — and no more than its share of each sending time;
+//   - a campaign whose contacts are bouncing past its limit, or whose mailbox's
+//     warmup mail is landing in spam, stops itself; and a contact at a domain
+//     that takes no mail is stepped over, not sent.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { sha256Hex } from "@/lib/email/attachments.pure";
 
@@ -34,6 +37,10 @@ const db = vi.hoisted(() => ({
   refusedTokens: new Set<string>(),
   outcomes: [] as Record<string, unknown>[],
   audits: [] as Record<string, unknown>[],
+  /** Recipient domains DNS says take no mail, with why. */
+  deadDomains: new Map<string, string>(),
+  /** Set to make the domain check throw, as a resolver outage would. */
+  domainCheckFails: false,
   seq: 0,
 }));
 
@@ -254,6 +261,15 @@ vi.mock("@/server/graph-client", () => {
   };
 });
 
+vi.mock("@/server/email-domain-health.server", () => ({
+  deadRecipientDomains: async (domains: string[]) => {
+    if (db.domainCheckFails) throw new Error("resolver unreachable");
+    return new Map(
+      domains.filter((d) => db.deadDomains.has(d)).map((d) => [d, db.deadDomains.get(d)!]),
+    );
+  },
+}));
+
 vi.mock("@/server/audit.server", () => ({
   writeAuditLog: async (entry: Record<string, unknown>) => {
     db.audits.push(entry);
@@ -289,6 +305,9 @@ function campaign(over: Row = {}): Row {
     ends_at: null,
     last_message_at: null,
     unsubscribe_token: "camptoken",
+    started_at: null,
+    bounce_pause_percent: 5,
+    warmup_guard: true,
     ...over,
   };
 }
@@ -337,8 +356,13 @@ beforeEach(() => {
     email_campaign_segments: [],
     email_campaign_attachments: [],
     email_suppressions: [],
+    email_campaign_bounces: [],
+    email_warmup_mailboxes: [],
+    email_warmup_daily: [],
     microsoft_tenants: [],
   };
+  db.deadDomains.clear();
+  db.domainCheckFails = false;
   db.vault.clear();
   db.refusedTokens.clear();
   db.objects.clear();
@@ -959,5 +983,157 @@ describe("sending times and segments", () => {
     );
     expect(row.next_send_at).toBeNull();
     expect(statuses()).toContain("rcpt-8:pending"); // the ACT contact, untouched
+  });
+});
+
+describe("protecting the sender", () => {
+  /** Contacts sent before this tick, the sample a bounce rate is taken over. */
+  function alreadySent(n: number, at = "2026-10-11T03:00:00.000Z"): Row[] {
+    return Array.from({ length: n }, (_, i) => ({
+      id: `old-${i + 1}`,
+      campaign_id: "camp-1",
+      email: `earlier${i + 1}@example.test`,
+      email_key: `earlier${i + 1}@example.test`,
+      status: "sent",
+      sent_at: at,
+      position: 100 + i,
+      attempts: 1,
+      attributes: {},
+      attributes_norm: {},
+      unsubscribe_token: `old${i + 1}`,
+    }));
+  }
+  /** The first `n` of those, bounced. */
+  const bounced = (n: number, sentAt = "2026-10-11T03:00:00.000Z") =>
+    Array.from({ length: n }, (_, i) => ({
+      campaign_id: "camp-1",
+      recipient_id: `old-${i + 1}`,
+      email_key: `earlier${i + 1}@example.test`,
+      sent_at: sentAt,
+      bounced_at: "2026-10-11T04:00:00.000Z",
+    }));
+
+  it("pauses a campaign whose contacts are bouncing past its limit, and sends nothing more", async () => {
+    db.tables.email_campaign_recipients.push(...alreadySent(60));
+    db.tables.email_campaign_bounces = bounced(4);
+
+    const summary = await dispatchDueCampaigns({ now: NOW });
+
+    expect(db.deliveries).toEqual([]);
+    expect(summary.paused).toBe(1);
+    const row = db.tables.email_campaigns[0];
+    expect(row.status).toBe("paused");
+    expect(String(row.paused_reason)).toMatch(/4 of the 60 contacts .* hard-bounced \(6\.7%\)/);
+    expect(db.audits[0]).toMatchObject({ action: "email_campaign_paused_by_dispatcher" });
+    expect(statuses().filter((s) => s.startsWith("rcpt-"))).toEqual([
+      "rcpt-1:pending",
+      "rcpt-2:pending",
+      "rcpt-3:pending",
+      "rcpt-4:pending",
+    ]);
+  });
+
+  it("counts only what was sent since the campaign was last started", async () => {
+    db.tables.email_campaign_recipients.push(...alreadySent(60));
+    db.tables.email_campaign_bounces = bounced(4);
+    // Resumed after the list was cleaned: those bounces were the last run's.
+    db.tables.email_campaigns = [campaign({ started_at: "2026-10-12T00:00:00.000Z" })];
+
+    const summary = await dispatchDueCampaigns({ now: NOW });
+
+    expect(summary).toMatchObject({ messages: 4, paused: 0 });
+  });
+
+  it("warns below the limit, and keeps sending", async () => {
+    db.tables.email_campaign_recipients.push(...alreadySent(60));
+    db.tables.email_campaign_bounces = bounced(2);
+
+    const summary = await dispatchDueCampaigns({ now: NOW });
+
+    expect(summary).toMatchObject({ messages: 4, paused: 0 });
+    expect(db.tables.email_campaigns[0].last_tick_note).toMatch(
+      /sent 4 messages; hard-bounce rate 3\.3% since it was started \(2 of 60\) — it pauses at 5%/,
+    );
+  });
+
+  it("only warns when automatic pausing is switched off", async () => {
+    db.tables.email_campaign_recipients.push(...alreadySent(60));
+    db.tables.email_campaign_bounces = bounced(10);
+    db.tables.email_campaigns = [campaign({ bounce_pause_percent: null })];
+
+    const summary = await dispatchDueCampaigns({ now: NOW });
+
+    expect(summary).toMatchObject({ messages: 4, paused: 0 });
+    expect(db.tables.email_campaigns[0].last_tick_note).toMatch(/automatic pausing is off/);
+  });
+
+  const today = () => new Date().toISOString().slice(0, 10);
+  const inPool = (inbox: number, junk: number) => {
+    // Enrolled under a different spelling of the same address.
+    db.tables.email_warmup_mailboxes = [
+      { id: "wm-1", mailbox: "Sales@Aurixa.test", status: "active", timezone: "UTC" },
+    ];
+    db.tables.email_warmup_daily = [
+      { mailbox_id: "wm-1", day: today(), inbox, junk, other: 0, missing: 0 },
+    ];
+  };
+
+  it("pauses when the sending mailbox's own warmup mail is landing in spam", async () => {
+    inPool(4, 8);
+
+    const summary = await dispatchDueCampaigns({ now: NOW });
+
+    expect(db.deliveries).toEqual([]);
+    expect(summary.paused).toBe(1);
+    expect(String(db.tables.email_campaigns[0].paused_reason)).toMatch(
+      /sales@aurixa\.test's own warmup mail is landing in spam \(33% inbox placement/,
+    );
+    expect(statuses().every((s) => s.endsWith(":pending"))).toBe(true);
+  });
+
+  it("sends from a mailbox whose warmup mail is landing well, or when the guard is off", async () => {
+    inPool(18, 2);
+    expect(await dispatchDueCampaigns({ now: NOW })).toMatchObject({ messages: 4, paused: 0 });
+
+    db.tables.email_campaign_recipients = recipients(4);
+    db.tables.email_campaigns = [campaign({ warmup_guard: false })];
+    inPool(4, 8);
+    expect(await dispatchDueCampaigns({ now: NOW })).toMatchObject({ messages: 4, paused: 0 });
+  });
+
+  it("steps over contacts at a domain that takes no mail, and still fills the message", async () => {
+    const list = recipients(6);
+    for (const row of [list[1], list[3]]) {
+      row.email = String(row.email).replace("example.test", "gone.test");
+      row.email_key = row.email;
+    }
+    db.tables.email_campaign_recipients = list;
+    db.tables.email_campaigns = [campaign({ recipients_per_message: 4 })];
+    db.deadDomains.set("gone.test", "the domain does not exist");
+
+    const summary = await dispatchDueCampaigns({ now: NOW });
+
+    expect(summary).toMatchObject({ messages: 1, recipients: 4 });
+    const bcc = (db.deliveries[0].message.bccRecipients as { emailAddress: { address: string } }[])
+      .map((r) => r.emailAddress.address)
+      .sort();
+    expect(bcc).toEqual([
+      "reader1@example.test",
+      "reader3@example.test",
+      "reader5@example.test",
+      "reader6@example.test",
+    ]);
+    const stepped = db.tables.email_campaign_recipients.filter((r) => r.status === "suppressed");
+    expect(stepped.map((r) => r.id)).toEqual(["rcpt-2", "rcpt-4"]);
+    expect(stepped[0].suppressed_reason).toBe("gone.test takes no mail: the domain does not exist");
+    expect(db.tables.email_campaigns[0].last_tick_note).toMatch(
+      /stepped over 2 contacts at a domain that takes no mail \(gone\.test\)/,
+    );
+  });
+
+  it("sends anyway when the domain check itself fails", async () => {
+    db.domainCheckFails = true;
+    const summary = await dispatchDueCampaigns({ now: NOW });
+    expect(summary).toMatchObject({ messages: 4, recipients: 4, paused: 0 });
   });
 });

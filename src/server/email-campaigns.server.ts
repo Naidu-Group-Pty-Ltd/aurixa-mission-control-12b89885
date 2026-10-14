@@ -123,6 +123,18 @@ import {
   prepareCampaignAttachments,
   type PreparedAttachments,
 } from "@/server/email-attachments.server";
+import { domainOf } from "@/lib/email/domainAuth.pure";
+import { emailKey } from "@/lib/email/emailAddress.pure";
+import { bounceVerdict, warmupGuardVerdict } from "@/lib/email/senderProtection.pure";
+import {
+  daysBefore,
+  HEALTH_WINDOW_DAYS,
+  localDate,
+  totalsBetween,
+  type PlacementCounts,
+  type WarmupDay,
+} from "@/lib/email/warmupPlan.pure";
+import { deadRecipientDomains } from "@/server/email-domain-health.server";
 
 /**
  * How long a pass may keep STARTING messages. One pass has to cover the gap
@@ -154,6 +166,14 @@ const CANDIDATE_MULTIPLIER = 4;
 const MAX_CANDIDATES = 2000;
 /** Refusals in a row, within one tick, that pause a campaign whatever their cause. */
 export const REFUSALS_BEFORE_PAUSE = 3;
+/**
+ * Pages of contacts read for one message when the checks at the wire take
+ * some out, so a fifty-contact message whose page held three dead domains
+ * reads three more rather than going out with forty-seven.
+ */
+const SCREEN_ROUNDS = 3;
+/** How long one message's recipient-domain lookups may keep starting. */
+const DOMAIN_CHECK_BUDGET_MS = 8_000;
 
 export type DispatchSummary = {
   campaigns: number;
@@ -202,6 +222,12 @@ type CampaignRow = {
   segment_messages_per_slot: number | null;
   /** The campaign's shared unsubscribe link, for a message to several contacts. */
   unsubscribe_token: string | null;
+  /** When it was last started or resumed: the bounce rate is counted from here. */
+  started_at: string | null;
+  /** Hard-bounce percent that pauses it; null is only a warning. */
+  bounce_pause_percent: number | null;
+  /** Pause when its mailbox's warmup mail is landing in spam. */
+  warmup_guard: boolean;
 };
 
 /** A segmented campaign's enabled segments, and every value they cover. */
@@ -424,7 +450,8 @@ export async function dispatchDueCampaigns(
         summary.stranded += outcome.stranded;
         if (outcome.completed) summary.completed += 1;
         if (outcome.paused) summary.paused += 1;
-        if (outcome.note) summary.skipped.push(`${campaign.name}: ${outcome.note}`);
+        const said = [outcome.note, ...outcome.notices].filter(Boolean).join("; ");
+        if (said) summary.skipped.push(`${campaign.name}: ${said}`);
       } catch (error) {
         // One campaign's fault must not stop the others: they share nothing but
         // this loop.
@@ -452,6 +479,12 @@ type TickOutcome = {
   leased: boolean;
   stranded: number;
   note: string | null;
+  /**
+   * Things worth saying whether or not anything was sent — a bounce rate
+   * climbing, contacts stepped over — which `note`, the reason the pass
+   * stopped where it did, would otherwise crowd out.
+   */
+  notices: string[];
 };
 
 type TenantAccess = { config: GraphConfig; problem: null } | { config: null; problem: string };
@@ -515,6 +548,57 @@ async function pauseCampaign(campaignId: string, reason: string): Promise<boolea
     metadata: { reason },
   });
   return true;
+}
+
+/**
+ * The campaign's hard-bounce rate since it was last started, judged.
+ *
+ * Both counts come from records: contacts the ledger says were sent, and
+ * those of them whose address the bounce scan has since put on the
+ * do-not-send register (`email_campaign_bounces`). Since the last start, so a
+ * campaign resumed after its list was cleaned is judged on what it sends now.
+ */
+async function bounceRate(campaign: CampaignRow) {
+  const pausePercent = campaign.bounce_pause_percent ?? null;
+  const since = campaign.started_at ?? new Date(0).toISOString();
+  const sent = await countRecipients(campaign.id, (q) =>
+    q.eq("status", "sent").gte("sent_at", since),
+  );
+  if (sent === 0) return bounceVerdict({ sent, bounced: 0, pausePercent });
+  const { count, error } = await supabaseAdmin
+    .from("email_campaign_bounces")
+    .select("recipient_id", { count: "exact", head: true })
+    .eq("campaign_id", campaign.id)
+    .gte("sent_at", since);
+  if (error) throw error;
+  return bounceVerdict({ sent, bounced: count ?? 0, pausePercent });
+}
+
+/**
+ * What the warmup pool has measured for a sending mailbox over the health
+ * window, or null when the mailbox is not in the pool. Days are the
+ * mailbox's own, as the warmup page counts them.
+ */
+async function warmupPlacement(mailbox: string): Promise<PlacementCounts | null> {
+  const key = emailKey(mailbox);
+  if (!key) return null;
+  const { data: members, error } = await supabaseAdmin
+    .from("email_warmup_mailboxes")
+    .select("id, mailbox, timezone")
+    .neq("status", "removed");
+  if (error) throw error;
+  const member = (members ?? []).find((row) => emailKey(row.mailbox as string) === key);
+  if (!member) return null;
+  const today = localDate(new Date(), (member.timezone as string) || "Australia/Sydney");
+  const from = daysBefore(today, HEALTH_WINDOW_DAYS - 1);
+  const { data: days, error: dayError } = await supabaseAdmin
+    .from("email_warmup_daily")
+    .select("*")
+    .eq("mailbox_id", member.id as string)
+    .gte("day", from);
+  if (dayError) throw dayError;
+  const week = totalsBetween((days ?? []) as Partial<WarmupDay>[], from, today);
+  return { inbox: week.inbox, junk: week.junk, other: week.other, missing: week.missing };
 }
 
 /**
@@ -656,6 +740,7 @@ async function runCampaignTick(campaign: CampaignRow, context: TickContext): Pro
       leased: true,
       stranded: 0,
       note: null,
+      notices: [],
     };
   }
 
@@ -676,6 +761,7 @@ async function runCampaignTick(campaign: CampaignRow, context: TickContext): Pro
             ? `sent ${outcome.messages} message${outcome.messages === 1 ? "" : "s"}`
             : null,
           outcome.note,
+          ...outcome.notices,
         ]
           .filter(Boolean)
           .join("; ") || "nothing to do"
@@ -699,6 +785,7 @@ async function workCampaign(
     leased: false,
     stranded: 0,
     note: null,
+    notices: [],
   };
 
   const rules = rulesFor(campaign);
@@ -754,6 +841,24 @@ async function workCampaign(
           : `every enabled segment is finished; ${waiting} ${pendingCount === 1 ? "is" : "are"} outside them (in a disabled segment, or in none) — enable a segment, or cancel the campaign to close it`;
       return { outcome, nextSendAt: null };
     }
+  }
+
+  // Before anything else is planned: a list bouncing by the dozen stops here,
+  // whether or not this minute was going to send. See "Protecting the sender".
+  try {
+    const bounces = await bounceRate(campaign);
+    if (bounces.action === "pause" && bounces.detail) {
+      outcome.paused = await pauseCampaign(campaign.id, bounces.detail);
+      outcome.note = bounces.detail;
+      return { outcome, nextSendAt: null };
+    }
+    if (bounces.detail) outcome.notices.push(bounces.detail);
+  } catch (error) {
+    // A check that could not be made is said, not treated as a pass or a
+    // pause: the campaign's own rules still hold, and the next pass asks again.
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[email] bounce check failed for ${campaign.id}:`, message);
+    outcome.notices.push(`the bounce rate could not be checked: ${message}`);
   }
 
   const messagesTodayResult = await supabaseAdmin
@@ -852,6 +957,24 @@ async function workCampaign(
     return { outcome, nextSendAt: null };
   }
 
+  if (campaign.warmup_guard !== false) {
+    try {
+      const guard = warmupGuardVerdict({
+        address: mailbox,
+        counts: await warmupPlacement(mailbox),
+      });
+      if (guard.pause && guard.detail) {
+        outcome.paused = await pauseCampaign(campaign.id, guard.detail);
+        outcome.note = guard.detail;
+        return { outcome, nextSendAt: null };
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[email] warmup guard failed for ${campaign.id}:`, message);
+      outcome.notices.push(`the sending mailbox's warmup placement could not be read: ${message}`);
+    }
+  }
+
   // Before anything is claimed — see the header.
   let attachments: PreparedAttachments;
   try {
@@ -870,6 +993,7 @@ async function workCampaign(
   // Contacts a quota has stepped over this tick, so the next page does not
   // hand back the same ones for ever.
   const stepOver = new Set<string>();
+  const screened: Screened = { deadDomain: 0, domains: new Set() };
 
   for (let message = 0; message < plan.messageAllowance; message++) {
     if (recipientsLeft <= 0) break;
@@ -901,10 +1025,16 @@ async function workCampaign(
       // The first segment whose turn it is and that has somebody to send to.
       for (const candidate of turns) {
         if (candidate.remaining <= 0 || exhausted.has(candidate.segment.id)) continue;
-        const picked = await chooseRecipients(campaign.id, wanted, quotas, usage, taken, stepOver, {
-          dimension: segmentation.dimension,
-          values: candidate.segment.matchValues,
-        });
+        const picked = await chooseRecipients(
+          campaign.id,
+          wanted,
+          quotas,
+          usage,
+          taken,
+          stepOver,
+          { dimension: segmentation.dimension, values: candidate.segment.matchValues },
+          screened,
+        );
         if (picked.length === 0) {
           exhausted.add(candidate.segment.id);
           continue;
@@ -914,7 +1044,16 @@ async function workCampaign(
         break;
       }
     } else {
-      chosen = await chooseRecipients(campaign.id, wanted, quotas, usage, taken, stepOver, null);
+      chosen = await chooseRecipients(
+        campaign.id,
+        wanted,
+        quotas,
+        usage,
+        taken,
+        stepOver,
+        null,
+        screened,
+      );
     }
     if (chosen.length === 0) {
       // Every segment with a share left is finished or held, a quota holding
@@ -1002,6 +1141,12 @@ async function workCampaign(
   }
 
   if (!stopped && outcome.note == null && slotSpent()) outcome.note = slotDone();
+  if (screened.deadDomain > 0) {
+    const domains = [...screened.domains];
+    outcome.notices.push(
+      `stepped over ${screened.deadDomain} contact${screened.deadDomain === 1 ? "" : "s"} at ${domains.length === 1 ? "a domain" : `${domains.length} domains`} that take${domains.length === 1 ? "s" : ""} no mail (${domains.slice(0, 3).join(", ")}${domains.length > 3 ? ", …" : ""})`,
+    );
+  }
 
   // A campaign that stopped (paused, here or by an operator) has no next message.
   return { outcome, nextSendAt: stopped ? null : whenNext() };
@@ -1032,10 +1177,14 @@ export function messageBatchSize(campaign: {
   return Math.max(1, campaign.recipients_per_message);
 }
 
+/** What the checks at the wire took out during a pass, for its heartbeat. */
+type Screened = { deadDomain: number; domains: Set<string> };
+
 /**
  * Pending contacts that no quota is holding — and, for a segmented campaign,
- * only the segment whose turn it is — re-checked against the suppression
- * register immediately before they are claimed.
+ * only the segment whose turn it is — screened at the wire immediately before
+ * they are claimed: against the suppression register, and against domains
+ * known to take no mail.
  */
 async function chooseRecipients(
   campaignId: string,
@@ -1045,8 +1194,42 @@ async function chooseRecipients(
   taken: Map<string, number>,
   stepOver: Set<string>,
   segment: { dimension: string; values: string[] } | null,
+  screened: Screened,
 ): Promise<RecipientRow[]> {
-  const limit = Math.min(MAX_CANDIDATES, Math.max(wanted * CANDIDATE_MULTIPLIER, wanted + 20));
+  const sendable: RecipientRow[] = [];
+  for (let round = 0; round < SCREEN_ROUNDS && sendable.length < wanted; round++) {
+    const candidates = await readCandidates(
+      campaignId,
+      wanted - sendable.length,
+      quotas,
+      usage,
+      taken,
+      stepOver,
+      segment,
+    );
+    if (candidates.length === 0) break;
+    // Read once a pass: whatever happens to them below, the next round's page
+    // must be different contacts.
+    for (const candidate of candidates) stepOver.add(candidate.id);
+    sendable.push(...(await screenAtTheWire(campaignId, candidates, screened)));
+  }
+  if (sendable.length === 0) return [];
+  return claimRecipients(sendable);
+}
+
+async function readCandidates(
+  campaignId: string,
+  wanted: number,
+  quotas: QuotaRule[],
+  usage: Map<string, { today: number; total: number }>,
+  taken: Map<string, number>,
+  stepOver: Set<string>,
+  segment: { dimension: string; values: string[] } | null,
+): Promise<RecipientRow[]> {
+  const limit = Math.min(
+    MAX_CANDIDATES,
+    Math.max(wanted * CANDIDATE_MULTIPLIER, wanted + 20) + stepOver.size,
+  );
   let query = supabaseAdmin
     .from("email_campaign_recipients")
     .select("id, email, email_key, attempts, attributes, attributes_norm, unsubscribe_token")
@@ -1075,10 +1258,28 @@ async function chooseRecipients(
     candidates.push(row);
     if (candidates.length >= wanted) break;
   }
-  if (candidates.length === 0) return [];
+  return candidates;
+}
 
-  // The wire re-check. A bounce recorded since the import — or since this
-  // tick began — takes the address out here, before anything is claimed.
+/**
+ * The checks made immediately before a claim, returning who passed.
+ *
+ * The suppression register is re-read: a bounce recorded since the import —
+ * or since this tick began — takes the address out here. Then each contact's
+ * domain is asked whether it takes mail at all: an address at a domain that
+ * does not exist, or has no mail server, bounces every time, and a run of
+ * those is what a receiver reads as a scraped list. Both kinds are recorded
+ * as suppressed with the reason, so they are not read again.
+ *
+ * The domain check fails open. A resolver that cannot answer is not evidence
+ * that a domain is dead, and holding the campaign for it would make every
+ * resolver hiccup a missed sending time.
+ */
+async function screenAtTheWire(
+  campaignId: string,
+  candidates: RecipientRow[],
+  screened: Screened,
+): Promise<RecipientRow[]> {
   const { data: suppressed, error: suppressionError } = await supabaseAdmin
     .from("email_suppressions")
     .select("email_key")
@@ -1089,8 +1290,6 @@ async function chooseRecipients(
   if (suppressionError) throw suppressionError;
 
   const blocked = new Set((suppressed ?? []).map((row) => row.email_key as string));
-  const sendable = candidates.filter((c) => !blocked.has(c.email_key));
-
   if (blocked.size > 0) {
     const { error } = await supabaseAdmin
       .from("email_campaign_recipients")
@@ -1100,9 +1299,48 @@ async function chooseRecipients(
       .in("email_key", [...blocked]);
     if (error) console.error("[email] could not mark suppressed recipients:", error.message);
   }
-  if (sendable.length === 0) return [];
+  const unblocked = candidates.filter((c) => !blocked.has(c.email_key));
+  if (unblocked.length === 0) return [];
 
-  return claimRecipients(sendable);
+  let dead = new Map<string, string>();
+  try {
+    dead = await deadRecipientDomains(
+      unblocked.map((c) => domainOf(c.email_key)).filter((d): d is string => d != null),
+      { budgetMs: DOMAIN_CHECK_BUDGET_MS },
+    );
+  } catch (error) {
+    console.error(
+      "[email] recipient domain check failed:",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+  if (dead.size === 0) return unblocked;
+
+  const byDomain = new Map<string, string[]>();
+  const passed: RecipientRow[] = [];
+  for (const candidate of unblocked) {
+    const domain = domainOf(candidate.email_key);
+    if (domain && dead.has(domain)) {
+      byDomain.set(domain, [...(byDomain.get(domain) ?? []), candidate.id]);
+    } else {
+      passed.push(candidate);
+    }
+  }
+  for (const [domain, ids] of byDomain) {
+    const { error } = await supabaseAdmin
+      .from("email_campaign_recipients")
+      .update({
+        status: "suppressed",
+        suppressed_reason: `${domain} takes no mail: ${dead.get(domain)}`.slice(0, 500),
+      })
+      .eq("campaign_id", campaignId)
+      .eq("status", "pending")
+      .in("id", ids);
+    if (error) console.error("[email] could not mark dead-domain recipients:", error.message);
+    screened.deadDomain += ids.length;
+    screened.domains.add(domain);
+  }
+  return passed;
 }
 
 /**

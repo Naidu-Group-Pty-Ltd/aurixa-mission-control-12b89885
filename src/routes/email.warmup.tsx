@@ -32,6 +32,7 @@ import {
 } from "@/components/ui/dialog";
 import { AddWarmupMailboxesDialog } from "@/components/email/warmup/add-mailboxes-dialog";
 import { WarmupMailboxRow } from "@/components/email/warmup/mailbox-row";
+import { SendingDomainsPanel } from "@/components/email/sending-domains";
 import { HEALTH_WINDOW_DAYS } from "@/lib/email/warmupPlan.pure";
 import { getWarmupPool, updateWarmupSettings, type WarmupPool } from "@/lib/email-warmup.functions";
 
@@ -274,6 +275,8 @@ function EmailWarmupPage() {
           ))}
         </div>
       )}
+
+      <SendingDomainsPanel />
 
       <div className="glass-inset spine spine-idle flex items-start gap-3 px-4 py-3">
         <Pause className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
