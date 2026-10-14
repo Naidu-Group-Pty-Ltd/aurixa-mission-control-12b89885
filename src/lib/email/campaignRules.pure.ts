@@ -22,15 +22,37 @@
  * day and batching 40 to a message either sends 200 messages (8,000 people) or
  * 5 messages, depending on which of the two you meant. Both are here, both
  * nullable, and neither is derived from the other.
+ *
+ * **A calendar is a window or a set of sending times, never both.** A window
+ * (09:00–17:00) lets messages go at any minute inside it, paced by the gap. A
+ * set of sending times (09:00, 13:00, 15:00, 17:00) sends a batch at each of
+ * them and nothing in between — the shape a list worked "six states, fifty to
+ * a message, four times a day" needs, and one a window cannot express: there
+ * is no window that holds 09:00 and 17:00 but not 11:00. Each sending time
+ * stays open for its grace, so a dispatcher that arrives at 09:03 still sends
+ * the 09:00 batch; it closes before the next one opens, so a missed batch is
+ * missed rather than doubled into the next.
  */
+
+/** How long a sending time stays open when the campaign does not say. */
+export const DEFAULT_SLOT_GRACE_MINUTES = 30;
 
 export type CampaignRules = {
   timezone: string;
   /** ISO weekday numbers: 1 = Monday … 7 = Sunday. */
   sendDays: number[];
-  /** `HH:MM`, in the campaign's zone. */
+  /** `HH:MM`, in the campaign's zone. Ignored once `sendTimes` names any. */
   windowStart: string;
   windowEnd: string;
+  /**
+   * Set times of day (`HH:MM`, the campaign's zone) at which a batch goes out,
+   * instead of a window. Empty means the window decides.
+   */
+  sendTimes: string[];
+  /** Minutes each sending time stays open for its batch. */
+  slotGraceMinutes: number;
+  /** Messages one sending time may carry, across every segment. Null is no limit. */
+  maxMessagesPerSlot: number | null;
   maxMessagesPerDay: number | null;
   maxRecipientsPerDay: number | null;
   recipientsPerMessage: number;
@@ -143,11 +165,124 @@ export function minutesOfClock(clock: string): number {
   return Math.min(23, Number(match[1])) * 60 + Math.min(59, Number(match[2]));
 }
 
+/** Minutes since midnight → `HH:MM`. */
+export function clockOfMinutes(minutes: number): string {
+  const whole = Math.max(0, Math.min(24 * 60 - 1, Math.floor(minutes)));
+  return `${String(Math.floor(whole / 60)).padStart(2, "0")}:${String(whole % 60).padStart(2, "0")}`;
+}
+
+/**
+ * Sending times as one canonical list: `HH:MM`, earliest first, each once.
+ * `["17:00", "09:00:00", "9:00"]` → `["09:00", "17:00"]`. Anything that does
+ * not read as a clock is dropped rather than read as midnight, which is what
+ * `minutesOfClock` would make of it.
+ */
+export function normaliseSendTimes(times: readonly string[] | null | undefined): string[] {
+  const minutes = new Set<number>();
+  for (const time of times ?? []) {
+    if (/^\d{1,2}:\d{2}/.test(String(time ?? "").trim())) minutes.add(minutesOfClock(time));
+  }
+  return [...minutes].sort((a, b) => a - b).map(clockOfMinutes);
+}
+
+/** Whether the campaign sends at set times rather than across a window. */
+export function isSlotMode(rules: Pick<CampaignRules, "sendTimes">): boolean {
+  return normaliseSendTimes(rules.sendTimes).length > 0;
+}
+
+/** One occurrence of a sending time: Tuesday's 13:00, say. */
+export type SendSlot = {
+  /** The instant the sending time names. Every message sent for it records this. */
+  at: Date;
+  /** When it stops sending: after its grace, or when the next one opens if that is sooner. */
+  closesAt: Date;
+  /** `HH:MM`, the campaign's own clock. */
+  clock: string;
+};
+
+const ALL_DAYS = [1, 2, 3, 4, 5, 6, 7];
+
+/**
+ * Every sending time from the day before `from` to `days` days after it,
+ * earliest first.
+ *
+ * Each is a wall-clock time in the CAMPAIGN'S zone converted for that specific
+ * date, so 09:00 stays 09:00 in Sydney across daylight saving. A slot belongs
+ * to the day its clock is on — Saturday's 23:30 is a Saturday slot even while
+ * its grace runs past midnight. And no slot stays open past the opening of the
+ * next: that is what makes a late or missing tick lose one batch instead of
+ * sending two at once.
+ */
+export function slotOccurrences(
+  rules: Pick<CampaignRules, "timezone" | "sendDays" | "sendTimes" | "slotGraceMinutes">,
+  from: Date,
+  days: number,
+): SendSlot[] {
+  const clocks = normaliseSendTimes(rules.sendTimes);
+  if (clocks.length === 0) return [];
+  const allowed = new Set(rules.sendDays?.length ? rules.sendDays : ALL_DAYS);
+  const base = zonedParts(from, rules.timezone);
+  const starts: { at: Date; clock: string }[] = [];
+  const seen = new Set<number>();
+  for (let offset = -1; offset <= days; offset++) {
+    const date = zonedDatePlus(base, offset);
+    const weekday =
+      ((new Date(Date.UTC(date.year, date.month - 1, date.day)).getUTCDay() + 6) % 7) + 1;
+    if (!allowed.has(weekday)) continue;
+    for (const clock of clocks) {
+      const minutes = minutesOfClock(clock);
+      const at = zonedTimeToInstant(
+        rules.timezone,
+        date.year,
+        date.month,
+        date.day,
+        Math.floor(minutes / 60),
+        minutes % 60,
+      );
+      // Two clocks the zone maps to one instant — inside the hour daylight
+      // saving skips — are one sending time, not two batches at once.
+      if (seen.has(at.getTime())) continue;
+      seen.add(at.getTime());
+      starts.push({ at, clock });
+    }
+  }
+  starts.sort((a, b) => a.at.getTime() - b.at.getTime());
+  const grace = Math.max(1, Number(rules.slotGraceMinutes) || DEFAULT_SLOT_GRACE_MINUTES) * 60_000;
+  return starts.map((start, index) => {
+    const next = starts[index + 1]?.at.getTime() ?? Number.POSITIVE_INFINITY;
+    return {
+      at: start.at,
+      clock: start.clock,
+      closesAt: new Date(Math.min(start.at.getTime() + grace, next)),
+    };
+  });
+}
+
+/** The sending time `now` falls inside, or null between them. */
+export function currentSlot(
+  rules: Pick<CampaignRules, "timezone" | "sendDays" | "sendTimes" | "slotGraceMinutes">,
+  now: Date,
+): SendSlot | null {
+  const at = now.getTime();
+  return (
+    slotOccurrences(rules, now, 1).find(
+      (slot) => slot.at.getTime() <= at && at < slot.closesAt.getTime(),
+    ) ?? null
+  );
+}
+
+/** `["09:00", "13:00", "17:00"]` → "09:00, 13:00 and 17:00". */
+export function describeSendTimes(times: readonly string[] | null | undefined): string {
+  const clocks = normaliseSendTimes(times);
+  if (clocks.length <= 1) return clocks.join("");
+  return `${clocks.slice(0, -1).join(", ")} and ${clocks[clocks.length - 1]}`;
+}
+
 export type WindowState =
   | { open: true }
   | {
       open: false;
-      reason: "before_start" | "after_end" | "day_not_selected" | "outside_hours";
+      reason: "before_start" | "after_end" | "day_not_selected" | "outside_hours" | "between_slots";
       detail: string;
     };
 
@@ -160,6 +295,11 @@ export function windowState(rules: CampaignRules, now: Date): WindowState {
     return { open: false, reason: "after_end", detail: "the campaign's end date has passed" };
   }
 
+  // A sending time open now is open whatever today is: Saturday's 23:30 batch
+  // still sends at 00:10 on a Sunday the campaign does not otherwise use.
+  const slotMode = isSlotMode(rules);
+  if (slotMode && currentSlot(rules, now)) return { open: true };
+
   const parts = zonedParts(now, rules.timezone);
   const days = rules.sendDays?.length ? rules.sendDays : [1, 2, 3, 4, 5, 6, 7];
   if (!days.includes(parts.weekday)) {
@@ -167,6 +307,14 @@ export function windowState(rules: CampaignRules, now: Date): WindowState {
       open: false,
       reason: "day_not_selected",
       detail: "today is not one of this campaign's sending days",
+    };
+  }
+
+  if (slotMode) {
+    return {
+      open: false,
+      reason: "between_slots",
+      detail: `between sending times (${describeSendTimes(rules.sendTimes)} ${rules.timezone})`,
     };
   }
 
@@ -196,6 +344,9 @@ export type CampaignRuleColumns = {
   send_days: number[] | null;
   window_start: string;
   window_end: string;
+  send_times: string[] | null;
+  slot_grace_minutes: number | null;
+  max_messages_per_slot: number | null;
   max_messages_per_day: number | null;
   max_recipients_per_day: number | null;
   recipients_per_message: number;
@@ -215,6 +366,9 @@ export function campaignRulesFromRow(row: CampaignRuleColumns): CampaignRules {
     sendDays: row.send_days?.length ? row.send_days : [1, 2, 3, 4, 5, 6, 7],
     windowStart: row.window_start,
     windowEnd: row.window_end,
+    sendTimes: normaliseSendTimes(row.send_times),
+    slotGraceMinutes: row.slot_grace_minutes ?? DEFAULT_SLOT_GRACE_MINUTES,
+    maxMessagesPerSlot: row.max_messages_per_slot ?? null,
     maxMessagesPerDay: row.max_messages_per_day,
     maxRecipientsPerDay: row.max_recipients_per_day,
     recipientsPerMessage: row.recipients_per_message,
@@ -255,6 +409,16 @@ export function nextWindowOpening(rules: CampaignRules, from: Date, horizonDays 
   }
   if (endsAt != null && Number.isFinite(endsAt) && at.getTime() > endsAt) return null;
   if (windowState(rules, at).open) return at;
+
+  if (isSlotMode(rules)) {
+    for (const slot of slotOccurrences(rules, at, horizonDays)) {
+      if (slot.closesAt.getTime() <= at.getTime()) continue;
+      const opening = slot.at.getTime() > at.getTime() ? slot.at : at;
+      if (endsAt != null && opening.getTime() > endsAt) return null;
+      return opening;
+    }
+    return null;
+  }
 
   const start = minutesOfClock(rules.windowStart);
   const end = minutesOfClock(rules.windowEnd);
@@ -300,12 +464,21 @@ export function nextSendTime(input: {
   lastMessageAt: string | null;
   messagesToday: number;
   recipientsToday: number;
+  /**
+   * The sending time open now has sent everything it may — its own limit, or
+   * every segment's share. The next message then waits for the next one.
+   */
+  slotSpent?: boolean;
 }): Date | null {
   const { rules, now } = input;
   let earliest = now.getTime();
   if (rules.minGapSeconds > 0 && input.lastMessageAt) {
     const due = Date.parse(input.lastMessageAt) + rules.minGapSeconds * 1000;
     if (Number.isFinite(due) && due > earliest) earliest = due;
+  }
+  if (input.slotSpent && isSlotMode(rules)) {
+    const slot = currentSlot(rules, now);
+    if (slot && slot.closesAt.getTime() > earliest) earliest = slot.closesAt.getTime();
   }
   const capSpent =
     (rules.maxMessagesPerDay != null && input.messagesToday >= rules.maxMessagesPerDay) ||
@@ -339,8 +512,15 @@ export function describeSendDays(days: number[] | null | undefined): string {
   return set.map((day) => DAY_NAMES[day - 1]).join(", ");
 }
 
-/** "Mon–Fri, 09:00–17:00 Australia/Sydney" — the calendar in one line. */
+/**
+ * "Mon–Fri, 09:00–17:00 Australia/Sydney", or with sending times
+ * "Mon–Sat at 09:00, 13:00, 15:00 and 17:00 Australia/Sydney" — the calendar
+ * in one line.
+ */
 export function describeSchedule(rules: CampaignRules): string {
+  if (isSlotMode(rules)) {
+    return `${describeSendDays(rules.sendDays)} at ${describeSendTimes(rules.sendTimes)} ${rules.timezone}`;
+  }
   const start = String(rules.windowStart ?? "").slice(0, 5);
   const end = String(rules.windowEnd ?? "").slice(0, 5);
   const hours = minutesOfClock(start) === minutesOfClock(end) ? "all day" : `${start}–${end}`;
@@ -383,6 +563,8 @@ export type TickInput = {
   messagesToday: number;
   recipientsToday: number;
   pendingCount: number;
+  /** Messages already sent for the sending time open now. Ignored with a window. */
+  messagesThisSlot?: number;
 };
 
 /** What one dispatcher tick is allowed to do for one campaign. */
@@ -409,6 +591,12 @@ export function planTick(input: TickInput): TickPlan {
   if (rules.maxMessagesPerDay != null) {
     const left = rules.maxMessagesPerDay - input.messagesToday;
     if (left <= 0) return { ...idle, blockedBy: "today's message limit has been reached" };
+    messageAllowance = Math.min(messageAllowance, left);
+  }
+
+  if (isSlotMode(rules) && rules.maxMessagesPerSlot != null) {
+    const left = rules.maxMessagesPerSlot - (input.messagesThisSlot ?? 0);
+    if (left <= 0) return { ...idle, blockedBy: "this sending time's messages have all gone" };
     messageAllowance = Math.min(messageAllowance, left);
   }
 

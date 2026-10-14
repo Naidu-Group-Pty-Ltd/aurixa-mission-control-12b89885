@@ -7507,7 +7507,10 @@ export type Database = {
           mailbox: string | null
           queued_at: string
           recipient_count: number
+          segment_id: string | null
+          segment_label: string | null
           sent_at: string | null
+          slot_at: string | null
           status: string
           subject: string
           tenant_id: string | null
@@ -7529,7 +7532,10 @@ export type Database = {
           mailbox?: string | null
           queued_at?: string
           recipient_count?: number
+          segment_id?: string | null
+          segment_label?: string | null
           sent_at?: string | null
+          slot_at?: string | null
           status?: string
           subject: string
           tenant_id?: string | null
@@ -7551,13 +7557,23 @@ export type Database = {
           mailbox?: string | null
           queued_at?: string
           recipient_count?: number
+          segment_id?: string | null
+          segment_label?: string | null
           sent_at?: string | null
+          slot_at?: string | null
           status?: string
           subject?: string
           tenant_id?: string | null
           to_address?: string | null
         }
         Relationships: [
+          {
+            foreignKeyName: "email_campaign_messages_segment_id_fkey"
+            columns: ["segment_id"]
+            isOneToOne: false
+            referencedRelation: "email_campaign_segments"
+            referencedColumns: ["id"]
+          },
           {
             foreignKeyName: "email_campaign_messages_tenant_id_fkey"
             columns: ["tenant_id"]
@@ -7709,6 +7725,47 @@ export type Database = {
           },
         ]
       }
+      email_campaign_segments: {
+        Row: {
+          campaign_id: string
+          created_at: string
+          enabled: boolean
+          id: string
+          label: string
+          match_values: string[]
+          position: number
+          updated_at: string
+        }
+        Insert: {
+          campaign_id: string
+          created_at?: string
+          enabled?: boolean
+          id?: string
+          label: string
+          match_values: string[]
+          position?: number
+          updated_at?: string
+        }
+        Update: {
+          campaign_id?: string
+          created_at?: string
+          enabled?: boolean
+          id?: string
+          label?: string
+          match_values?: string[]
+          position?: number
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "email_campaign_segments_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "email_campaigns"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       email_campaigns: {
         Row: {
           body_format: string
@@ -7728,6 +7785,7 @@ export type Database = {
           last_tick_note: string | null
           max_messages_per_day: number | null
           max_messages_per_run: number
+          max_messages_per_slot: number | null
           max_recipients_per_day: number | null
           min_gap_seconds: number
           name: string
@@ -7735,7 +7793,11 @@ export type Database = {
           paused_reason: string | null
           recipients_per_message: number
           reply_to: string | null
+          segment_dimension: string | null
+          segment_messages_per_slot: number
           send_days: number[]
+          send_times: string[]
+          slot_grace_minutes: number
           started_at: string | null
           starts_at: string | null
           status: string
@@ -7764,6 +7826,7 @@ export type Database = {
           last_tick_note?: string | null
           max_messages_per_day?: number | null
           max_messages_per_run?: number
+          max_messages_per_slot?: number | null
           max_recipients_per_day?: number | null
           min_gap_seconds?: number
           name: string
@@ -7771,7 +7834,11 @@ export type Database = {
           paused_reason?: string | null
           recipients_per_message?: number
           reply_to?: string | null
+          segment_dimension?: string | null
+          segment_messages_per_slot?: number
           send_days?: number[]
+          send_times?: string[]
+          slot_grace_minutes?: number
           started_at?: string | null
           starts_at?: string | null
           status?: string
@@ -7800,6 +7867,7 @@ export type Database = {
           last_tick_note?: string | null
           max_messages_per_day?: number | null
           max_messages_per_run?: number
+          max_messages_per_slot?: number | null
           max_recipients_per_day?: number | null
           min_gap_seconds?: number
           name?: string
@@ -7807,7 +7875,11 @@ export type Database = {
           paused_reason?: string | null
           recipients_per_message?: number
           reply_to?: string | null
+          segment_dimension?: string | null
+          segment_messages_per_slot?: number
           send_days?: number[]
+          send_times?: string[]
+          slot_grace_minutes?: number
           started_at?: string | null
           starts_at?: string | null
           status?: string

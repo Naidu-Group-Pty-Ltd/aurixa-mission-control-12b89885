@@ -1041,4 +1041,19 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "rpc", fn: "microsoft_tenant_update" },
     ],
   },
+  {
+    migration: "20261014100000_email_send_times_and_segments.sql",
+    version: "20261014100000",
+    assertions: [
+      { kind: "column", table: "email_campaigns", column: "send_times" },
+      { kind: "column", table: "email_campaigns", column: "slot_grace_minutes" },
+      { kind: "column", table: "email_campaigns", column: "max_messages_per_slot" },
+      { kind: "column", table: "email_campaigns", column: "segment_dimension" },
+      { kind: "column", table: "email_campaigns", column: "segment_messages_per_slot" },
+      { kind: "table", table: "email_campaign_segments" },
+      { kind: "column", table: "email_campaign_messages", column: "segment_id" },
+      { kind: "column", table: "email_campaign_messages", column: "segment_label" },
+      { kind: "column", table: "email_campaign_messages", column: "slot_at" },
+    ],
+  },
 ];

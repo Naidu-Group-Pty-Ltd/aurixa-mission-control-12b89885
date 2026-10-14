@@ -58,6 +58,16 @@ describe("messageBatchSize", () => {
     ).toBe(1);
   });
 
+  it("lets a segmented campaign batch a message that names its own segment column", () => {
+    const named = { subject_template: "News for {{state}}", segment_dimension: "state" };
+    expect(messageBatchSize(campaign(named))).toBe(40);
+    // Any other column still means one contact per message.
+    expect(
+      messageBatchSize(campaign({ ...named, body_template: "<p>Hi {{first_name}}</p>" })),
+    ).toBe(1);
+    expect(messageBatchSize(campaign({ ...named, segment_dimension: "region" }))).toBe(1);
+  });
+
   it("never returns zero", () => {
     expect(messageBatchSize(campaign({ recipients_per_message: 0 }))).toBe(1);
   });
@@ -79,6 +89,9 @@ describe("rulesFor", () => {
     send_days: null,
     window_start: "09:00:00",
     window_end: "17:00:00",
+    send_times: null,
+    slot_grace_minutes: null,
+    max_messages_per_slot: null,
     max_messages_per_day: null,
     max_recipients_per_day: null,
     recipients_per_message: 1,
@@ -87,6 +100,8 @@ describe("rulesFor", () => {
     starts_at: null,
     ends_at: null,
     last_message_at: null,
+    segment_dimension: null,
+    segment_messages_per_slot: null,
   };
 
   it("fills a missing zone and an empty day list rather than sending nothing", () => {
@@ -95,5 +110,12 @@ describe("rulesFor", () => {
     // An empty day list would close the window for ever, which reads on screen
     // as a campaign that is running and does nothing.
     expect(rules.sendDays).toEqual([1, 2, 3, 4, 5, 6, 7]);
+  });
+
+  it("keeps the window in charge until sending times are named, and reads them as clocks", () => {
+    expect(rulesFor(row)).toMatchObject({ sendTimes: [], slotGraceMinutes: 30 });
+    expect(
+      rulesFor({ ...row, send_times: ["17:00:00", "09:00:00"], slot_grace_minutes: 20 }),
+    ).toMatchObject({ sendTimes: ["09:00", "17:00"], slotGraceMinutes: 20 });
   });
 });

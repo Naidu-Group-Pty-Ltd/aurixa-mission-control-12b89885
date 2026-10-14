@@ -78,14 +78,29 @@ export function missingFields(tokens: string[], available: string[]): string[] {
  * list, the address itself, or the unsubscribe link.
  */
 export function requiresOneRecipient(...templates: string[]): boolean {
-  const campaignLevel = new Set<string>(CAMPAIGN_FIELDS);
-  return findTokens(...templates).some((token) => !campaignLevel.has(token));
+  return perRecipientFields(templates).length > 0;
 }
 
 /** The per-recipient fields a template uses, for explaining the rule above. */
 export function personalisingFields(...templates: string[]): string[] {
-  const campaignLevel = new Set<string>(CAMPAIGN_FIELDS);
-  return findTokens(...templates).filter((token) => !campaignLevel.has(token));
+  return perRecipientFields(templates);
+}
+
+/**
+ * The fields that make a template one-person-per-message, given the columns
+ * whose value is the same for everybody a message carries.
+ *
+ * That is what a segment is: a campaign segmented by `state` puts only one
+ * state's contacts in each message, so `{{state}}` has one answer for all
+ * fifty of them and does not force the batch down to one. Any other column
+ * still does.
+ */
+export function perRecipientFields(
+  templates: readonly string[],
+  messageLevel: readonly string[] = [],
+): string[] {
+  const shared = new Set<string>([...CAMPAIGN_FIELDS, ...messageLevel]);
+  return findTokens(...templates).filter((token) => !shared.has(token));
 }
 
 export type RenderContext = Record<string, string | null | undefined>;

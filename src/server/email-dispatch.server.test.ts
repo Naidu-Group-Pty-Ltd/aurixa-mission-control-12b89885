@@ -10,7 +10,10 @@
 //   - a send that never left (a draft that could not be built) is retried,
 //     and one that may have left (unconfirmed) is not, and keeps its draft id;
 //   - a campaign sends through its own Microsoft tenant's credentials, and a
-//     tenant whose credentials fail holds up only its own campaigns.
+//     tenant whose credentials fail holds up only its own campaigns;
+//   - a campaign with sending times sends at them and not between, and a
+//     segmented one sends each segment its own message — one state per BCC
+//     line — and no more than its share of each sending time.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { sha256Hex } from "@/lib/email/attachments.pure";
 
@@ -117,6 +120,17 @@ vi.mock("@/integrations/supabase/client.server", () => {
       this.filters.push((row) => row[column] != null);
       return this;
     }
+    /** Only the shape quotas and segments use: `attributes_norm->>key`, `in`, a pgInList. */
+    filter(column: string, operator: string, list: string) {
+      if (operator !== "in") throw new Error(`fake: unsupported filter ${operator}`);
+      const [base, key] = column.split("->>");
+      const values = JSON.parse(`[${list.slice(1, -1)}]`) as string[];
+      this.filters.push((row) => {
+        const value = key ? (row[base] as Record<string, unknown> | null)?.[key] : row[column];
+        return values.includes(value as string);
+      });
+      return this;
+    }
     order(column: string, options: { ascending?: boolean; nullsFirst?: boolean } = {}) {
       this.orderBy.push({ column, ascending: options.ascending ?? true, ...options });
       return this;
@@ -139,7 +153,11 @@ vi.mock("@/integrations/supabase/client.server", () => {
       let data: Record<string, unknown>[] = [];
       if (this.op === "insert") {
         for (const input of this.inserts) {
-          const row = { id: `row-${++db.seq}`, ...input };
+          const row: Record<string, unknown> = { id: `row-${++db.seq}`, ...input };
+          // The column default the real table has, which the ledger reads.
+          if (this.table === "email_campaign_messages" && row.queued_at == null) {
+            row.queued_at = new Date().toISOString();
+          }
           this.rows().push(row);
           data.push(row);
         }
@@ -315,6 +333,7 @@ beforeEach(() => {
     email_campaign_recipients: recipients(4),
     email_campaign_messages: [],
     email_campaign_quotas: [],
+    email_campaign_segments: [],
     email_campaign_attachments: [],
     email_suppressions: [],
     microsoft_tenants: [],
@@ -749,5 +768,172 @@ describe("a campaign on an added Microsoft tenant", () => {
     expect(db.deliveries).toEqual([]);
     expect(statuses().every((s) => s.endsWith(":pending"))).toBe(true);
     expect(summary.skipped.join(" ")).toMatch(/"Partner tenant" was removed/);
+  });
+});
+
+describe("sending times and segments", () => {
+  // Monday 12 Oct 2026, 09:05 UTC: five minutes into the 09:00 sending time.
+  const AT_0905 = new Date("2026-10-12T09:05:00.000Z");
+  const SLOT_0900 = "2026-10-12T09:00:00.000Z";
+
+  /** The scenario in miniature: three states, two contacts to a message, one message each per time. */
+  function bySegment(over: Row = {}): Row {
+    return campaign({
+      send_times: ["09:00:00", "13:00:00"],
+      slot_grace_minutes: 30,
+      max_messages_per_slot: null,
+      segment_dimension: "state",
+      segment_messages_per_slot: 1,
+      recipients_per_message: 2,
+      subject_template: "News for {{state}}",
+      body_template: "<p>Hello {{state}}</p>",
+      ...over,
+    });
+  }
+
+  function stateRecipients(): Row[] {
+    const states: [string, string][] = [
+      ["NSW", "nsw"],
+      ["New South Wales", "new south wales"],
+      ["VIC", "vic"],
+      ["QLD", "qld"],
+      ["NSW", "nsw"],
+      ["VIC", "vic"],
+      ["QLD", "qld"],
+      ["ACT", "act"],
+    ];
+    return states.map(([state, norm], i) => ({
+      ...recipients(i + 1)[i],
+      attributes: { state },
+      attributes_norm: { state: norm },
+    }));
+  }
+
+  function segments(over: Record<string, Row> = {}): Row[] {
+    return [
+      { id: "seg-nsw", label: "NSW", match_values: ["nsw", "new south wales"], position: 0 },
+      { id: "seg-vic", label: "VIC", match_values: ["vic"], position: 1 },
+      { id: "seg-qld", label: "QLD", match_values: ["qld"], position: 2 },
+    ].map((row) => ({ campaign_id: "camp-1", enabled: true, ...row, ...over[row.id as string] }));
+  }
+
+  const bcc = (delivery: (typeof db.deliveries)[number]) =>
+    ((delivery.message.bccRecipients ?? []) as { emailAddress: { address: string } }[]).map(
+      (r) => r.emailAddress.address,
+    );
+
+  beforeEach(() => {
+    db.tables.email_campaigns = [bySegment()];
+    db.tables.email_campaign_recipients = stateRecipients();
+    db.tables.email_campaign_segments = segments();
+  });
+
+  it("sends each segment one message at the sending time, every contact in it from that segment", async () => {
+    const summary = await dispatchDueCampaigns({ now: AT_0905 });
+
+    expect(summary).toMatchObject({ messages: 3, recipients: 6 });
+    // Two to a message, never mixed: both spellings of NSW travel together.
+    expect(db.deliveries.map(bcc)).toEqual([
+      ["reader1@example.test", "reader2@example.test"],
+      ["reader3@example.test", "reader6@example.test"],
+      ["reader4@example.test", "reader7@example.test"],
+    ]);
+    // The segment column renders the segment's label, though the message is batched.
+    expect(db.deliveries.map((d) => d.message.subject)).toEqual([
+      "News for NSW",
+      "News for VIC",
+      "News for QLD",
+    ]);
+    expect(
+      db.tables.email_campaign_messages.map((m) => [m.segment_id, m.segment_label, m.slot_at]),
+    ).toEqual([
+      ["seg-nsw", "NSW", SLOT_0900],
+      ["seg-vic", "VIC", SLOT_0900],
+      ["seg-qld", "QLD", SLOT_0900],
+    ]);
+    const row = db.tables.email_campaigns[0];
+    expect(row.last_tick_note).toMatch(/everything the 09:00 sending time may send/);
+    expect(row.next_send_at).toBe("2026-10-12T13:00:00.000Z");
+  });
+
+  it("sends nothing more in the same sending time, however many ticks arrive", async () => {
+    await dispatchDueCampaigns({ now: AT_0905 });
+    await dispatchDueCampaigns({ now: new Date("2026-10-12T09:12:00.000Z") });
+    expect(db.deliveries).toHaveLength(3);
+    expect(statuses().filter((s) => s.endsWith(":pending"))).toHaveLength(2);
+  });
+
+  it("picks up a sending time part-sent before a pause, without repeating a segment", async () => {
+    db.tables.email_campaign_messages.push({
+      id: "earlier",
+      campaign_id: "camp-1",
+      status: "sent",
+      segment_id: "seg-nsw",
+      segment_label: "NSW",
+      slot_at: SLOT_0900,
+      queued_at: new Date().toISOString(),
+    });
+    await dispatchDueCampaigns({ now: AT_0905 });
+    expect(db.deliveries.map((d) => d.message.subject)).toEqual(["News for VIC", "News for QLD"]);
+  });
+
+  it("does not send between sending times, and names the next one", async () => {
+    const summary = await dispatchDueCampaigns({ now: new Date("2026-10-12T10:00:00.000Z") });
+    expect(summary.messages).toBe(0);
+    expect(db.deliveries).toEqual([]);
+    const row = db.tables.email_campaigns[0];
+    expect(row.last_tick_note).toMatch(/between sending times \(09:00 and 13:00 UTC\)/);
+    expect(row.next_send_at).toBe("2026-10-12T13:00:00.000Z");
+  });
+
+  it("caps a sending time with no segments at its own limit", async () => {
+    db.tables.email_campaigns = [
+      campaign({ send_times: ["09:00"], max_messages_per_slot: 2, segment_dimension: null }),
+    ];
+    db.tables.email_campaign_recipients = recipients(4);
+    await dispatchDueCampaigns({ now: AT_0905 });
+    expect(db.deliveries).toHaveLength(2);
+    expect(db.tables.email_campaign_messages.every((m) => m.slot_at === SLOT_0900)).toBe(true);
+    // The next is tomorrow's 09:00: there is only one sending time a day.
+    expect(db.tables.email_campaigns[0].next_send_at).toBe("2026-10-13T09:00:00.000Z");
+  });
+
+  it("rotates segments message by message across a window", async () => {
+    db.tables.email_campaigns = [
+      bySegment({ send_times: [], recipients_per_message: 1, max_messages_per_run: 5 }),
+    ];
+    await dispatchDueCampaigns({ now: NOW });
+    expect(db.deliveries.map((d) => d.message.subject)).toEqual([
+      "News for NSW",
+      "News for VIC",
+      "News for QLD",
+      "News for NSW",
+      "News for VIC",
+    ]);
+  });
+
+  it("never sends a disabled segment or a contact in no segment", async () => {
+    db.tables.email_campaign_segments = segments({ "seg-vic": { enabled: false } });
+    db.tables.email_campaigns = [bySegment({ send_times: [], max_messages_per_run: 20 })];
+    await dispatchDueCampaigns({ now: NOW });
+    const sent = db.tables.email_campaign_recipients
+      .filter((r) => r.status === "sent")
+      .map((r) => (r.attributes_norm as Record<string, string>).state);
+    expect(sent.sort()).toEqual(["new south wales", "nsw", "nsw", "qld", "qld"]);
+  });
+
+  it("holds contacts outside every enabled segment rather than completing over them", async () => {
+    db.tables.email_campaigns = [bySegment({ send_times: [] })];
+    await dispatchDueCampaigns({ now: NOW });
+    const after = await dispatchDueCampaigns({ now: NOW });
+
+    expect(after.completed).toBe(0);
+    const row = db.tables.email_campaigns[0];
+    expect(row.status).toBe("running");
+    expect(row.last_tick_note).toMatch(
+      /every enabled segment is finished; 1 waiting contact is outside them/,
+    );
+    expect(row.next_send_at).toBeNull();
+    expect(statuses()).toContain("rcpt-8:pending"); // the ACT contact, untouched
   });
 });
