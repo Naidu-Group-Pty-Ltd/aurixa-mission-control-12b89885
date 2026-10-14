@@ -200,6 +200,8 @@ type CampaignRow = {
   /** The list column every message is confined to; null is no segmentation. */
   segment_dimension: string | null;
   segment_messages_per_slot: number | null;
+  /** The campaign's shared unsubscribe link, for a message to several contacts. */
+  unsubscribe_token: string | null;
 };
 
 /** A segmented campaign's enabled segments, and every value they cover. */
@@ -1166,6 +1168,23 @@ async function releaseClaims(ids: string[], why: string): Promise<void> {
   if (error) console.error(`[email] could not release a claim (${why}):`, error.message);
 }
 
+/**
+ * The unsubscribe link a message carries: the contact's own for a message to
+ * one, the campaign's shared one for a message to several — or none, for a
+ * campaign row that predates the shared token, which renders the field empty
+ * rather than handing a batch one person's link.
+ */
+export function unsubscribeUrl(
+  origin: string,
+  campaign: { unsubscribe_token?: string | null },
+  only: { unsubscribe_token: string } | null,
+): string | null {
+  if (only)
+    return `${origin}/api/public/email/unsubscribe?t=${encodeURIComponent(only.unsubscribe_token)}`;
+  if (!campaign.unsubscribe_token) return null;
+  return `${origin}/api/public/email/unsubscribe?c=${encodeURIComponent(campaign.unsubscribe_token)}`;
+}
+
 /** Compose, record, send, record again. */
 async function sendOneMessage(input: {
   campaign: CampaignRow;
@@ -1193,16 +1212,17 @@ async function sendOneMessage(input: {
   // The segment's column is the exception, and it is the segment's LABEL that
   // renders, for every message alike: one message carrying `NSW` and
   // `New South Wales` contacts says "NSW" to all of them.
+  //
+  // So is the unsubscribe link, which has an answer for a batch: the
+  // campaign's shared link, where the reader confirms the address the message
+  // reached them at. One contact gets their own one-click link instead.
   const personal = recipients.length === 1;
+  const unsubscribe = unsubscribeUrl(origin, campaign, personal ? lead : null);
   const context: Record<string, string> = {
     ...(personal ? (lead.attributes ?? {}) : {}),
     ...(segment ? { [segment.dimension]: segment.label } : {}),
-    ...(personal
-      ? {
-          email: lead.email,
-          unsubscribe_url: `${origin}/api/public/email/unsubscribe?t=${encodeURIComponent(lead.unsubscribe_token)}`,
-        }
-      : {}),
+    ...(personal ? { email: lead.email } : {}),
+    ...(unsubscribe ? { unsubscribe_url: unsubscribe } : {}),
     campaign_name: campaign.name,
     sender_name: campaign.from_name ?? "",
     today: new Date().toISOString().slice(0, 10),

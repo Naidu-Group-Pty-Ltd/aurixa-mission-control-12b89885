@@ -427,9 +427,12 @@ describe("mergeTemplate.pure", () => {
   it("forces one recipient per message as soon as anything is per-person", () => {
     expect(requiresOneRecipient("Hello", "<p>A notice for everyone.</p>")).toBe(false);
     expect(requiresOneRecipient("Hello", "<p>Hi {{first_name}}</p>")).toBe(true);
-    // An unsubscribe link identifies the person clicking it, so it counts too.
+    // The address itself has no answer for a batch.
+    expect(requiresOneRecipient("Hello", "<p>Sent to {{email}}</p>")).toBe(true);
+    // An unsubscribe link does: the reader's own for one contact, the
+    // campaign's shared link for many.
     expect(requiresOneRecipient("Hello", "<p><a href='{{unsubscribe_url}}'>Stop</a></p>")).toBe(
-      true,
+      false,
     );
     // A campaign-level field does not.
     expect(requiresOneRecipient("{{campaign_name}}", "<p>Sent by {{sender_name}}</p>")).toBe(false);

@@ -18,20 +18,30 @@
  * before it will start.
  *
  * **A personalised template forces one recipient per message.** `{{state}}`
- * has no single answer for forty people in one BCC line, and neither does an
- * unsubscribe link, which has to identify the person clicking it. So the
- * presence of any per-recipient field caps the batch at one — stated on the
- * page rather than discovered when forty people are addressed as `Hi ,`.
+ * has no single answer for forty people in one BCC line. So the presence of
+ * any per-recipient field caps the batch at one — stated on the page rather
+ * than discovered when forty people are addressed as `Hi ,`. The unsubscribe
+ * link is the exception: it resolves for one reader (their own one-click
+ * link) and for many (the campaign's shared link, where the reader confirms
+ * their address), so it never decides the batch size.
  */
 
 /** Fields the campaign supplies, the same for everybody who receives it. */
 export const CAMPAIGN_FIELDS = ["campaign_name", "sender_name", "today"] as const;
 
 /**
- * Fields the recipient supplies. Any of these in a template means one message
- * per person.
+ * Fields the recipient supplies. Any of these but the unsubscribe link in a
+ * template means one message per person.
  */
 export const RECIPIENT_FIELDS = ["email", "unsubscribe_url"] as const;
+
+/**
+ * Fields with an answer for a message to many as well as to one. One contact
+ * gets their own one-click unsubscribe link; a batch gets the campaign's
+ * shared one, where the reader confirms the address it was sent to. Neither
+ * puts one person's link in front of anybody else.
+ */
+export const BATCHABLE_FIELDS = ["unsubscribe_url"] as const;
 
 const TOKEN = /\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}/g;
 
@@ -99,7 +109,7 @@ export function perRecipientFields(
   templates: readonly string[],
   messageLevel: readonly string[] = [],
 ): string[] {
-  const shared = new Set<string>([...CAMPAIGN_FIELDS, ...messageLevel]);
+  const shared = new Set<string>([...CAMPAIGN_FIELDS, ...BATCHABLE_FIELDS, ...messageLevel]);
   return findTokens(...templates).filter((token) => !shared.has(token));
 }
 

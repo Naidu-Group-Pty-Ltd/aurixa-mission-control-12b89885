@@ -288,6 +288,7 @@ function campaign(over: Row = {}): Row {
     starts_at: null,
     ends_at: null,
     last_message_at: null,
+    unsubscribe_token: "camptoken",
     ...over,
   };
 }
@@ -910,6 +911,29 @@ describe("sending times and segments", () => {
       "News for NSW",
       "News for VIC",
     ]);
+  });
+
+  it("gives a batched message the campaign's shared unsubscribe link, and one contact their own", async () => {
+    const body = '<p>Hello {{state}}</p><a href="{{unsubscribe_url}}">Unsubscribe</a>';
+    db.tables.email_campaigns = [bySegment({ body_template: body })];
+    await dispatchDueCampaigns({ now: AT_0905 });
+
+    // The link does not force one contact per message: two to a message, as set.
+    expect(db.deliveries.map(bcc).map((line) => line.length)).toEqual([2, 2, 2]);
+    for (const delivery of db.deliveries) {
+      const content = String((delivery.message.body as { content: string }).content);
+      expect(content).toMatch(/unsubscribe\?c=camptoken/);
+      // Nobody's own link is put in front of the rest of a BCC line.
+      expect(content).not.toMatch(/unsubscribe\?t=/);
+    }
+
+    // A message to one contact still carries that contact's one-click link.
+    db.deliveries = [];
+    db.tables.email_campaigns = [campaign({ body_template: body })];
+    db.tables.email_campaign_recipients = recipients(1);
+    await dispatchDueCampaigns({ now: NOW });
+    const single = String((db.deliveries[0].message.body as { content: string }).content);
+    expect(single).toMatch(/unsubscribe\?t=tok1/);
   });
 
   it("never sends a disabled segment or a contact in no segment", async () => {
