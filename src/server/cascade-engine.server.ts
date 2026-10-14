@@ -230,6 +230,7 @@ import {
 import { isBlockedByApproval } from "./cascade-approvals.server";
 import { validateClonePinsServer } from "./library-validation.server";
 import { leastRecentlyTouchedFirst } from "./cascade/passOrder.pure";
+import { fitPullRequestBody } from "./cascade/pullRequestBodyBudget.pure";
 import { validateModuleGlobs } from "@/lib/module-globs";
 import { mapWithConcurrency, mapWithConcurrencyUntil } from "@/lib/concurrency";
 import {
@@ -5775,12 +5776,14 @@ export async function processClone(args: {
   // What the pull request has to say beyond the file list. `manual_reconcile`
   // paths are the reason this section exists: withholding them silently is how
   // a clone stops learning about new routes without anyone noticing.
+  //
+  // GitHub refuses a body over 65,536 characters, and the file list grows with
+  // how far behind a clone is, so the list is the one part that gives way: the
+  // commit message names every path. See `pullRequestBodyBudget.pure.ts`.
   const cascadeBody = (lead: string) =>
-    lead +
-    `\n\nScope: **${scopeLabel}**.\n\n` +
-    `Files synchronized:\n\n` +
-    treeEntries
-      .map(
+    fitPullRequestBody({
+      head: lead + `\n\nScope: **${scopeLabel}**.\n\n` + `Files synchronized:\n\n`,
+      items: treeEntries.map(
         (t) =>
           `- \`${t.path}\`${
             t.sha === null
@@ -5789,153 +5792,154 @@ export async function processClone(args: {
                 : " — **removed**, prime deleted it"
               : ""
           }`,
-      )
-      .join("\n") +
-    (staleHeld.length > 0
-      ? `\n\n### ⚠ This cascade breaks a held file\n\n` +
-        `A file this cascade delivers no longer exports something a withheld file still imports. ` +
-        `Merging this as-is puts the clone's default branch in a state that cannot build — ` +
-        `the bundler fails with "is not exported by", not a test.\n\n` +
-        describeStaleHeldReferences(staleHeld)
-          .map((l) => `- ${l}`)
-          .join("\n") +
-        `\n\nRepair the held file in the same merge, or carry the removal across by hand.`
-      : "") +
-    (missingHeld.length > 0
-      ? `\n\n### ⚠ A held file is missing wiring this cascade delivered\n\n` +
-        `Upstream uses something from a file this cascade DID deliver, and this clone's ` +
-        `held copy does not. Nothing fails the build — the routes or components are simply ` +
-        `absent here, and stay absent until somebody brings them across.\n\n` +
-        describeMissingHeldReferences(missingHeld)
-          .map((l) => `- ${l}`)
-          .join("\n") +
-        `\n\nAdd the import and its use to the held file in the same merge.`
-      : "") +
-    (configReconcileNote
-      ? `\n\n### The Supabase config was reconciled, not copied\n\n` +
-        `\`${CONFIG_TOML_PATH}\` is a **protected** exclusion and prime's copy was not written. ` +
-        `What travelled is prime's file with this clone's own \`project_id\` line put back, so the ` +
-        `per-function \`verify_jwt\` declarations arrive while the project this deployment talks ` +
-        `to does not change. An omitted \`[functions.X]\` block is read by the CLI as ` +
-        `\`verify_jwt = true\`, which gates a function prime declares open.\n\n` +
-        `- ${configReconcileNote}`
-      : "") +
-    (baselineNotes.length
-      ? `\n\n### The security baselines were recomputed, not copied\n\n` +
-        `\`${SECURITY_INVENTORY_PATH}\` and \`${FUNCTION_COUNT_RATCHET_PATH}\` each state how ` +
-        `many edge functions a repository has, so prime's copies state PRIME'S count. This ` +
-        `deployment ${describeFunctionSetDifference(cloneOwnedFunctions, withheldFunctions)}, ` +
-        `so both were computed from the \`config.toml\` and ` +
-        `security registry this same pass reconciled — the numbers describe the tree this ` +
-        `proposal creates rather than either side's.\n\n` +
-        baselineNotes.map((l) => `- ${l}`).join("\n")
-      : "") +
-    (apiSurfaceNote
-      ? `\n\n### The mobile API surface was generated here, not copied\n\n` +
-        `\`${API_SURFACE_PATH}\` is generated from the security registry and ` +
-        `\`config.toml\`, and this clone's function set is not prime's, so prime's copy lists ` +
-        `functions this repository's registry does not. What travelled is the surface this ` +
-        `clone's reconciled registry and config generate, composed the way ` +
-        `\`npm run mobile:api\` composes it and checked against prime's own file first.\n\n` +
-        `- ${apiSurfaceNote}`
-      : "") +
-    (edgeBaselineNote
-      ? `\n\n### The Edge Function type baseline followed the files it counts\n\n` +
-        `\`${EDGE_TYPECHECK_BASELINE_PATH}\` freezes the type errors in each edge-function file, ` +
-        `and prime's copy counts PRIME'S files. Where this clone keeps its own version of a ` +
-        `counted file, this clone's count for it was kept; every other count is prime's, and ` +
-        `the total is re-summed.\n\n` +
-        `- ${edgeBaselineNote}`
-      : "") +
-    (deployWorkflowNote
-      ? `\n\n### The deploy workflow was carried, not copied\n\n` +
-        `\`${DEPLOY_WORKFLOW_PATH}\` is a **protected** exclusion and was not written by the ` +
-        `ordinary path. It carries no deploy target of its own any more — it resolves one from ` +
-        `the \`SUPABASE_PROJECT_REF\` repository variable and, failing that, from THIS ` +
-        `repository's own \`supabase/config.toml\` — so prime's copy can only ever deploy to ` +
-        `this deployment's project. Every project ref outside the paired-origin declaration is ` +
-        `refused rather than carried.\n\n` +
-        `- ${deployWorkflowNote}`
-      : "") +
-    (variantOutcomes.length > 0
-      ? `\n\n### This line's own copies, merged with prime\n\n` +
-        `These files are held because this line's copy carries work prime does not. Each was ` +
-        `three-way merged: the base is the prime revision this line's own history names for the ` +
-        `file, a hunk only one side changed takes that side, and one hunk both sides changed ` +
-        `differently leaves the whole file held for a person. A merged file still meets every ` +
-        `content hold. See \`variantMerge.pure.ts\` in Mission Control.\n\n` +
-        describeVariantMerges(
-          variantOutcomes,
-          new Set(treeEntries.filter((t) => t.sha !== null).map((t) => t.path)),
-        )
-      : "") +
-    (holdReleases.some((r) => r.act === "release")
-      ? `\n\n### Released from hold — the clone had done no work these holds protect\n\n` +
-        `A \`manual_reconcile\` hold is honoured only where the clone's copy carries work that ` +
-        `would be lost. Where the copy is byte-identical to a version prime itself held, or an ` +
-        `operator recorded an overwrite approval in Mission Control, prime's current copy ` +
-        `travels — through the same content holds as every other write. Protected paths are ` +
-        `never released.\n\n` +
-        describeHoldReleases(holdReleases)
-      : "") +
-    (describeStrandedFunctions(strandedReported)
-      ? `\n\n### Edge Functions this clone carries, kept current\n\n` +
-        `No installed module names these functions, so their own directories never cross — ` +
-        `but the shared layer they import crosses on every pass. Each file is one this clone ` +
-        `already holds, and it travels only where prime's own history shows the clone's copy ` +
-        `is a version prime held, so nothing of this clone's is lost. A function this clone ` +
-        `does not have is never added.\n\n` +
-        describeStrandedFunctions(strandedReported)
-      : "") +
-    (bridgesReported.length > 0
-      ? `\n\n### Bridges carried beside the shared modules they re-export\n\n` +
-        `Each file does nothing but re-export a module under \`supabase/functions/_shared/\` ` +
-        `that this delivery lands, or that is already prime's copy here. It adds no behaviour ` +
-        `and sits in a directory this clone already carries.\n\n` +
-        describeBridges(bridgesReported)
-      : "") +
-    (specsBroughtAcrossNote
-      ? `\n\n### Brought across beside the files they test\n\n` +
-        `A spec and the file it asserts about travel together or neither does. None of these ` +
-        `is in this clone's scope: each moved because a file it belongs with did, and only where ` +
-        `nothing of this clone's is lost — the same evidence a held path is released on.\n\n` +
-        specsBroughtAcrossNote
-      : "") +
-    (needsReconcile.length > 0
-      ? `\n\n### Needs a human — ${needsReconcile.length} file(s) changed upstream and were held back\n\n` +
-        `These carry deliberate divergence on this clone, so the cascade will never overwrite them. ` +
-        `Prime has moved; someone has to decide what to carry across.\n\n` +
-        needsReconcile.map((h) => `- \`${h.path}\`${h.note ? ` — ${h.note}` : ""}`).join("\n")
-      : "") +
-    (partition.held.length - needsReconcile.length > 0
-      ? `\n\n_${partition.held.length - needsReconcile.length} further path(s) are owned by this clone and were withheld without comment._`
-      : "") +
-    (conversion
-      ? (describeConversionDeletions(deletionPlan, conversion.leaving.label)
-          ? `\n\n### What the line this clone leaves carried\n\n${describeConversionDeletions(
-              deletionPlan,
-              conversion.leaving.label,
-            )}`
+      ),
+      tail:
+        (staleHeld.length > 0
+          ? `\n\n### ⚠ This cascade breaks a held file\n\n` +
+            `A file this cascade delivers no longer exports something a withheld file still imports. ` +
+            `Merging this as-is puts the clone's default branch in a state that cannot build — ` +
+            `the bundler fails with "is not exported by", not a test.\n\n` +
+            describeStaleHeldReferences(staleHeld)
+              .map((l) => `- ${l}`)
+              .join("\n") +
+            `\n\nRepair the held file in the same merge, or carry the removal across by hand.`
           : "") +
-        (describeRetiredFunctions(retiredByConversion, conversion.toMode)
-          ? `\n\n${describeRetiredFunctions(retiredByConversion, conversion.toMode)}`
+        (missingHeld.length > 0
+          ? `\n\n### ⚠ A held file is missing wiring this cascade delivered\n\n` +
+            `Upstream uses something from a file this cascade DID deliver, and this clone's ` +
+            `held copy does not. Nothing fails the build — the routes or components are simply ` +
+            `absent here, and stay absent until somebody brings them across.\n\n` +
+            describeMissingHeldReferences(missingHeld)
+              .map((l) => `- ${l}`)
+              .join("\n") +
+            `\n\nAdd the import and its use to the held file in the same merge.`
           : "") +
-        (releasedRoutingHolds.length > 0
-          ? `\n\n**Routing holds released for this proposal (${releasedRoutingHolds.length}).** ` +
-            `These files decide which CRM the deployment talks to, so the line this clone joins ` +
-            `delivers its own copy of each:\n` +
-            releasedRoutingHolds.map((p) => `- \`${p}\``).join("\n")
-          : "")
-      : describeDeletionPlan(deletionPlan)
-        ? `\n\n### What prime deleted\n\n${describeDeletionPlan(deletionPlan)}`
-        : "") +
-    (unprobedDeletions > 0
-      ? `\n\n_${unprobedDeletions} further clone-only path(s) were not checked against prime's history this run._`
-      : "") +
-    (onlyInClone > 0
-      ? `\n\n_${onlyInClone} path(s) exist only in this clone. A path is removed only where prime's ` +
-        `own history shows it deleted AND this clone's copy is byte-identical to a version prime itself held._`
-      : "");
+        (configReconcileNote
+          ? `\n\n### The Supabase config was reconciled, not copied\n\n` +
+            `\`${CONFIG_TOML_PATH}\` is a **protected** exclusion and prime's copy was not written. ` +
+            `What travelled is prime's file with this clone's own \`project_id\` line put back, so the ` +
+            `per-function \`verify_jwt\` declarations arrive while the project this deployment talks ` +
+            `to does not change. An omitted \`[functions.X]\` block is read by the CLI as ` +
+            `\`verify_jwt = true\`, which gates a function prime declares open.\n\n` +
+            `- ${configReconcileNote}`
+          : "") +
+        (baselineNotes.length
+          ? `\n\n### The security baselines were recomputed, not copied\n\n` +
+            `\`${SECURITY_INVENTORY_PATH}\` and \`${FUNCTION_COUNT_RATCHET_PATH}\` each state how ` +
+            `many edge functions a repository has, so prime's copies state PRIME'S count. This ` +
+            `deployment ${describeFunctionSetDifference(cloneOwnedFunctions, withheldFunctions)}, ` +
+            `so both were computed from the \`config.toml\` and ` +
+            `security registry this same pass reconciled — the numbers describe the tree this ` +
+            `proposal creates rather than either side's.\n\n` +
+            baselineNotes.map((l) => `- ${l}`).join("\n")
+          : "") +
+        (apiSurfaceNote
+          ? `\n\n### The mobile API surface was generated here, not copied\n\n` +
+            `\`${API_SURFACE_PATH}\` is generated from the security registry and ` +
+            `\`config.toml\`, and this clone's function set is not prime's, so prime's copy lists ` +
+            `functions this repository's registry does not. What travelled is the surface this ` +
+            `clone's reconciled registry and config generate, composed the way ` +
+            `\`npm run mobile:api\` composes it and checked against prime's own file first.\n\n` +
+            `- ${apiSurfaceNote}`
+          : "") +
+        (edgeBaselineNote
+          ? `\n\n### The Edge Function type baseline followed the files it counts\n\n` +
+            `\`${EDGE_TYPECHECK_BASELINE_PATH}\` freezes the type errors in each edge-function file, ` +
+            `and prime's copy counts PRIME'S files. Where this clone keeps its own version of a ` +
+            `counted file, this clone's count for it was kept; every other count is prime's, and ` +
+            `the total is re-summed.\n\n` +
+            `- ${edgeBaselineNote}`
+          : "") +
+        (deployWorkflowNote
+          ? `\n\n### The deploy workflow was carried, not copied\n\n` +
+            `\`${DEPLOY_WORKFLOW_PATH}\` is a **protected** exclusion and was not written by the ` +
+            `ordinary path. It carries no deploy target of its own any more — it resolves one from ` +
+            `the \`SUPABASE_PROJECT_REF\` repository variable and, failing that, from THIS ` +
+            `repository's own \`supabase/config.toml\` — so prime's copy can only ever deploy to ` +
+            `this deployment's project. Every project ref outside the paired-origin declaration is ` +
+            `refused rather than carried.\n\n` +
+            `- ${deployWorkflowNote}`
+          : "") +
+        (variantOutcomes.length > 0
+          ? `\n\n### This line's own copies, merged with prime\n\n` +
+            `These files are held because this line's copy carries work prime does not. Each was ` +
+            `three-way merged: the base is the prime revision this line's own history names for the ` +
+            `file, a hunk only one side changed takes that side, and one hunk both sides changed ` +
+            `differently leaves the whole file held for a person. A merged file still meets every ` +
+            `content hold. See \`variantMerge.pure.ts\` in Mission Control.\n\n` +
+            describeVariantMerges(
+              variantOutcomes,
+              new Set(treeEntries.filter((t) => t.sha !== null).map((t) => t.path)),
+            )
+          : "") +
+        (holdReleases.some((r) => r.act === "release")
+          ? `\n\n### Released from hold — the clone had done no work these holds protect\n\n` +
+            `A \`manual_reconcile\` hold is honoured only where the clone's copy carries work that ` +
+            `would be lost. Where the copy is byte-identical to a version prime itself held, or an ` +
+            `operator recorded an overwrite approval in Mission Control, prime's current copy ` +
+            `travels — through the same content holds as every other write. Protected paths are ` +
+            `never released.\n\n` +
+            describeHoldReleases(holdReleases)
+          : "") +
+        (describeStrandedFunctions(strandedReported)
+          ? `\n\n### Edge Functions this clone carries, kept current\n\n` +
+            `No installed module names these functions, so their own directories never cross — ` +
+            `but the shared layer they import crosses on every pass. Each file is one this clone ` +
+            `already holds, and it travels only where prime's own history shows the clone's copy ` +
+            `is a version prime held, so nothing of this clone's is lost. A function this clone ` +
+            `does not have is never added.\n\n` +
+            describeStrandedFunctions(strandedReported)
+          : "") +
+        (bridgesReported.length > 0
+          ? `\n\n### Bridges carried beside the shared modules they re-export\n\n` +
+            `Each file does nothing but re-export a module under \`supabase/functions/_shared/\` ` +
+            `that this delivery lands, or that is already prime's copy here. It adds no behaviour ` +
+            `and sits in a directory this clone already carries.\n\n` +
+            describeBridges(bridgesReported)
+          : "") +
+        (specsBroughtAcrossNote
+          ? `\n\n### Brought across beside the files they test\n\n` +
+            `A spec and the file it asserts about travel together or neither does. None of these ` +
+            `is in this clone's scope: each moved because a file it belongs with did, and only where ` +
+            `nothing of this clone's is lost — the same evidence a held path is released on.\n\n` +
+            specsBroughtAcrossNote
+          : "") +
+        (needsReconcile.length > 0
+          ? `\n\n### Needs a human — ${needsReconcile.length} file(s) changed upstream and were held back\n\n` +
+            `These carry deliberate divergence on this clone, so the cascade will never overwrite them. ` +
+            `Prime has moved; someone has to decide what to carry across.\n\n` +
+            needsReconcile.map((h) => `- \`${h.path}\`${h.note ? ` — ${h.note}` : ""}`).join("\n")
+          : "") +
+        (partition.held.length - needsReconcile.length > 0
+          ? `\n\n_${partition.held.length - needsReconcile.length} further path(s) are owned by this clone and were withheld without comment._`
+          : "") +
+        (conversion
+          ? (describeConversionDeletions(deletionPlan, conversion.leaving.label)
+              ? `\n\n### What the line this clone leaves carried\n\n${describeConversionDeletions(
+                  deletionPlan,
+                  conversion.leaving.label,
+                )}`
+              : "") +
+            (describeRetiredFunctions(retiredByConversion, conversion.toMode)
+              ? `\n\n${describeRetiredFunctions(retiredByConversion, conversion.toMode)}`
+              : "") +
+            (releasedRoutingHolds.length > 0
+              ? `\n\n**Routing holds released for this proposal (${releasedRoutingHolds.length}).** ` +
+                `These files decide which CRM the deployment talks to, so the line this clone joins ` +
+                `delivers its own copy of each:\n` +
+                releasedRoutingHolds.map((p) => `- \`${p}\``).join("\n")
+              : "")
+          : describeDeletionPlan(deletionPlan)
+            ? `\n\n### What prime deleted\n\n${describeDeletionPlan(deletionPlan)}`
+            : "") +
+        (unprobedDeletions > 0
+          ? `\n\n_${unprobedDeletions} further clone-only path(s) were not checked against prime's history this run._`
+          : "") +
+        (onlyInClone > 0
+          ? `\n\n_${onlyInClone} path(s) exist only in this clone. A path is removed only where prime's ` +
+            `own history shows it deleted AND this clone's copy is byte-identical to a version prime itself held._`
+          : ""),
+    }).body;
 
   const { data: newCommit } = await octokit.git.createCommit({
     owner: cloneRef.owner,
