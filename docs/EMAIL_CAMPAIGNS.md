@@ -607,15 +607,38 @@ Merge fields are `{{column_key}}` — any column from an attached list — plus
 - **Any per-recipient field forces one message per contact**, whatever the batch
   size says, and `messageBatchSize` enforces it server-side so a template edited
   after the fact cannot quietly BCC a hundred people a letter addressed to one.
-  The one exception is a segmented campaign's own column, which is the same for
-  everybody in a message — see "Sending times and segments".
+  Two exceptions: a segmented campaign's own column, which is the same for
+  everybody in a message — see "Sending times and segments" — and
+  `{{unsubscribe_url}}`, which a message to many carries as the campaign's
+  shared link (below).
 
 ---
 
 ## Unsubscribing
 
-`{{unsubscribe_url}}` resolves to `/api/public/email/unsubscribe?t=<token>`, a
-64-hex token minted per recipient.
+`{{unsubscribe_url}}` resolves two ways, and neither ever shows one person's
+link to anybody else:
+
+- **In a message to one contact**, `/api/public/email/unsubscribe?t=<token>` —
+  a 64-hex token minted per recipient. The page names the address; one click
+  removes it.
+- **In a message to several**, `/api/public/email/unsubscribe?c=<token>` — the
+  campaign's own token (`email_campaigns.unsubscribe_token`, migration
+  `20261014120000`). The reader types the address the message reached them at.
+
+So the link no longer decides the batch size. It used to force one contact per
+message — forty people in one BCC line cannot share one person's link — which
+made a commercial campaign choose between its batch size and the unsubscribe
+facility it is required to carry.
+
+The shared link is safe to put in front of anybody holding the email because of
+two rules (`email-unsubscribe.server.ts`):
+
+- **Only an address the campaign sent to is removed.** The token names the
+  campaign; the typed address must be one of its recipients. A forwarded copy,
+  or somebody typing addresses at random, removes nobody from anything.
+- **The answer is the same either way** — "if that address received this email,
+  it has been removed" — so the page cannot be used to learn who is on a list.
 
 **A GET does not unsubscribe anybody.** A link in an email is fetched by things
 that are not the recipient — Outlook Safe Links, corporate mail gateways, spam

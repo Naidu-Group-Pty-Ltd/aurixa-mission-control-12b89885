@@ -7804,6 +7804,7 @@ export type Database = {
           subject_template: string
           tenant_id: string | null
           timezone: string
+          unsubscribe_token: string
           updated_at: string
           window_end: string
           window_start: string
@@ -7845,6 +7846,7 @@ export type Database = {
           subject_template?: string
           tenant_id?: string | null
           timezone?: string
+          unsubscribe_token?: string
           updated_at?: string
           window_end?: string
           window_start?: string
@@ -7886,6 +7888,7 @@ export type Database = {
           subject_template?: string
           tenant_id?: string | null
           timezone?: string
+          unsubscribe_token?: string
           updated_at?: string
           window_end?: string
           window_start?: string

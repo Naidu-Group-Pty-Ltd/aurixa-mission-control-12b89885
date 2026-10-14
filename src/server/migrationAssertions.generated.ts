@@ -1056,4 +1056,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "column", table: "email_campaign_messages", column: "slot_at" },
     ],
   },
+  {
+    migration: "20261014120000_email_campaign_shared_unsubscribe.sql",
+    version: "20261014120000",
+    assertions: [{ kind: "column", table: "email_campaigns", column: "unsubscribe_token" }],
+  },
 ];

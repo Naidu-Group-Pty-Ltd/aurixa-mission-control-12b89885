@@ -687,8 +687,11 @@ function MessageEditor({
               so a contact's own text cannot break the page. Using any per-recipient field sends one
               message per contact whatever the batch size says — except, when messages are split
               into segments, the segment's own column, which is the same for everybody in a message
-              and reads as the segment's name. To show an attached image in the body, write{" "}
-              <code>{'<img src="cid:logo.png">'}</code> with the name shown beside the file below.
+              and reads as the segment's name. <code>{"{{unsubscribe_url}}"}</code> never does: a
+              contact sent alone gets their own one-click link, and a message to many carries the
+              campaign's shared link, where the reader confirms their address. To show an attached
+              image in the body, write <code>{'<img src="cid:logo.png">'}</code> with the name shown
+              beside the file below.
             </p>
           </div>
 

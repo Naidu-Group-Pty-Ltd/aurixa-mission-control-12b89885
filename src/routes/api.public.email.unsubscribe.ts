@@ -1,13 +1,25 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
+import {
+  campaignForLink,
+  readLinkToken,
+  suppressAddress,
+  unsubscribeThroughCampaign,
+} from "@/server/email-unsubscribe.server";
 
 /**
  * GET/POST /api/public/email/unsubscribe?t=<token>
+ * GET/POST /api/public/email/unsubscribe?c=<campaign token>
  *
  * The unsubscribe facility every campaign message can carry. Unauthenticated
  * by necessity — the person clicking it has no account here — so the token IS
  * the authorisation: 64 hex characters minted per recipient, unique-indexed,
  * and good for exactly one address.
+ *
+ * A message to several contacts carries the campaign's shared token instead
+ * (`?c=`): the reader types the address the message reached them at, it is
+ * removed only if the campaign has it, and the page answers the same either
+ * way. See `email-unsubscribe.server.ts`.
  *
  * ## Why a GET does not unsubscribe anybody
  *
@@ -70,14 +82,24 @@ function page(title: string, body: string, status = 200): Response {
   );
 }
 
-const TOKEN_SHAPE = /^[a-f0-9]{16,128}$/i;
+/** A token from the form, else from the query string, under one parameter name. */
+function readToken(request: Request, name: "t" | "c", formValue?: string | null): string | null {
+  return readLinkToken(formValue) ?? readLinkToken(new URL(request.url).searchParams.get(name));
+}
 
-function readToken(request: Request, formValue?: string | null): string | null {
-  const fromForm = (formValue ?? "").trim();
-  if (fromForm && TOKEN_SHAPE.test(fromForm)) return fromForm.toLowerCase();
-  const url = new URL(request.url);
-  const raw = (url.searchParams.get("t") ?? "").trim();
-  return raw && TOKEN_SHAPE.test(raw) ? raw.toLowerCase() : null;
+/** The form behind a campaign's shared link: the reader names their own address. */
+function sharedForm(campaignToken: string, problem: string | null = null, typed = ""): string {
+  return `<h1>Unsubscribe</h1>
+    <p>Enter the email address this message was sent to, and it will stop receiving email from us.</p>
+    ${problem ? `<p><strong>${escapeHtml(problem)}</strong></p>` : ""}
+    <form method="post">
+      <input type="hidden" name="c" value="${escapeHtml(campaignToken)}">
+      <p><input type="email" name="email" required autocomplete="email" value="${escapeHtml(typed)}"
+        placeholder="you@example.com" aria-label="Email address"
+        style="font:inherit;width:100%;padding:10px 12px;border:1px solid var(--line);background:var(--panel);color:var(--ink)"></p>
+      <button type="submit">Unsubscribe this address</button>
+    </form>
+    <p class="note">This applies to every campaign, not just the message you received.</p>`;
 }
 
 type Recipient = {
@@ -105,7 +127,15 @@ export const Route = createFileRoute("/api/public/email/unsubscribe")({
   server: {
     handlers: {
       GET: async ({ request }) => {
-        const token = readToken(request);
+        const campaignToken = readToken(request, "c");
+        if (campaignToken) {
+          if (!(await campaignForLink(campaignToken))) {
+            return page("Unsubscribe", NOT_A_LINK, 404);
+          }
+          return page("Unsubscribe", sharedForm(campaignToken));
+        }
+
+        const token = readToken(request, "t");
         if (!token) return page("Unsubscribe", NOT_A_LINK, 400);
 
         const recipient = await findRecipient(token);
@@ -131,61 +161,57 @@ export const Route = createFileRoute("/api/public/email/unsubscribe")({
       },
 
       POST: async ({ request }) => {
-        let formToken: string | null = null;
+        let form: FormData | null = null;
         try {
-          const form = await request.formData();
-          formToken = String(form.get("t") ?? "");
+          form = await request.formData();
         } catch {
           // A JSON or empty body is fine; the query string still carries it.
         }
-        const token = readToken(request, formToken);
+
+        const campaignToken = readToken(request, "c", String(form?.get("c") ?? ""));
+        if (campaignToken) {
+          const campaign = await campaignForLink(campaignToken);
+          if (!campaign) return page("Unsubscribe", NOT_A_LINK, 404);
+          const typed = String(form?.get("email") ?? "").slice(0, 320);
+          const outcome = await unsubscribeThroughCampaign(campaign.id, typed);
+          if (outcome.kind === "invalid_address") {
+            return page(
+              "Unsubscribe",
+              sharedForm(campaignToken, "That does not look like an email address.", typed),
+              400,
+            );
+          }
+          if (outcome.kind === "failed") return page("Unsubscribe", WRITE_FAILED, 500);
+          return page("Unsubscribed", sharedDone(outcome.address));
+        }
+
+        const token = readToken(request, "t", String(form?.get("t") ?? ""));
         if (!token) return page("Unsubscribe", NOT_A_LINK, 400);
 
         const recipient = await findRecipient(token);
         if (!recipient) return page("Unsubscribe", NOT_A_LINK, 404);
 
-        const now = new Date().toISOString();
-        const { error } = await supabaseAdmin.from("email_suppressions").upsert(
-          {
-            email_key: recipient.email_key,
-            email: recipient.email,
-            reason: "unsubscribed",
-            detail: "requested through the unsubscribe link",
-            source: "unsubscribe_link",
-            campaign_id: recipient.campaign_id,
-            last_seen_at: now,
-          },
-          { onConflict: "email_key" },
-        );
-        if (error) {
-          console.error("[email] unsubscribe write failed:", error.message);
-          return page(
-            "Unsubscribe",
-            `<h1>Something went wrong</h1>
-             <p>We could not record your request just now. Please try again in a few minutes, or reply to the message you received and we will do it by hand.</p>`,
-            500,
-          );
+        if (!(await suppressAddress(recipient, "requested through the unsubscribe link"))) {
+          return page("Unsubscribe", WRITE_FAILED, 500);
         }
-
-        // Every campaign, immediately — including ones this person has not
-        // been mailed by yet.
-        const { error: stopError } = await supabaseAdmin
-          .from("email_campaign_recipients")
-          .update({ status: "suppressed", suppressed_reason: "unsubscribed" })
-          .eq("email_key", recipient.email_key)
-          .eq("status", "pending");
-        if (stopError) {
-          console.error(
-            "[email] could not stop pending sends after unsubscribe:",
-            stopError.message,
-          );
-        }
-
         return page("Unsubscribed", alreadyDone(recipient.email));
       },
     },
   },
 });
+
+const WRITE_FAILED = `<h1>Something went wrong</h1>
+  <p>We could not record your request just now. Please try again in a few minutes, or reply to the message you received and we will do it by hand.</p>`;
+
+/**
+ * The same words whether or not the campaign had the address, so the page
+ * cannot be used to learn who is on a list.
+ */
+function sharedDone(address: string): string {
+  return `<h1>Unsubscribed</h1>
+    <p>If <strong>${escapeHtml(address)}</strong> received this email from us, it has been removed and will not receive any further campaign email.</p>
+    <p class="note">Still hearing from us at another address? Unsubscribe that one too, or reply to the message and we will remove you by hand.</p>`;
+}
 
 const NOT_A_LINK = `<h1>This link is no longer valid</h1>
   <p>It may have expired, or the address may already have been removed. If you are still receiving email you did not ask for, reply to the message and we will remove you by hand.</p>`;

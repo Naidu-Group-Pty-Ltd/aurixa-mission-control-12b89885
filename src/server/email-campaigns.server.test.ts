@@ -5,7 +5,7 @@
 // letter addressed to one of them.
 import { describe, expect, it } from "vitest";
 import { jsonPathColumn, pgInList } from "@/lib/email/quotaFilter.pure";
-import { messageBatchSize, rulesFor } from "./email-campaigns.server";
+import { messageBatchSize, rulesFor, unsubscribeUrl } from "./email-campaigns.server";
 
 describe("jsonPathColumn", () => {
   it("builds the filter column for an attribute", () => {
@@ -52,10 +52,12 @@ describe("messageBatchSize", () => {
     expect(messageBatchSize(campaign({ subject_template: "For {{state}}" }))).toBe(1);
   });
 
-  it("collapses to one for an unsubscribe link, which identifies the reader", () => {
+  it("keeps the batch for an unsubscribe link, which a batch carries as the shared link", () => {
     expect(
       messageBatchSize(campaign({ body_template: "<a href='{{unsubscribe_url}}'>Stop</a>" })),
-    ).toBe(1);
+    ).toBe(40);
+    // The address itself still has no answer for forty people.
+    expect(messageBatchSize(campaign({ body_template: "<p>Sent to {{email}}</p>" }))).toBe(1);
   });
 
   it("lets a segmented campaign batch a message that names its own segment column", () => {
@@ -102,6 +104,7 @@ describe("rulesFor", () => {
     last_message_at: null,
     segment_dimension: null,
     segment_messages_per_slot: null,
+    unsubscribe_token: null,
   };
 
   it("fills a missing zone and an empty day list rather than sending nothing", () => {
@@ -117,5 +120,25 @@ describe("rulesFor", () => {
     expect(
       rulesFor({ ...row, send_times: ["17:00:00", "09:00:00"], slot_grace_minutes: 20 }),
     ).toMatchObject({ sendTimes: ["09:00", "17:00"], slotGraceMinutes: 20 });
+  });
+});
+
+describe("unsubscribeUrl", () => {
+  const origin = "https://mc.example";
+
+  it("gives one contact their own one-click link", () => {
+    expect(
+      unsubscribeUrl(origin, { unsubscribe_token: "camp" }, { unsubscribe_token: "abc" }),
+    ).toBe("https://mc.example/api/public/email/unsubscribe?t=abc");
+  });
+
+  it("gives a message to several the campaign's shared link, never one person's", () => {
+    expect(unsubscribeUrl(origin, { unsubscribe_token: "camp" }, null)).toBe(
+      "https://mc.example/api/public/email/unsubscribe?c=camp",
+    );
+  });
+
+  it("renders nothing for a batch when the campaign has no shared token", () => {
+    expect(unsubscribeUrl(origin, { unsubscribe_token: null }, null)).toBeNull();
   });
 });
