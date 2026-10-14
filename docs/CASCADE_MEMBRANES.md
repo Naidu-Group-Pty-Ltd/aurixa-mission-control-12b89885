@@ -1435,8 +1435,18 @@ stays a hold wherever it cannot be exact.
     held, but no longer counts as "need reconciling". A deliberate variant is
     not owed work, and reporting it as owed every pass is what made the fleet
     tree read red when nothing was wrong.
-  - **Held for a person, exactly as before:** one conflicting hunk, an
-    ambiguous or missing base, a binary file, or a failed read.
+  - **Held for a person, exactly as before:** one conflicting hunk, a
+    missing base, a binary file, or a failed read.
+  - **A reconcile that names several prime revisions** (`land the cascades at
+    prime@278cdc3 and prime@1a39b32`) does not say which one this file was
+    reconciled to. The file is merged against each of them, at most
+    `MAX_AGREEING_BASES` (3), and acted on only where the answer does not
+    depend on the choice: every merge clean, and every merge giving the same
+    text. That text is then the merge against the true base, whichever it was.
+    One that conflicts, or two that give different text, holds the file and
+    names the commit. Two names for one commit (an abbreviation at two
+    lengths) are one base, and more than three names are refused before a
+    request is spent on them (`decideAcrossBases`).
 - **Validated** against the six held agent specs of cascade #104: identical,
   byte for byte, to `git merge-file`. On the agent itself it found the same four
   conflicting hunks (the calendar `source` label), in 193 ms for a

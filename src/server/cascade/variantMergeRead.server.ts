@@ -11,7 +11,10 @@
  *      in step 3 are read at the commit the kept verdict is keyed to, never
  *      at a branch that moved in between;
  *   2. prime's copy at that revision (the base), resolved to a full SHA first
- *      so an abbreviated name is never read as a branch;
+ *      so an abbreviated name is never read as a branch. A reconcile naming
+ *      several revisions gives several bases, each resolved and read, and
+ *      `decideAcrossBases` merges against all of them; two names for one
+ *      commit (an abbreviation at two lengths) are one base;
  *   3. the clone's copy (ours) and prime's current copy (theirs).
  *
  * Every failure is a hold, never a guess: a read that FAILED is not a fact
@@ -22,9 +25,10 @@
  * transient hold is asked again on a later pass, after every path that was
  * never asked at all.
  *
- * Four requests at most per path (the commit list, the revision, and the
- * three file reads minus the one a caller already holds), so the engine
- * bounds the number of paths it asks about rather than the requests.
+ * Five requests at most per path naming one revision (the commit list, the
+ * revision, and the three file reads), four once the revision is cached; one
+ * naming several adds a revision and a read for each, to at most nine. The
+ * engine bounds the number of paths it asks about rather than the requests.
  */
 import type { Octokit } from "@octokit/rest";
 import {
@@ -34,7 +38,13 @@ import {
   type RepoRef,
 } from "../github-app.server";
 import { gitBlobSha } from "./gitBlobSha.pure";
-import { decideVariantMerge, variantBaseFrom, type VariantMergeVerdict } from "./variantMerge.pure";
+import {
+  decideAcrossBases,
+  decideVariantMerge,
+  MAX_AGREEING_BASES,
+  variantBaseFrom,
+  type VariantMergeVerdict,
+} from "./variantMerge.pure";
 
 /** How far back the clone's history of one path is read for a named base. */
 export const VARIANT_BASE_COMMITS = 30;
@@ -87,44 +97,53 @@ export async function mergeHeldVariant(args: {
     };
   }
   const named = variantBaseFrom(commits);
-  if (named.kind === "ambiguous") {
-    return {
-      act: "hold",
-      why: `its newest reconcile (${named.commit.slice(0, 7)}) names more than one prime revision`,
-    };
-  }
   if (named.kind === "none") return decideVariantMerge({ base: null, ours: "", theirs: "" });
-
-  let revision: string;
-  const cached = revisions?.get(named.primeRevision);
-  if (cached) {
-    revision = cached;
-  } else {
-    try {
-      const { data } = await octokit.repos.getCommit({
-        owner: primeRef.owner,
-        repo: primeRef.repo,
-        ref: named.primeRevision,
-      });
-      revision = data.sha;
-      revisions?.set(named.primeRevision, revision);
-    } catch (e) {
-      return {
-        act: "hold",
-        why: `prime@${named.primeRevision} could not be resolved (${msg(e)})`,
-        ...(isTransientReadFailure(e) ? { transient: true as const } : {}),
-      };
-    }
+  const names = named.kind === "named" ? [named.primeRevision] : named.primeRevisions;
+  if (names.length > MAX_AGREEING_BASES) {
+    // Refused before a request is spent on it; nothing was read, so no text.
+    return decideAcrossBases({
+      commit: named.commit,
+      bases: names.map((revision) => ({ revision, text: null })),
+      ours: "",
+      theirs: "",
+    });
   }
 
-  let base: RepoFile | null;
+  // Each name resolved to the commit it means. One at a time: they almost
+  // always share the cache, and a failure stops before spending the rest.
+  const resolved: string[] = [];
+  for (const name of names) {
+    let revision = revisions?.get(name);
+    if (!revision) {
+      try {
+        const { data } = await octokit.repos.getCommit({
+          owner: primeRef.owner,
+          repo: primeRef.repo,
+          ref: name,
+        });
+        revision = data.sha;
+        revisions?.set(name, revision);
+      } catch (e) {
+        return {
+          act: "hold",
+          why: `prime@${name} could not be resolved (${msg(e)})`,
+          ...(isTransientReadFailure(e) ? { transient: true as const } : {}),
+        };
+      }
+    }
+    if (!resolved.includes(revision)) resolved.push(revision);
+  }
+
+  let bases: (RepoFile | null)[];
   let ours: RepoFile | null;
   let theirs: RepoFile | null;
   try {
-    [base, ours, theirs] = await Promise.all([
-      getFileContent(octokit, { ...primeRef, branch: revision }, path, { maxBytes }),
+    [ours, theirs, ...bases] = await Promise.all([
       getFileContent(octokit, cloneRef, path, { maxBytes }),
       getFileContent(octokit, primeRef, path, { maxBytes }),
+      ...resolved.map((revision) =>
+        getFileContent(octokit, { ...primeRef, branch: revision }, path, { maxBytes }),
+      ),
     ]);
   } catch (e) {
     return {
@@ -134,11 +153,15 @@ export async function mergeHeldVariant(args: {
     };
   }
   if (!ours || !theirs) return { act: "hold", why: "this file is not on both sides to merge" };
-  if (ours.binary || theirs.binary || base?.binary) {
+  if (ours.binary || theirs.binary || bases.some((b) => b?.binary)) {
     return { act: "hold", why: "a binary file is never merged line by line" };
   }
-  return decideVariantMerge({
-    base: { revision, text: base ? base.content : null },
+  return decideAcrossBases({
+    commit: named.commit,
+    bases: resolved.map((revision, i) => ({
+      revision,
+      text: bases[i] ? bases[i].content : null,
+    })),
     ours: ours.content,
     theirs: theirs.content,
   });
