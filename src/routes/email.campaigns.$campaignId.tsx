@@ -55,18 +55,26 @@ import { auStateSiblings, type ColumnProfile } from "@/lib/email/listProfile.pur
 import { humanBytes } from "@/lib/email/attachments.pure";
 import {
   campaignRulesFromRow,
+  currentSlot,
   describeSchedule,
+  describeSendDays,
   formatInZone,
+  isSlotMode,
   nextSendTime,
+  normaliseSendTimes,
   windowState,
   type CampaignRuleColumns,
 } from "@/lib/email/campaignRules.pure";
+import { importedDimensions, slotCapacity } from "@/lib/email/segments.pure";
 import { MailboxPicker } from "@/components/email/mailbox-picker";
+import { SendPlan } from "@/components/email/send-plan";
+import { SegmentsPanel, type SegmentListRow } from "@/components/email/segments-panel";
 import { TenantSelect } from "@/components/email/tenant-select";
 import { AttachmentPanel, type AttachmentListRow } from "@/components/email/attachment-panel";
 import {
   attachListToCampaign,
   attachmentDownloadUrl,
+  batchSizeFor,
   campaignReadiness,
   cancelRecipient,
   deleteQuota,
@@ -197,6 +205,8 @@ function CampaignWorkspace() {
 
   const isRunning = campaign.status === "running";
   const isFinal = campaign.status === "completed" || campaign.status === "cancelled";
+  const segmentRows = (detail.data?.segments ?? []) as SegmentListRow[];
+  const segmentDimension = (campaign.segment_dimension as string | null) ?? null;
 
   return (
     <div className="space-y-6 p-6">
@@ -263,6 +273,7 @@ function CampaignWorkspace() {
         <TabsList>
           <TabsTrigger value="message">Message</TabsTrigger>
           <TabsTrigger value="rules">Rules</TabsTrigger>
+          <TabsTrigger value="segments">Segments</TabsTrigger>
           <TabsTrigger value="parameters">Parameters</TabsTrigger>
           <TabsTrigger value="audience">Audience</TabsTrigger>
           <TabsTrigger value="activity">Activity</TabsTrigger>
@@ -276,7 +287,22 @@ function CampaignWorkspace() {
           />
         </TabsContent>
         <TabsContent value="rules" className="mt-4">
-          <RulesEditor campaign={campaign} campaignId={campaignId} />
+          <RulesEditor
+            campaign={campaign}
+            campaignId={campaignId}
+            segmentsEnabled={
+              segmentDimension ? segmentRows.filter((segment) => segment.enabled).length : null
+            }
+          />
+        </TabsContent>
+        <TabsContent value="segments" className="mt-4">
+          <SegmentsPanel
+            campaignId={campaignId}
+            status={campaign.status as string}
+            dimension={segmentDimension}
+            segments={segmentRows}
+            imports={detail.data?.imports ?? []}
+          />
         </TabsContent>
         <TabsContent value="parameters" className="mt-4">
           <QuotaEditor
@@ -289,7 +315,10 @@ function CampaignWorkspace() {
           <AudiencePanel campaignId={campaignId} imports={detail.data?.imports ?? []} />
         </TabsContent>
         <TabsContent value="activity" className="mt-4">
-          <ActivityPanel messages={detail.data?.messages ?? []} />
+          <ActivityPanel
+            messages={detail.data?.messages ?? []}
+            timezone={(campaign.timezone as string) || "Australia/Sydney"}
+          />
         </TabsContent>
       </Tabs>
     </div>
@@ -344,6 +373,8 @@ function DispatchStatus({ campaign }: { campaign: DispatchCampaign }) {
   }
 
   const open = windowState(rules, now).open;
+  const slots = isSlotMode(rules);
+  const slotOpen = slots ? currentSlot(rules, now) : null;
   const fromRules = nextSendTime({
     rules,
     now,
@@ -367,6 +398,11 @@ function DispatchStatus({ campaign }: { campaign: DispatchCampaign }) {
     : null;
 
   const stale = !fresh;
+  // A fresh pass that named no next message stopped for a reason of its own —
+  // segments finished, a tenant refused, files unreadable — which says more
+  // than the calendar's next opening would.
+  const held =
+    fresh && !campaign.next_send_at && campaign.last_tick_note ? campaign.last_tick_note : null;
   return (
     <div className="space-y-2">
       <div
@@ -378,17 +414,25 @@ function DispatchStatus({ campaign }: { campaign: DispatchCampaign }) {
         <Clock className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
         <div className="space-y-1 text-sm text-muted-foreground">
           <p>
-            {open ? (
+            {held ? (
               <>
-                <span className="text-foreground">Sending</span> — {schedule}, {pace}.
+                <span className="text-foreground">Not sending</span> — {held}.
+              </>
+            ) : open ? (
+              <>
+                <span className="text-foreground">Sending</span> —{" "}
+                {slotOpen ? `the ${slotOpen.clock} sending time is open; ` : ""}
+                {schedule}, {pace}.
               </>
             ) : (
               <>
-                <span className="text-foreground">Waiting for the sending window</span> — {schedule}
-                . Nothing is sent outside it.
+                <span className="text-foreground">
+                  {slots ? "Waiting for the next sending time" : "Waiting for the sending window"}
+                </span>{" "}
+                — {schedule}. Nothing is sent {slots ? "between them" : "outside it"}.
               </>
             )}{" "}
-            {nextLabel ? (
+            {held ? null : nextLabel ? (
               <>
                 Next message: <span className="text-foreground">{nextLabel}</span>.
               </>
@@ -434,6 +478,7 @@ function ReadinessPanel({
         warnings: string[];
         batchSize: number;
         pending: number;
+        segments?: { dimension: string; enabled: number } | null;
         tenant?: { id: string | null; label: string };
         mailbox?: { address: string | null; isDefault: boolean };
         attachments?: { count: number; totalBytes: number };
@@ -464,6 +509,9 @@ function ReadinessPanel({
         <p className="text-sm text-muted-foreground">
           Ready to send — {readiness.pending.toLocaleString()} contacts waiting,{" "}
           {readiness.batchSize === 1 ? "one at a time" : `${readiness.batchSize} to a message`}
+          {readiness.segments
+            ? `, split by ${readiness.segments.dimension} into ${readiness.segments.enabled} segment${readiness.segments.enabled === 1 ? "" : "s"}`
+            : ""}
           {readiness.mailbox?.address ? `, from ${readiness.mailbox.address}` : ""}
           {readiness.tenant?.id ? ` through ${readiness.tenant.label}` : ""}
           {files
@@ -637,9 +685,10 @@ function MessageEditor({
               <code>{"{{sender_name}}"}</code>, <code>{"{{today}}"}</code> and{" "}
               <code>{"{{unsubscribe_url}}"}</code>. Anything a value is substituted into is escaped,
               so a contact's own text cannot break the page. Using any per-recipient field sends one
-              message per contact whatever the batch size says. To show an attached image in the
-              body, write <code>{'<img src="cid:logo.png">'}</code> with the name shown beside the
-              file below.
+              message per contact whatever the batch size says — except, when messages are split
+              into segments, the segment's own column, which is the same for everybody in a message
+              and reads as the segment's name. To show an attached image in the body, write{" "}
+              <code>{'<img src="cid:logo.png">'}</code> with the name shown beside the file below.
             </p>
           </div>
 
@@ -772,9 +821,12 @@ function TestSendDialog({ campaignId }: { campaignId: string }) {
 function RulesEditor({
   campaign,
   campaignId,
+  segmentsEnabled,
 }: {
   campaign: Record<string, unknown>;
   campaignId: string;
+  /** Enabled segments when messages are split by a column; null when they are not. */
+  segmentsEnabled: number | null;
 }) {
   const qc = useQueryClient();
   const [timezone, setTimezone] = useState((campaign.timezone as string) ?? "Australia/Sydney");
@@ -785,6 +837,13 @@ function RulesEditor({
   const [windowEnd, setWindowEnd] = useState(
     ((campaign.window_end as string) ?? "17:00").slice(0, 5),
   );
+  const savedTimes = normaliseSendTimes(campaign.send_times as string[] | null);
+  const [mode, setMode] = useState<"window" | "slots">(savedTimes.length ? "slots" : "window");
+  const [times, setTimes] = useState<string[]>(savedTimes);
+  const [newTime, setNewTime] = useState("09:00");
+  const [grace, setGrace] = useState(String(campaign.slot_grace_minutes ?? 30));
+  const [perSlot, setPerSlot] = useState(String(campaign.max_messages_per_slot ?? ""));
+  const [perSegment, setPerSegment] = useState(String(campaign.segment_messages_per_slot ?? 1));
   const [perDay, setPerDay] = useState(String(campaign.max_messages_per_day ?? ""));
   const [contactsPerDay, setContactsPerDay] = useState(
     String(campaign.max_recipients_per_day ?? ""),
@@ -793,6 +852,7 @@ function RulesEditor({
   const [gap, setGap] = useState(String(campaign.min_gap_seconds ?? 60));
   const [perRun, setPerRun] = useState(String(campaign.max_messages_per_run ?? 20));
 
+  const slots = mode === "slots";
   const save = useMutation({
     mutationFn: () =>
       updateCampaign({
@@ -803,6 +863,10 @@ function RulesEditor({
             sendDays: days.length ? days : [1, 2, 3, 4, 5],
             windowStart,
             windowEnd,
+            sendTimes: slots ? times : [],
+            slotGraceMinutes: Math.min(720, Math.max(1, Number(grace) || 30)),
+            maxMessagesPerSlot: perSlot.trim() ? Math.max(1, Number(perSlot)) : null,
+            segmentMessagesPerSlot: Math.min(100, Math.max(1, Number(perSegment) || 1)),
             maxMessagesPerDay: perDay.trim() ? Number(perDay) : null,
             maxRecipientsPerDay: contactsPerDay.trim() ? Number(contactsPerDay) : null,
             recipientsPerMessage: Math.max(1, Number(perMessage) || 1),
@@ -820,124 +884,298 @@ function RulesEditor({
 
   const perHour = Number(gap) > 0 ? Math.floor(3600 / Number(gap)) : null;
 
+  // What these settings carry, as typed — before they are saved — so the
+  // numbers move with the fields instead of after a round trip.
+  const { batchSize } = batchSizeFor({
+    subject_template: (campaign.subject_template as string) ?? "",
+    body_template: (campaign.body_template as string) ?? "",
+    recipients_per_message: Math.max(1, Number(perMessage) || 1),
+    segment_dimension: (campaign.segment_dimension as string | null) ?? null,
+  });
+  const capacity = slots
+    ? slotCapacity({
+        rules: {
+          ...campaignRulesFromRow(campaign as unknown as CampaignRuleColumns),
+          sendDays: days.length ? days : [1, 2, 3, 4, 5],
+          sendTimes: times,
+          slotGraceMinutes: Math.max(1, Number(grace) || 30),
+          maxMessagesPerSlot: perSlot.trim() ? Math.max(1, Number(perSlot)) : null,
+          maxMessagesPerDay: perDay.trim() ? Number(perDay) : null,
+          maxRecipientsPerDay: contactsPerDay.trim() ? Number(contactsPerDay) : null,
+          minGapSeconds: Math.max(0, Number(gap) || 0),
+        },
+        perMessage: batchSize,
+        segments: segmentsEnabled,
+        segmentMessagesPerSlot: Math.max(1, Number(perSegment) || 1),
+      })
+    : null;
+  const amount = (value: number | null, unit: string) =>
+    value == null ? `no limit on ${unit}` : `${value.toLocaleString("en-AU")} ${unit}`;
+
+  const addTime = () => {
+    const next = normaliseSendTimes([...times, newTime]);
+    if (next.length > 24) {
+      toast.error("At most 24 sending times a day");
+      return;
+    }
+    setTimes(next);
+  };
+
   return (
-    <div className="glass space-y-6 p-5">
-      <div className="space-y-2">
-        <p className="label-mono">when it may send</p>
-        <div className="flex flex-wrap gap-2">
-          {DAYS.map((day) => (
-            <button
-              key={day.value}
-              type="button"
-              onClick={() =>
-                setDays((current) =>
-                  current.includes(day.value)
-                    ? current.filter((value) => value !== day.value)
-                    : [...current, day.value].sort(),
-                )
-              }
-              className={cn(
-                "border px-3 py-1.5 font-mono text-[11px] uppercase tracking-wider transition-colors",
-                days.includes(day.value)
-                  ? "border-foreground bg-foreground text-background"
-                  : "border-border text-muted-foreground hover:border-border-strong",
-              )}
-            >
-              {day.label}
-            </button>
-          ))}
-        </div>
-        <div className="grid gap-4 sm:grid-cols-3">
-          <div className="space-y-2">
-            <Label htmlFor="window-start">From</Label>
-            <Input
-              id="window-start"
-              type="time"
-              value={windowStart}
-              onChange={(event) => setWindowStart(event.target.value)}
-            />
+    <div className="space-y-6">
+      <div className="glass space-y-6 p-5">
+        <div className="space-y-2">
+          <p className="label-mono">when it may send</p>
+          <div className="flex flex-wrap gap-2">
+            {DAYS.map((day) => (
+              <button
+                key={day.value}
+                type="button"
+                onClick={() =>
+                  setDays((current) =>
+                    current.includes(day.value)
+                      ? current.filter((value) => value !== day.value)
+                      : [...current, day.value].sort(),
+                  )
+                }
+                className={cn(
+                  "border px-3 py-1.5 font-mono text-[11px] uppercase tracking-wider transition-colors",
+                  days.includes(day.value)
+                    ? "border-foreground bg-foreground text-background"
+                    : "border-border text-muted-foreground hover:border-border-strong",
+                )}
+              >
+                {day.label}
+              </button>
+            ))}
           </div>
-          <div className="space-y-2">
-            <Label htmlFor="window-end">Until</Label>
-            <Input
-              id="window-end"
-              type="time"
-              value={windowEnd}
-              onChange={(event) => setWindowEnd(event.target.value)}
-            />
+
+          <div className="flex flex-wrap gap-2 pt-2" role="radiogroup" aria-label="How it sends">
+            {(
+              [
+                ["window", "Across a window"],
+                ["slots", "At set times"],
+              ] as const
+            ).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                role="radio"
+                aria-checked={mode === value}
+                onClick={() => setMode(value)}
+                className={cn(
+                  "border px-3 py-1.5 font-mono text-[11px] uppercase tracking-wider transition-colors",
+                  mode === value
+                    ? "border-foreground bg-foreground text-background"
+                    : "border-border text-muted-foreground hover:border-border-strong",
+                )}
+              >
+                {label}
+              </button>
+            ))}
           </div>
-          <div className="space-y-2">
-            <Label htmlFor="timezone">In this timezone</Label>
-            <Select value={timezone} onValueChange={setTimezone}>
-              <SelectTrigger id="timezone">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {TIMEZONES.map((zone) => (
-                  <SelectItem key={zone} value={zone}>
-                    {zone}
-                  </SelectItem>
+
+          {slots ? (
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center gap-2">
+                {times.map((time) => (
+                  <span
+                    key={time}
+                    className="inline-flex items-center gap-1 border border-border px-2 py-1 font-mono text-xs"
+                  >
+                    {time}
+                    <button
+                      type="button"
+                      aria-label={`Remove ${time}`}
+                      className="text-muted-foreground hover:text-foreground"
+                      onClick={() => setTimes((current) => current.filter((t) => t !== time))}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </span>
                 ))}
-              </SelectContent>
-            </Select>
+                {times.length === 0 && (
+                  <span className="font-mono text-[11px] text-muted-foreground">
+                    No sending times yet — add one.
+                  </span>
+                )}
+              </div>
+              <div className="grid gap-4 sm:grid-cols-3">
+                <div className="space-y-2">
+                  <Label htmlFor="new-time">Add a sending time</Label>
+                  <div className="flex gap-2">
+                    <Input
+                      id="new-time"
+                      type="time"
+                      value={newTime}
+                      onChange={(event) => setNewTime(event.target.value)}
+                    />
+                    <Button type="button" variant="outline" onClick={addTime} disabled={!newTime}>
+                      <Plus className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </div>
+                <Field
+                  id="grace"
+                  label="Each stays open (minutes)"
+                  hint="Never past the next sending time, so a missed batch is lost, not doubled."
+                  value={grace}
+                  onChange={setGrace}
+                />
+                <div className="space-y-2">
+                  <Label htmlFor="timezone">In this timezone</Label>
+                  <TimezoneSelect value={timezone} onChange={setTimezone} />
+                </div>
+              </div>
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                <Field
+                  id="per-slot"
+                  label="Messages per sending time"
+                  hint="Across every segment. Blank means no limit of its own."
+                  value={perSlot}
+                  onChange={setPerSlot}
+                  placeholder="no limit"
+                />
+                <Field
+                  id="per-segment"
+                  label="Messages per segment, each time"
+                  hint={
+                    segmentsEnabled == null
+                      ? "Applies once messages are split into segments on the Segments tab."
+                      : `${segmentsEnabled} segment${segmentsEnabled === 1 ? "" : "s"} enabled.`
+                  }
+                  value={perSegment}
+                  onChange={setPerSegment}
+                />
+              </div>
+              <p className="font-mono text-[11px] text-muted-foreground">
+                A batch goes out at each time on each selected day, in the campaign&apos;s own clock
+                — 09:00 here means 09:00 there, across daylight saving — and nothing is sent in
+                between. Each time stays open long enough for the dispatcher, which arrives every
+                minute or two, to send its whole batch at the pace set below.
+              </p>
+            </div>
+          ) : (
+            <>
+              <div className="grid gap-4 sm:grid-cols-3">
+                <div className="space-y-2">
+                  <Label htmlFor="window-start">From</Label>
+                  <Input
+                    id="window-start"
+                    type="time"
+                    value={windowStart}
+                    onChange={(event) => setWindowStart(event.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="window-end">Until</Label>
+                  <Input
+                    id="window-end"
+                    type="time"
+                    value={windowEnd}
+                    onChange={(event) => setWindowEnd(event.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="timezone">In this timezone</Label>
+                  <TimezoneSelect value={timezone} onChange={setTimezone} />
+                </div>
+              </div>
+              <p className="font-mono text-[11px] text-muted-foreground">
+                The window is the campaign&apos;s own clock, not the server&apos;s — 09:00 here
+                means 09:00 there, across daylight saving. The same time for From and Until means
+                all day. Nothing is sent outside the window: a campaign started after it closes
+                waits for it to open again.
+              </p>
+            </>
+          )}
+        </div>
+
+        <div className="space-y-2">
+          <p className="label-mono">how fast</p>
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <Field
+              id="per-day"
+              label="Messages a day"
+              hint="Blank means no daily limit."
+              value={perDay}
+              onChange={setPerDay}
+              placeholder="unlimited"
+            />
+            <Field
+              id="contacts-per-day"
+              label="Contacts a day"
+              hint="A different number when one message carries several people."
+              value={contactsPerDay}
+              onChange={setContactsPerDay}
+              placeholder="unlimited"
+            />
+            <Field
+              id="per-message"
+              label="Contacts per message"
+              hint="Above 1 the extras travel as BCC. Personalisation forces 1."
+              value={perMessage}
+              onChange={setPerMessage}
+            />
+            <Field
+              id="gap"
+              label="Seconds between messages"
+              hint={perHour ? `About ${perHour} an hour at most.` : "No pause between messages."}
+              value={gap}
+              onChange={setGap}
+            />
+            <Field
+              id="per-run"
+              label="Messages per dispatcher tick"
+              hint="The dispatcher runs once a minute; this caps one pass."
+              value={perRun}
+              onChange={setPerRun}
+            />
           </div>
         </div>
-        <p className="font-mono text-[11px] text-muted-foreground">
-          The window is the campaign's own clock, not the server's — 09:00 here means 09:00 there,
-          across daylight saving. The same time for From and Until means all day. Nothing is sent
-          outside the window: a campaign started after it closes waits for it to open again.
-        </p>
-      </div>
 
-      <div className="space-y-2">
-        <p className="label-mono">how fast</p>
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          <Field
-            id="per-day"
-            label="Messages a day"
-            hint="Blank means no daily limit."
-            value={perDay}
-            onChange={setPerDay}
-            placeholder="unlimited"
-          />
-          <Field
-            id="contacts-per-day"
-            label="Contacts a day"
-            hint="A different number when one message carries several people."
-            value={contactsPerDay}
-            onChange={setContactsPerDay}
-            placeholder="unlimited"
-          />
-          <Field
-            id="per-message"
-            label="Contacts per message"
-            hint="Above 1 the extras travel as BCC. Personalisation forces 1."
-            value={perMessage}
-            onChange={setPerMessage}
-          />
-          <Field
-            id="gap"
-            label="Seconds between messages"
-            hint={perHour ? `About ${perHour} an hour at most.` : "No pause between messages."}
-            value={gap}
-            onChange={setGap}
-          />
-          <Field
-            id="per-run"
-            label="Messages per dispatcher tick"
-            hint="The dispatcher runs once a minute; this caps one pass."
-            value={perRun}
-            onChange={setPerRun}
-          />
+        {capacity && (
+          <p className="glass-inset px-4 py-3 font-mono text-[11px] text-muted-foreground">
+            As set: each sending time carries {amount(capacity.perSlot.messages, "messages")} ×{" "}
+            {batchSize} = {amount(capacity.perSlot.contacts, "contacts")}; each day{" "}
+            {amount(capacity.perDay.contacts, "contacts")}; each week (
+            {describeSendDays(days.length ? days : [1, 2, 3, 4, 5])}){" "}
+            {amount(capacity.perWeek.contacts, "contacts")}.
+            {batchSize === 1 && Number(perMessage) > 1
+              ? " The message names a per-contact field, so it goes one contact at a time."
+              : ""}
+          </p>
+        )}
+
+        <div className="flex justify-end">
+          <Button
+            onClick={() => save.mutate()}
+            disabled={save.isPending || (slots && times.length === 0)}
+          >
+            Save rules
+          </Button>
         </div>
       </div>
 
-      <div className="flex justify-end">
-        <Button onClick={() => save.mutate()} disabled={save.isPending}>
-          Save rules
-        </Button>
-      </div>
+      <SendPlan campaignId={campaignId} />
     </div>
+  );
+}
+
+function TimezoneSelect({ value, onChange }: { value: string; onChange: (zone: string) => void }) {
+  return (
+    <Select value={value} onValueChange={onChange}>
+      <SelectTrigger id="timezone">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {TIMEZONES.map((zone) => (
+          <SelectItem key={zone} value={zone}>
+            {zone}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
   );
 }
 
@@ -973,11 +1211,6 @@ function Field({
 
 // ── Per-parameter quotas ────────────────────────────────────────────────────
 
-/** The column profile an import carried. Snapshotted, so it survives the list. */
-function importedColumns(value: unknown): ColumnProfile[] {
-  return Array.isArray(value) ? (value as ColumnProfile[]) : [];
-}
-
 function QuotaEditor({
   campaignId,
   quotas,
@@ -997,27 +1230,7 @@ function QuotaEditor({
 
   // Every parameter column across every list this campaign has taken, merged
   // by key: two lists that both carry `state` are one control, not two.
-  const dimensions = useMemo(() => {
-    const merged = new Map<string, ColumnProfile>();
-    for (const row of imports) {
-      for (const column of importedColumns(row.columns)) {
-        if (!column?.isDimension) continue;
-        const existing = merged.get(column.key);
-        if (!existing) {
-          merged.set(column.key, { ...column, values: [...(column.values ?? [])] });
-          continue;
-        }
-        const values = new Map(existing.values.map((value) => [value.value, { ...value }]));
-        for (const value of column.values ?? []) {
-          const seen = values.get(value.value);
-          if (seen) seen.count += value.count;
-          else values.set(value.value, { ...value });
-        }
-        existing.values = [...values.values()].sort((a, b) => b.count - a.count);
-      }
-    }
-    return [...merged.values()];
-  }, [imports]);
+  const dimensions = useMemo(() => importedDimensions(imports), [imports]);
 
   const remove = useMutation({
     mutationFn: (id: string) => deleteQuota({ data: { id } }),
@@ -1478,7 +1691,13 @@ function AudiencePanel({
 
 // ── Activity ────────────────────────────────────────────────────────────────
 
-function ActivityPanel({ messages }: { messages: Record<string, unknown>[] }) {
+function ActivityPanel({
+  messages,
+  timezone,
+}: {
+  messages: Record<string, unknown>[];
+  timezone: string;
+}) {
   const openCarried = async (messageId: string, attachmentId: string) => {
     try {
       const { url } = await attachmentDownloadUrl({ data: { attachmentId, messageId } });
@@ -1527,6 +1746,10 @@ function ActivityPanel({ messages }: { messages: Record<string, unknown>[] }) {
                 {message.status as string} · {(message.recipient_count as number).toLocaleString()}{" "}
                 contact{message.recipient_count === 1 ? "" : "s"}
                 {message.bcc_count ? ` (${message.bcc_count} bcc)` : ""}
+                {message.segment_label ? ` · ${message.segment_label as string}` : ""}
+                {message.slot_at
+                  ? ` · the ${formatInZone(new Date(message.slot_at as string), timezone)} sending time`
+                  : ""}
                 {message.mailbox ? ` · from ${message.mailbox as string}` : ""}
                 {message.sent_at
                   ? ` · ${formatDistanceToNow(new Date(message.sent_at as string), { addSuffix: true })}`

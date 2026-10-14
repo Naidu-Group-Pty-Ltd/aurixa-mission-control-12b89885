@@ -7,11 +7,15 @@
 // while the page said only "running".
 import { describe, expect, it } from "vitest";
 import {
+  currentSlot,
   describeSchedule,
   describeSendDays,
   formatInZone,
   nextSendTime,
   nextWindowOpening,
+  normaliseSendTimes,
+  planTick,
+  slotOccurrences,
   windowState,
   type CampaignRules,
 } from "./campaignRules.pure";
@@ -21,6 +25,9 @@ const SYDNEY: CampaignRules = {
   sendDays: [1, 2, 3, 4, 5],
   windowStart: "09:00:00",
   windowEnd: "17:00:00",
+  sendTimes: [],
+  slotGraceMinutes: 30,
+  maxMessagesPerSlot: null,
   maxMessagesPerDay: null,
   maxRecipientsPerDay: null,
   recipientsPerMessage: 1,
@@ -194,6 +201,133 @@ describe("saying it", () => {
   it("reads an instant on the campaign's clock", () => {
     expect(formatInZone(new Date("2026-10-12T22:00:00Z"), "Australia/Sydney")).toMatch(
       /Tue.*13.*Oct.*09:00/,
+    );
+  });
+});
+
+// The calendar a state-by-state list needs: a batch at four set times, Monday
+// to Saturday, in Sydney — and nothing in between. A window cannot say this:
+// there is no 09:00–17:00 window that excludes 11:00, and a half-open one
+// excludes 17:00 itself.
+describe("sending times", () => {
+  const FOUR_A_DAY: CampaignRules = {
+    ...SYDNEY,
+    sendDays: [1, 2, 3, 4, 5, 6],
+    sendTimes: ["09:00", "13:00", "15:00", "17:00"],
+    slotGraceMinutes: 30,
+  };
+  // Monday 12 Oct 2026; Sydney is on daylight time (UTC+11).
+  const mon0900 = "2026-10-11T22:00:00.000Z";
+  const mon1300 = "2026-10-12T02:00:00.000Z";
+
+  it("reads the times as one list, earliest first, and drops what is not a clock", () => {
+    expect(normaliseSendTimes(["17:00", "09:00:00", "9:00", "13:00", "", "soon"])).toEqual([
+      "09:00",
+      "13:00",
+      "17:00",
+    ]);
+    expect(normaliseSendTimes(null)).toEqual([]);
+  });
+
+  it("is open from each time for its grace, and names the time it belongs to", () => {
+    const slot = currentSlot(FOUR_A_DAY, new Date("2026-10-11T22:10:00Z")); // Mon 09:10
+    expect(slot).toMatchObject({ clock: "09:00" });
+    expect(iso(slot!.at)).toBe(mon0900);
+    expect(iso(slot!.closesAt)).toBe("2026-10-11T22:30:00.000Z");
+    expect(windowState(FOUR_A_DAY, new Date("2026-10-11T22:10:00Z"))).toEqual({ open: true });
+  });
+
+  it("is closed between the times, and says so in words", () => {
+    expect(windowState(FOUR_A_DAY, new Date("2026-10-11T22:31:00Z"))).toMatchObject({
+      open: false,
+      reason: "between_slots",
+      detail: "between sending times (09:00, 13:00, 15:00 and 17:00 Australia/Sydney)",
+    });
+  });
+
+  it("sends at 17:00 itself, which a 09:00–17:00 window never does", () => {
+    const five = new Date("2026-10-12T06:05:00Z"); // Mon 17:05
+    expect(windowState(FOUR_A_DAY, five)).toEqual({ open: true });
+    expect(windowState(SYDNEY, five).open).toBe(false);
+  });
+
+  it("opens next at the following time, and steps over Sunday", () => {
+    expect(iso(nextWindowOpening(FOUR_A_DAY, new Date("2026-10-11T23:00:00Z")))).toBe(mon1300);
+    // Saturday 17 Oct, 17:45 → Monday 19 Oct, 09:00.
+    expect(iso(nextWindowOpening(FOUR_A_DAY, new Date("2026-10-17T06:45:00Z")))).toBe(
+      "2026-10-18T22:00:00.000Z",
+    );
+    expect(windowState(FOUR_A_DAY, new Date("2026-10-17T22:00:00Z"))).toMatchObject({
+      reason: "day_not_selected",
+    }); // Sunday 09:00
+  });
+
+  it("holds 09:00 in Sydney across the night daylight saving starts", () => {
+    const daily = { ...FOUR_A_DAY, sendDays: [1, 2, 3, 4, 5, 6, 7], sendTimes: ["09:00"] };
+    // Saturday 3 Oct 09:00 is AEST (+10); Sunday 4 Oct 09:00 is AEDT (+11).
+    const slots = slotOccurrences(daily, new Date("2026-10-03T00:00:00Z"), 1).map((s) => iso(s.at));
+    expect(slots).toContain("2026-10-02T23:00:00.000Z");
+    expect(slots).toContain("2026-10-03T22:00:00.000Z");
+  });
+
+  it("never stays open past the next time, so a late tick loses a batch rather than doubling one", () => {
+    const close = { ...FOUR_A_DAY, sendTimes: ["09:00", "09:20"] };
+    const first = currentSlot(close, new Date("2026-10-11T22:05:00Z"));
+    expect(iso(first!.closesAt)).toBe("2026-10-11T22:20:00.000Z");
+    expect(currentSlot(close, new Date("2026-10-11T22:21:00Z"))).toMatchObject({ clock: "09:20" });
+  });
+
+  it("keeps a late time open past midnight into a day the campaign does not use", () => {
+    const late = { ...FOUR_A_DAY, sendDays: [6], sendTimes: ["23:50"] };
+    // Saturday 17 Oct 23:50 Sydney; checked at Sunday 00:10.
+    const sunday = new Date("2026-10-17T13:10:00Z");
+    expect(windowState(late, sunday)).toEqual({ open: true });
+    expect(iso(currentSlot(late, sunday)!.at)).toBe("2026-10-17T12:50:00.000Z");
+  });
+
+  it("waits for the next time once this one has sent everything it may", () => {
+    const at = new Date("2026-10-11T22:05:00Z"); // Mon 09:05
+    const base = {
+      rules: FOUR_A_DAY,
+      now: at,
+      lastMessageAt: null,
+      messagesToday: 6,
+      recipientsToday: 300,
+    };
+    expect(iso(nextSendTime(base))).toBe(at.toISOString());
+    expect(iso(nextSendTime({ ...base, slotSpent: true }))).toBe(mon1300);
+  });
+
+  it("caps the messages one sending time may carry", () => {
+    const capped = { ...FOUR_A_DAY, maxMessagesPerSlot: 6 };
+    const input = {
+      rules: capped,
+      now: new Date("2026-10-11T22:05:00Z"),
+      lastMessageAt: null,
+      messagesToday: 4,
+      recipientsToday: 200,
+      pendingCount: 1000,
+    };
+    expect(planTick({ ...input, messagesThisSlot: 4 })).toMatchObject({
+      canSend: true,
+      messageAllowance: 2,
+    });
+    expect(planTick({ ...input, messagesThisSlot: 6 })).toMatchObject({
+      canSend: false,
+      blockedBy: "this sending time's messages have all gone",
+    });
+  });
+
+  it("opens at the campaign's own start when that falls inside a sending time", () => {
+    const started = { ...FOUR_A_DAY, startsAt: "2026-10-11T22:12:00Z" };
+    expect(iso(nextWindowOpening(started, new Date("2026-10-11T20:00:00Z")))).toBe(
+      "2026-10-11T22:12:00.000Z",
+    );
+  });
+
+  it("puts the calendar in one line", () => {
+    expect(describeSchedule(FOUR_A_DAY)).toBe(
+      "Mon–Sat at 09:00, 13:00, 15:00 and 17:00 Australia/Sydney",
     );
   });
 });

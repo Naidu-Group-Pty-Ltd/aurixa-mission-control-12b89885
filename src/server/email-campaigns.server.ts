@@ -73,12 +73,28 @@
  * the window to open at 09:00 tomorrow" instead of only "running" — which is
  * exactly what a working campaign outside its hours used to look like, and
  * exactly what a stalled scheduler looked like too.
+ *
+ * And two follow from sending at set times, one message per segment.
+ *
+ * **A sending time's share is counted from the ledger.** Every message records
+ * the sending time it belonged to (`slot_at`) and its segment; "has NSW had
+ * its 09:00 message" is a count of those rows, so a pass that dies, a pause and
+ * resume, or three ticks in one burst all read the same answer. A message that
+ * may have reached people — sent, sending, unconfirmed — spends its share; one
+ * Microsoft refused before accepting does not, because nothing went.
+ *
+ * **Every message stays inside one segment.** Its contacts are chosen with the
+ * segment's values as a filter, so a fifty-contact BCC batch is fifty people
+ * from one state, and the segment column's merge field has one answer for all
+ * of them — the segment's label.
  */
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import type { Json } from "@/integrations/supabase/types";
 import {
   campaignRulesFromRow,
   claimQuota,
+  currentSlot,
+  isSlotMode,
   nextSendTime,
   planTick,
   quotaBlocking,
@@ -86,8 +102,10 @@ import {
   windowState,
   type CampaignRules,
   type QuotaRule,
+  type SendSlot,
 } from "@/lib/email/campaignRules.pure";
-import { bodyPreview, renderTemplate, requiresOneRecipient } from "@/lib/email/mergeTemplate.pure";
+import { bodyPreview, perRecipientFields, renderTemplate } from "@/lib/email/mergeTemplate.pure";
+import { segmentTurns, type Segment, type SegmentTurn } from "@/lib/email/segments.pure";
 import { jsonPathColumn, pgInList } from "@/lib/email/quotaFilter.pure";
 import { refusalPauseReason, refusalScope } from "@/lib/email/mailboxes.pure";
 import { resolveMissionControlOrigin } from "@/server/missionControlLink.pure";
@@ -168,6 +186,9 @@ type CampaignRow = {
   send_days: number[] | null;
   window_start: string;
   window_end: string;
+  send_times: string[] | null;
+  slot_grace_minutes: number | null;
+  max_messages_per_slot: number | null;
   max_messages_per_day: number | null;
   max_recipients_per_day: number | null;
   recipients_per_message: number;
@@ -176,7 +197,18 @@ type CampaignRow = {
   starts_at: string | null;
   ends_at: string | null;
   last_message_at: string | null;
+  /** The list column every message is confined to; null is no segmentation. */
+  segment_dimension: string | null;
+  segment_messages_per_slot: number | null;
 };
+
+/** A segmented campaign's enabled segments, and every value they cover. */
+type Segmentation = { dimension: string; segments: Segment[]; values: string[] };
+
+/** Statuses of a message that may have reached people, so spend a sending time's share. */
+const SPENDING_STATUSES = ["sending", "sent", "unconfirmed"];
+/** How far back a segment's last message is looked for, to decide whose turn it is. */
+const TURN_MEMORY_MS = 7 * 24 * 3_600_000;
 
 type RecipientRow = {
   id: string;
@@ -240,6 +272,78 @@ async function loadQuotaUsage(
     usage.set(rule.id, { today: today.count ?? 0, total: total.count ?? 0 });
   }
   return usage;
+}
+
+/**
+ * The campaign's enabled segments in the operator's order, or null when it is
+ * not segmented. A segmented campaign with none enabled has nobody it may
+ * send to — which the caller says, rather than falling back to everybody.
+ */
+async function loadSegmentation(campaign: CampaignRow): Promise<Segmentation | null> {
+  const dimension = campaign.segment_dimension?.trim();
+  if (!dimension) return null;
+  // The key reaches a filter expression, so it is validated before anything else.
+  jsonPathColumn("attributes_norm", dimension);
+  const { data, error } = await supabaseAdmin
+    .from("email_campaign_segments")
+    .select("id, label, match_values, position, enabled")
+    .eq("campaign_id", campaign.id)
+    .eq("enabled", true)
+    .order("position", { ascending: true })
+    .order("created_at", { ascending: true });
+  if (error) throw error;
+  const segments: Segment[] = (data ?? []).map((row) => ({
+    id: row.id as string,
+    label: row.label as string,
+    matchValues: (row.match_values as string[]) ?? [],
+    position: Number(row.position) || 0,
+    enabled: true,
+  }));
+  return {
+    dimension,
+    segments,
+    values: [...new Set(segments.flatMap((segment) => segment.matchValues))],
+  };
+}
+
+type SlotLedger = {
+  /** Messages that may have reached people in the sending time open now. */
+  thisSlot: number;
+  /** The same, per segment. */
+  bySegment: Map<string, number>;
+  /** When each segment last had a message, for whose turn it is. */
+  lastServedAt: Map<string, number>;
+};
+
+/** What the message ledger says about this sending time, and about each segment's last turn. */
+async function loadSlotLedger(
+  campaignId: string,
+  slot: SendSlot | null,
+  segmented: boolean,
+): Promise<SlotLedger> {
+  const ledger: SlotLedger = { thisSlot: 0, bySegment: new Map(), lastServedAt: new Map() };
+  if (!slot && !segmented) return ledger;
+  const { data, error } = await supabaseAdmin
+    .from("email_campaign_messages")
+    .select("segment_id, slot_at, queued_at")
+    .eq("campaign_id", campaignId)
+    .in("status", SPENDING_STATUSES)
+    .gte("queued_at", new Date(Date.now() - TURN_MEMORY_MS).toISOString())
+    .order("queued_at", { ascending: false })
+    .limit(2000);
+  if (error) throw error;
+  for (const row of data ?? []) {
+    const segment = (row.segment_id as string | null) ?? null;
+    const queued = Date.parse(row.queued_at as string);
+    if (segment && Number.isFinite(queued) && queued > (ledger.lastServedAt.get(segment) ?? -1)) {
+      ledger.lastServedAt.set(segment, queued);
+    }
+    if (slot && row.slot_at && Date.parse(row.slot_at as string) === slot.at.getTime()) {
+      ledger.thisSlot += 1;
+      if (segment) ledger.bySegment.set(segment, (ledger.bySegment.get(segment) ?? 0) + 1);
+    }
+  }
+  return ledger;
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -516,6 +620,7 @@ async function reasonToStop(
   campaignId: string,
   rules: CampaignRules,
   now: Date,
+  slot: SendSlot | null,
 ): Promise<{ reason: string; final: boolean } | null> {
   const { data, error } = await supabaseAdmin
     .from("email_campaigns")
@@ -527,7 +632,13 @@ async function reasonToStop(
     return { reason: `stopped: the campaign is now ${data?.status ?? "gone"}`, final: true };
   }
   const window = windowState(rules, now);
-  return window.open ? null : { reason: window.detail, final: false };
+  if (!window.open) return { reason: window.detail, final: false };
+  // The pass counted THIS sending time's share. If the next one has opened,
+  // the next pass counts that one's.
+  if (slot && currentSlot(rules, now)?.at.getTime() !== slot.at.getTime()) {
+    return { reason: `the ${slot.clock} sending time has closed`, final: false };
+  }
+  return null;
 }
 
 async function runCampaignTick(campaign: CampaignRow, context: TickContext): Promise<TickOutcome> {
@@ -591,6 +702,10 @@ async function workCampaign(
   const rules = rulesFor(campaign);
   const startedNow = context.clock();
   const dayStart = startOfZonedDay(startedNow, rules.timezone);
+  // The sending time open now, for a campaign that sends at set times. Fixed
+  // for the pass: the share counted below is this one's, so a pass that runs
+  // into the next sending time stops rather than spending it on a stale count.
+  const slot = isSlotMode(rules) ? currentSlot(rules, startedNow) : null;
 
   outcome.stranded = await expireStrandedClaims(campaign.id, new Date());
 
@@ -611,6 +726,34 @@ async function workCampaign(
     return { outcome, nextSendAt: null };
   }
 
+  // With segments, only contacts in an enabled one may be sent. The rest stay
+  // waiting — a segment disabled for now is a decision to hold them, not to
+  // drop them — and the campaign says so rather than completing over them.
+  const segmentation = await loadSegmentation(campaign);
+  let sendable = pendingCount;
+  if (segmentation) {
+    sendable =
+      segmentation.values.length === 0
+        ? 0
+        : await countRecipients(campaign.id, (q) =>
+            q
+              .eq("status", "pending")
+              .filter(
+                jsonPathColumn("attributes_norm", segmentation.dimension),
+                "in",
+                pgInList(segmentation.values),
+              ),
+          );
+    if (sendable === 0) {
+      const waiting = `${pendingCount.toLocaleString("en-AU")} waiting contact${pendingCount === 1 ? "" : "s"}`;
+      outcome.note =
+        segmentation.segments.length === 0
+          ? `no segment is enabled, so none of the ${waiting} can be sent — enable one on the Segments tab`
+          : `every enabled segment is finished; ${waiting} ${pendingCount === 1 ? "is" : "are"} outside them (in a disabled segment, or in none) — enable a segment, or cancel the campaign to close it`;
+      return { outcome, nextSendAt: null };
+    }
+  }
+
   const messagesTodayResult = await supabaseAdmin
     .from("email_campaign_messages")
     .select("id", { count: "exact", head: true })
@@ -624,8 +767,37 @@ async function workCampaign(
     q.eq("status", "sent").gte("sent_at", dayStart.toISOString()),
   );
   let lastMessageAt = campaign.last_message_at;
+
+  const ledger = await loadSlotLedger(campaign.id, slot, segmentation != null);
+  let messagesThisSlot = ledger.thisSlot;
+  // Whose turn it is, and how much of this sending time's share each has left.
+  // Reordered as the pass goes, so consecutive messages go to different segments.
+  const turns: SegmentTurn[] | null = segmentation
+    ? segmentTurns({
+        segments: segmentation.segments,
+        perSlot: slot ? Math.max(1, campaign.segment_messages_per_slot ?? 1) : null,
+        sentThisSlot: ledger.bySegment,
+        lastServedAt: ledger.lastServedAt,
+      })
+    : null;
+  // Segments with nobody claimable this pass: finished, or held by a quota.
+  const exhausted = new Set<string>();
+  const slotSpent = () =>
+    slot != null &&
+    ((rules.maxMessagesPerSlot != null && messagesThisSlot >= rules.maxMessagesPerSlot) ||
+      (turns != null &&
+        turns.every((turn) => turn.remaining <= 0 || exhausted.has(turn.segment.id))));
+  const slotDone = () =>
+    `that is everything the ${slot?.clock ?? ""} sending time may send — the next goes at the next sending time`;
   const whenNext = () =>
-    nextSendTime({ rules, now: context.clock(), lastMessageAt, messagesToday, recipientsToday });
+    nextSendTime({
+      rules,
+      now: context.clock(),
+      lastMessageAt,
+      messagesToday,
+      recipientsToday,
+      slotSpent: slotSpent(),
+    });
 
   const plan = planTick({
     rules,
@@ -633,10 +805,15 @@ async function workCampaign(
     lastMessageAt,
     messagesToday,
     recipientsToday,
-    pendingCount,
+    pendingCount: sendable,
+    messagesThisSlot,
   });
   if (!plan.canSend) {
     outcome.note = plan.blockedBy;
+    return { outcome, nextSendAt: whenNext() };
+  }
+  if (slotSpent()) {
+    outcome.note = slotDone();
     return { outcome, nextSendAt: whenNext() };
   }
 
@@ -694,6 +871,8 @@ async function workCampaign(
 
   for (let message = 0; message < plan.messageAllowance; message++) {
     if (recipientsLeft <= 0) break;
+    // Before waiting out a gap for a message this sending time has no room for.
+    if (slotSpent()) break;
     if (Date.now() + delayMs > context.deadline) {
       // Not a fault: the next pass picks up where this one stopped, and the
       // heartbeat says when that will be.
@@ -705,7 +884,7 @@ async function workCampaign(
 
     // The world may have moved while this pass waited or sent.
     if (message > 0 || plan.initialDelayMs > 0) {
-      const stop = await reasonToStop(campaign.id, rules, context.clock());
+      const stop = await reasonToStop(campaign.id, rules, context.clock(), slot);
       if (stop) {
         outcome.note = stop.reason;
         stopped = stop.final;
@@ -714,13 +893,36 @@ async function workCampaign(
     }
 
     const wanted = Math.min(perMessage, recipientsLeft);
-    const chosen = await chooseRecipients(campaign.id, wanted, quotas, usage, taken, stepOver);
+    let chosen: RecipientRow[] = [];
+    let turn: SegmentTurn | null = null;
+    if (turns && segmentation) {
+      // The first segment whose turn it is and that has somebody to send to.
+      for (const candidate of turns) {
+        if (candidate.remaining <= 0 || exhausted.has(candidate.segment.id)) continue;
+        const picked = await chooseRecipients(campaign.id, wanted, quotas, usage, taken, stepOver, {
+          dimension: segmentation.dimension,
+          values: candidate.segment.matchValues,
+        });
+        if (picked.length === 0) {
+          exhausted.add(candidate.segment.id);
+          continue;
+        }
+        chosen = picked;
+        turn = candidate;
+        break;
+      }
+    } else {
+      chosen = await chooseRecipients(campaign.id, wanted, quotas, usage, taken, stepOver, null);
+    }
     if (chosen.length === 0) {
-      // A quota holding every waiting contact, or another pass having claimed
-      // them between the read and the claim. Both mean there is nothing to do
-      // this tick and neither is a fault.
+      // Every segment with a share left is finished or held, a quota holding
+      // every waiting contact, or another pass having claimed them between the
+      // read and the claim. None of these is a fault.
       outcome.note =
-        outcome.note ?? "no contact could be claimed — held by a quota, or taken by another pass";
+        outcome.note ??
+        (slotSpent()
+          ? slotDone()
+          : "no contact could be claimed — held by a quota, or taken by another pass");
       break;
     }
 
@@ -731,10 +933,27 @@ async function workCampaign(
       origin,
       recipients: chosen,
       attachments,
+      segment:
+        turn && segmentation
+          ? { id: turn.segment.id, label: turn.segment.label, dimension: segmentation.dimension }
+          : null,
+      slotAt: slot?.at ?? null,
     });
     // `last_message_at` is stamped for every attempt; so is this pass's copy,
     // with the same instant, so the next send time is measured from it.
     lastMessageAt = sent.at;
+
+    if (turns && turn) {
+      // Its go is over whatever happened: the next message is another segment's.
+      turns.splice(turns.indexOf(turn), 1);
+      turns.push(turn);
+    }
+    if (sent.kind === "sent" || sent.kind === "unconfirmed") {
+      // Either may have reached people, so either spends the share — the
+      // ledger counts them the same way.
+      messagesThisSlot += 1;
+      if (turn) turn.remaining -= 1;
+    }
 
     outcome.messages += 1;
     if (sent.kind === "sent") {
@@ -780,6 +999,8 @@ async function workCampaign(
     }
   }
 
+  if (!stopped && outcome.note == null && slotSpent()) outcome.note = slotDone();
+
   // A campaign that stopped (paused, here or by an operator) has no next message.
   return { outcome, nextSendAt: stopped ? null : whenNext() };
 }
@@ -793,19 +1014,26 @@ async function workCampaign(
  * page says so while the campaign is being written; this is the enforcement,
  * so a template edited after the fact cannot quietly send `Hi ,` to a hundred
  * people in one BCC line.
+ *
+ * The one column exempt is a segmented campaign's own: every contact in its
+ * message shares the segment, so `{{state}}` has one answer for all of them.
  */
 export function messageBatchSize(campaign: {
   subject_template: string;
   body_template: string;
   recipients_per_message: number;
+  segment_dimension?: string | null;
 }): number {
-  if (requiresOneRecipient(campaign.subject_template, campaign.body_template)) return 1;
+  const shared = campaign.segment_dimension ? [campaign.segment_dimension] : [];
+  const templates = [campaign.subject_template, campaign.body_template];
+  if (perRecipientFields(templates, shared).length > 0) return 1;
   return Math.max(1, campaign.recipients_per_message);
 }
 
 /**
- * Pending contacts that no quota is holding, re-checked against the
- * suppression register immediately before they are claimed.
+ * Pending contacts that no quota is holding — and, for a segmented campaign,
+ * only the segment whose turn it is — re-checked against the suppression
+ * register immediately before they are claimed.
  */
 async function chooseRecipients(
   campaignId: string,
@@ -814,15 +1042,24 @@ async function chooseRecipients(
   usage: Map<string, { today: number; total: number }>,
   taken: Map<string, number>,
   stepOver: Set<string>,
+  segment: { dimension: string; values: string[] } | null,
 ): Promise<RecipientRow[]> {
   const limit = Math.min(MAX_CANDIDATES, Math.max(wanted * CANDIDATE_MULTIPLIER, wanted + 20));
-  const { data, error } = await supabaseAdmin
+  let query = supabaseAdmin
     .from("email_campaign_recipients")
     .select("id, email, email_key, attempts, attributes, attributes_norm, unsubscribe_token")
     .eq("campaign_id", campaignId)
-    .eq("status", "pending")
-    .order("position", { ascending: true })
-    .limit(limit);
+    .eq("status", "pending");
+  if (segment) {
+    // In the query rather than after it: a page of the first two thousand
+    // contacts may hold none of this segment's.
+    query = query.filter(
+      jsonPathColumn("attributes_norm", segment.dimension),
+      "in",
+      pgInList(segment.values),
+    );
+  }
+  const { data, error } = await query.order("position", { ascending: true }).limit(limit);
   if (error) throw error;
 
   const candidates: RecipientRow[] = [];
@@ -938,8 +1175,12 @@ async function sendOneMessage(input: {
   origin: string;
   recipients: RecipientRow[];
   attachments: PreparedAttachments;
+  /** The segment every one of these recipients is in, for a segmented campaign. */
+  segment: { id: string; label: string; dimension: string } | null;
+  /** The sending time this message belongs to, for a campaign that has them. */
+  slotAt: Date | null;
 }): Promise<MessageResult> {
-  const { campaign, config, mailbox, origin, recipients, attachments } = input;
+  const { campaign, config, mailbox, origin, recipients, attachments, segment } = input;
   const html = campaign.body_format !== "text";
   const lead = recipients[0];
 
@@ -948,9 +1189,14 @@ async function sendOneMessage(input: {
   // as well means that if that guarantee were ever weakened, a batched message
   // renders those fields EMPTY rather than filling them with the first
   // person's name, state and unsubscribe link.
+  //
+  // The segment's column is the exception, and it is the segment's LABEL that
+  // renders, for every message alike: one message carrying `NSW` and
+  // `New South Wales` contacts says "NSW" to all of them.
   const personal = recipients.length === 1;
   const context: Record<string, string> = {
     ...(personal ? (lead.attributes ?? {}) : {}),
+    ...(segment ? { [segment.dimension]: segment.label } : {}),
     ...(personal
       ? {
           email: lead.email,
@@ -1009,6 +1255,11 @@ async function sendOneMessage(input: {
       attachments: attachments.snapshot as unknown as Json,
       attachment_count: attachments.snapshot.length,
       attachment_bytes: attachments.totalBytes,
+      // Before the send too: these are what a sending time's share is counted
+      // from, and a message that may have left has spent it.
+      segment_id: segment?.id ?? null,
+      segment_label: segment?.label ?? null,
+      slot_at: input.slotAt ? input.slotAt.toISOString() : null,
     })
     .select("id")
     .single();

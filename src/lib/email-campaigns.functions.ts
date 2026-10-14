@@ -30,9 +30,8 @@ import { emailKey } from "@/lib/email/emailAddress.pure";
 import {
   findTokens,
   missingFields,
-  personalisingFields,
+  perRecipientFields,
   renderTemplate,
-  requiresOneRecipient,
 } from "@/lib/email/mergeTemplate.pure";
 import {
   admissionProblem,
@@ -59,10 +58,25 @@ import {
 } from "@/lib/email/warmupPlan.pure";
 import {
   campaignRulesFromRow,
+  currentSlot,
   describeSchedule,
   formatInZone,
+  isSlotMode,
   nextWindowOpening,
+  normaliseSendTimes,
+  slotOccurrences,
+  startOfZonedDay,
 } from "@/lib/email/campaignRules.pure";
+import { normaliseValue } from "@/lib/email/listProfile.pure";
+import {
+  MAX_SEGMENTS,
+  forecastSlots,
+  messagesPerSlot,
+  overlappingValues,
+  segmentCovers,
+  slotCapacity,
+} from "@/lib/email/segments.pure";
+import { jsonPathColumn, pgInList } from "@/lib/email/quotaFilter.pure";
 
 const uuid = z.string().uuid();
 
@@ -114,6 +128,11 @@ const rulesSchema = z.object({
   maxMessagesPerRun: z.number().int().min(1).max(200).optional(),
   startsAt: z.string().datetime({ offset: true }).nullable().optional(),
   endsAt: z.string().datetime({ offset: true }).nullable().optional(),
+  /** Empty sends across the window; any time here sends at set times instead. */
+  sendTimes: z.array(clock).max(24).optional(),
+  slotGraceMinutes: z.number().int().min(1).max(720).optional(),
+  maxMessagesPerSlot: z.number().int().min(1).max(10_000).nullable().optional(),
+  segmentMessagesPerSlot: z.number().int().min(1).max(100).optional(),
 });
 
 // ── Campaigns ───────────────────────────────────────────────────────────────
@@ -177,36 +196,45 @@ export const getCampaign = createServerFn({ method: "POST" })
     if (error) throw error;
     if (!campaign) throw new Error("campaign_not_found");
 
-    const [quotas, imports, messages, recipientStatuses, attachments] = await Promise.all([
-      context.supabase
-        .from("email_campaign_quotas")
-        .select("*")
-        .eq("campaign_id", data.id)
-        .order("created_at", { ascending: true }),
-      context.supabase
-        .from("email_campaign_imports")
-        .select("*")
-        .eq("campaign_id", data.id)
-        .order("created_at", { ascending: false })
-        .limit(25),
-      context.supabase
-        .from("email_campaign_messages")
-        .select("*")
-        .eq("campaign_id", data.id)
-        .order("queued_at", { ascending: false })
-        .limit(25),
-      context.supabase
-        .from("email_campaign_recipient_counts")
-        .select("status, recipients")
-        .eq("campaign_id", data.id),
-      context.supabase
-        .from("email_campaign_attachments")
-        .select("id, file_name, content_type, size_bytes, content_id, position, created_at")
-        .eq("campaign_id", data.id)
-        .order("position", { ascending: true })
-        .order("created_at", { ascending: true }),
-    ]);
+    const [quotas, imports, messages, recipientStatuses, attachments, segments] = await Promise.all(
+      [
+        context.supabase
+          .from("email_campaign_quotas")
+          .select("*")
+          .eq("campaign_id", data.id)
+          .order("created_at", { ascending: true }),
+        context.supabase
+          .from("email_campaign_imports")
+          .select("*")
+          .eq("campaign_id", data.id)
+          .order("created_at", { ascending: false })
+          .limit(25),
+        context.supabase
+          .from("email_campaign_messages")
+          .select("*")
+          .eq("campaign_id", data.id)
+          .order("queued_at", { ascending: false })
+          .limit(25),
+        context.supabase
+          .from("email_campaign_recipient_counts")
+          .select("status, recipients")
+          .eq("campaign_id", data.id),
+        context.supabase
+          .from("email_campaign_attachments")
+          .select("id, file_name, content_type, size_bytes, content_id, position, created_at")
+          .eq("campaign_id", data.id)
+          .order("position", { ascending: true })
+          .order("created_at", { ascending: true }),
+        context.supabase
+          .from("email_campaign_segments")
+          .select("*")
+          .eq("campaign_id", data.id)
+          .order("position", { ascending: true })
+          .order("created_at", { ascending: true }),
+      ],
+    );
     if (quotas.error) throw quotas.error;
+    if (segments.error) throw segments.error;
     if (imports.error) throw imports.error;
     if (messages.error) throw messages.error;
     if (recipientStatuses.error) throw recipientStatuses.error;
@@ -225,6 +253,7 @@ export const getCampaign = createServerFn({ method: "POST" })
       imports: imports.data ?? [],
       messages: messages.data ?? [],
       attachments: attachments.data ?? [],
+      segments: segments.data ?? [],
       counts,
     };
   });
@@ -370,6 +399,12 @@ export const updateCampaign = createServerFn({ method: "POST" })
         patch.max_messages_per_run = rules.maxMessagesPerRun;
       if (rules.startsAt !== undefined) patch.starts_at = rules.startsAt;
       if (rules.endsAt !== undefined) patch.ends_at = rules.endsAt;
+      if (rules.sendTimes !== undefined) patch.send_times = normaliseSendTimes(rules.sendTimes);
+      if (rules.slotGraceMinutes !== undefined) patch.slot_grace_minutes = rules.slotGraceMinutes;
+      if (rules.maxMessagesPerSlot !== undefined)
+        patch.max_messages_per_slot = rules.maxMessagesPerSlot;
+      if (rules.segmentMessagesPerSlot !== undefined)
+        patch.segment_messages_per_slot = rules.segmentMessagesPerSlot;
     }
 
     if (Object.keys(patch).length === 0) return { ok: true };
@@ -495,8 +530,107 @@ export type Readiness = {
   mailbox: { address: string | null; isDefault: boolean; access: MailboxAccess | null };
   attachments: { count: number; totalBytes: number; path: DeliveryPath };
   /** The campaign's calendar, and when it next lets a message go. */
-  schedule: { description: string; openNow: boolean; nextOpening: string | null };
+  schedule: {
+    mode: "window" | "slots";
+    description: string;
+    openNow: boolean;
+    nextOpening: string | null;
+  };
+  /** How messages are split by a list column, and who is left outside; null when they are not. */
+  segments: {
+    dimension: string;
+    enabled: number;
+    total: number;
+    /** Waiting contacts in an enabled segment. */
+    sendable: number;
+    /** Waiting contacts in none — held while the campaign is split this way. */
+    outside: number;
+  } | null;
 };
+
+/**
+ * Exchange Online's default recipient rate limit: recipients one mailbox may
+ * address in 24 hours, BCC included. Past it Exchange refuses the mailbox's
+ * mail until its count falls back.
+ */
+export const EXCHANGE_RECIPIENTS_PER_DAY = 10_000;
+
+/** The editable-while statuses for a campaign's segments; turning one on or off is always allowed. */
+export const SEGMENT_EDITABLE_STATUSES = ["draft", "paused"] as const;
+
+/**
+ * How many contacts share one message, and the fields that say otherwise. The
+ * dispatcher's `messageBatchSize`, readable from here without its server
+ * imports: one per message as soon as anything per-person is named — except a
+ * segmented campaign's own column, which is the same for its whole message.
+ */
+export function batchSizeFor(campaign: {
+  subject_template: string | null;
+  body_template: string | null;
+  recipients_per_message: number | null;
+  segment_dimension?: string | null;
+}): { batchSize: number; personalising: string[] } {
+  const personalising = perRecipientFields(
+    [campaign.subject_template ?? "", campaign.body_template ?? ""],
+    campaign.segment_dimension ? [campaign.segment_dimension] : [],
+  );
+  return {
+    batchSize:
+      personalising.length > 0 ? 1 : Math.max(1, Number(campaign.recipients_per_message) || 1),
+    personalising,
+  };
+}
+
+/** Recipients of a campaign in a status whose segment column holds one of these values. */
+async function countIn(
+  supabase: SupabaseClient<Database>,
+  campaignId: string,
+  status: string,
+  dimension: string,
+  values: string[],
+): Promise<number> {
+  if (values.length === 0) return 0;
+  const { count, error } = await supabase
+    .from("email_campaign_recipients")
+    .select("id", { count: "exact", head: true })
+    .eq("campaign_id", campaignId)
+    .eq("status", status)
+    .filter(jsonPathColumn("attributes_norm", dimension), "in", pgInList(values));
+  if (error) throw error;
+  return count ?? 0;
+}
+
+/**
+ * Values a list holds in the segment column that no enabled segment covers,
+ * with how many rows of the list carry each — read from the imports' own
+ * column snapshots, so it costs no scan of the recipients.
+ */
+function uncoveredValues(
+  imports: { columns: unknown }[],
+  dimension: string,
+  covered: Set<string>,
+): { label: string; count: number }[] {
+  const out = new Map<string, { label: string; count: number }>();
+  for (const row of imports) {
+    const columns = Array.isArray(row.columns)
+      ? (row.columns as {
+          key?: string;
+          values?: { value: string; label: string; count: number }[];
+        }[])
+      : [];
+    const column = columns.find((entry) => entry?.key === dimension);
+    for (const value of column?.values ?? []) {
+      if (covered.has(value.value)) continue;
+      const seen = out.get(value.value);
+      if (seen) seen.count += value.count;
+      else out.set(value.value, { label: value.label, count: value.count });
+    }
+  }
+  return [...out.values()].sort((a, b) => b.count - a.count);
+}
+
+const plural = (n: number, one: string, many = `${one}s`) =>
+  `${n.toLocaleString("en-AU")} ${n === 1 ? one : many}`;
 
 /** What the warmup pool says about a campaign's sending mailbox, or null. Advisory: a read that fails says nothing. */
 async function warmupAdviceFor(
@@ -648,15 +782,60 @@ async function assessReadiness(
     );
   }
 
-  const personalising = personalisingFields(
-    campaign.subject_template ?? "",
-    campaign.body_template ?? "",
-  );
-  const oneAtATime = requiresOneRecipient(
-    campaign.subject_template ?? "",
-    campaign.body_template ?? "",
-  );
-  const batchSize = oneAtATime ? 1 : Math.max(1, Number(campaign.recipients_per_message) || 1);
+  // Segments: each message confined to one value-set of a list column. A
+  // contact in no enabled segment is held, not dropped — said here, with the
+  // values that put them there, before anybody wonders where ACT went.
+  const dimension = (campaign.segment_dimension as string | null) ?? null;
+  let segments: Readiness["segments"] = null;
+  if (dimension) {
+    const [
+      { data: segmentRows, error: segmentError },
+      { data: importColumns, error: columnError },
+    ] = await Promise.all([
+      supabase
+        .from("email_campaign_segments")
+        .select("label, match_values, enabled")
+        .eq("campaign_id", campaignId),
+      supabase.from("email_campaign_imports").select("columns").eq("campaign_id", campaignId),
+    ]);
+    if (segmentError) throw segmentError;
+    if (columnError) throw columnError;
+    const enabled = (segmentRows ?? []).filter((row) => row.enabled);
+    const covered = new Set(enabled.flatMap((row) => row.match_values ?? []));
+    const sendable = await countIn(supabase, campaignId, "pending", dimension, [...covered]);
+    const outside = Math.max(0, pending - sendable);
+    segments = {
+      dimension,
+      enabled: enabled.length,
+      total: (segmentRows ?? []).length,
+      sendable,
+      outside,
+    };
+    if (!available.has(dimension)) {
+      blocking.push(
+        `messages are split by the "${dimension}" column, which no attached list supplies — choose another column on the Segments tab`,
+      );
+    }
+    if (enabled.length === 0) {
+      blocking.push(
+        "messages are split into segments but none is enabled — enable one on the Segments tab, or stop splitting",
+      );
+    } else if (pending > 0 && sendable === 0) {
+      blocking.push("no waiting contact is in an enabled segment");
+    } else if (outside > 0) {
+      const values = uncoveredValues(importColumns ?? [], dimension, covered);
+      const named = values
+        .slice(0, 6)
+        .map((value) => `${value.label} (${value.count.toLocaleString("en-AU")} in the list)`)
+        .join(", ");
+      warnings.push(
+        `${plural(outside, "waiting contact")} ${outside === 1 ? "is" : "are"} in no enabled segment and will not be sent while messages are split this way${named ? ` — ${named}${values.length > 6 ? ", …" : ""}` : " (their value is blank, or in a disabled segment)"}`,
+      );
+    }
+  }
+
+  const { batchSize, personalising } = batchSizeFor(campaign);
+  const oneAtATime = personalising.length > 0;
   if (oneAtATime && Number(campaign.recipients_per_message) > 1) {
     warnings.push(
       `the message names ${personalising.map((f) => `{{${f}}}`).join(", ")}, so it goes to one contact at a time whatever the batch size says`,
@@ -692,8 +871,49 @@ async function assessReadiness(
     );
   } else if (!openNow && campaign.status !== "running") {
     warnings.push(
-      `the sending window is closed right now (${description}) — once started, the first message goes out ${formatInZone(opening, rules.timezone)}`,
+      `${isSlotMode(rules) ? "it is between sending times" : "the sending window is closed"} right now (${description}) — once started, the first message goes out ${formatInZone(opening, rules.timezone)}`,
     );
+  }
+
+  // Sending times: whether each can carry what is asked of it, and whether a
+  // day of them stays inside what one Exchange mailbox may address.
+  if (isSlotMode(rules)) {
+    const perSegment = Math.max(1, Number(campaign.segment_messages_per_slot) || 1);
+    const segmentCount = segments ? segments.enabled : null;
+    const asked = [
+      rules.maxMessagesPerSlot,
+      segmentCount == null ? null : segmentCount * perSegment,
+    ].filter((value): value is number => value != null);
+    const wanted = asked.length ? Math.min(...asked) : null;
+    const fits = messagesPerSlot({
+      rules,
+      segments: segmentCount,
+      segmentMessagesPerSlot: perSegment,
+    });
+    if (wanted != null && fits != null && fits < wanted) {
+      warnings.push(
+        `each sending time stays open ${rules.slotGraceMinutes} minutes and messages go at least ${rules.minGapSeconds} s apart, so one fits ${fits} of its ${wanted} messages — the rest wait for a later sending time; shorten the gap or keep each time open longer on the Rules tab`,
+      );
+    }
+    if (wanted == null && rules.maxMessagesPerDay == null && rules.maxRecipientsPerDay == null) {
+      warnings.push(
+        "nothing limits how many messages one sending time carries, so each sends as many as fit while it is open — set messages per sending time on the Rules tab, or split by segment",
+      );
+    }
+    const capacity = slotCapacity({
+      rules,
+      perMessage: batchSize,
+      segments: segmentCount,
+      segmentMessagesPerSlot: perSegment,
+    });
+    if (
+      capacity.perDay.contacts != null &&
+      capacity.perDay.contacts > EXCHANGE_RECIPIENTS_PER_DAY
+    ) {
+      warnings.push(
+        `at full pace this addresses ${capacity.perDay.contacts.toLocaleString("en-AU")} contacts a day from one mailbox; Exchange Online's default recipient rate limit is ${EXCHANGE_RECIPIENTS_PER_DAY.toLocaleString("en-AU")} in 24 hours, past which it refuses the mailbox's mail — set a daily contact limit on the Rules tab`,
+      );
+    }
   }
 
   const { data: attachmentRows, error: attachmentError } = await supabase
@@ -736,17 +956,273 @@ async function assessReadiness(
       path: attached.path,
     },
     schedule: {
+      mode: isSlotMode(rules) ? "slots" : "window",
       description,
       openNow,
       nextOpening: opening ? opening.toISOString() : null,
     },
+    segments,
   };
+}
+
+/**
+ * `{ state: "NSW" }` — the merge field a segmented campaign's column renders
+ * as: the label of the segment these attributes fall in, or of the first
+ * enabled segment when there are none to go by. Empty when not segmented.
+ */
+async function segmentFieldFor(
+  supabase: SupabaseClient<Database>,
+  campaign: { id: string; segment_dimension: string | null },
+  attributesNorm: Record<string, string> | null | undefined,
+): Promise<Record<string, string>> {
+  const dimension = campaign.segment_dimension;
+  if (!dimension) return {};
+  const { data, error } = await supabase
+    .from("email_campaign_segments")
+    .select("label, match_values")
+    .eq("campaign_id", campaign.id)
+    .eq("enabled", true)
+    .order("position", { ascending: true })
+    .order("created_at", { ascending: true });
+  if (error) throw error;
+  const rows = data ?? [];
+  const match = attributesNorm
+    ? rows.find((row) =>
+        segmentCovers({ matchValues: row.match_values ?? [] }, dimension, attributesNorm),
+      )
+    : rows[0];
+  return match ? { [dimension]: match.label } : {};
 }
 
 export const campaignReadiness = createServerFn({ method: "POST" })
   .middleware([requireOperator])
   .inputValidator((input) => z.object({ id: uuid }).parse(input))
   .handler(async ({ data, context }) => assessReadiness(context.supabase, data.id));
+
+/** How far back the plan reads the message ledger: turns, and recent sending times. */
+const PLAN_MEMORY_MS = 7 * 24 * 3_600_000;
+/** Sending times shown as history. */
+const PLAN_HISTORY_DAYS = 3;
+
+/**
+ * What the calendar will do with the list.
+ *
+ * Per sending time, per day and per week; what each of the next sending times
+ * should carry and for which segments; when each segment, and the list, run
+ * out; and what the last few sending times actually sent, read from the
+ * ledger. The forecast is the dispatcher's own rules replayed without quotas,
+ * throttling or a stalled scheduler — so it is the EARLIEST the list can
+ * finish, and the page says so.
+ */
+export const campaignPlan = createServerFn({ method: "POST" })
+  .middleware([requireOperator])
+  .inputValidator((input) => z.object({ id: uuid }).parse(input))
+  .handler(async ({ data, context }) => {
+    const supabase = context.supabase;
+    const { data: campaign, error } = await supabase
+      .from("email_campaigns")
+      .select("*")
+      .eq("id", data.id)
+      .maybeSingle();
+    if (error) throw error;
+    if (!campaign) throw new Error("campaign_not_found");
+
+    const rules = campaignRulesFromRow(campaign);
+    const slotMode = isSlotMode(rules);
+    const now = new Date();
+    const dayStart = startOfZonedDay(now, rules.timezone).toISOString();
+    const dimension = campaign.segment_dimension ?? null;
+    const { batchSize } = batchSizeFor(campaign);
+    const perSegment = Math.max(1, Number(campaign.segment_messages_per_slot) || 1);
+
+    const [segmentRows, pendingResult, sentToday, recipientsToday, recent, imports] =
+      await Promise.all([
+        supabase
+          .from("email_campaign_segments")
+          .select("id, label, match_values, enabled, position")
+          .eq("campaign_id", data.id)
+          .order("position", { ascending: true })
+          .order("created_at", { ascending: true }),
+        supabase
+          .from("email_campaign_recipients")
+          .select("id", { count: "exact", head: true })
+          .eq("campaign_id", data.id)
+          .eq("status", "pending"),
+        supabase
+          .from("email_campaign_messages")
+          .select("id", { count: "exact", head: true })
+          .eq("campaign_id", data.id)
+          .eq("status", "sent")
+          .gte("sent_at", dayStart),
+        supabase
+          .from("email_campaign_recipients")
+          .select("id", { count: "exact", head: true })
+          .eq("campaign_id", data.id)
+          .eq("status", "sent")
+          .gte("sent_at", dayStart),
+        supabase
+          .from("email_campaign_messages")
+          .select("segment_id, segment_label, slot_at, status, recipient_count, queued_at")
+          .eq("campaign_id", data.id)
+          .gte("queued_at", new Date(now.getTime() - PLAN_MEMORY_MS).toISOString())
+          .order("queued_at", { ascending: false })
+          .limit(2000),
+        supabase.from("email_campaign_imports").select("columns").eq("campaign_id", data.id),
+      ]);
+    for (const result of [
+      segmentRows,
+      pendingResult,
+      sentToday,
+      recipientsToday,
+      recent,
+      imports,
+    ]) {
+      if (result.error) throw result.error;
+    }
+    const pending = pendingResult.count ?? 0;
+    const messages = recent.data ?? [];
+    const spending = (status: string) => ["sending", "sent", "unconfirmed"].includes(status);
+
+    // Each segment's waiting and sent contacts, and when it last had a message.
+    const slot = slotMode ? currentSlot(rules, now) : null;
+    const segments = await Promise.all(
+      (dimension ? (segmentRows.data ?? []) : []).map(async (row) => {
+        const values = row.match_values ?? [];
+        const [waiting, sent] = await Promise.all([
+          countIn(supabase, data.id, "pending", dimension!, values),
+          countIn(supabase, data.id, "sent", dimension!, values),
+        ]);
+        const own = messages.filter((m) => m.segment_id === row.id && spending(m.status));
+        const last = own.reduce<number | null>((latest, m) => {
+          const at = Date.parse(m.queued_at);
+          return Number.isFinite(at) && (latest == null || at > latest) ? at : latest;
+        }, null);
+        return {
+          id: row.id,
+          label: row.label,
+          matchValues: values,
+          enabled: row.enabled,
+          position: row.position,
+          pending: waiting,
+          sent,
+          lastServedAt: last,
+          sentThisSlot: slot
+            ? own.filter((m) => m.slot_at && Date.parse(m.slot_at) === slot.at.getTime()).length
+            : 0,
+        };
+      }),
+    );
+    const covered = new Set(segments.filter((s) => s.enabled).flatMap((s) => s.matchValues));
+    const inAnySegment = segments.reduce((sum, s) => sum + s.pending, 0);
+    const enabledSegments = segments.filter((s) => s.enabled);
+
+    const messagesThisSlot = slot
+      ? messages.filter(
+          (m) => spending(m.status) && m.slot_at && Date.parse(m.slot_at) === slot.at.getTime(),
+        ).length
+      : 0;
+
+    const forecast = slotMode
+      ? forecastSlots({
+          rules,
+          from: now,
+          perMessage: batchSize,
+          segments: dimension
+            ? enabledSegments.map((s) => ({
+                id: s.id,
+                label: s.label,
+                pending: s.pending,
+                lastServedAt: s.lastServedAt,
+                sentThisSlot: s.sentThisSlot,
+              }))
+            : null,
+          pending,
+          segmentMessagesPerSlot: perSegment,
+          messagesToday: sentToday.count ?? 0,
+          recipientsToday: recipientsToday.count ?? 0,
+          messagesThisSlot,
+        })
+      : null;
+
+    // The last few sending times, and what each actually carried. A time with
+    // nothing against it after the campaign started says so — paused, stalled
+    // or simply finished — rather than being left out.
+    const startedAt = campaign.started_at ? Date.parse(campaign.started_at) : null;
+    const history =
+      slotMode && startedAt != null
+        ? slotOccurrences(
+            rules,
+            new Date(now.getTime() - PLAN_HISTORY_DAYS * 86_400_000),
+            PLAN_HISTORY_DAYS + 1,
+          )
+            .filter(
+              (o) =>
+                o.at.getTime() <= now.getTime() &&
+                o.closesAt.getTime() > startedAt &&
+                o.at.getTime() >= now.getTime() - PLAN_HISTORY_DAYS * 86_400_000,
+            )
+            .reverse()
+            .slice(0, 12)
+            .map((o) => {
+              const own = messages.filter(
+                (m) => m.slot_at && Date.parse(m.slot_at) === o.at.getTime(),
+              );
+              const went = own.filter((m) => spending(m.status));
+              return {
+                at: o.at.toISOString(),
+                clock: o.clock,
+                open: now.getTime() < o.closesAt.getTime(),
+                messages: went.length,
+                contacts: went.reduce((sum, m) => sum + (m.recipient_count ?? 0), 0),
+                unconfirmed: own.filter((m) => m.status === "unconfirmed").length,
+                refused: own.filter((m) => m.status === "failed").length,
+                segments: went
+                  .map((m) => m.segment_label)
+                  .filter((l): l is string => !!l)
+                  .reverse(),
+              };
+            })
+        : [];
+
+    return {
+      mode: slotMode ? ("slots" as const) : ("window" as const),
+      timezone: rules.timezone,
+      batchSize,
+      pending,
+      dimension,
+      segments: segments.map(({ sentThisSlot: _slot, lastServedAt, ...rest }) => ({
+        ...rest,
+        lastServedAt: lastServedAt == null ? null : new Date(lastServedAt).toISOString(),
+      })),
+      outside: dimension
+        ? {
+            pending: Math.max(0, pending - inAnySegment),
+            inDisabled: segments.filter((s) => !s.enabled).reduce((sum, s) => sum + s.pending, 0),
+            values: uncoveredValues(imports.data ?? [], dimension, covered).slice(0, 20),
+          }
+        : null,
+      capacity: slotMode
+        ? slotCapacity({
+            rules,
+            perMessage: batchSize,
+            segments: dimension ? enabledSegments.length : null,
+            segmentMessagesPerSlot: perSegment,
+          })
+        : null,
+      forecast: forecast
+        ? {
+            outcome: forecast.outcome,
+            finishesAt: forecast.finishesAt?.toISOString() ?? null,
+            upcoming: forecast.upcoming.map((slot) => ({ ...slot, at: slot.at.toISOString() })),
+            segments: forecast.segments.map((s) => ({
+              ...s,
+              finishesAt: s.finishesAt?.toISOString() ?? null,
+            })),
+          }
+        : null,
+      history,
+    };
+  });
 
 /** The message as the next contact in the queue will receive it. */
 export const previewCampaign = createServerFn({ method: "POST" })
@@ -763,7 +1239,7 @@ export const previewCampaign = createServerFn({ method: "POST" })
 
     const { data: recipients, error: recipientError } = await context.supabase
       .from("email_campaign_recipients")
-      .select("email, attributes, unsubscribe_token")
+      .select("email, attributes, attributes_norm, unsubscribe_token")
       .eq("campaign_id", data.id)
       .eq("status", "pending")
       .order("position", { ascending: true })
@@ -771,11 +1247,20 @@ export const previewCampaign = createServerFn({ method: "POST" })
     if (recipientError) throw recipientError;
 
     const lead = recipients?.[0] as
-      | { email: string; attributes: Record<string, string>; unsubscribe_token: string }
+      | {
+          email: string;
+          attributes: Record<string, string>;
+          attributes_norm: Record<string, string>;
+          unsubscribe_token: string;
+        }
       | undefined;
+    // A segmented campaign's column renders as the segment's label, as the
+    // dispatcher sends it — so the preview shows "NSW", not the cell's spelling.
+    const segment = await segmentFieldFor(context.supabase, campaign, lead?.attributes_norm);
     const html = campaign.body_format !== "text";
     const fields: Record<string, string> = {
       ...(lead?.attributes ?? {}),
+      ...segment,
       email: lead?.email ?? "someone@example.com",
       campaign_name: campaign.name as string,
       sender_name: (campaign.from_name as string) ?? "",
@@ -879,6 +1364,8 @@ export const sendTestEmail = createServerFn({ method: "POST" })
 
     const html = campaign.body_format !== "text";
     const preview: Record<string, string> = {
+      // The first segment's label, so a subject naming the segment reads as one.
+      ...(await segmentFieldFor(context.supabase, campaign, null)),
       email: address,
       campaign_name: campaign.name as string,
       sender_name: (campaign.from_name as string) ?? "",
@@ -1609,6 +2096,303 @@ export const quotaUsage = createServerFn({ method: "POST" })
       out[quota.id as string] = { today: today.count ?? 0, total: total.count ?? 0 };
     }
     return out;
+  });
+
+// ── Segments ────────────────────────────────────────────────────────────────
+
+const segmentKey = z
+  .string()
+  .min(1)
+  .max(120)
+  .regex(/^[a-z][a-z0-9_]*$/, "not a column key this parser produces");
+const segmentLabel = z.string().trim().min(1).max(120);
+const segmentValues = z.array(z.string().max(1024)).min(1).max(200);
+
+/** Values as the ledger's `attributes_norm` holds them, each once. */
+function cleanValues(values: string[]): string[] {
+  return [...new Set(values.map(normaliseValue).filter(Boolean))];
+}
+
+/**
+ * A campaign whose segments may change: not while it is sending. A segment
+ * redrawn mid-run changes who the rest of a sending time goes to, and its
+ * share is counted against segment ids — so it waits for a pause, like the
+ * files. Turning a segment on or off is the exception, and is always allowed.
+ */
+async function segmentEditableCampaign(
+  supabase: SupabaseClient<Database>,
+  campaignId: string,
+): Promise<{ id: string; status: string; segment_dimension: string | null }> {
+  const { data: campaign, error } = await supabase
+    .from("email_campaigns")
+    .select("id, status, segment_dimension")
+    .eq("id", campaignId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!campaign) throw new Error("campaign_not_found");
+  if (!(SEGMENT_EDITABLE_STATUSES as readonly string[]).includes(campaign.status)) {
+    throw new Error(
+      campaign.status === "running"
+        ? "segments cannot change while the campaign is sending — pause it first (turning one on or off is allowed)"
+        : `segments cannot change on a ${campaign.status} campaign`,
+    );
+  }
+  return campaign;
+}
+
+/** Refuse a segment that would share a value, or a label, with another of the campaign's. */
+async function assertSegmentFits(
+  supabase: SupabaseClient<Database>,
+  campaignId: string,
+  segment: { id?: string; label: string; values: string[] },
+): Promise<{ position: number }> {
+  const { data, error } = await supabase
+    .from("email_campaign_segments")
+    .select("id, label, match_values, position")
+    .eq("campaign_id", campaignId);
+  if (error) throw error;
+  const others = (data ?? []).filter((row) => row.id !== segment.id);
+  const sameLabel = others.find((row) => row.label.toLowerCase() === segment.label.toLowerCase());
+  if (sameLabel) throw new Error(`there is already a segment called ${sameLabel.label}`);
+  for (const row of others) {
+    const shared = (row.match_values ?? []).find((value) => segment.values.includes(value));
+    if (shared) {
+      throw new Error(
+        `"${shared}" is already in the ${row.label} segment — a contact can be in only one`,
+      );
+    }
+  }
+  return { position: others.reduce((max, row) => Math.max(max, row.position + 1), 0) };
+}
+
+async function auditSegments(
+  context: { userId: string },
+  campaignId: string,
+  action: string,
+  metadata: Record<string, unknown>,
+): Promise<void> {
+  const { writeAuditLog } = await import("@/server/audit.server");
+  await writeAuditLog({
+    action,
+    entityType: "email_campaign",
+    entityId: campaignId,
+    actorUserId: context.userId,
+    metadata,
+  });
+}
+
+/**
+ * Split messages by a list column — or stop, with null. Changing the column
+ * removes the segments drawn on the old one: they describe values of a column
+ * the campaign no longer splits by.
+ */
+export const setSegmentDimension = createServerFn({ method: "POST" })
+  .middleware([requireOperator])
+  .inputValidator((input) =>
+    z.object({ campaignId: uuid, dimension: segmentKey.nullable() }).parse(input),
+  )
+  .handler(async ({ data, context }) => {
+    const campaign = await segmentEditableCampaign(context.supabase, data.campaignId);
+    if ((campaign.segment_dimension ?? null) === data.dimension) return { ok: true };
+    const { error: clearError } = await context.supabase
+      .from("email_campaign_segments")
+      .delete()
+      .eq("campaign_id", data.campaignId);
+    if (clearError) throw clearError;
+    const { error } = await context.supabase
+      .from("email_campaigns")
+      .update({ segment_dimension: data.dimension })
+      .eq("id", data.campaignId);
+    if (error) throw error;
+    await auditSegments(context, data.campaignId, "email_campaign_segment_column_changed", {
+      from: campaign.segment_dimension ?? null,
+      to: data.dimension,
+    });
+    return { ok: true };
+  });
+
+/**
+ * Draw several segments at once — the "build from the list" step. With
+ * `replace`, the campaign's existing segments go first; without it, the new
+ * ones must not overlap them.
+ */
+export const createSegments = createServerFn({ method: "POST" })
+  .middleware([requireOperator])
+  .inputValidator((input) =>
+    z
+      .object({
+        campaignId: uuid,
+        dimension: segmentKey,
+        replace: z.boolean().default(false),
+        segments: z
+          .array(
+            z.object({
+              label: segmentLabel,
+              matchValues: segmentValues,
+              enabled: z.boolean().default(true),
+            }),
+          )
+          .min(1)
+          .max(MAX_SEGMENTS),
+      })
+      .parse(input),
+  )
+  .handler(async ({ data, context }) => {
+    const campaign = await segmentEditableCampaign(context.supabase, data.campaignId);
+    const drawn = data.segments.map((segment, index) => ({
+      id: `new-${index}`,
+      label: segment.label,
+      matchValues: cleanValues(segment.matchValues),
+      enabled: segment.enabled,
+    }));
+    if (drawn.some((segment) => segment.matchValues.length === 0)) {
+      throw new Error("every segment needs at least one value");
+    }
+    const labels = new Set(drawn.map((segment) => segment.label.toLowerCase()));
+    if (labels.size !== drawn.length) throw new Error("two segments have the same name");
+    const overlap = overlappingValues(drawn);
+    if (overlap.length > 0) {
+      throw new Error(`"${overlap[0]}" is in more than one segment — a contact can be in only one`);
+    }
+
+    if (data.replace || campaign.segment_dimension !== data.dimension) {
+      const { error } = await context.supabase
+        .from("email_campaign_segments")
+        .delete()
+        .eq("campaign_id", data.campaignId);
+      if (error) throw error;
+    }
+    let position = 0;
+    if (!data.replace && campaign.segment_dimension === data.dimension) {
+      for (const segment of drawn) {
+        ({ position } = await assertSegmentFits(context.supabase, data.campaignId, {
+          label: segment.label,
+          values: segment.matchValues,
+        }));
+      }
+    }
+    if (campaign.segment_dimension !== data.dimension) {
+      const { error } = await context.supabase
+        .from("email_campaigns")
+        .update({ segment_dimension: data.dimension })
+        .eq("id", data.campaignId);
+      if (error) throw error;
+    }
+    const { error } = await context.supabase.from("email_campaign_segments").insert(
+      drawn.map((segment, index) => ({
+        campaign_id: data.campaignId,
+        label: segment.label,
+        match_values: segment.matchValues,
+        enabled: segment.enabled,
+        position: position + index,
+      })),
+    );
+    if (error) throw error;
+    await auditSegments(context, data.campaignId, "email_campaign_segments_drawn", {
+      dimension: data.dimension,
+      replaced: data.replace,
+      segments: drawn.map((segment) => segment.label),
+    });
+    return { ok: true, created: drawn.length };
+  });
+
+/** Add one segment, or redraw one: its name and the values it covers. */
+export const saveSegment = createServerFn({ method: "POST" })
+  .middleware([requireOperator])
+  .inputValidator((input) =>
+    z
+      .object({
+        id: uuid.optional(),
+        campaignId: uuid,
+        label: segmentLabel,
+        matchValues: segmentValues,
+      })
+      .parse(input),
+  )
+  .handler(async ({ data, context }) => {
+    const campaign = await segmentEditableCampaign(context.supabase, data.campaignId);
+    if (!campaign.segment_dimension) {
+      throw new Error("choose the column to split messages by first");
+    }
+    const values = cleanValues(data.matchValues);
+    if (values.length === 0) throw new Error("a segment needs at least one value");
+    const { position } = await assertSegmentFits(context.supabase, data.campaignId, {
+      id: data.id,
+      label: data.label,
+      values,
+    });
+    if (data.id) {
+      const { error } = await context.supabase
+        .from("email_campaign_segments")
+        .update({ label: data.label, match_values: values })
+        .eq("id", data.id)
+        .eq("campaign_id", data.campaignId);
+      if (error) throw error;
+    } else {
+      const { error } = await context.supabase.from("email_campaign_segments").insert({
+        campaign_id: data.campaignId,
+        label: data.label,
+        match_values: values,
+        position,
+      });
+      if (error) throw error;
+    }
+    await auditSegments(context, data.campaignId, "email_campaign_segment_saved", {
+      segment_id: data.id ?? null,
+      label: data.label,
+      values,
+    });
+    return { ok: true };
+  });
+
+/**
+ * Turn a segment on or off — allowed while sending, because holding one
+ * state back for a day is exactly the kind of thing an operator does mid-run.
+ * Its contacts wait; nothing is cancelled.
+ */
+export const setSegmentEnabled = createServerFn({ method: "POST" })
+  .middleware([requireOperator])
+  .inputValidator((input) => z.object({ id: uuid, enabled: z.boolean() }).parse(input))
+  .handler(async ({ data, context }) => {
+    const { data: row, error } = await context.supabase
+      .from("email_campaign_segments")
+      .update({ enabled: data.enabled })
+      .eq("id", data.id)
+      .select("campaign_id, label")
+      .maybeSingle();
+    if (error) throw error;
+    if (!row) throw new Error("segment_not_found");
+    await auditSegments(context, row.campaign_id, "email_campaign_segment_toggled", {
+      segment_id: data.id,
+      label: row.label,
+      enabled: data.enabled,
+    });
+    return { ok: true };
+  });
+
+/** Remove a segment. Messages it had keep their record of it, by label. */
+export const deleteSegment = createServerFn({ method: "POST" })
+  .middleware([requireOperator])
+  .inputValidator((input) => z.object({ id: uuid }).parse(input))
+  .handler(async ({ data, context }) => {
+    const { data: row, error } = await context.supabase
+      .from("email_campaign_segments")
+      .select("campaign_id, label")
+      .eq("id", data.id)
+      .maybeSingle();
+    if (error) throw error;
+    if (!row) throw new Error("segment_not_found");
+    await segmentEditableCampaign(context.supabase, row.campaign_id);
+    const { error: deleteError } = await context.supabase
+      .from("email_campaign_segments")
+      .delete()
+      .eq("id", data.id);
+    if (deleteError) throw deleteError;
+    await auditSegments(context, row.campaign_id, "email_campaign_segment_removed", {
+      segment_id: data.id,
+      label: row.label,
+    });
+    return { ok: true };
   });
 
 // ── The do-not-send register ────────────────────────────────────────────────

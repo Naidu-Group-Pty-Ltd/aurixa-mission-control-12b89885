@@ -38,6 +38,7 @@
  * a warmup is for.
  */
 import {
+  DEFAULT_SLOT_GRACE_MINUTES,
   minutesOfClock,
   nextWindowOpening,
   windowState,
@@ -204,6 +205,9 @@ export function warmupRules(schedule: WarmupSchedule): CampaignRules {
     sendDays: schedule.weekdaysOnly ? [1, 2, 3, 4, 5] : [1, 2, 3, 4, 5, 6, 7],
     windowStart: schedule.windowStart,
     windowEnd: schedule.windowEnd,
+    sendTimes: [],
+    slotGraceMinutes: DEFAULT_SLOT_GRACE_MINUTES,
+    maxMessagesPerSlot: null,
     maxMessagesPerDay: null,
     maxRecipientsPerDay: null,
     recipientsPerMessage: 1,

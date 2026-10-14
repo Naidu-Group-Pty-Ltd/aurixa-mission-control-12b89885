@@ -44,6 +44,7 @@ import { MicrosoftTenantsPanel } from "@/components/email/microsoft-tenants-pane
 import {
   campaignRulesFromRow,
   formatInZone,
+  isSlotMode,
   nextWindowOpening,
   type CampaignRuleColumns,
 } from "@/lib/email/campaignRules.pure";
@@ -339,7 +340,10 @@ function waitingNote(row: CampaignRuleColumns): string {
   const opening = nextWindowOpening(rules, now);
   if (!opening) return " · its calendar never opens again";
   if (opening.getTime() <= now.getTime()) return "";
-  return ` · waiting for its window — next ${formatInZone(opening, rules.timezone)}`;
+  const waiting = isSlotMode(rules)
+    ? "waiting for its next sending time"
+    : "waiting for its window";
+  return ` · ${waiting} — next ${formatInZone(opening, rules.timezone)}`;
 }
 
 function MailboxStrip({

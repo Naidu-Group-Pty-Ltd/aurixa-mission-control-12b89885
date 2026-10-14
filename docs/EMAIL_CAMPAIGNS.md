@@ -180,6 +180,119 @@ a global cap.
 
 ---
 
+## Sending times and segments
+
+Read with `campaignRules.pure.ts` (the calendar) and `segments.pure.ts`
+(segments, capacity, the forecast). Migration `20261014100000`.
+
+### The case these exist for
+
+> Monday to Saturday at 09:00, 13:00, 15:00 and 17:00 Sydney time, 50
+> recipients per email, and at each of those times six emails — one for each
+> Australian state, the states read from the uploaded list.
+
+Before this, neither half could be said. A campaign had a **window** and a
+**gap**: no window holds 09:00 and 17:00 without 11:00, and a half-open
+09:00–17:00 window never sends at 17:00 at all. And a fifty-contact BCC batch
+was simply the next fifty rows of the file, every state mixed into one message
+— a quota could cap NSW at 200 a day, but nothing could say "one NSW message".
+
+Set up, it is:
+
+| tab      | setting                         | value                       |
+| -------- | ------------------------------- | --------------------------- |
+| Rules    | days                            | Mon–Sat                     |
+| Rules    | how it sends                    | At set times                |
+| Rules    | sending times                   | 09:00, 13:00, 15:00, 17:00  |
+| Rules    | timezone                        | Australia/Sydney            |
+| Rules    | contacts per message            | 50                          |
+| Rules    | messages per segment, each time | 1                           |
+| Segments | split messages by               | State → draw the six states |
+
+and the Rules tab then says what that carries — **300 contacts at each sending
+time, 1,200 a day, 7,200 a week** — what each of the next sending times will
+send and to which states, when each state runs out, and what the last few
+sending times actually sent.
+
+### Sending times
+
+`send_times` replaces the window when it names any time; empty keeps the window
+in charge, so every existing campaign behaves as it did. Each time is a
+wall-clock time in the campaign's zone, converted per date, so 09:00 stays
+09:00 across daylight saving.
+
+**Each time stays open for its grace** (`slot_grace_minutes`, 30 by default).
+The dispatcher is not called on the minute — pg*net delivers ticks in bursts a
+minute and a half apart, and about one cron start in eleven never happens — so
+the 09:00 batch has to be sendable at 09:03. **It never stays open past the
+next time**: a scheduler that stalls through 09:00 loses that batch rather than
+sending it on top of 13:00's. A missed batch is visible in "what recent sending
+times sent" as \_nothing went*.
+
+**A time's share is counted from the ledger.** Every message records the
+sending time it belonged to (`email_campaign_messages.slot_at` — the instant
+the time names, so "Tuesday 13:00" is one value) and its segment. Whether NSW
+has had its 13:00 message is a count of those rows, the same rule as quota
+usage: three ticks in one burst, a pass that dies, and a pause-and-resume
+inside 13:00 all read the same answer. A message that may have reached people
+(`sending`, `sent`, `unconfirmed`) spends the share; one Microsoft refused
+before accepting does not, because nothing went.
+
+`max_messages_per_slot` caps one time across everything; without segments it is
+the "six emails at each time" number. Either way the gap still applies inside a
+sending time, and readiness warns when a time cannot fit its batch — six
+messages ten minutes apart do not fit in thirty minutes.
+
+### Segments
+
+`segment_dimension` names a parsed column (`state`); `email_campaign_segments`
+holds the segments — like a quota, each is a **set** of normalised values,
+because a list spells one state several ways and nothing here rewrites anybody's
+data. **Draw from the list** groups a column of Australian states by state
+(`NSW`, `nsw` and `New South Wales` become the segment "NSW"); any other column
+gets one segment per value. Four rules:
+
+- **Every message stays inside one segment.** Contacts are chosen with the
+  segment's values as a database filter, so a fifty-contact batch is fifty
+  people from one state.
+- **A contact is in at most one segment.** Overlap is refused when a segment is
+  saved; two segments both claiming `nsw` would make "one NSW message" two.
+- **Turns rotate.** The least recently served segment goes first. When a
+  sending time fits every segment this changes nothing; when it does not, it is
+  the difference between the states left out at 09:00 going first at 13:00 and
+  never going at all.
+- **Contacts in no enabled segment wait.** A blank value, a value no segment
+  covers (ACT and NT when only the six states are drawn) or a segment turned
+  off: those contacts stay `pending`, are never sent while the campaign is
+  split, and the campaign does **not** complete over them — the dispatcher's
+  note says how many are held and how to release them. Readiness names them,
+  with the values responsible, before Start.
+
+The segment's own column is the one per-recipient field that does **not** force
+one contact per message: everybody in the message shares it. `{{state}}` in a
+batched message renders the **segment's label** — every message alike, so a
+message carrying `NSW` and `New South Wales` contacts says "NSW" to all of them.
+Any other column still forces one contact per message.
+
+Segments are drawn while a campaign is a draft or paused — a share is counted
+per segment id, and a segment redrawn mid-send would change who the rest of a
+sending time goes to. Turning one on or off is allowed at any time, and is
+audited (`email_campaign_segment_toggled`), as are drawing
+(`email_campaign_segments_drawn`), saving, removing and changing the column.
+
+### The plan
+
+`campaignPlan` replays the dispatcher's own rules forward (`forecastSlots`):
+each time's limit, every segment's share, the gaps that fit while a time is
+open, the daily caps and the rotation. It cannot see per-parameter quotas, a
+throttled mailbox or a stalled scheduler, all of which only ever make a
+campaign later — so its finish date is the **earliest** the list can finish,
+and the page says so. Readiness also warns when a day of sending times would
+address more than Exchange Online's default recipient rate limit of 10,000
+recipients in 24 hours from one mailbox.
+
+---
+
 ## Uploading a list
 
 **The file goes to Supabase Storage directly from the browser, and only the
@@ -494,6 +607,8 @@ Merge fields are `{{column_key}}` — any column from an attached list — plus
 - **Any per-recipient field forces one message per contact**, whatever the batch
   size says, and `messageBatchSize` enforces it server-side so a template edited
   after the fact cannot quietly BCC a hundred people a letter addressed to one.
+  The one exception is a segmented campaign's own column, which is the same for
+  everybody in a message — see "Sending times and segments".
 
 ---
 
@@ -648,7 +763,8 @@ are what the page and the dispatcher both use to say when the next message goes.
 | `src/lib/email/xlsx.pure.ts`                       | workbook parts → a grid                      |
 | `src/lib/email/workbook.pure.ts`                   | the format router                            |
 | `src/lib/email/listProfile.pure.ts`                | column profiles, address detection, contacts |
-| `src/lib/email/campaignRules.pure.ts`              | window, gap, caps, quotas                    |
+| `src/lib/email/campaignRules.pure.ts`              | window, sending times, gap, caps, quotas     |
+| `src/lib/email/segments.pure.ts`                   | segments, turns, capacity, the forecast      |
 | `src/lib/email/mergeTemplate.pure.ts`              | merge fields and escaping                    |
 | `src/lib/email/bounceReport.pure.ts`               | delivery reports → verdicts                  |
 | `src/lib/email/attachments.pure.ts`                | what may be attached, and the delivery path  |
@@ -666,4 +782,6 @@ are what the page and the dispatcher both use to say when the next message goes.
 | `src/routes/email.*`                               | the console                                  |
 | `src/components/email/mailbox-picker.tsx`          | choosing the mailbox                         |
 | `src/components/email/attachment-panel.tsx`        | attaching files                              |
+| `src/components/email/segments-panel.tsx`          | the Segments tab                             |
+| `src/components/email/send-plan.tsx`               | the plan on the Rules tab                    |
 | `src/routes/api.public.email.unsubscribe.ts`       | the unsubscribe facility                     |
