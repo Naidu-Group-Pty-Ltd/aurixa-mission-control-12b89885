@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  decideAcrossBases,
   decideVariantMerge,
   matchLines,
+  MAX_AGREEING_BASES,
   MAX_VARIANT_MERGES,
   orderVariantMergeCandidates,
   primeRevisionNamedBy,
@@ -40,12 +42,14 @@ describe("the base is read off the line's own history", () => {
   });
 
   it("stops at an ambiguous commit rather than reaching past it to an older base", () => {
+    // The commit's own names are the candidates; the older reconcile is not
+    // one of them, because the true base is the newest reconcile's.
     expect(
       variantBaseFrom([
-        { sha: "c2", message: "Land the cascades at prime@278cdc3 and prime@1a39b32" },
+        { sha: "c2", message: "Land the cascades at prime@278cdc3 and prime@1A39B32" },
         { sha: "c1", message: "Reconcile at prime@e02572f" },
       ]),
-    ).toEqual({ kind: "ambiguous", commit: "c2" });
+    ).toEqual({ kind: "ambiguous", primeRevisions: ["278cdc3", "1a39b32"], commit: "c2" });
     expect(variantBaseFrom([{ sha: "c1", message: "an edit" }])).toEqual({ kind: "none" });
   });
 });
@@ -178,6 +182,109 @@ describe("the verdict for one held path", () => {
     });
     expect(v).toMatchObject({ act: "hold" });
     if (v.act === "hold") expect(v.why).toContain("prime@36fae6b");
+  });
+});
+
+describe("the verdict when the reconcile names several prime revisions", () => {
+  // Nine lines, so a change on line 2, line 5 and line 8 are three separate
+  // hunks: the merge (rightly) reads changes on ADJACENT lines as one hunk,
+  // and a hunk both sides changed differently is a conflict.
+  const nine = (over: Record<number, string> = {}) =>
+    lines(...["1", "2", "3", "4", "5", "6", "7", "8", "9"].map((x, i) => over[i + 1] ?? x));
+  // Two candidate bases that differ on line 5: the true base is one of them.
+  const X = { revision: "a".repeat(40), text: nine() };
+  const Y = { revision: "b".repeat(40), text: nine({ 5: "5y" }) };
+  const commit = "c2c2c2c2c2";
+
+  it("writes where every base gives the same merge", () => {
+    const ours = nine({ 2: "2o", 5: "5y" });
+    const theirs = nine({ 5: "5y", 8: "8t" });
+    const merged = nine({ 2: "2o", 5: "5y", 8: "8t" });
+    const v = decideAcrossBases({ commit, bases: [X, Y], ours, theirs });
+    expect(v).toMatchObject({ act: "write", text: merged });
+    // Each base, on its own, gives that same text.
+    for (const base of [X, Y]) {
+      expect(decideVariantMerge({ base, ours, theirs })).toMatchObject({
+        act: "write",
+        text: merged,
+      });
+    }
+    // The base it reports is a full revision, as the ledger requires.
+    if (v.act === "write") expect(v.base).toBe(X.revision);
+  });
+
+  it("is current where every base finds nothing owed", () => {
+    const ours = nine({ 2: "2o", 5: "5y" });
+    const theirs = nine({ 5: "5y" });
+    expect(decideAcrossBases({ commit, bases: [X, Y], ours, theirs })).toEqual({
+      act: "current",
+      base: X.revision,
+    });
+  });
+
+  it("holds where the bases disagree on the result, each merge clean", () => {
+    const ours = nine({ 2: "2o" });
+    const theirs = nine({ 5: "5y" });
+    // Against X prime changed line 5 and the line did not: the merge takes 5y.
+    // Against Y the line changed 5 back and prime did not: the line's copy stands.
+    expect(decideVariantMerge({ base: X, ours, theirs })).toMatchObject({
+      act: "write",
+      text: nine({ 2: "2o", 5: "5y" }),
+    });
+    expect(decideVariantMerge({ base: Y, ours, theirs }).act).toBe("current");
+    const v = decideAcrossBases({ commit, bases: [X, Y], ours, theirs });
+    expect(v.act).toBe("hold");
+    if (v.act === "hold") {
+      expect(v.why).toContain("different result");
+      expect(v.why).toContain("c2c2c2c");
+      expect(v.transient).toBeUndefined();
+    }
+  });
+
+  it("holds where any one base conflicts, and says which", () => {
+    const ours = nine({ 2: "2o", 5: "5o" });
+    const theirs = nine({ 5: "5y", 8: "8t" });
+    // Against Y the line changed 5 and prime did not, so it merges cleanly;
+    // against X both changed 5, differently.
+    expect(decideVariantMerge({ base: Y, ours, theirs }).act).toBe("write");
+    expect(decideVariantMerge({ base: X, ours, theirs }).act).toBe("hold");
+    const v = decideAcrossBases({ commit, bases: [X, Y], ours, theirs });
+    expect(v.act).toBe("hold");
+    if (v.act === "hold") expect(v.why).toContain("prime@aaaaaaa");
+  });
+
+  it("holds where any base's copy is missing", () => {
+    const ours = nine({ 2: "2o", 5: "5y" });
+    const theirs = nine({ 5: "5y", 8: "8t" });
+    const v = decideAcrossBases({
+      commit,
+      bases: [X, { revision: Y.revision, text: null }],
+      ours,
+      theirs,
+    });
+    expect(v.act).toBe("hold");
+  });
+
+  it(`holds past ${MAX_AGREEING_BASES} bases without merging`, () => {
+    const many = Array.from({ length: MAX_AGREEING_BASES + 1 }, (_, i) => ({
+      revision: String(i).repeat(40),
+      text: lines("a"),
+    }));
+    const v = decideAcrossBases({ commit, bases: many, ours: lines("a"), theirs: lines("a") });
+    expect(v.act).toBe("hold");
+    if (v.act === "hold") expect(v.why).toContain(String(MAX_AGREEING_BASES));
+  });
+
+  it("is exactly the single-base verdict for one base", () => {
+    const ours = nine({ 2: "2o" });
+    for (const theirs of [nine({ 8: "8t" }), nine({ 2: "2t" }), nine()]) {
+      expect(decideAcrossBases({ commit, bases: [X], ours, theirs })).toEqual(
+        decideVariantMerge({ base: X, ours, theirs }),
+      );
+    }
+    expect(decideAcrossBases({ commit, bases: [], ours, theirs: ours })).toEqual(
+      decideVariantMerge({ base: null, ours, theirs: ours }),
+    );
   });
 });
 

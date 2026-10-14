@@ -46,7 +46,7 @@ Tests: `headRedelivery.test.ts` (47), `passOrder.test.ts`, `passProgress.test.ts
    - Failing agent specs: `agentRbacContract`, `approvalPolicy`, `playbookAndSchedule` and `writableArguments`. `approvalPolicy` is missing `assign_client`, `delete_borrowing_capacity_scenario`, `list_borrowing_capacity_scenarios`, `estimate_capital_growth`, `estimate_property_expenses` and `update_client_pipeline`. The likely cause is that the agent head variant on the CRM line lags prime: reconcile the agent tool registry and policy files at prime's revision, keeping the CRM line's GoHighLevel removals.
    - The security check flags `supabase/migrations/20270105100000_messaging_hub_dispatch_cron.sql`, which schedules a `messaging-hub-dispatch` function the CRM line does not carry. Carry the function with it, or withhold the migration from the line. Never edit an applied migration.
 5. **Merge the Preflight and NPC Test cascades** once CD #348 is in, and confirm all four `clones.sync_status = 'in_sync'` at prime's head.
-6. **Follow-up (not urgent):** an ambiguous variant base should merge when every named base agrees.
+6. **Follow-up — done.** An ambiguous variant base merges when every named base agrees. A held file whose newest reconcile names several prime revisions is merged against each of them (at most three), and is written or reported current only when every merge is clean and they all give the same text. Anything else holds the file and names the commit (`decideAcrossBases` in `variantMerge.pure.ts`, described in `CASCADE_MEMBRANES.md`).
 
 ## Caveats
 

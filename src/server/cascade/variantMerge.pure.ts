@@ -42,8 +42,16 @@
  * path and names the prime revision it was reconciled to (`prime@<sha>`).
  * Every reconcile on the line names one ("Reconcile the CRM's agent at
  * prime@e02572f"), and so does the engine's own statement commit ("chore(aurixa):
- * cascade 258 file(s) from prime@6c2180a"). A commit naming two different
- * revisions is ambiguous and yields no base; no base means no merge.
+ * cascade 258 file(s) from prime@6c2180a"). No base means no merge.
+ *
+ * A commit naming two or more revisions ("Land the cascades at prime@278cdc3
+ * and prime@1a39b32") does not say which one each file reached, so no one of
+ * them may be taken as THE base. It names a short list the true base is on,
+ * though, and that is enough when the list agrees: the file is merged against
+ * every revision named, and written only if every merge is clean and they all
+ * give the same text. The true base is one of them, so that text IS the true
+ * merge. Any conflict, a revision lacking the file, or two different
+ * results is a hold, and so is a list longer than `MAX_AGREEING_BASES`.
  *
  * A LATER commit that touched the path without naming a revision is the
  * line's own edit on top of that base (a CRM change), which a three-way merge
@@ -85,26 +93,36 @@ export function primeRevisionNamedBy(message: string): string | null {
 
 export type VariantBase =
   | { kind: "named"; primeRevision: string; commit: string }
-  | { kind: "ambiguous"; commit: string }
+  /** Every revision the commit names, lowercased, in the order it names them. */
+  | { kind: "ambiguous"; primeRevisions: string[]; commit: string }
   | { kind: "none" };
 
 /**
  * The base for one held path, from the commits that touched it, newest first.
  *
  * The first commit naming exactly one revision decides. The first commit that
- * names TWO stops the walk as ambiguous rather than reaching past it to an
- * older, unambiguous one — the file's content was decided by the ambiguous
- * commit, and an older base would misattribute everything it brought.
+ * names TWO OR MORE stops the walk as ambiguous rather than reaching past it
+ * to an older, unambiguous one — the file's content was decided by the
+ * ambiguous commit, and an older base would misattribute everything it
+ * brought. The names it carries are the candidates `decideAcrossBases` merges
+ * against.
  */
 export function variantBaseFrom(commits: readonly { sha: string; message: string }[]): VariantBase {
   for (const c of commits) {
     const names = new Set<string>();
     for (const m of c.message.matchAll(PRIME_REVISION)) names.add(m[1].toLowerCase());
     if (names.size === 1) return { kind: "named", primeRevision: [...names][0], commit: c.sha };
-    if (names.size > 1) return { kind: "ambiguous", commit: c.sha };
+    if (names.size > 1) return { kind: "ambiguous", primeRevisions: [...names], commit: c.sha };
   }
   return { kind: "none" };
 }
+
+/**
+ * The most revisions an ambiguous reconcile may name and still be merged.
+ * Each is one more revision to resolve and one more copy to read; the commits
+ * that name more than one on the CRM line name two.
+ */
+export const MAX_AGREEING_BASES = 3;
 
 // ── The matcher ─────────────────────────────────────────────────────────────
 
@@ -366,13 +384,64 @@ export function decideVariantMerge(args: {
   };
 }
 
+/**
+ * What to do with one held path whose newest reconcile named several prime
+ * revisions (`variantBaseFrom` → `ambiguous`). `bases` are the distinct
+ * revisions it named, resolved, with prime's copy at each.
+ *
+ * The file was reconciled to ONE of them, and nothing says which. So it is
+ * merged against every one, and acted on only where the answer does not
+ * depend on the choice: every merge clean and every merge giving the same
+ * text. That text is then the merge against the true base, whichever it was.
+ * Anything else is a hold that names the commit, because the person it is
+ * left for starts from that commit's message.
+ *
+ * One base is the ordinary case, decided by `decideVariantMerge`, and so is
+ * none (a hold).
+ */
+export function decideAcrossBases(args: {
+  commit: string;
+  bases: readonly { revision: string; text: string | null }[];
+  ours: string;
+  theirs: string;
+}): VariantMergeVerdict {
+  const { commit, bases, ours, theirs } = args;
+  if (bases.length <= 1) {
+    return decideVariantMerge({ base: bases[0] ?? null, ours, theirs });
+  }
+  const named = `its newest reconcile (${commit.slice(0, 7)}) names ${bases.length} prime revisions`;
+  if (bases.length > MAX_AGREEING_BASES) {
+    return {
+      act: "hold",
+      why: `${named}, more than the ${MAX_AGREEING_BASES} a merge is checked against`,
+    };
+  }
+  const verdicts = bases.map((base) => decideVariantMerge({ base, ours, theirs }));
+  const held = verdicts.find((v) => v.act === "hold");
+  if (held && held.act === "hold") return { act: "hold", why: `${named}; ${held.why}` };
+  const textOf = (v: VariantMergeVerdict): string | null =>
+    v.act === "write" ? v.text : v.act === "current" ? ours : null;
+  const first = textOf(verdicts[0]);
+  if (verdicts.some((v) => textOf(v) !== first)) {
+    return {
+      act: "hold",
+      why: `${named}, and merging against each gives a different result`,
+    };
+  }
+  return verdicts[0];
+}
+
 // ── What a pass says about its merges ───────────────────────────────────────
 
 /**
- * Held paths one pass asks about. Each is at most four requests (the line's
- * history of the file, the named revision, three file reads less what is
- * cached), so thirty-two is ~130 requests at worst, and the pass's own
- * deadline still stops the loop.
+ * Held paths one pass asks about. A path whose reconcile names one revision
+ * is at most five requests (the line's history of the file, the named
+ * revision, three file reads), four once the revision is cached; one whose
+ * reconcile names several is at most nine (`MAX_AGREEING_BASES` revisions and
+ * as many base copies, plus ours and theirs). A line's held paths mostly
+ * share one reconcile, so thirty-two is ~130 requests in practice and under
+ * three hundred at the very worst, and the pass's own deadline still stops
+ * the loop.
  *
  * It was twelve, on the premise that the CRM line holds fewer than twelve
  * paths that differ on any one cascade. Measured on #104 into
