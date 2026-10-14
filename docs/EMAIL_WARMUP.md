@@ -177,9 +177,65 @@ The page shows it per mailbox and for the pool, and each mailbox's last thirty
 days as a chart (with a table view): each day's column is what it sent, the
 part that missed the inbox highlighted.
 
-**Campaigns are told.** A campaign whose sending mailbox is in the pool gets a
-readiness warning while that mailbox is in its first two weeks, or while its
-placement is under 75%.
+### The brake
+
+The ramp climbs only while the mail is wanted (`rampGate`). Sending more of
+what receivers are already junking teaches them the opposite of what warmup is
+for, and is how a warming domain ends up blocklisted instead of trusted. So,
+each day, from the same figures the page shows:
+
+| what the figures say                                           | what the mailbox does                                    |
+| -------------------------------------------------------------- | -------------------------------------------------------- |
+| three or more of its messages went missing today and yesterday | **held**: its starting volume, and no day of ramp earned |
+| placement under 50% over seven days                            | **held**, the same                                       |
+| placement 50–74% (poor)                                        | **slowed**: half its planned volume, no day of ramp      |
+| placement 75% or better, or too little settled mail to judge   | climbs as planned                                        |
+
+Missing mail is the fast signal: mail being quarantined or refused outright
+shows up there days before it moves a seven-day average. Engagement carries on
+either way — a held mailbox still receives its share, reads it, rescues it from
+Junk and answers it, which is what repairs placement — and the ramp resumes
+from the day it stopped once placement is back in the fair band. The mailbox's
+row says when it is held or slowed, and why.
+
+**Campaigns are told — and stopped.** A campaign whose sending mailbox is in
+the pool gets a readiness warning while that mailbox is in its first two weeks,
+or while its placement is under 75%. While it runs, its **warmup guard** pauses
+it when the mailbox's own warmup placement falls under 75% over at least ten
+settled messages — campaign mail from a mailbox whose warmup mail is landing in
+spam lands there too. A campaign sending from a mailbox **outside** the pool is
+warned that nothing is measuring where its mail lands. See
+[EMAIL_CAMPAIGNS.md, "Protecting the sender"](EMAIL_CAMPAIGNS.md#protecting-the-sender).
+
+---
+
+## Sending domains
+
+Warmup earns a mailbox a reputation; **SPF, DKIM and DMARC are what let a
+receiver attach that reputation to the domain at all.** Mail that fails them is
+junked or refused whatever its history, and since 2024 Gmail and Yahoo — and
+since 2025 Outlook.com — expect all three from anyone sending in volume. None
+of it is visible from inside Microsoft 365: a tenant sends perfectly well with
+no DKIM and no DMARC, and the cost shows up only as placement.
+
+So the warmup page lists every domain a message can leave from — each warmup
+mailbox's, each live campaign's sending mailbox, each tenant's default — and
+reads its records from public DNS the way a receiving server does
+(`domainAuth.pure.ts`, over DNS-over-HTTPS in `dns.server.ts`):
+
+| check | passes when                                                                                                       |
+| ----- | ----------------------------------------------------------------------------------------------------------------- |
+| SPF   | exactly one record, including `spf.protection.outlook.com`, not ending `+all`, within ten top-level lookups       |
+| DKIM  | both Microsoft 365 selectors (`selector1`/`selector2._domainkey`) are published as CNAMEs                         |
+| DMARC | exactly one record with a valid `p=`; warns with no `rua=` (nobody is told when spoofed or failing mail goes out) |
+| MX    | the domain receives mail — replies and bounces have somewhere to go                                               |
+
+Each finding says what is true and the record to publish. What DNS cannot show
+is said rather than guessed: whether DKIM signing is **switched on** in
+Microsoft Defender (the CNAMEs are necessary, not sufficient), and what SPF's
+includes expand to. A lookup that fails is "could not check", never a failure.
+Answers are cached for an hour; **Check DNS again** asks afresh. A campaign's
+Rules tab shows its own sending domain, and its readiness lists the problems.
 
 ---
 
@@ -238,6 +294,12 @@ judged by Google, which this pool never shows a warmup message to.
 **It is only as good as its spread.** Two organisations work; five work better.
 Domains you send campaigns from should each have mailboxes in the pool.
 
+**It cannot fix what is not reputation.** A domain without DKIM, a list
+whose addresses bounce by the dozen, or a mailbox asked to address a thousand
+strangers a day in its first week will be junked however warm it is. The
+sending-domain checks, the campaign's bounce breaker and the warmup guard
+exist for exactly those; warmup on its own is not protection.
+
 **It reads and files mail in real mailboxes.** Warmup mail passes through the
 inbox for a few minutes (until it is engaged with) before it is filed into the
 Warmup folder, and sent copies are filed out of Sent Items. Nothing else in a
@@ -261,14 +323,19 @@ changes, pause, resume, remove and pool settings are audited
 
 ## Where things live
 
-|                                                       |                                                 |
-| ----------------------------------------------------- | ----------------------------------------------- |
-| `src/lib/email/warmupPlan.pure.ts`                    | ramp, pacing, pairing, engagement plan, health  |
-| `src/lib/email/warmupContent.pure.ts`                 | what warmup mail says                           |
-| `src/server/email-warmup.server.ts`                   | the engine, and preparing a mailbox             |
-| `src/server/graph-client.ts` ("Warmup")               | drafts, search by Message-ID, move, flag, reply |
-| `src/lib/email-warmup.functions.ts`                   | the operator's API                              |
-| `src/routes/email.warmup.tsx`                         | the page                                        |
-| `src/components/email/warmup/*`                       | its parts, and the placement chart              |
-| `src/routes/hooks.email-warmup.tsx`                   | the cron hook                                   |
-| `supabase/migrations/20261012130000_email_warmup.sql` | tables, view, cron job                          |
+|                                                       |                                                              |
+| ----------------------------------------------------- | ------------------------------------------------------------ |
+| `src/lib/email/warmupPlan.pure.ts`                    | ramp and its brake, pacing, pairing, engagement plan, health |
+| `src/lib/email/domainAuth.pure.ts`                    | SPF, DKIM, DMARC and MX, judged                              |
+| `src/server/dns.server.ts`                            | DNS over HTTPS                                               |
+| `src/server/email-domain-health.server.ts`            | domain checks, and recipient domains remembered              |
+| `src/lib/email-domains.functions.ts`                  | the sending domains in use                                   |
+| `src/components/email/sending-domains.tsx`            | the Sending domains panel                                    |
+| `src/lib/email/warmupContent.pure.ts`                 | what warmup mail says                                        |
+| `src/server/email-warmup.server.ts`                   | the engine, and preparing a mailbox                          |
+| `src/server/graph-client.ts` ("Warmup")               | drafts, search by Message-ID, move, flag, reply              |
+| `src/lib/email-warmup.functions.ts`                   | the operator's API                                           |
+| `src/routes/email.warmup.tsx`                         | the page                                                     |
+| `src/components/email/warmup/*`                       | its parts, and the placement chart                           |
+| `src/routes/hooks.email-warmup.tsx`                   | the cron hook                                                |
+| `supabase/migrations/20261012130000_email_warmup.sql` | tables, view, cron job                                       |

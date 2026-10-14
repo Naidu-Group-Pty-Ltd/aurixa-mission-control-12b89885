@@ -19,6 +19,8 @@ import {
   localDate,
   nextSendAt,
   rampDay,
+  rampEvidence,
+  rampGate,
   receiveCap,
   scheduleProblems,
   windowCloses,
@@ -421,5 +423,58 @@ describe("reading the daily figures", () => {
     expect(describeRamp({ ...DEFAULT_SCHEDULE, increasePerDay: 0, startPerDay: 5 })).toBe(
       "5 new conversations a day, every day",
     );
+  });
+});
+
+describe("the brake", () => {
+  const dayTen = (evidence: { health: number | null; recentMissing: number }) =>
+    rampGate({ schedule, day: 10, evidence });
+
+  it("climbs while the mail is landing, or while there is too little to judge", () => {
+    expect(dayTen({ health: 96, recentMissing: 0 })).toEqual({
+      state: "climbing",
+      planned: 20,
+      target: 20,
+      advances: true,
+      reason: null,
+    });
+    expect(dayTen({ health: null, recentMissing: 0 }).state).toBe("climbing");
+    // The fair band is not yet a reason to stop.
+    expect(dayTen({ health: 80, recentMissing: 2 }).state).toBe("climbing");
+  });
+
+  it("slows to half, earning no ramp, while placement is poor", () => {
+    expect(dayTen({ health: 60, recentMissing: 0 })).toMatchObject({
+      state: "slowed",
+      target: 10,
+      advances: false,
+    });
+  });
+
+  it("holds at the start while mail goes missing or mostly lands in spam", () => {
+    const missing = dayTen({ health: 95, recentMissing: 3 });
+    expect(missing).toMatchObject({ state: "held", target: 2, advances: false });
+    expect(missing.reason).toMatch(/3 of its messages went missing since yesterday/);
+    expect(dayTen({ health: 40, recentMissing: 0 })).toMatchObject({ state: "held", target: 2 });
+  });
+
+  it("never holds a mailbox above what its ramp planned", () => {
+    expect(
+      rampGate({
+        schedule: { ...schedule, startPerDay: 5, maxPerDay: 3 },
+        day: 1,
+        evidence: { health: 10, recentMissing: 0 },
+      }).target,
+    ).toBe(3);
+  });
+
+  it("reads its evidence from the daily figures, in the mailbox's own days", () => {
+    const days = [
+      { day: "2026-10-04", inbox: 50, junk: 0 }, // outside the week
+      { day: "2026-10-08", inbox: 6, junk: 2 },
+      { day: "2026-10-11", inbox: 1, missing: 1 },
+      { day: "2026-10-12", inbox: 1, junk: 1, missing: 2 },
+    ];
+    expect(rampEvidence(days, "2026-10-12")).toEqual({ health: 57, recentMissing: 3 });
   });
 });

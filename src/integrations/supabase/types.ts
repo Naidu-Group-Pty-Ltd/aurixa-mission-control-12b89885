@@ -7770,6 +7770,7 @@ export type Database = {
         Row: {
           body_format: string
           body_template: string
+          bounce_pause_percent: number | null
           completed_at: string | null
           created_at: string
           created_by: string | null
@@ -7806,12 +7807,14 @@ export type Database = {
           timezone: string
           unsubscribe_token: string
           updated_at: string
+          warmup_guard: boolean
           window_end: string
           window_start: string
         }
         Insert: {
           body_format?: string
           body_template?: string
+          bounce_pause_percent?: number | null
           completed_at?: string | null
           created_at?: string
           created_by?: string | null
@@ -7848,12 +7851,14 @@ export type Database = {
           timezone?: string
           unsubscribe_token?: string
           updated_at?: string
+          warmup_guard?: boolean
           window_end?: string
           window_start?: string
         }
         Update: {
           body_format?: string
           body_template?: string
+          bounce_pause_percent?: number | null
           completed_at?: string | null
           created_at?: string
           created_by?: string | null
@@ -7890,6 +7895,7 @@ export type Database = {
           timezone?: string
           unsubscribe_token?: string
           updated_at?: string
+          warmup_guard?: boolean
           window_end?: string
           window_start?: string
         }
@@ -8007,6 +8013,27 @@ export type Database = {
           source_format?: string | null
           status?: string
           updated_at?: string
+        }
+        Relationships: []
+      }
+      email_mail_domains: {
+        Row: {
+          accepts_mail: boolean
+          checked_at: string
+          detail: string | null
+          domain: string
+        }
+        Insert: {
+          accepts_mail: boolean
+          checked_at?: string
+          detail?: string | null
+          domain: string
+        }
+        Update: {
+          accepts_mail?: boolean
+          checked_at?: string
+          detail?: string | null
+          domain?: string
         }
         Relationships: []
       }
@@ -15490,6 +15517,24 @@ export type Database = {
           slug: string | null
         }
         Relationships: []
+      }
+      email_campaign_bounces: {
+        Row: {
+          bounced_at: string | null
+          campaign_id: string | null
+          email_key: string | null
+          recipient_id: string | null
+          sent_at: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "email_campaign_recipients_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "email_campaigns"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       email_campaign_recipient_counts: {
         Row: {

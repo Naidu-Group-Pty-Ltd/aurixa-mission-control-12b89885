@@ -46,6 +46,12 @@ import {
 } from "@/lib/email/attachments.pure";
 import { mayChoose, sameMailbox, type MailboxAccess } from "@/lib/email/mailboxes.pure";
 import { sameTenant } from "@/lib/email/microsoftTenants.pure";
+import { authWarnings, domainOf, type DomainAuthReport } from "@/lib/email/domainAuth.pure";
+import {
+  bounceVerdict,
+  unwatchedSenderAdvice,
+  type BounceVerdict,
+} from "@/lib/email/senderProtection.pure";
 import {
   HEALTH_WINDOW_DAYS,
   campaignWarmupAdvice,
@@ -133,6 +139,10 @@ const rulesSchema = z.object({
   slotGraceMinutes: z.number().int().min(1).max(720).optional(),
   maxMessagesPerSlot: z.number().int().min(1).max(10_000).nullable().optional(),
   segmentMessagesPerSlot: z.number().int().min(1).max(100).optional(),
+  /** Hard-bounce percent since the last start that pauses it; null only warns. */
+  bouncePausePercent: z.number().int().min(1).max(50).nullable().optional(),
+  /** Pause when the sending mailbox's warmup mail is landing in spam. */
+  warmupGuard: z.boolean().optional(),
 });
 
 // ── Campaigns ───────────────────────────────────────────────────────────────
@@ -405,6 +415,9 @@ export const updateCampaign = createServerFn({ method: "POST" })
         patch.max_messages_per_slot = rules.maxMessagesPerSlot;
       if (rules.segmentMessagesPerSlot !== undefined)
         patch.segment_messages_per_slot = rules.segmentMessagesPerSlot;
+      if (rules.bouncePausePercent !== undefined)
+        patch.bounce_pause_percent = rules.bouncePausePercent;
+      if (rules.warmupGuard !== undefined) patch.warmup_guard = rules.warmupGuard;
     }
 
     if (Object.keys(patch).length === 0) return { ok: true };
@@ -546,6 +559,16 @@ export type Readiness = {
     /** Waiting contacts in none — held while the campaign is split this way. */
     outside: number;
   } | null;
+  /** What protects the sending domain while it runs. See "Protecting the sender". */
+  protection: {
+    /** Null: bounces only warn. */
+    bouncePausePercent: number | null;
+    warmupGuard: boolean;
+    /** The hard-bounce rate since the last start; null when it could not be read. */
+    bounces: BounceVerdict | null;
+    /** The sending domain's SPF, DKIM, DMARC and MX; null when DNS could not be asked. */
+    domain: DomainAuthReport | null;
+  };
 };
 
 /**
@@ -632,12 +655,16 @@ function uncoveredValues(
 const plural = (n: number, one: string, many = `${one}s`) =>
   `${n.toLocaleString("en-AU")} ${n === 1 ? one : many}`;
 
-/** What the warmup pool says about a campaign's sending mailbox, or null. Advisory: a read that fails says nothing. */
+/**
+ * What the warmup pool says about a campaign's sending mailbox: whether it is
+ * in the pool at all (null when that could not be read), and any advice.
+ * Advisory: a read that fails says nothing.
+ */
 async function warmupAdviceFor(
   supabase: SupabaseClient<Database>,
   address: string | null,
-): Promise<string | null> {
-  if (!address) return null;
+): Promise<{ inPool: boolean | null; advice: string | null }> {
+  if (!address) return { inPool: null, advice: null };
   const { data: warming, error } = await supabase
     .from("email_warmup_mailboxes")
     .select("id, status, active_days, last_active_on, timezone")
@@ -646,9 +673,9 @@ async function warmupAdviceFor(
     .maybeSingle();
   if (error) {
     console.error("[email] could not read the warmup pool for readiness:", error.message);
-    return null;
+    return { inPool: null, advice: null };
   }
-  if (!warming) return null;
+  if (!warming) return { inPool: false, advice: null };
   const today = localDate(new Date(), warming.timezone || "Australia/Sydney");
   const from = daysBefore(today, HEALTH_WINDOW_DAYS - 1);
   const { data: days, error: daysError } = await supabase
@@ -658,18 +685,73 @@ async function warmupAdviceFor(
     .gte("day", from);
   if (daysError) {
     console.error("[email] could not read warmup figures for readiness:", daysError.message);
+    return { inPool: true, advice: null };
+  }
+  return {
+    inPool: true,
+    advice: campaignWarmupAdvice({
+      address,
+      status: warming.status,
+      rampDay: rampDay({
+        activeDays: warming.active_days,
+        lastActiveOn: warming.last_active_on,
+        today,
+      }),
+      health: healthScore(totalsBetween((days ?? []) as Partial<WarmupDay>[], from, today)),
+    }),
+  };
+}
+
+/**
+ * The campaign's hard-bounce rate since it was last started, as the
+ * dispatcher judges it. Null when it could not be read — advisory here; the
+ * dispatcher makes the same count before it sends.
+ */
+async function bounceVerdictFor(
+  supabase: SupabaseClient<Database>,
+  campaign: { id: string; started_at: string | null; bounce_pause_percent: number | null },
+): Promise<BounceVerdict | null> {
+  const since = campaign.started_at ?? new Date(0).toISOString();
+  const [sent, bounced] = await Promise.all([
+    supabase
+      .from("email_campaign_recipients")
+      .select("id", { count: "exact", head: true })
+      .eq("campaign_id", campaign.id)
+      .eq("status", "sent")
+      .gte("sent_at", since),
+    supabase
+      .from("email_campaign_bounces")
+      .select("recipient_id", { count: "exact", head: true })
+      .eq("campaign_id", campaign.id)
+      .gte("sent_at", since),
+  ]);
+  for (const result of [sent, bounced]) {
+    if (result.error) {
+      console.error("[email] could not read the bounce rate for readiness:", result.error.message);
+      return null;
+    }
+  }
+  return bounceVerdict({
+    sent: sent.count ?? 0,
+    bounced: bounced.count ?? 0,
+    pausePercent: campaign.bounce_pause_percent,
+  });
+}
+
+/** The sending domain's authentication as a receiver sees it, or null when DNS could not be asked. */
+async function sendingDomainReport(address: string | null): Promise<DomainAuthReport | null> {
+  const domain = domainOf(address);
+  if (!domain) return null;
+  try {
+    const { checkSendingDomain } = await import("@/server/email-domain-health.server");
+    return await checkSendingDomain(domain);
+  } catch (error) {
+    console.error(
+      "[email] could not check the sending domain:",
+      error instanceof Error ? error.message : String(error),
+    );
     return null;
   }
-  return campaignWarmupAdvice({
-    address,
-    status: warming.status,
-    rampDay: rampDay({
-      activeDays: warming.active_days,
-      lastActiveOn: warming.last_active_on,
-      today,
-    }),
-    health: healthScore(totalsBetween((days ?? []) as Partial<WarmupDay>[], from, today)),
-  });
 }
 
 /** The column profile an import carried, whatever shape the jsonb holds. */
@@ -754,12 +836,11 @@ async function assessReadiness(
     }
   }
 
-  // A sending mailbox that is still young in its warmup, or whose warmup mail
-  // lands in spam, is a warning about where this campaign's mail will land.
-  if (effectiveMailbox) {
-    const advice = await warmupAdviceFor(supabase, emailKey(effectiveMailbox));
-    if (advice) warnings.push(advice);
-  }
+  // How the sending domain authenticates, read from DNS the way a receiver
+  // reads it. Warnings, never blocks: a resolver's bad minute must not stop a
+  // start, and a domain with p=none still delivers — it is placement at stake.
+  const domain = await sendingDomainReport(effectiveMailbox);
+  if (domain) warnings.push(...authWarnings(domain));
 
   // Which fields the attached lists can actually supply — read from each
   // import's own snapshot, so deleting the uploaded list afterwards does not
@@ -875,6 +956,10 @@ async function assessReadiness(
     );
   }
 
+  // Contacts a day at full pace, where the rules say: the daily contact limit,
+  // or what a day of sending times carries.
+  let contactsPerDay: number | null = rules.maxRecipientsPerDay ?? null;
+
   // Sending times: whether each can carry what is asked of it, and whether a
   // day of them stays inside what one Exchange mailbox may address.
   if (isSlotMode(rules)) {
@@ -906,6 +991,9 @@ async function assessReadiness(
       segments: segmentCount,
       segmentMessagesPerSlot: perSegment,
     });
+    if (capacity.perDay.contacts != null) {
+      contactsPerDay = Math.min(contactsPerDay ?? Infinity, capacity.perDay.contacts);
+    }
     if (
       capacity.perDay.contacts != null &&
       capacity.perDay.contacts > EXCHANGE_RECIPIENTS_PER_DAY
@@ -915,6 +1003,27 @@ async function assessReadiness(
       );
     }
   }
+
+  // A sending mailbox that is still young in its warmup, or whose warmup mail
+  // lands in spam, is a warning about where this campaign's mail will land —
+  // and one outside the pool is a warning that nothing is watching.
+  if (effectiveMailbox) {
+    const address = emailKey(effectiveMailbox) ?? effectiveMailbox;
+    const warmup = await warmupAdviceFor(supabase, address);
+    if (warmup.advice) warnings.push(warmup.advice);
+    else if (warmup.inPool === false) {
+      warnings.push(unwatchedSenderAdvice({ address, contactsPerDay }));
+    }
+  }
+
+  // The list as it has behaved so far. The dispatcher pauses at the limit;
+  // below it, the climb is said here.
+  const bounces = await bounceVerdictFor(supabase, {
+    id: campaignId,
+    started_at: (campaign.started_at as string | null) ?? null,
+    bounce_pause_percent: (campaign.bounce_pause_percent as number | null) ?? null,
+  });
+  if (bounces?.action === "warn" && bounces.detail) warnings.push(bounces.detail);
 
   const { data: attachmentRows, error: attachmentError } = await supabase
     .from("email_campaign_attachments")
@@ -962,6 +1071,12 @@ async function assessReadiness(
       nextOpening: opening ? opening.toISOString() : null,
     },
     segments,
+    protection: {
+      bouncePausePercent: (campaign.bounce_pause_percent as number | null) ?? null,
+      warmupGuard: campaign.warmup_guard !== false,
+      bounces,
+      domain,
+    },
   };
 }
 

@@ -71,6 +71,7 @@ import { SendPlan } from "@/components/email/send-plan";
 import { SegmentsPanel, type SegmentListRow } from "@/components/email/segments-panel";
 import { TenantSelect } from "@/components/email/tenant-select";
 import { AttachmentPanel, type AttachmentListRow } from "@/components/email/attachment-panel";
+import { DomainReport, VerdictBadge } from "@/components/email/sending-domains";
 import {
   attachListToCampaign,
   attachmentDownloadUrl,
@@ -88,6 +89,7 @@ import {
   setCampaignStatus,
   updateCampaign,
   upsertQuota,
+  type Readiness,
 } from "@/lib/email-campaigns.functions";
 
 export const Route = createFileRoute("/email/campaigns/$campaignId")({
@@ -290,6 +292,7 @@ function CampaignWorkspace() {
           <RulesEditor
             campaign={campaign}
             campaignId={campaignId}
+            protection={readiness.data?.protection}
             segmentsEnabled={
               segmentDimension ? segmentRows.filter((segment) => segment.enabled).length : null
             }
@@ -824,10 +827,13 @@ function TestSendDialog({ campaignId }: { campaignId: string }) {
 function RulesEditor({
   campaign,
   campaignId,
+  protection,
   segmentsEnabled,
 }: {
   campaign: Record<string, unknown>;
   campaignId: string;
+  /** The bounce rate so far and the sending domain's records, from readiness. */
+  protection: Readiness["protection"] | undefined;
   /** Enabled segments when messages are split by a column; null when they are not. */
   segmentsEnabled: number | null;
 }) {
@@ -854,6 +860,10 @@ function RulesEditor({
   const [perMessage, setPerMessage] = useState(String(campaign.recipients_per_message ?? 1));
   const [gap, setGap] = useState(String(campaign.min_gap_seconds ?? 60));
   const [perRun, setPerRun] = useState(String(campaign.max_messages_per_run ?? 20));
+  const [bouncePause, setBouncePause] = useState(
+    campaign.bounce_pause_percent == null ? "" : String(campaign.bounce_pause_percent),
+  );
+  const [warmupGuard, setWarmupGuard] = useState(campaign.warmup_guard !== false);
 
   const slots = mode === "slots";
   const save = useMutation({
@@ -875,6 +885,10 @@ function RulesEditor({
             recipientsPerMessage: Math.max(1, Number(perMessage) || 1),
             minGapSeconds: Math.max(0, Number(gap) || 0),
             maxMessagesPerRun: Math.max(1, Number(perRun) || 1),
+            bouncePausePercent: bouncePause.trim()
+              ? Math.min(50, Math.max(1, Math.round(Number(bouncePause)) || 5))
+              : null,
+            warmupGuard,
           },
         },
       }),
@@ -1135,6 +1149,56 @@ function RulesEditor({
               onChange={setPerRun}
             />
           </div>
+        </div>
+
+        <div className="space-y-2">
+          <p className="label-mono">protecting the sender</p>
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <Field
+              id="bounce-pause"
+              label="Pause at hard-bounce rate (%)"
+              hint="Counted since it was last started. Blank only warns."
+              value={bouncePause}
+              onChange={setBouncePause}
+              placeholder="only warn"
+            />
+            <label className="flex items-start justify-between gap-3 text-sm lg:col-span-2">
+              <span>
+                Pause if its warmup mail is landing in spam
+                <span className="block font-mono text-[10px] text-muted-foreground">
+                  When the sending mailbox is in the warmup pool and under 75% of its warmup mail
+                  has reached the inbox over the last 7 days.
+                </span>
+              </span>
+              <Switch checked={warmupGuard} onCheckedChange={setWarmupGuard} />
+            </label>
+          </div>
+          {protection?.bounces && protection.bounces.sent > 0 ? (
+            <p className="font-mono text-[11px] text-muted-foreground">
+              Since it was last started: {protection.bounces.bounced.toLocaleString("en-AU")} of{" "}
+              {protection.bounces.sent.toLocaleString("en-AU")} contacts hard-bounced
+              {protection.bounces.bounced > 0
+                ? ` (${((protection.bounces.bounced / protection.bounces.sent) * 100).toFixed(1)}%)`
+                : ""}
+              . Bounces are read from the sending mailbox every 15 minutes.
+            </p>
+          ) : null}
+          <p className="font-mono text-[11px] text-muted-foreground">
+            Before each message the dispatcher also steps over contacts whose domain does not exist
+            or has no mail server — mail to them bounces every time.
+          </p>
+          {protection?.domain ? (
+            <div className="glass-inset space-y-3 px-4 py-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-sm">
+                  Sending domain{" "}
+                  <span className="font-mono text-foreground">{protection.domain.domain}</span>
+                </p>
+                <VerdictBadge verdict={protection.domain.verdict} />
+              </div>
+              <DomainReport report={protection.domain} />
+            </div>
+          ) : null}
         </div>
 
         {capacity && (

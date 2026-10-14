@@ -81,6 +81,8 @@ export function HealthBadge({ score }: { score: number | null }) {
 function spineFor(row: WarmupMailboxSummary): SpineTone {
   if (row.status === "error") return "bad";
   if (row.status === "paused") return "idle";
+  if (row.brake?.state === "held") return "bad";
+  if (row.brake) return "warn";
   const tone = healthTone(row.health);
   if (tone === "poor") return "bad";
   if (tone === "fair") return "warn";
@@ -315,6 +317,11 @@ export function WarmupMailboxRow({ row }: { row: WarmupMailboxSummary }) {
             {week.junk} in spam · {week.missing} missing · {week.rescued} rescued · {week.replied}{" "}
             answered
           </p>
+          {row.status === "active" && row.brake ? (
+            <p className="font-mono text-[11px] leading-snug text-warning">
+              {row.brake.state === "held" ? "Held back" : "Slowed"}: {row.brake.reason}
+            </p>
+          ) : null}
           {row.statusReason || row.lastError ? (
             <p
               className={cn(

@@ -105,6 +105,9 @@ describe("rulesFor", () => {
     segment_dimension: null,
     segment_messages_per_slot: null,
     unsubscribe_token: null,
+    started_at: null,
+    bounce_pause_percent: 5,
+    warmup_guard: true,
   };
 
   it("fills a missing zone and an empty day list rather than sending nothing", () => {
