@@ -3,17 +3,20 @@
 // after the nightly Prime scan, and self-healing.server.ts merges them.
 //
 // The rule, set by the platform owner (October 2026): P0 and P1 findings —
-// critical and high — are fixed by Claude, P2 and below by Codex, and every
-// fix PR merges with no person in the loop once its automated checks pass
-// (remediation-policy.ts `decideFixMerge`). The merge lands on Prime and the
-// cascade delivers it to the clones.
+// critical and high — are fixed by Claude, P2 and below by Codex, info (P4)
+// included, and every fix PR merges with no person in the loop once its
+// automated checks pass (remediation-policy.ts `decideFixMerge`). The merge
+// lands on Prime and the cascade delivers it to the clones. Info findings
+// come last in the night's order, so they use what the limit leaves.
 //
 // Not fixed automatically:
-//   - info findings: context, not work (they carry no response time either);
-//   - committed credentials (gitleaks): deleting a key from the code does not
-//     make it safe — it has to be rotated, which the scan alert asks a person
-//     to do — and replacing it with an unset environment variable passes
-//     every check and breaks the app at runtime, on Prime and then the fleet;
+//   - anything gitleaks reported, at any severity. A committed credential
+//     (critical to medium) has to be rotated: deleting it from the code does not
+//     make it safe — the scan alert asks a person to rotate it — and replacing
+//     it with an unset environment variable passes every check and breaks the
+//     app at runtime, on Prime and then the fleet. An info-level hit is a
+//     value graded as not secret (a public anon key, a publishable key, an id)
+//     that the app needs where it is: "fixing" it is the same breakage;
 //   - findings seen only on a pull request (none are raised any more: scans
 //     run nightly on Prime), and anything a person has already decided or is
 //     looking at (`triaging`).
@@ -42,13 +45,14 @@ export function isFixEngine(value: unknown): value is FixEngine {
 
 /**
  * The engine that writes the fix for a finding of this severity: Claude for
- * P0/P1, Codex for P2/P3. Null for info (P4) and anything unrecognised.
+ * P0/P1, Codex for P2, P3 and info (P4). Null for a severity it cannot place
+ * — which `severityToPriority` would also call P4.
  */
 export function fixEngineFor(severity: string | null | undefined): FixEngine | null {
   const priority = severityToPriority(severity ?? "");
   if (priority === "P0" || priority === "P1") return "claude_code";
   if (priority === "P2" || priority === "P3") return "codex_cli";
-  return null;
+  return severity === "info" ? "codex_cli" : null;
 }
 
 /** Automatic attempts at one finding that ended without a merge, before it is left for a person. */
@@ -71,7 +75,7 @@ export type AutofixPick = AutofixFinding & { engine: FixEngine; priority: Ticket
 
 export type AutofixSkip = { id: string; reason: string };
 
-const SEVERITY_RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
+const SEVERITY_RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
 
 /** Why a finding is not fixed automatically, or null when it is eligible. */
 export function autofixIneligibility(f: AutofixFinding): string | null {
@@ -79,7 +83,9 @@ export function autofixIneligibility(f: AutofixFinding): string | null {
   if (f.pr_number != null) return "pull request finding";
   if (f.state !== "open") return `finding is ${f.state}`;
   if (f.scanner && SECRET_SCANNERS.has(f.scanner)) {
-    return "committed credential — rotate it; a code change cannot make it safe";
+    return f.severity === "info"
+      ? "a value graded as not secret — the app needs it where it is"
+      : "committed credential — rotate it; a code change cannot make it safe";
   }
   if (!fixEngineFor(f.severity)) return `${f.severity} findings are not fixed automatically`;
   return null;

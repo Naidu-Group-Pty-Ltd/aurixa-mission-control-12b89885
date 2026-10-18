@@ -120,6 +120,7 @@ describe("startRemediation", () => {
     ["high", "claude_code", "claude"],
     ["medium", "codex_cli", "codex"],
     ["low", "codex_cli", "codex"],
+    ["info", "codex_cli", "codex"],
   ])("sends a %s finding to %s", async (severity, engine, workflowEngine) => {
     h.tables.codex_findings = [finding({ severity })];
     expect(await start()).toMatchObject({ ok: true, reused: false, engine });

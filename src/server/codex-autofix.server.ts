@@ -91,7 +91,6 @@ async function openPrimeFindings(): Promise<AutofixFinding[]> {
       .select(columns)
       .is("clone_id", null)
       .eq("state", "open")
-      .neq("severity", "info")
       .limit(CANDIDATE_LIMIT);
     if (withPr) q = q.is("pr_number", null);
     return q;

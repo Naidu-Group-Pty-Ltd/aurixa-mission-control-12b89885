@@ -48,7 +48,8 @@ workflow files:
 ## October 2026, third pass: nightly on Prime, fixed and merged by itself
 
 Decided by the platform owner: **scans run once a night, on Prime only**;
-**P0/P1 findings are fixed by Claude and P2 and below by Codex**; **every fix
+**P0/P1 findings are fixed by Claude and P2 and below — info included — by
+Codex**; **every fix
 PR merges by itself, with no person in the loop**. Migration
 `20261018120000_codex_autofix_settings.sql` and remediation workflow
 version 4. This supersedes the two-key review, the auto-merge ceiling, PR
@@ -58,8 +59,8 @@ scans, post-merge scans and clone scans described in the passes above.
 |---|---|
 | Clones were scanned nightly and on demand, and their findings fixed on the clone | **Clones are not scanned or fixed** (`src/lib/codex-scan-policy.ts`, enforced in `enqueueScanNoAuth`). Prime's fixes reach them through the cascade. Their earlier scans stay readable on the clone page. The migration turns `codex_nightly_enabled` off on every clone; their Codex secrets are removed by the clone and fleet secret sync. |
 | Every pull request was scanned, and every push to `main` re-scanned Prime | Neither. One full scan of Prime a night (`/hooks/codex-nightly`), plus **Scan Prime now**. `/hooks/github` still does the PR bookkeeping for fix PRs and cascades merges. |
-| A fix waited for two admin approvals of its current head | After each nightly scan the sweep (`/hooks/codex-sweep` → `dispatchAutomaticFixes`) starts fixes by itself for open Prime findings, worst first, oldest first, up to `prime_config.codex_autofix_max_per_night` (default 10). A finding is tried at most twice in 30 days; credentials, info findings and anything being triaged are never auto-fixed. The scan's `autofix.dispatched` event claims it, so a night's fixes go out once. |
-| Codex wrote every fix | `codex_findings.severity` decides (`src/lib/codex-autofix-policy.ts`): critical/high → **Claude Code** (`claude -p --bare --restricted`, file tools only), medium/low → **Codex**. The engine travels inside the `finding` dispatch input, so a workflow older than version 4 ignores it and uses Codex. |
+| A fix waited for two admin approvals of its current head | After each nightly scan the sweep (`/hooks/codex-sweep` → `dispatchAutomaticFixes`) starts fixes by itself for open Prime findings, worst first, oldest first, up to `prime_config.codex_autofix_max_per_night` (default 10). Info findings are fixed too, last. A finding is tried at most twice in 30 days; anything gitleaks reported (a credential to rotate, or at info a public value the app needs) and anything being triaged is never auto-fixed. The scan's `autofix.dispatched` event claims it, so a night's fixes go out once. |
+| Codex wrote every fix | `codex_findings.severity` decides (`src/lib/codex-autofix-policy.ts`): critical/high → **Claude Code** (`claude -p --bare --restricted`, file tools only), medium/low/info → **Codex**. The engine travels inside the `finding` dispatch input, so a workflow older than version 4 ignores it and uses Codex. |
 | The fix's checks ran on the agent's working copy, as the job's own user, with `npm ci \|\| npm install` | They run on the **base plus the patch** — exactly the committed tree — as a separate user (`fixcheck`) that can read none of the job's files or the environment of the steps holding a token, with `npm ci` alone when a lockfile exists. A fix that fails them is **not pushed**: the run reports what broke and prints the patch. |
 | A dependency fix arrived with stale lockfiles (neither agent can reach the registry) | The workflow regenerates `package-lock.json` and `bun.lockb` (`bun@1.3.11`, as CI's `lovable-install` job) with no install scripts, and leaves lockfiles out of the reported size. |
 | Only CI workflows, scanner silencing and secrets were refused | Also refused: anything under `.github`, package-manager / git / hook / agent configuration (`.npmrc`, `bunfig.toml`, `.gitattributes`, `CLAUDE.md`, `AGENTS.md`, `.claude/`, …), changed `package.json` scripts, a package the project did not use, a dependency pointed at a URL, git repository or alias, a lockfile entry from a new host or carrying another package's tarball, symlinks and submodules, and the run's own callback key in the added lines. Tested by running the guard script on real diffs (`codex-remediation-guards.contract.test.ts`). |
@@ -226,7 +227,7 @@ finding now.
 
 | | Claude Code | OpenAI Codex CLI |
 |---|---|---|
-| Fixes | P0, P1 (critical, high) | P2, P3 (medium, low) |
+| Fixes | P0, P1 (critical, high) | P2, P3, P4 (medium, low, info) |
 | Package | `@anthropic-ai/claude-code@2.1.289` | `@openai/codex@0.160.1` |
 | Runs as | `claude -p --bare --restricted --tools "Read,Glob,Grep,Edit,Write" --permission-mode acceptEdits --permission-prompts none --strict-mcp-config` | `codex exec --sandbox workspace-write --ephemeral` |
 | Can | read and edit files in the checkout | read the runner, write the checkout, run commands without network |

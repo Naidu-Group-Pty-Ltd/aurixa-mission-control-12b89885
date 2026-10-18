@@ -751,10 +751,11 @@ function RemediationExplainer() {
           </li>
           <li>
             On that runner, <strong>Claude</strong> writes the fix for a P0 or P1 finding (critical,
-            high) and the <strong>OpenAI Codex CLI</strong> for P2 and below. Either may only read
-            and edit files in the checkout, with no network; it is given the title, severity, file,
-            line, CWE and the offending code excerpt. When the fix changes <code>package.json</code>
-            , the lockfiles are regenerated without running any install script.
+            high) and the <strong>OpenAI Codex CLI</strong> for P2 and below, info included. Either
+            may only read and edit files in the checkout, with no network; it is given the title,
+            severity, file, line, CWE and the offending code excerpt. When the fix changes{" "}
+            <code>package.json</code>, the lockfiles are regenerated without running any install
+            script.
           </li>
           <li>
             The patch is measured and refused if it touches CI, package-manager, git or agent

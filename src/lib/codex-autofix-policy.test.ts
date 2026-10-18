@@ -19,16 +19,17 @@ const f = (over: Partial<AutofixFinding> & { id: string }): AutofixFinding => ({
 });
 
 describe("fixEngineFor", () => {
-  it("gives P0 and P1 to Claude and P2 and P3 to Codex", () => {
+  it("gives P0 and P1 to Claude, and P2, P3 and info to Codex", () => {
     expect(fixEngineFor("critical")).toBe("claude_code");
     expect(fixEngineFor("high")).toBe("claude_code");
     expect(fixEngineFor("medium")).toBe("codex_cli");
     expect(fixEngineFor("low")).toBe("codex_cli");
+    expect(fixEngineFor("info")).toBe("codex_cli");
   });
 
   it("fixes nothing it cannot place on the scale", () => {
-    expect(fixEngineFor("info")).toBeNull();
     expect(fixEngineFor("urgent")).toBeNull();
+    expect(fixEngineFor("")).toBeNull();
     expect(fixEngineFor(null)).toBeNull();
   });
 });
@@ -44,7 +45,11 @@ describe("autofixIneligibility", () => {
     for (const state of ["triaging", "dismissed", "false_positive", "resolved", "fix_drafted"]) {
       expect(autofixIneligibility(f({ id: "e", state }))).toMatch(state);
     }
-    expect(autofixIneligibility(f({ id: "g", severity: "info" }))).toMatch(/info/);
+    expect(autofixIneligibility(f({ id: "g", severity: "info" }))).toBeNull();
+    // gitleaks at info is a public value the app needs, not a finding to fix.
+    expect(autofixIneligibility(f({ id: "i", scanner: "gitleaks", severity: "info" }))).toMatch(
+      /not secret/,
+    );
     expect(
       autofixIneligibility(f({ id: "h", scanner: "osv-scanner", severity: "high" })),
     ).toBeNull();
@@ -58,6 +63,7 @@ describe("selectAutofixCandidates", () => {
     f({ id: "high-new", severity: "high", first_seen_at: "2026-10-10T00:00:00Z" }),
     f({ id: "high-old", severity: "high", first_seen_at: "2026-09-01T00:00:00Z" }),
     f({ id: "med", severity: "medium" }),
+    f({ id: "info-old", severity: "info", first_seen_at: "2025-01-01T00:00:00Z" }),
     f({ id: "secret", severity: "critical", scanner: "gitleaks" }),
   ];
 
@@ -74,6 +80,8 @@ describe("selectAutofixCandidates", () => {
       ["high-new", "claude_code", "P1"],
       ["med", "codex_cli", "P2"],
       ["low-old", "codex_cli", "P3"],
+      // Last, however old: info uses what the limit leaves.
+      ["info-old", "codex_cli", "P4"],
     ]);
   });
 
@@ -89,6 +97,7 @@ describe("selectAutofixCandidates", () => {
       "high-new",
       "med",
       "low-old",
+      "info-old",
     ]);
   });
 
@@ -102,7 +111,7 @@ describe("selectAutofixCandidates", () => {
         ["high-new", AUTOFIX_MAX_ATTEMPTS - 1],
       ]),
     });
-    expect(picks.map((p) => p.id)).toEqual(["high-new", "med", "low-old"]);
+    expect(picks.map((p) => p.id)).toEqual(["high-new", "med", "low-old", "info-old"]);
     expect(skipped.find((s) => s.id === "crit")?.reason).toMatch(/in flight/);
     expect(skipped.find((s) => s.id === "high-old")?.reason).toMatch(/did not merge/);
   });

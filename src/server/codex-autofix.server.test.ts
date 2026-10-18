@@ -173,19 +173,32 @@ describe("dispatchAutomaticFixes", () => {
     }
   });
 
-  it("gives P2 and below to Codex", async () => {
+  it("gives P2 and below, info included, to Codex — info last", async () => {
     h.tables.prime_config = [{ codex_autofix_max_per_night: 10 }];
     const res = await dispatchAutomaticFixes();
     if (!res.ran) throw new Error("did not run");
     const engines = Object.fromEntries(res.dispatched.map((d) => [d.findingId, d.engine]));
-    expect(engines).toMatchObject({ "medium-1": "codex_cli", "low-1": "codex_cli" });
+    expect(engines).toMatchObject({
+      "medium-1": "codex_cli",
+      "low-1": "codex_cli",
+      "info-1": "codex_cli",
+    });
+    expect(res.dispatched.at(-1)?.findingId).toBe("info-1");
   });
 
-  it("never starts a credential, an info finding, a clone's, one being triaged, one in flight or one tried twice", async () => {
+  it("never starts a gitleaks hit at any severity, a clone's, one being triaged, one in flight or one tried twice", async () => {
     h.tables.prime_config = [{ codex_autofix_max_per_night: 50 }];
+    h.tables.codex_findings.push(finding("public-key", "info", { scanner: "gitleaks" }));
     await dispatchAutomaticFixes();
     const started = vi.mocked(startRemediation).mock.calls.map(([i]) => i.findingId);
-    for (const id of ["secret-1", "info-1", "clone-1", "triaging", "in-flight", "tried-twice"]) {
+    for (const id of [
+      "secret-1",
+      "public-key",
+      "clone-1",
+      "triaging",
+      "in-flight",
+      "tried-twice",
+    ]) {
       expect(started).not.toContain(id);
     }
   });
