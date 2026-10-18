@@ -1090,6 +1090,17 @@ jobs:
           elif ! sudo useradd --create-home --shell /bin/bash fixcheck; then
             fail "isolation" "Could not create the user the checks run as."
           else
+            # Nor may the checks rewrite what later steps run. On a hosted
+            # runner the tool cache — node, first on PATH, and the agents'
+            # CLIs — is world-writable, so a test could replace node or plant
+            # a `git` that the push step, holding the token, would run.
+            IFS=: read -ra PATH_DIRS <<< "$PATH"
+            for d in "${RUNNER_TOOL_CACHE:-}" "${PATH_DIRS[@]}"; do
+              if [ -n "$d" ] && [ -d "$d" ]; then
+                sudo setfacl -R -b "$d" 2>/dev/null || true
+                sudo chmod -R go-w "$d" 2>/dev/null || true
+              fi
+            done
             CHECK_HOME=$(getent passwd fixcheck | cut -d: -f6)
             # The script is root's, outside the checks' reach.
             sudo install -d -m 0755 -o root -g root /usr/local/lib/fixcheck

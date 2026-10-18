@@ -247,6 +247,9 @@ describe("the remediation workflow", () => {
     expect(verify).toContain('apply --binary "$RUNNER_TEMP/fix.patch"');
     expect(verify).toContain("sudo -u fixcheck -H env -i");
     expect(verify).toContain("sudo pkill -KILL -u fixcheck");
+    // A hosted runner's tool cache is world-writable: closed before the checks run.
+    expect(verify).toContain('for d in "${RUNNER_TOOL_CACHE:-}" "${PATH_DIRS[@]}"; do');
+    expect(verify.indexOf("chmod -R go-w")).toBeLessThan(verify.indexOf("sudo -u fixcheck"));
     // The lockfile is the one CI installs from: no silent re-resolve.
     expect(verify).toContain('locked ? "npm ci --no-audit --no-fund"');
   });
