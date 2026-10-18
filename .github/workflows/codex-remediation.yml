@@ -646,7 +646,21 @@ jobs:
             # checkout itself provides.
             regenerate "bun lockfile (bun ${BUN_VERSION} did not install)" \
               env -C "$RUNNER_TEMP" npm install --prefix "$RUNNER_TEMP/bun" --no-save --no-audit --no-fund "bun@${BUN_VERSION}"
+            # Rebuilt from package-lock.json, not updated in place. An update
+            # keeps an old resolution wherever another package asks for a
+            # loose range — a peer such as the Lovable preset's
+            # `@tanstack/react-start >=1.100.0` — so the vulnerable copy stays
+            # in what Lovable installs while npm's tree is fixed. Migrated, the
+            # two lockfiles agree package for package.
+            HAD_BINARY=false
+            if [ -f bun.lockb ]; then HAD_BINARY=true; fi
+            if [ -f package-lock.json ]; then rm -f bun.lockb bun.lock; fi
             regenerate "bun lockfile" "$RUNNER_TEMP/bun/node_modules/.bin/bun" install --lockfile-only --ignore-scripts
+            if [ "$HAD_BINARY" = true ] && [ ! -f bun.lockb ]; then
+              echo "bun wrote a text bun.lock where the repository keeps bun.lockb; set saveTextLockfile = false in bunfig.toml." > "$HELPER_DIR/failure-reason.txt"
+              echo "::error::bun changed the lockfile's format."
+              exit 1
+            fi
           fi
 
       - name: Collect the fix

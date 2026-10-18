@@ -264,6 +264,8 @@ describe("the remediation workflow", () => {
     expect(lock).toContain("install --lockfile-only --ignore-scripts");
     // bun from a prefix of its own: `npx bun` would run one the checkout provides.
     expect(lock).toContain('env -C "$RUNNER_TEMP" npm install --prefix "$RUNNER_TEMP/bun"');
+    // bun's lockfile is rebuilt from npm's, so both hold one copy of each package.
+    expect(lock).toContain("if [ -f package-lock.json ]; then rm -f bun.lockb bun.lock; fi");
     const code = lock
       .split("\n")
       .filter((line) => !line.trim().startsWith("#"))
