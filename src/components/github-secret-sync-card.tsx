@@ -6,6 +6,7 @@ import { KeyRound, AlertTriangle, CheckCircle2, XCircle } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { useConfirm } from "@/components/confirm-dialog";
 import {
   syncPrimeActionsSecrets,
   syncCloneActionsSecrets,
@@ -17,6 +18,7 @@ import {
 type Props = { target: "prime" } | { target: "clone"; cloneId: string } | { target: "fleet" };
 
 export function GitHubSecretSyncCard(props: Props) {
+  const confirm = useConfirm();
   const syncPrime = useServerFn(syncPrimeActionsSecrets);
   const syncClone = useServerFn(syncCloneActionsSecrets);
   const syncAll = useServerFn(syncAllCloneActionsSecrets);
@@ -48,7 +50,22 @@ export function GitHubSecretSyncCard(props: Props) {
   const rows: any[] = data?.rows ?? [];
   const last = rows[0];
 
+  const isPrime = props.target === "prime";
+
   async function run() {
+    if (!isPrime) {
+      const ok = await confirm({
+        title:
+          props.target === "clone"
+            ? "Remove the Codex secrets from this clone's repo?"
+            : "Remove the Codex secrets from every clone repo?",
+        description:
+          "Deletes OPENAI_API_KEY, CODEX_SECURITY_API_KEY, ANTHROPIC_API_KEY, the callback URLs and the old signing secrets from the repository's Actions secrets. Clones no longer run the Codex workflows, and only those workflows read these names.",
+        confirmText: "Remove",
+        destructive: true,
+      });
+      if (!ok) return;
+    }
     setBusy(true);
     setLastRun(null);
     try {
@@ -89,8 +106,8 @@ export function GitHubSecretSyncCard(props: Props) {
     props.target === "prime"
       ? "Sync to Prime repo"
       : props.target === "clone"
-        ? "Sync to this clone's repo"
-        : "Sync to all clone repos";
+        ? "Remove Codex secrets from this clone"
+        : "Remove Codex secrets from all clones";
 
   const missingRequired = preview?.missingRequired ?? [];
 
@@ -106,14 +123,26 @@ export function GitHubSecretSyncCard(props: Props) {
           )}
         </CardTitle>
         <CardDescription>
-          Pushes the Codex Security workflow secrets into the target repository using the Aurixa
-          GitHub App and sealed-box encryption — values never appear in the browser. Requires the
-          App installation to hold <strong>Secrets: read &amp; write</strong>.
+          {isPrime ? (
+            <>
+              Pushes the Codex Security workflow secrets — the Codex and Claude model keys — into
+              Prime&apos;s repository using the Aurixa GitHub App and sealed-box encryption; values
+              never appear in the browser. Also removes the callback-signing masters earlier syncs
+              wrote there. Requires the App installation to hold{" "}
+              <strong>Secrets: read &amp; write</strong>.
+            </>
+          ) : (
+            <>
+              Clones are neither scanned nor fixed on their own — Prime&apos;s fixes reach them
+              through the cascade — so their repositories need no Codex secrets. This removes the
+              ones earlier syncs wrote.
+            </>
+          )}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         {/* What will be pushed */}
-        {preview && (
+        {isPrime && preview && (
           <div className="space-y-1 border p-2 text-xs">
             <div className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
               will push {preview.configuredCount}/{preview.entries.length} secrets
@@ -145,20 +174,20 @@ export function GitHubSecretSyncCard(props: Props) {
           </div>
         )}
 
-        {missingRequired.length > 0 && (
+        {isPrime && missingRequired.length > 0 && (
           <div className="flex items-start gap-2 border border-warning/40 bg-warning/5 p-2 text-xs">
             <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" />
             <div>
               <span className="font-mono">{missingRequired.join(", ")}</span> is not configured in
-              Mission Control. Scans still run gitleaks, semgrep and osv-scanner, but the Codex
-              reasoning pass and autonomous remediation cannot work without it.
+              Mission Control. Scans still run gitleaks, semgrep and osv-scanner, but findings the
+              missing key&apos;s engine fixes (Claude: P0/P1, Codex: P2 and below) cannot be fixed.
             </div>
           </div>
         )}
 
         <div className="flex items-center gap-3">
           <Button onClick={run} disabled={busy}>
-            {busy ? "Syncing…" : label}
+            {busy ? (isPrime ? "Syncing…" : "Removing…") : label}
           </Button>
           {last && (
             <div className="text-xs text-muted-foreground">

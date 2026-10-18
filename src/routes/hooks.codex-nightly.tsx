@@ -1,14 +1,14 @@
-// Codex Security nightly scan drainer — invoked by pg_cron with
-// Bearer(cron_secret) auth. Enqueues one Codex scan for Prime plus one for
-// every clone with codex_nightly_enabled=true, with a dedup window so
-// overlapping cron runs (or manual re-runs) don't stack duplicates.
+// Codex Security nightly scan — invoked by pg_cron with Bearer(cron_secret)
+// auth. Enqueues the one scheduled scan there is: Prime's, with a dedup
+// window so overlapping cron runs (or manual re-runs) don't stack duplicates.
+// Clones are not scanned (src/lib/codex-scan-policy.ts); the fixes the scan
+// leads to are dispatched by the sweep once it completes (codex-autofix.server.ts).
 //
 // IT SPENDS THE APP INSTALLATION, AND FOR A YEAR IT NEVER SAID SO.
 //
 // `enqueueScanNoAuth` dispatches as it enqueues — `dispatchJob` →
-// `dispatchCodexScan` → `workflow_dispatch` — so this is one GitHub call per
-// enabled clone plus the prime, fanned out by `mapWithConcurrency`. The
-// scheduling module's own comment gives the scale: "a 40-clone fleet used to
+// `dispatchCodexScan` → `workflow_dispatch` — so this is a GitHub call. It
+// used to be one per enabled clone as well: "a 40-clone fleet used to
 // serialize 40 round-trips to GitHub."
 //
 // `everyGithubLaneYields.contract.test.ts` could not see it. It followed ONE

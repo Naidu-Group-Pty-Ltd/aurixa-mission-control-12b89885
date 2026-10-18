@@ -18,10 +18,21 @@
 //     counts findings per scanner;
 //   - refuses a drafted fix that silences a scanner instead of fixing the
 //     code, and catches CI changes git would have quoted or shown as renames.
+// Remediation version 4 is the first that:
+//   - writes the fix with the engine the finding names (`engine`: Claude for
+//     P0/P1, Codex for P2 and below), and reports it with the model it used;
+//   - regenerates lockfiles for a changed package.json and leaves them out of
+//     the reported size;
+//   - checks the base plus the patch (the committed tree) as a user of its
+//     own, and pushes nothing that fails;
+//   - refuses fixes that change package-manager, git or agent configuration,
+//     package.json scripts or where packages come from;
+//   - names the repository's CI (`verification.ci`), which Mission Control
+//     runs on the fix before merging it.
 // The contract test keeps these constants equal to the YAML.
 
 export const CODEX_SCAN_WORKFLOW_VERSION = 3;
-export const CODEX_REMEDIATION_WORKFLOW_VERSION = 3;
+export const CODEX_REMEDIATION_WORKFLOW_VERSION = 4;
 
 /** The version a scan reported, or 1 for workflows that predate versioning. */
 export function reportedWorkflowVersion(summary: unknown): number {

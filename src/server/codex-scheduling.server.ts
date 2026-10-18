@@ -1,5 +1,9 @@
 // Server-only orchestration for Codex Security scans without a user context
-// (pg_cron nightly job, the GitHub webhook receiver, and the sweeper).
+// (pg_cron nightly job and the sweeper).
+//
+// Scans run on Prime only, once a night (src/lib/codex-scan-policy.ts), plus
+// a person's explicit "Scan Prime now". The policy is checked here, at the
+// one place a scan is queued, so no caller can route around it.
 //
 // This is the single insert-then-dispatch path for the whole feature; the
 // authenticated `enqueueScan` server fn in src/lib/codex-security.functions.ts
@@ -19,7 +23,6 @@
 import type { Json } from "@/integrations/supabase/types";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { asJson } from "@/lib/json-cast";
-import { mapWithConcurrency } from "@/lib/concurrency";
 import {
   dispatchCodexScan,
   resolveScanEngine,
@@ -38,6 +41,7 @@ import {
   startScanCheckRun,
 } from "@/server/codex-pr-checks.server";
 import { alertOnScanFailed } from "@/server/codex-scan-alerts.server";
+import { scanRequestAllowed } from "@/lib/codex-scan-policy";
 
 export { resolveDispatchTarget, type DispatchTarget } from "@/server/codex-dispatch-target.server";
 
@@ -92,8 +96,6 @@ const NEVER_STARTED_TIMEOUT_MINUTES = 6 * 60;
 const QUEUED_STALL_MINUTES = 10;
 /** Dispatch attempts (initial + sweeper retries) before a job is failed. */
 const MAX_DISPATCH_ATTEMPTS = 3;
-/** Parallel dispatches during a fleet-wide nightly run. */
-const NIGHTLY_CONCURRENCY = 5;
 
 export type DeepScanScope = "off" | "prime" | "fleet";
 
@@ -332,6 +334,8 @@ async function dispatchJob(
 }
 
 export async function enqueueScanNoAuth(opts: EnqueueOpts): Promise<EnqueueResult> {
+  const allowed = scanRequestAllowed({ kind: opts.kind, targetKind: opts.targetKind });
+  if (!allowed.ok) return { skipped: true, reason: allowed.reason };
   if (!opts.repoFullName) return { skipped: true, reason: "missing_repo" };
   if (await recentDuplicate(opts)) {
     return { skipped: true, reason: "duplicate_within_window" };
@@ -392,9 +396,9 @@ export type NightlyResult = {
 };
 
 /**
- * Enqueue nightly scans across Prime + every clone that has
- * `codex_nightly_enabled = true` and a resolvable repo. Prime is skipped
- * when `prime_config.codex_nightly_enabled` is false.
+ * Enqueue the nightly scan of Prime, unless `prime_config.codex_nightly_enabled`
+ * is off. Clones are not scanned (src/lib/codex-scan-policy.ts): they receive
+ * Prime's fixes through the cascade.
  */
 export async function runNightlyScans(): Promise<NightlyResult> {
   const enqueued: NightlyResult["enqueued"] = [];
@@ -408,112 +412,31 @@ export async function runNightlyScans(): Promise<NightlyResult> {
     .limit(1)
     .maybeSingle();
 
-  const dedupHours = prime?.codex_scan_dedup_hours ?? 6;
-
-  if (prime && prime.codex_nightly_enabled) {
-    const repo = `${prime.github_owner}/${prime.github_repo}`;
-    try {
-      const r = await enqueueScanNoAuth({
-        kind: "nightly_full",
-        targetKind: "prime",
-        repoFullName: repo,
-        ref: prime.default_branch || "main",
-        dedupWindowHours: dedupHours,
-        requestPayload: { source: "nightly" },
-      });
-      if (r.skipped) skipped.push({ target: `prime:${repo}`, reason: r.reason });
-      else enqueued.push({ target: `prime:${repo}`, jobId: r.jobId, kind: "nightly_full" });
-    } catch (err) {
-      skipped.push({ target: `prime:${repo}`, reason: (err as Error).message });
-    }
-  } else if (prime) {
+  if (!prime) {
+    skipped.push({ target: "prime", reason: "prime_not_configured" });
+    return { enqueued, skipped };
+  }
+  if (!prime.codex_nightly_enabled) {
     skipped.push({ target: "prime", reason: "nightly_disabled" });
+    return { enqueued, skipped };
   }
 
-  // owner/repo only — `repo_full_name` is a generated convenience column and
-  // naming it here would fail the whole select on an unmigrated deployment,
-  // silently yielding an empty fleet.
-  const { data: clones } = await admin
-    .from("clones")
-    .select("id, name, github_owner, github_repo, default_branch, codex_nightly_enabled")
-    .eq("codex_nightly_enabled", true);
-
-  // Fan out across the fleet instead of dispatching one clone at a time —
-  // a 40-clone fleet used to serialize 40 round-trips to GitHub.
-  const outcomes = await mapWithConcurrency(clones ?? [], NIGHTLY_CONCURRENCY, async (c) => {
-    const label = `clone:${c.name ?? c.id}`;
-    const repo = c.github_owner && c.github_repo ? `${c.github_owner}/${c.github_repo}` : "";
-    if (!repo) return { label, skipped: true, reason: "no_repo" } as const;
-    try {
-      const r = await enqueueScanNoAuth({
-        kind: "nightly_full",
-        targetKind: "clone",
-        cloneId: c.id,
-        repoFullName: repo,
-        ref: c.default_branch || "main",
-        dedupWindowHours: dedupHours,
-        requestPayload: { source: "nightly", cloneId: c.id },
-      });
-      return r.skipped
-        ? ({ label, skipped: true, reason: r.reason } as const)
-        : ({ label, skipped: false, jobId: r.jobId } as const);
-    } catch (err) {
-      return { label, skipped: true, reason: (err as Error).message } as const;
-    }
-  });
-
-  for (const o of outcomes) {
-    if (o.skipped) skipped.push({ target: o.label, reason: o.reason });
-    else enqueued.push({ target: o.label, jobId: o.jobId, kind: "nightly_full" });
+  const repo = `${prime.github_owner}/${prime.github_repo}`;
+  try {
+    const r = await enqueueScanNoAuth({
+      kind: "nightly_full",
+      targetKind: "prime",
+      repoFullName: repo,
+      ref: prime.default_branch || "main",
+      dedupWindowHours: prime.codex_scan_dedup_hours ?? 6,
+      requestPayload: { source: "nightly" },
+    });
+    if (r.skipped) skipped.push({ target: `prime:${repo}`, reason: r.reason });
+    else enqueued.push({ target: `prime:${repo}`, jobId: r.jobId, kind: "nightly_full" });
+  } catch (err) {
+    skipped.push({ target: `prime:${repo}`, reason: (err as Error).message });
   }
-
   return { enqueued, skipped };
-}
-
-export type FleetScanResult = {
-  queued: number;
-  skipped: Array<{ target: string; reason: string }>;
-};
-
-/**
- * Scan every clone now, server-side. Replaces a loop that ran in the
- * operator's browser and stopped wherever the tab was closed.
- */
-export async function runFleetScanNow(requestedBy: string | null): Promise<FleetScanResult> {
-  const { data: clones, error } = await admin
-    .from("clones")
-    .select("id, name, github_owner, github_repo, default_branch");
-  if (error) throw error;
-
-  const outcomes = await mapWithConcurrency(clones ?? [], NIGHTLY_CONCURRENCY, async (c) => {
-    const label = c.name ?? c.id;
-    const repo = c.github_owner && c.github_repo ? `${c.github_owner}/${c.github_repo}` : "";
-    if (!repo) return { label, skipped: true, reason: "no_repo" } as const;
-    try {
-      const r = await enqueueScanNoAuth({
-        kind: "manual",
-        targetKind: "clone",
-        cloneId: c.id,
-        repoFullName: repo,
-        ref: c.default_branch || "main",
-        requestedBy,
-        dedupWindowHours: 0,
-        requestPayload: { source: "manual_fleet", requestedBy },
-      });
-      return r.skipped
-        ? ({ label, skipped: true, reason: r.reason } as const)
-        : ({ label, skipped: false } as const);
-    } catch (err) {
-      return { label, skipped: true, reason: (err as Error).message } as const;
-    }
-  });
-
-  return {
-    queued: outcomes.filter((o) => !o.skipped).length,
-    skipped: outcomes
-      .filter((o): o is { label: string; skipped: true; reason: string } => o.skipped)
-      .map((o) => ({ target: o.label, reason: o.reason })),
-  };
 }
 
 export type SweepResult = {

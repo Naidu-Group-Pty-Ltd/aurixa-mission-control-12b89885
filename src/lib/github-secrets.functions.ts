@@ -1,5 +1,7 @@
 // Admin-facing server functions to push GitHub Actions repository
-// secrets from Mission Control into the Prime repo or any clone repo.
+// secrets from Mission Control into the Prime repo — and to take the Codex
+// ones back out of clone repos, which no longer run the Codex workflows
+// (src/lib/codex-scan-policy.ts).
 //
 // Three faults used to make this fail from the settings page:
 //
@@ -43,7 +45,7 @@ async function recordSync(row: {
   clone_id: string | null;
   owner: string;
   repo: string;
-  result: { ok: boolean; written: string[]; skipped: any[]; failed: any[] };
+  result: { ok: boolean; written: string[]; removed?: string[]; skipped: any[]; failed: any[] };
   trigger_source: string;
   triggered_by: string | null;
 }): Promise<string | null> {
@@ -54,7 +56,15 @@ async function recordSync(row: {
       owner: row.owner,
       repo: row.repo,
       written: row.result.written,
-      skipped: row.result.skipped,
+      // The history table has no column for deletions; they are listed with
+      // the names this sync did not write, and say why.
+      skipped: [
+        ...row.result.skipped,
+        ...(row.result.removed ?? []).map((name) => ({
+          name,
+          reason: "removed from the repository (no longer used)",
+        })),
+      ],
       failed: row.result.failed,
       ok: row.result.ok,
       trigger_source: row.trigger_source,
@@ -75,18 +85,31 @@ async function recordSync(row: {
 /** Human-readable one-liner for a completed single-repo sync. */
 function summarize(
   target: string,
-  result: { ok: boolean; written: string[]; failed: any[]; nothingConfigured: boolean },
+  result: {
+    ok: boolean;
+    written: string[];
+    removed?: string[];
+    failed: any[];
+    nothingConfigured: boolean;
+  },
 ): string {
-  if (result.nothingConfigured) {
-    return `No secrets are configured in Mission Control, so nothing was pushed to ${target}.`;
+  const removed = result.removed?.length ?? 0;
+  const removedNote = removed ? ` Removed ${removed} secret(s) no longer used.` : "";
+  if (result.nothingConfigured && result.written.length === 0) {
+    if (result.failed.length) {
+      return `Could not update ${target}. ${result.failed[0]?.error ?? ""}`.trim();
+    }
+    return removed
+      ? `Removed ${removed} Codex secret(s) from ${target}; it needs none.`
+      : `No secrets are configured in Mission Control, so nothing was pushed to ${target}.`;
   }
   if (result.ok) {
-    return `Wrote ${result.written.length} secret(s) to ${target}.`;
+    return `Wrote ${result.written.length} secret(s) to ${target}.${removedNote}`;
   }
   if (result.written.length === 0) {
     return `Could not write any secret to ${target}. ${result.failed[0]?.error ?? ""}`.trim();
   }
-  return `Wrote ${result.written.length} secret(s) to ${target}; ${result.failed.length} failed.`;
+  return `Wrote ${result.written.length} secret(s) to ${target}; ${result.failed.length} failed.${removedNote}`;
 }
 
 /** Push Codex Actions secrets to the Prime repo. Admin only. */
@@ -111,7 +134,7 @@ export const syncPrimeActionsSecrets = createServerFn({ method: "POST" })
       };
     }
 
-    const { syncRepoSecrets, buildCodexRepoSecrets } =
+    const { syncRepoSecrets, buildCodexRepoSecrets, RETIRED_CODEX_REPO_SECRETS } =
       await import("@/server/github-secrets.server");
     const target = `${prime.github_owner}/${prime.github_repo}`;
     const result = await syncRepoSecrets({
@@ -119,6 +142,7 @@ export const syncPrimeActionsSecrets = createServerFn({ method: "POST" })
       repo: prime.github_repo,
       installationId: prime.github_app_installation_id ?? null,
       secrets: await buildCodexRepoSecrets(),
+      remove: RETIRED_CODEX_REPO_SECRETS,
     });
 
     const historyError = await recordSync({
@@ -148,7 +172,10 @@ export const syncPrimeActionsSecrets = createServerFn({ method: "POST" })
 
 const CloneInput = z.object({ cloneId: z.string().uuid() });
 
-/** Push Codex Actions secrets to a specific clone repo. Admin only. */
+/**
+ * Take the Codex Actions secrets out of one clone's repo. Admin only. Clones
+ * no longer run the Codex workflows, and nothing else reads these names.
+ */
 export const syncCloneActionsSecrets = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((d) => CloneInput.parse(d))
@@ -168,7 +195,7 @@ export const syncCloneActionsSecrets = createServerFn({ method: "POST" })
       return { ok: false, error: "Clone has no GitHub repo attached" };
     }
 
-    const { syncRepoSecrets, buildCodexRepoSecrets } =
+    const { syncRepoSecrets, CLONE_CODEX_REPO_SECRETS } =
       await import("@/server/github-secrets.server");
     const { loadCloneInstallationId } = await import("@/server/clone-installation.server");
     const target = `${clone.github_owner}/${clone.github_repo}`;
@@ -176,7 +203,8 @@ export const syncCloneActionsSecrets = createServerFn({ method: "POST" })
       owner: clone.github_owner,
       repo: clone.github_repo,
       installationId: await loadCloneInstallationId(supabase, clone.id),
-      secrets: await buildCodexRepoSecrets(),
+      secrets: {},
+      remove: CLONE_CODEX_REPO_SECRETS,
     });
 
     const historyError = await recordSync({
@@ -202,7 +230,7 @@ export const syncCloneActionsSecrets = createServerFn({ method: "POST" })
     };
   });
 
-/** Fan out to every clone that has a GitHub repo. Admin only. */
+/** The same, for every clone that has a GitHub repo. Admin only. */
 export const syncAllCloneActionsSecrets = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .handler(async ({ context }) => {
@@ -231,10 +259,9 @@ export const syncAllCloneActionsSecrets = createServerFn({ method: "POST" })
       };
     }
 
-    const { syncRepoSecrets, buildCodexRepoSecrets } =
+    const { syncRepoSecrets, CLONE_CODEX_REPO_SECRETS } =
       await import("@/server/github-secrets.server");
     const { loadCloneInstallationIds } = await import("@/server/clone-installation.server");
-    const secrets = await buildCodexRepoSecrets();
     const installations = await loadCloneInstallationIds(
       supabase,
       targets.map((c: any) => c.id),
@@ -249,7 +276,8 @@ export const syncAllCloneActionsSecrets = createServerFn({ method: "POST" })
           owner: c.github_owner,
           repo: c.github_repo,
           installationId: installations.get(c.id) ?? null,
-          secrets,
+          secrets: {},
+          remove: CLONE_CODEX_REPO_SECRETS,
         });
         await recordSync({
           target_kind: "clone",
@@ -265,7 +293,7 @@ export const syncAllCloneActionsSecrets = createServerFn({ method: "POST" })
           name: c.name,
           target,
           ok: result.ok,
-          written: result.written.length,
+          written: result.removed.length,
           error: result.ok ? undefined : (result.failed[0]?.error ?? "unknown error"),
         };
       } catch (e) {
@@ -291,8 +319,8 @@ export const syncAllCloneActionsSecrets = createServerFn({ method: "POST" })
       results,
       message:
         failedCount === 0
-          ? `Synced all ${succeeded} clone repo(s).`
-          : `Synced ${succeeded}/${results.length} clone repo(s); ${failedCount} failed.`,
+          ? `Removed the Codex secrets from all ${succeeded} clone repo(s).`
+          : `Cleaned ${succeeded}/${results.length} clone repo(s); ${failedCount} failed.`,
       ok: failedCount === 0,
       error: failedCount === 0 ? undefined : `${failedCount} clone repo(s) failed — see below.`,
     };

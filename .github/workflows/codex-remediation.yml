@@ -1,55 +1,81 @@
 name: Codex Security Remediation
-# Reference workflow: place this file at .github/workflows/codex-remediation.yml
-# in every repo (Prime and clones) that should accept Mission Control's
-# draft-fix dispatches.
+# Reference workflow: lives at .github/workflows/codex-remediation.yml on Prime,
+# which is the only repository Mission Control writes security fixes for.
+# Clones receive Prime's fixes through the cascade.
 #
 # WHAT AUTHORS THE FIX
-#   The OpenAI Codex CLI (`@openai/codex`, pinned), running here on the
-#   runner with `--sandbox workspace-write`. It reads the repository, edits
-#   real files in a checkout of `base_ref`, and writes a summary of what it
-#   changed. There is no "patch API" — the model works directly in the
-#   working tree, which is why it can follow the surrounding code's
-#   conventions.
+#   Mission Control names the engine in the finding's `engine` field, by the
+#   finding's priority (src/lib/codex-autofix-policy.ts):
+#   - P0/P1 (critical, high): Claude Code (`@anthropic-ai/claude-code`,
+#     pinned), run as `claude -p --bare --restricted` with the file tools
+#     only — Read, Glob, Grep, Edit, Write. No shell, no web, writes confined
+#     to the checkout, and settings, git and package-manager files refused.
+#   - P2 and below: the OpenAI Codex CLI (`@openai/codex`, pinned), with
+#     `--sandbox workspace-write` (no network).
+#   A finding that names no engine is fixed by Codex, as before.
+#   Either agent edits real files in a checkout of `base_ref` and writes a
+#   summary of what it changed; there is no "patch API".
 #
-# WHAT HAPPENS TO THAT FIX BEFORE A HUMAN SEES IT
-#   1. Blast radius is measured (files touched, lines added/removed). A patch
-#      that touches CI workflows is refused outright, and so is one that
-#      silences a scanner instead of fixing the code: an added inline
-#      suppression (semgrep's or gitleaks'), or an edit to an ignore file or
-#      to the scan rules. The finding would vanish from the next scan and
-#      the fix be "confirmed" with the vulnerability still in place.
-#   2. gitleaks scans the lines the patch ADDS. A fix that introduces a
-#      secret is NEVER pushed — that is the one hard stop in this workflow.
-#      (Scanning the whole patched tree, as before, refused every fix in a
-#      repository that already had a test fixture gitleaks dislikes.)
-#   3. The repo's own checks (typecheck / lint / test / build, whichever
-#      exist) run against a COPY of the patched tree. Failures do not block
-#      the PR — a reviewer needs to see a broken fix — but they are reported
-#      on the PR and back to Mission Control.
-#   4. A DRAFT pull request is opened. Nothing is ever merged here.
+# WHAT HAPPENS TO THAT FIX
+#   1. Lockfiles: neither agent can reach the registry, so when the fix
+#      changes package.json, package-lock.json and bun.lockb are regenerated
+#      here, with no install scripts run. CI installs with `npm ci` and
+#      Lovable publishes with a frozen bun install; both refuse a lockfile
+#      that disagrees with its manifest.
+#   2. The patch is measured (files, lines; lockfiles not counted) and
+#      refused outright when it changes anything under .github, package-
+#      manager, git or agent configuration, package.json scripts, adds a
+#      package the project did not use or installs one from somewhere new,
+#      adds a symlink or a submodule, or silences a scanner instead of fixing
+#      the code: an inline suppression (semgrep's or gitleaks'), or an edit
+#      to an ignore file or to the scan rules.
+#   3. gitleaks scans the lines the patch ADDS, and so does a check for this
+#      run's own callback key. A fix that introduces a secret is NEVER pushed.
+#   4. The repository's own checks (install / typecheck / lint / test /
+#      build, whichever exist) run against the base plus the patch — exactly
+#      the tree that is committed — as a user of their own. A fix that fails
+#      them is not pushed: the run reports what broke and shows the patch.
+#   5. A draft pull request is opened. Nothing merges here. Mission Control
+#      runs the repository's CI on it (FIX_CI_WORKFLOW, default ci.yml) and
+#      merges it by itself once that passes on this exact commit and the
+#      patch is within its size limits; otherwise it closes it, and the
+#      finding is tried again on a later night. No person reviews it.
 #
 # TRUST
 #   The fix is written by a model reading untrusted text (the finding, the
 #   repository), and the checks then run code that model may have written.
-#   So neither ever holds a credential: the checkout keeps no token, the
-#   OpenAI key exists only in the Codex step, and GITHUB_TOKEN only in the
+#   So neither ever holds a credential: the checkout keeps no token, each
+#   API key exists only in its agent's step, and GITHUB_TOKEN only in the
 #   steps that push and open the PR. Those steps never run git inside the
-#   checkout either — its .git could have been altered — but commit the
-#   verified patch in a fresh repository of their own.
+#   checkout — its .git could have been altered — but commit the verified
+#   patch in a fresh repository of their own. The checks run as a separate
+#   user that can read none of this job's files and none of the environment
+#   of the steps that hold a token.
 #
 # Secrets consumed (synced by Mission Control — see
 # src/server/github-secrets.server.ts):
-#   OPENAI_API_KEY  — required. Authenticates the Codex CLI.
-#                     CODEX_SECURITY_API_KEY is accepted as a legacy alias.
-#   GITHUB_TOKEN    — provided automatically; used to push and open the PR.
+#   ANTHROPIC_API_KEY — required for P0/P1 fixes. Authenticates Claude Code.
+#   OPENAI_API_KEY    — required for P2 and below. Authenticates the Codex CLI.
+#                       CODEX_SECURITY_API_KEY is accepted as a legacy alias.
+#   GITHUB_TOKEN      — provided automatically; used to push and open the PR.
+#
+# Repository variables, all optional:
+#   CLAUDE_FIX_MODEL          — the model Claude Code uses, as an alias or a
+#                               full name the CLI accepts. Unset, the CLI's
+#                               default.
+#   CLAUDE_FIX_EFFORT         — low | medium | high | xhigh | max (default high).
+#   CLAUDE_FIX_MAX_BUDGET_USD — spend ceiling for one fix (default 10).
+#   FIX_CI_WORKFLOW           — the workflow file Mission Control runs on each
+#                               fix before merging it (default ci.yml).
 #
 # The callback key arrives as the `callback_secret` input, derived for THIS
 # remediation alone. It is read from the event payload and masked — never put
 # in `env:`, which GitHub prints in every step's log. Callbacks are signed
 # `HMAC-SHA256(key, "<unix seconds>.<body>")` with `x-codex-timestamp`.
 #
-# Note: pushes made with GITHUB_TOKEN do not trigger further workflow runs,
-# which is deliberate — a remediation PR must not recursively dispatch.
+# Note: pushes and pull requests made with GITHUB_TOKEN do not trigger further
+# workflow runs, which is deliberate — a remediation PR must not recursively
+# dispatch. It is also why Mission Control, not this workflow, starts the CI.
 
 on:
   workflow_dispatch:
@@ -62,7 +88,8 @@ on:
       # environment variable and parsed by node — never interpolated into a
       # shell command, where a crafted title could otherwise run code on the
       # runner. Shape:
-      # { id, title, severity, file, line, cwe, description, scanner, ruleId, snippet }.
+      # { id, title, severity, file, line, cwe, description, scanner, ruleId,
+      #   snippet, engine }, engine being "claude" or "codex".
       finding:         { description: "Finding as JSON", required: true }
       base_ref:        { description: "Base ref / branch to fork from", required: true }
       branch_name:     { description: "Branch name to push the fix to", required: true }
@@ -80,7 +107,7 @@ concurrency:
 jobs:
   draft-fix:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       REMEDIATION_ID: ${{ inputs.remediation_id }}
       BRANCH_NAME:    ${{ inputs.branch_name }}
@@ -88,10 +115,14 @@ jobs:
       CALLBACK_URL:   ${{ inputs.callback_url }}
       # Bump with any change to what the workflow reports. Mission Control
       # reads it from every callback (src/lib/codex-workflow-contract.ts).
-      WORKFLOW_VERSION: "3"
+      WORKFLOW_VERSION: "4"
       GITLEAKS_VERSION: "8.28.0"
       GITLEAKS_SHA256: "a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb"
       CODEX_CLI_VERSION: "0.160.1"
+      CLAUDE_CODE_VERSION: "2.1.289"
+      # The bun the repository's own CI checks bun.lockb with (ci.yml,
+      # `lovable-install`).
+      BUN_VERSION: "1.3.11"
 
     steps:
       # Resolved here, not in `jobs.<id>.env`: the `runner` context does not
@@ -102,6 +133,12 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
+          # Nothing but this job's own user may read its files: the event
+          # payload (which carries the callback key) and the helpers live in
+          # $RUNNER_TEMP, the runner's own files under $HOME, and the
+          # repository's checks later run as another user.
+          chmod 700 "$RUNNER_TEMP"
+          chmod o-rwx "$HOME"
           HELPER_DIR="$RUNNER_TEMP/codex-helpers"
           mkdir -p "$HELPER_DIR"
           echo "HELPER_DIR=$HELPER_DIR" >> "$GITHUB_ENV"
@@ -132,6 +169,7 @@ jobs:
       #
       # $RUNNER_TEMP survives actions/checkout, which wipes the workspace.
       - name: Render the finding
+        id: finding
         env:
           FINDING_JSON: ${{ inputs.finding }}
         run: |
@@ -164,9 +202,24 @@ jobs:
             scanner: str(raw.scanner, 60),
             ruleId: str(raw.ruleId, 200),
             snippet: str(raw.snippet, 2000),
+            // Which agent writes the fix. Absent: Codex, as before engines.
+            engine: str(raw.engine || "codex", 20),
           };
           if (!finding.id || !finding.title || !finding.severity) {
             console.error("::error::finding requires at least id, title and severity");
+            process.exit(1);
+          }
+          const ENGINES = {
+            claude: {
+              id: "claude_code",
+              label: "Claude",
+              author: "Claude Code CLI (`claude -p`), file tools only",
+            },
+            codex: { id: "codex_cli", label: "Codex", author: "OpenAI Codex CLI (`codex exec`)" },
+          };
+          const engine = ENGINES[finding.engine];
+          if (!engine) {
+            console.error("::error::the finding names an engine this workflow does not have");
             process.exit(1);
           }
           // A title spanning lines would corrupt a commit subject and a PR title.
@@ -198,27 +251,33 @@ jobs:
           );
           fs.writeFileSync(
             `${tmp}/commit-message.txt`,
-            `codex: draft fix for ${oneLine(finding.title)} (${finding.severity})\n\n` +
+            `${finding.engine}: fix for ${oneLine(finding.title)} (${finding.severity})\n\n` +
               `Finding: ${finding.id}\n`,
           );
           fs.writeFileSync(
             `${tmp}/pr-title.txt`,
-            `codex: ${oneLine(finding.severity)} — ${oneLine(finding.title)}`,
+            `${finding.engine}: ${oneLine(finding.severity)} — ${oneLine(finding.title)}`,
           );
           fs.writeFileSync(
             `${tmp}/pr-header.md`,
             [
-              "Autogenerated by **Codex Security** via Aurixa Mission Control.",
+              `Written by **${engine.label}** for Aurixa Mission Control's security pipeline.`,
               "",
               `- Finding: \`${inert(finding.id)}\``,
               `- Severity: **${inert(finding.severity)}**`,
               `- Location: \`${inert(location)}\``,
               `- CWE: ${inert(finding.cwe) || "(none)"}`,
               `- Reported by: ${inert(reportedBy)}`,
-              "- Patch author: OpenAI Codex CLI (`codex exec`)",
+              `- Patch author: ${engine.author}`,
               "",
             ].join("\n"),
           );
+          // Fixed strings only: nothing from the finding reaches these files.
+          fs.appendFileSync(
+            process.env.GITHUB_ENV,
+            `FIX_ENGINE_ID=${engine.id}\nFIX_ENGINE_LABEL=${engine.label}\n`,
+          );
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `engine=${finding.engine}\n`);
           RENDER
 
       - name: Install helpers
@@ -279,10 +338,16 @@ jobs:
           import { spawnSync } from "node:child_process";
 
           const extra = JSON.parse(process.argv[2] || "{}");
+          // The model that wrote the fix, once the agent has run (Claude only).
+          let agent = {};
+          try {
+            agent = JSON.parse(fs.readFileSync(path.join(process.env.HELPER_DIR, "agent.json"), "utf8"));
+          } catch {}
           const payload = {
             remediation_id: process.env.REMEDIATION_ID,
             branch_name: process.env.BRANCH_NAME,
-            engine: "codex_cli",
+            engine: process.env.FIX_ENGINE_ID || "codex_cli",
+            ...(typeof agent.model === "string" && agent.model ? { model: agent.model.slice(0, 120) } : {}),
             workflow_version: Number(process.env.WORKFLOW_VERSION),
             workflow_run_id: Number(process.env.GITHUB_RUN_ID),
             workflow_run_url: `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`,
@@ -310,8 +375,8 @@ jobs:
         with:
           ref: ${{ inputs.base_ref }}
           fetch-depth: 1
-          # No token in .git/config: Codex and the repository's own checks
-          # run in this checkout. The push uses GITHUB_TOKEN explicitly, in
+          # No token in .git/config: the agent and the repository's own
+          # checks never see one. The push uses GITHUB_TOKEN explicitly, in
           # its own step, from its own repository.
           persist-credentials: false
 
@@ -319,27 +384,52 @@ jobs:
         with:
           node-version: "22"
 
+      # The base as checked out, kept before any agent runs: the checks run on
+      # it plus the patch (exactly what is committed), the patch is staged in
+      # its untouched .git, and the lockfile step compares against it.
       - name: Record the base commit
         run: |
           set -euo pipefail
           echo "BASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          cp -a . "$RUNNER_TEMP/base-tree"
+          cp -a .git "$RUNNER_TEMP/collect.git"
 
-      # ── The fix itself ─────────────────────────────────────────────────
-      # The OpenAI key exists in this step only, and nothing but Codex runs
-      # in it: no git, so no git configuration Codex may have written can
-      # run code beside the key.
-      - name: Author the fix with Codex
+      # Installed before any key is in reach, and pinned: what writes the fix
+      # changes only with this file.
+      - name: Install the fix agent
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY || secrets.CODEX_SECURITY_API_KEY }}
-          CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY || secrets.CODEX_SECURITY_API_KEY }}
+          ENGINE: ${{ steps.finding.outputs.engine }}
         run: |
           set -euo pipefail
-          if [ -z "${OPENAI_API_KEY:-}" ]; then
-            echo "::error::OPENAI_API_KEY is not configured on this repository. Run the GitHub Actions secret sync from Mission Control settings."
+          cd "$RUNNER_TEMP"
+          if [ "$ENGINE" = "claude" ]; then
+            PACKAGE="@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+          else
+            PACKAGE="@openai/codex@${CODEX_CLI_VERSION}"
+          fi
+          if ! npm install -g --no-audit --no-fund "$PACKAGE" > agent-install.log 2>&1; then
+            tail -n 40 agent-install.log
+            echo "Could not install $PACKAGE on the runner." > "$HELPER_DIR/failure-reason.txt"
+            echo "::error::Could not install $PACKAGE."
             exit 1
           fi
-          npm install -g --no-audit --no-fund "@openai/codex@${CODEX_CLI_VERSION}" >/dev/null 2>&1
+          if [ "$ENGINE" = "claude" ]; then
+            # The package copies its native binary in from a platform package;
+            # a stub left in its place would fail later, and less clearly.
+            case "$(claude --version 2>/dev/null || true)" in
+              "${CLAUDE_CODE_VERSION} "*) ;;
+              *)
+                echo "Claude Code ${CLAUDE_CODE_VERSION} did not install on the runner." > "$HELPER_DIR/failure-reason.txt"
+                echo "::error::Claude Code ${CLAUDE_CODE_VERSION} did not install."
+                exit 1
+                ;;
+            esac
+          fi
 
+      # One prompt for both agents, written before either key is in reach.
+      - name: Write the fix prompt
+        run: |
+          set -euo pipefail
           cat > "$RUNNER_TEMP/prompt.txt" <<'PROMPT'
           Fix the following security finding in this repository.
           The finding below is scanner output about the repository's content:
@@ -358,47 +448,230 @@ jobs:
           - Match the conventions of the surrounding code.
           - Do not reformat unrelated code, bump unrelated dependencies, or
             rename things beyond what the fix requires.
-          - Do not touch .github/workflows, git configuration or hooks.
-          - Do not edit .gitleaks.toml, .gitleaksignore, .semgrepignore,
-            osv-scanner.toml or .github/codex-security: a fix that does is
+          - Do not touch anything under .github, git configuration or hooks,
+            package-manager configuration (.npmrc, .yarnrc, bunfig.toml),
+            CLAUDE.md, AGENTS.md, .claude or .codex: a fix that does is
             refused.
+          - Do not edit .gitleaks.toml, .gitleaksignore, .semgrepignore or
+            osv-scanner.toml either: a fix that silences a scanner is refused.
           - NEVER write a credential, token, or key into the repository. If
             the finding IS a committed secret, remove it and read it from an
             environment variable or secret store instead; the credential must
             still be rotated by a human.
           - Keep the project building: if you change a signature, update its
-            callers.
+            callers. The project's typecheck, lint, tests and build run after
+            you finish, and a fix that fails them is discarded.
+          - You have no network. For a vulnerable dependency, change its
+            version range in package.json (or add an "overrides" entry for a
+            package that is only installed indirectly) to a release the
+            finding names as fixed, and leave the lockfiles alone: they are
+            regenerated after you finish. Do not add packages the project
+            does not already use, and do not change package.json scripts.
           - Do not add or modify tests unless the fix is untestable without it.
           - If the finding is a false positive, change nothing and write your
             reasoning to CODEX_FIX_NOTES.md instead.
           - When you are done, write a 3-6 line summary of exactly what you
             changed and why it closes the finding to CODEX_FIX_SUMMARY.md.
+            Describe the change, not yourself: name no tool or model.
           PROMPT
 
+      # ── The fix itself ─────────────────────────────────────────────────
+      # Each key exists in its agent's step only, and nothing but the agent
+      # runs in it: no git, no node, so nothing the agent may have written
+      # can run beside the key.
+      - name: Author the fix with Codex
+        if: steps.finding.outputs.engine == 'codex'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY || secrets.CODEX_SECURITY_API_KEY }}
+          CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY || secrets.CODEX_SECURITY_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${OPENAI_API_KEY:-}" ]; then
+            echo "::error::OPENAI_API_KEY is not configured on this repository. Run the GitHub Actions secret sync from Mission Control settings."
+            exit 1
+          fi
+          code=0
           timeout 30m codex exec \
             --sandbox workspace-write \
             --ephemeral \
             --ignore-rules \
-            - < "$RUNNER_TEMP/prompt.txt"
+            - < "$RUNNER_TEMP/prompt.txt" || code=$?
+          if [ "$code" != "0" ]; then
+            echo "Codex stopped before finishing the fix (exit $code; 124 is the 30-minute limit)." > "$HELPER_DIR/failure-reason.txt"
+            exit "$code"
+          fi
 
-      - name: Collect the fix
-        id: codex
+      - name: Author the fix with Claude
+        if: steps.finding.outputs.engine == 'claude'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_FIX_MODEL: ${{ vars.CLAUDE_FIX_MODEL }}
+          CLAUDE_FIX_EFFORT: ${{ vars.CLAUDE_FIX_EFFORT }}
+          CLAUDE_FIX_MAX_BUDGET_USD: ${{ vars.CLAUDE_FIX_MAX_BUDGET_USD }}
+          # No telemetry, error reporting or update checks from a CI runner.
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+          DISABLE_AUTOUPDATER: "1"
         run: |
           set -euo pipefail
-          # These two are report artifacts, not part of the patch.
-          if [ -f CODEX_FIX_SUMMARY.md ]; then
-            cp CODEX_FIX_SUMMARY.md "$RUNNER_TEMP/summary.md"
-            rm -f CODEX_FIX_SUMMARY.md
-          else
-            echo "Codex produced no summary." > "$RUNNER_TEMP/summary.md"
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "::error::ANTHROPIC_API_KEY is not configured on this repository. Run the GitHub Actions secret sync from Mission Control settings."
+            exit 1
           fi
-          if [ -f CODEX_FIX_NOTES.md ]; then
-            cp CODEX_FIX_NOTES.md "$RUNNER_TEMP/notes.md"
-            rm -f CODEX_FIX_NOTES.md
+          MODEL_ARGS=()
+          if [ -n "${CLAUDE_FIX_MODEL:-}" ]; then
+            if ! printf '%s' "$CLAUDE_FIX_MODEL" | grep -Eq '^[A-Za-z0-9._:-]{1,100}(\[[0-9a-z]{1,8}\])?$'; then
+              echo "::error::CLAUDE_FIX_MODEL is not a model name or alias."
+              exit 1
+            fi
+            MODEL_ARGS=(--model "$CLAUDE_FIX_MODEL")
+          fi
+          EFFORT="${CLAUDE_FIX_EFFORT:-high}"
+          case "$EFFORT" in
+            low|medium|high|xhigh|max) ;;
+            *) echo "::error::CLAUDE_FIX_EFFORT must be low, medium, high, xhigh or max."; exit 1 ;;
+          esac
+          BUDGET="${CLAUDE_FIX_MAX_BUDGET_USD:-10}"
+          if ! printf '%s' "$BUDGET" | grep -Eq '^[0-9]{1,4}(\.[0-9]{1,2})?$'; then
+            echo "::error::CLAUDE_FIX_MAX_BUDGET_USD must be an amount in dollars."
+            exit 1
           fi
 
-          # Against the base commit, so a fix Codex committed itself counts.
-          GIT=(git -c core.fsmonitor=false -c core.hooksPath=/dev/null)
+          # The file tools and nothing else: no shell, no web (--restricted
+          # drops both unless --tools names them), writes confined to this
+          # checkout, and settings, git and package-manager files refused.
+          # --bare skips hooks, plugins, memory and CLAUDE.md discovery and
+          # authenticates with ANTHROPIC_API_KEY alone, so nothing the
+          # repository carries configures the agent. Edits are accepted
+          # without asking; anything that would still ask is refused.
+          # The result is checked in the next step, once the key is gone.
+          code=0
+          timeout 30m claude -p "$(cat "$RUNNER_TEMP/prompt.txt")" \
+            --bare \
+            --restricted \
+            --tools "Read,Glob,Grep,Edit,Write" \
+            --permission-mode acceptEdits \
+            --permission-prompts none \
+            --strict-mcp-config \
+            --disable-slash-commands \
+            --no-session-persistence \
+            --effort "$EFFORT" \
+            --max-turns 100 \
+            --max-budget-usd "$BUDGET" \
+            "${MODEL_ARGS[@]}" \
+            --output-format json > "$RUNNER_TEMP/claude-result.json" || code=$?
+          echo "$code" > "$RUNNER_TEMP/claude-exit-code"
+
+      - name: Check Claude's result
+        if: steps.finding.outputs.engine == 'claude'
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          node <<'RESULT'
+          const fs = require("fs");
+          const tmp = process.env.RUNNER_TEMP;
+          const code = Number(fs.readFileSync(`${tmp}/claude-exit-code`, "utf8").trim() || "1");
+          let r = null;
+          try {
+            r = JSON.parse(fs.readFileSync(`${tmp}/claude-result.json`, "utf8"));
+          } catch {}
+          const fail = (message) => {
+            fs.writeFileSync(`${process.env.HELPER_DIR}/failure-reason.txt`, message);
+            console.error(`::error::${message}`);
+            process.exit(1);
+          };
+          if (!r || typeof r !== "object") {
+            fail(`Claude Code returned no result (exit ${code}; 124 is the 30-minute limit).`);
+          }
+          // The model that did most of the writing, for Mission Control's
+          // record of the fix.
+          const usage = r.modelUsage && typeof r.modelUsage === "object" ? r.modelUsage : {};
+          const [model] =
+            Object.entries(usage).sort(
+              (a, b) => (Number(b[1]?.outputTokens) || 0) - (Number(a[1]?.outputTokens) || 0),
+            )[0] ?? [];
+          fs.writeFileSync(`${process.env.HELPER_DIR}/agent.json`, JSON.stringify({ model: model ?? null }));
+          const refused = Array.isArray(r.permission_denials) ? r.permission_denials.length : 0;
+          console.log(
+            `Claude Code: ${r.subtype ?? "?"} after ${r.num_turns ?? "?"} turn(s), ` +
+              `${refused} tool use(s) refused, $${(Number(r.total_cost_usd) || 0).toFixed(2)}.`,
+          );
+          if (typeof r.result === "string" && r.result) console.log(r.result.slice(0, 3000));
+          if (code !== 0 || r.is_error === true || r.subtype !== "success") {
+            fail(`Claude Code stopped before finishing the fix (${String(r.subtype ?? "error").slice(0, 60)}, exit ${code}).`);
+          }
+          RESULT
+
+      # Neither agent can reach the registry, so a fix that changes
+      # package.json arrives with stale lockfiles. Resolved here, with no
+      # package's install script run.
+      - name: Regenerate lockfiles
+        id: lockfiles
+        run: |
+          set -euo pipefail
+          BASE_TREE="$RUNNER_TEMP/base-tree"
+          if [ ! -f package.json ] || cmp -s package.json "$BASE_TREE/package.json"; then
+            echo "package.json is unchanged; nothing to regenerate."
+            exit 0
+          fi
+          # A patch that rewrote package-manager configuration is refused
+          # further down; it does not get to choose a registry first.
+          for f in .npmrc .yarnrc .yarnrc.yml bunfig.toml .bunfig.toml .pnpmfile.cjs; do
+            if [ -e "$f" ] || [ -e "$BASE_TREE/$f" ]; then
+              if ! cmp -s "$f" "$BASE_TREE/$f"; then
+                echo "::warning::$f changed; lockfiles not regenerated (the patch will be refused)."
+                exit 0
+              fi
+            fi
+          done
+          # A manifest the registry cannot satisfy (a version that does not
+          # exist, a package from somewhere else) stops here, and says so.
+          regenerate() {
+            local what=$1
+            shift
+            if ! "$@" > "$RUNNER_TEMP/lockfile.log" 2>&1; then
+              tail -n 40 "$RUNNER_TEMP/lockfile.log"
+              {
+                printf 'The %s could not be regenerated for the patched package.json: ' "$what"
+                tail -c 600 "$RUNNER_TEMP/lockfile.log" | tr '\n' ' '
+              } > "$HELPER_DIR/failure-reason.txt"
+              exit 1
+            fi
+            tail -n 20 "$RUNNER_TEMP/lockfile.log"
+          }
+          if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
+            regenerate "npm lockfile" npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+          fi
+          if [ -f bun.lockb ] || [ -f bun.lock ]; then
+            # Installed outside the checkout: `npx bun` would run a bun the
+            # checkout itself provides.
+            regenerate "bun lockfile (bun ${BUN_VERSION} did not install)" \
+              env -C "$RUNNER_TEMP" npm install --prefix "$RUNNER_TEMP/bun" --no-save --no-audit --no-fund "bun@${BUN_VERSION}"
+            regenerate "bun lockfile" "$RUNNER_TEMP/bun/node_modules/.bin/bun" install --lockfile-only --ignore-scripts
+          fi
+
+      - name: Collect the fix
+        id: collect
+        run: |
+          set -euo pipefail
+          # These two are report artifacts, not part of the patch. Regular
+          # files only: a symlink here would read whatever it points at into
+          # a public PR body.
+          if [ -f CODEX_FIX_SUMMARY.md ] && [ ! -L CODEX_FIX_SUMMARY.md ]; then
+            head -c 4000 CODEX_FIX_SUMMARY.md > "$RUNNER_TEMP/summary.md"
+          else
+            echo "${FIX_ENGINE_LABEL:-The agent} wrote no summary." > "$RUNNER_TEMP/summary.md"
+          fi
+          if [ -f CODEX_FIX_NOTES.md ] && [ ! -L CODEX_FIX_NOTES.md ]; then
+            head -c 4000 CODEX_FIX_NOTES.md > "$RUNNER_TEMP/notes.md"
+          fi
+          rm -f CODEX_FIX_SUMMARY.md CODEX_FIX_NOTES.md
+
+          # Staged in the copy of .git taken before the agent ran, with the
+          # checkout as its work tree: the checkout's own .git may have been
+          # rewritten (its config can name filters that run on `git add`).
+          # The tree is what is compared, so a fix the agent committed itself
+          # still counts.
+          GIT=(git --git-dir="$RUNNER_TEMP/collect.git" --work-tree="$GITHUB_WORKSPACE" -c core.fsmonitor=false -c core.hooksPath=/dev/null)
           "${GIT[@]}" add -A
           if "${GIT[@]}" diff --cached --quiet --no-ext-diff "$BASE_SHA"; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
@@ -409,94 +682,231 @@ jobs:
       # A no-op run is a real outcome, not a crash: report it and stop
       # cleanly so the finding does not sit in a phantom "in flight" state.
       - name: Report no-change outcome
-        if: steps.codex.outputs.changed != 'true'
+        if: steps.collect.outputs.changed != 'true'
         run: |
           set -euo pipefail
           ARG=$(node -e '
             const fs = require("fs");
-            let notes = "Codex made no changes.";
+            const label = process.env.FIX_ENGINE_LABEL || "The agent";
+            let notes = label + " made no changes.";
             try { notes = fs.readFileSync(process.env.RUNNER_TEMP + "/notes.md", "utf8"); } catch {}
             process.stdout.write(JSON.stringify({
               event: "workflow.failed",
-              error: "Codex produced no change for this finding: " + notes.trim().slice(0, 1000),
+              error: label + " produced no change for this finding: " + notes.trim().slice(0, 1000),
             }));
           ')
           node "$HELPER_DIR/notify.mjs" "$ARG" || true
-          echo "::warning::Codex produced no change; no PR was opened."
+          echo "::warning::${FIX_ENGINE_LABEL:-The agent} produced no change; no PR was opened."
 
-      # ── Blast radius ───────────────────────────────────────────────────
+      # ── Blast radius, and what a fix may not touch ─────────────────────
       - name: Measure the patch
         id: radius
-        if: steps.codex.outputs.changed == 'true'
+        if: steps.collect.outputs.changed == 'true'
         run: |
           set -euo pipefail
-          GIT=(git -c core.fsmonitor=false -c core.hooksPath=/dev/null)
+          GIT=(git --git-dir="$RUNNER_TEMP/collect.git" --work-tree="$GITHUB_WORKSPACE" -c core.fsmonitor=false -c core.hooksPath=/dev/null)
           DIFF=("${GIT[@]}" diff --cached --no-ext-diff --no-textconv "$BASE_SHA")
-          # Captured BEFORE verification runs, as a patch file: only what
-          # Codex changed is ever committed, and the commit is built from
+          # Captured BEFORE verification runs, as a patch file: only what the
+          # agent changed is ever committed, and the commit is built from
           # this file rather than from the checkout.
           "${DIFF[@]}" --binary > "$RUNNER_TEMP/fix.patch"
-          "${DIFF[@]}" --name-only > "$RUNNER_TEMP/changed-files.txt"
-          FILES=$(wc -l < "$RUNNER_TEMP/changed-files.txt" | tr -d ' ')
-          ADDED=$("${DIFF[@]}" --numstat | awk '{a+=$1} END {print a+0}')
-          REMOVED=$("${DIFF[@]}" --numstat | awk '{r+=$2} END {print r+0}')
-          echo "files=$FILES"     >> "$GITHUB_OUTPUT"
-          echo "added=$ADDED"     >> "$GITHUB_OUTPUT"
-          echo "removed=$REMOVED" >> "$GITHUB_OUTPUT"
           "${DIFF[@]}" --stat > "$RUNNER_TEMP/diffstat.txt"
-          echo "Patch touches $FILES file(s): +$ADDED / -$REMOVED"
-          # For the guards: every path, unquoted (git quotes unusual names,
-          # which no anchored pattern would match) and with renames split
-          # into their delete and add (a rename shows only its new name).
-          "${DIFF[@]}" --no-renames --name-only -z | tr '\0' '\n' > "$RUNNER_TEMP/changed-paths.txt"
-          if grep -Eq '^\.github/workflows/' "$RUNNER_TEMP/changed-paths.txt"; then
-            echo "workflows=true" >> "$GITHUB_OUTPUT"
-            echo "::error::The patch modifies CI workflows — refusing it."
-          else
-            echo "workflows=false" >> "$GITHUB_OUTPUT"
-          fi
+          "${DIFF[@]}" --summary > "$RUNNER_TEMP/summary.txt"
+          # Every path unquoted (git quotes unusual names, which no anchored
+          # pattern would match), with renames split into their delete and
+          # add (a rename shows only its new name).
+          "${DIFF[@]}" --no-renames --name-only -z > "$RUNNER_TEMP/changed-paths.z"
+          "${DIFF[@]}" --no-renames --numstat -z > "$RUNNER_TEMP/numstat.z"
+          node <<'GUARDS'
+          const fs = require("fs");
+          const tmp = process.env.RUNNER_TEMP;
+          const base = `${tmp}/base-tree`;
+          const work = process.env.GITHUB_WORKSPACE;
+          const output = (lines) => fs.appendFileSync(process.env.GITHUB_OUTPUT, lines.join("\n") + "\n");
+          const printable = (value) => String(value).replace(/[^\x20-\x7e]/g, "?").slice(0, 200);
+          const readJson = (file) => {
+            try {
+              return JSON.parse(fs.readFileSync(file, "utf8"));
+            } catch {
+              return null;
+            }
+          };
 
-          # A "fix" that silences the scanner: the finding would disappear
-          # from the next scan and the remediation be confirmed with the
-          # vulnerability still there. Inline markers are what the scanners
-          # match (semgrep: a space then "nosem", any case; gitleaks: its
-          # allow comment) — spelled in pieces so this file is not one.
-          MARKERS=' no''sem|gitleaks'':allow'
-          IGNORE_FILES='(^|/)(\.gitleaks\.toml|\.gitleaksignore|\.semgrepignore|osv-scanner\.toml)$|^\.github/codex-security/'
-          ADDED_MARKERS=$(grep -E '^\+' "$RUNNER_TEMP/fix.patch" | grep -Ev '^\+\+\+ ' | grep -ciE "$MARKERS" || true)
-          REMOVED_MARKERS=$(grep -E '^-' "$RUNNER_TEMP/fix.patch" | grep -Ev '^--- ' | grep -ciE "$MARKERS" || true)
-          SILENCED=""
-          if grep -Eq "$IGNORE_FILES" "$RUNNER_TEMP/changed-paths.txt"; then
-            SILENCED="it edits a scanner's ignore file or rules"
-          elif [ "${ADDED_MARKERS:-0}" -gt "${REMOVED_MARKERS:-0}" ]; then
-            SILENCED="it adds an inline scanner suppression comment"
-          fi
-          if [ -n "$SILENCED" ]; then
-            echo "silences=true" >> "$GITHUB_OUTPUT"
-            echo "silenced_reason=$SILENCED" >> "$GITHUB_OUTPUT"
-            echo "::error::The patch silences a scanner ($SILENCED) — refusing it."
-          else
-            echo "silences=false" >> "$GITHUB_OUTPUT"
-          fi
+          const paths = fs.readFileSync(`${tmp}/changed-paths.z`, "utf8").split("\0").filter(Boolean);
 
-      - name: Abort on a workflow change
-        if: steps.codex.outputs.changed == 'true' && steps.radius.outputs.workflows == 'true'
-        run: |
-          set -euo pipefail
-          node "$HELPER_DIR/notify.mjs" '{"event":"workflow.failed","error":"Refused to push: the drafted fix modifies files under .github/workflows. A security fix must not change CI; fix it by hand."}' || true
-          exit 1
+          // Size, lockfiles left out: a dependency fix's regenerated lockfile
+          // can run to thousands of lines that say nothing about the change.
+          const LOCKFILE = /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?)$/;
+          let files = 0;
+          let added = 0;
+          let removed = 0;
+          let lockfiles = 0;
+          for (const entry of fs.readFileSync(`${tmp}/numstat.z`, "utf8").split("\0").filter(Boolean)) {
+            const [a, r, ...rest] = entry.split("\t");
+            if (LOCKFILE.test(rest.join("\t"))) {
+              lockfiles += 1;
+              continue;
+            }
+            files += 1;
+            // "-" for a binary file.
+            added += Number.parseInt(a, 10) || 0;
+            removed += Number.parseInt(r, 10) || 0;
+          }
+          output([`files=${files}`, `added=${added}`, `removed=${removed}`, `lockfiles=${lockfiles}`]);
+          console.log(
+            `Patch touches ${files} file(s): +${added} / -${removed}` +
+              (lockfiles ? `, and regenerates ${lockfiles} lockfile(s)` : ""),
+          );
 
-      - name: Abort on a silenced scanner
-        if: steps.codex.outputs.changed == 'true' && steps.radius.outputs.workflows == 'false' && steps.radius.outputs.silences == 'true'
+          // The first refusal stops here. Each reason completes "the drafted
+          // fix …"; any path or package name in it is made printable first.
+          function refuse(kind, reason) {
+            fs.writeFileSync(`${tmp}/refused.txt`, reason);
+            output(["refused=true", `refused_kind=${kind}`]);
+            console.log(`::error::Refusing the patch: it ${reason}.`);
+            process.exit(0);
+          }
+
+          if (paths.some((p) => /[\u0000-\u001f\u007f]/.test(p))) {
+            refuse("path", "changes a path whose name contains control characters");
+          }
+
+          // A "fix" that silences the scanner: the finding would disappear
+          // from the next scan and the remediation be confirmed with the
+          // vulnerability still there. Inline markers are what the scanners
+          // match (semgrep: a space then "nosem", any case; gitleaks: its
+          // allow comment) — spelled in pieces so this file is not one.
+          const IGNORE_FILES =
+            /(^|\/)(\.gitleaks\.toml|\.gitleaksignore|\.semgrepignore|osv-scanner\.toml)$|^\.github\/codex-security\//;
+          const MARKER = new RegExp(" no" + "sem|gitleaks" + ":allow", "i");
+          const patchLines = fs.readFileSync(`${tmp}/fix.patch`, "utf8").split("\n");
+          const markers = (sign, header) =>
+            patchLines.filter((l) => l.startsWith(sign) && !l.startsWith(header) && MARKER.test(l)).length;
+          const ignoreFile = paths.find((p) => IGNORE_FILES.test(p));
+          if (ignoreFile) {
+            refuse("silenced", `silences a scanner instead of fixing the code (it edits ${printable(ignoreFile)})`);
+          }
+          if (markers("+", "+++ ") > markers("-", "--- ")) {
+            refuse("silenced", "silences a scanner instead of fixing the code (it adds an inline suppression comment)");
+          }
+
+          // CI and everything it reads: workflows, local actions, the scripts
+          // they call.
+          const ci = paths.find((p) => /^\.github\//.test(p));
+          if (ci) refuse("ci", `modifies ${printable(ci)}: a security fix must not change CI`);
+
+          // What decides what installs and what runs: package-manager, git
+          // and hook configuration, and the agents' own instructions, which
+          // the next fix would read.
+          const CONFIG =
+            /(^|\/)(\.npmrc|\.yarnrc|\.yarnrc\.yml|bunfig\.toml|\.bunfig\.toml|\.pnpmfile\.cjs|\.pnp\.c?js|\.pnp\.loader\.mjs|\.gitmodules|\.gitattributes|\.mcp\.json|CLAUDE\.md|AGENTS\.md|\.?lefthook\.ya?ml|\.pre-commit-config\.yaml)$|(^|\/)\.(claude|codex|husky)\//;
+          const config = paths.find((p) => CONFIG.test(p));
+          if (config) {
+            refuse("config", `modifies ${printable(config)}, which decides what installs and runs`);
+          }
+
+          // A link can point anywhere on the machine that later builds the
+          // tree; a submodule pulls in another repository.
+          if (/mode (\d{6} => )?1[26]0000 /.test(fs.readFileSync(`${tmp}/summary.txt`, "utf8"))) {
+            refuse("path", "adds a symbolic link or a submodule");
+          }
+
+          // Dependencies: a security fix upgrades what the project already
+          // uses, from where it already installs it.
+          const DEPENDENCY_FIELDS = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"];
+          // A version, range or dist-tag: no protocol, URL, path or alias.
+          const REGISTRY_SPEC = /^[0-9A-Za-z.^~<>=*|+\- ]{1,100}$/;
+          const baseLock = readJson(`${base}/package-lock.json`) ?? readJson(`${base}/npm-shrinkwrap.json`);
+          const lockPackages = (lock) => (lock && typeof lock.packages === "object" && lock.packages) || {};
+          const nameOf = (key, entry) => entry?.name ?? key.slice(key.lastIndexOf("node_modules/") + 13);
+          const known = new Set(
+            Object.entries(lockPackages(baseLock))
+              .filter(([key]) => key.includes("node_modules/"))
+              .map(([key, entry]) => nameOf(key, entry)),
+          );
+          for (const manifest of paths.filter((p) => /(^|\/)package\.json$/.test(p))) {
+            const before = readJson(`${base}/${manifest}`) ?? {};
+            const after = readJson(`${work}/${manifest}`);
+            if (!fs.existsSync(`${work}/${manifest}`)) continue;
+            if (!after) refuse("dependency", `leaves ${printable(manifest)} as invalid JSON`);
+            if (JSON.stringify(before.scripts ?? {}) !== JSON.stringify(after.scripts ?? {})) {
+              refuse("dependency", `changes the scripts in ${printable(manifest)}, which run in CI, on deploys and on developers' machines`);
+            }
+            for (const field of DEPENDENCY_FIELDS) for (const name of Object.keys(before[field] ?? {})) known.add(name);
+            const check = (name, spec, was) => {
+              if (spec === was) return;
+              if (!known.has(name)) {
+                refuse("dependency", `adds ${printable(name)}, a package the project did not use`);
+              }
+              if (!REGISTRY_SPEC.test(String(spec)) && !/^\$[\w@/.-]+$/.test(String(spec))) {
+                refuse("dependency", `points ${printable(name)} at ${printable(spec)}, which is not a registry version`);
+              }
+            };
+            for (const field of DEPENDENCY_FIELDS) {
+              for (const [name, spec] of Object.entries(after[field] ?? {})) check(name, spec, before[field]?.[name]);
+            }
+            // overrides (npm, bun) and resolutions (bun, yarn): nested
+            // objects whose keys name packages, optionally with a range.
+            const walk = (now, then, prefix) => {
+              for (const [key, value] of Object.entries(now ?? {})) {
+                const bare = key.replace(/^\*\*\//, "");
+                const name =
+                  key === "." ? prefix : bare.startsWith("@") ? bare.split("@").slice(0, 2).join("@") : bare.split("@")[0];
+                if (value && typeof value === "object") walk(value, then?.[key], name);
+                else check(name, value, then?.[key]);
+              }
+            };
+            walk(after.overrides, before.overrides, "");
+            walk(after.resolutions, before.resolutions, "");
+          }
+          for (const lockfile of paths.filter((p) => /(^|\/)(package-lock|npm-shrinkwrap)\.json$/.test(p))) {
+            const before = lockPackages(readJson(`${base}/${lockfile}`));
+            const after = lockPackages(readJson(`${work}/${lockfile}`));
+            const host = (url) => {
+              try {
+                return new URL(url).host;
+              } catch {
+                return null;
+              }
+            };
+            const hosts = new Set(Object.values(before).map((e) => host(e?.resolved)).filter(Boolean));
+            if (hosts.size === 0) hosts.add("registry.npmjs.org");
+            for (const [key, entry] of Object.entries(after)) {
+              if (!entry?.resolved || before[key]?.resolved === entry.resolved) continue;
+              const name = nameOf(key, entry);
+              const url = host(entry.resolved) ? new URL(entry.resolved) : null;
+              if (!url || !hosts.has(url.host)) {
+                refuse("dependency", `installs ${printable(name)} from ${printable(url?.host ?? entry.resolved)}`);
+              }
+              // A registry tarball lives under its package's own name; one
+              // under another name is a different package wearing this one's.
+              let pathname = url.pathname;
+              try {
+                pathname = decodeURIComponent(pathname);
+              } catch {}
+              if (!pathname.startsWith(`/${name}/-/`)) {
+                refuse("dependency", `installs ${printable(name)} from another package's release`);
+              }
+            }
+          }
+          output(["refused=false"]);
+          GUARDS
+
+      - name: Abort on a refused patch
+        if: steps.collect.outputs.changed == 'true' && steps.radius.outputs.refused == 'true'
         env:
-          SILENCED: ${{ steps.radius.outputs.silenced_reason }}
+          KIND: ${{ steps.radius.outputs.refused_kind }}
         run: |
           set -euo pipefail
           ARG=$(node -e '
+            const fs = require("fs");
+            const reason = fs.readFileSync(process.env.RUNNER_TEMP + "/refused.txt", "utf8").trim();
             process.stdout.write(JSON.stringify({
               event: "workflow.failed",
-              error: "Refused to push: the drafted fix silences the scanner instead of fixing the code (" +
-                     process.env.SILENCED + "). Fix it by hand, or dismiss the finding with a reason.",
+              error: "Refused to push: the drafted fix " + reason + ". " +
+                (process.env.KIND === "silenced"
+                  ? "Fix it by hand, or dismiss the finding with a reason."
+                  : "Fix it by hand."),
             }));
           ')
           node "$HELPER_DIR/notify.mjs" "$ARG" || true
@@ -505,7 +915,7 @@ jobs:
       # ── Hard stop: never push a patch that introduces a secret ─────────
       - name: Secret-leak guard
         id: secrets
-        if: steps.codex.outputs.changed == 'true' && steps.radius.outputs.workflows == 'false' && steps.radius.outputs.silences == 'false'
+        if: steps.collect.outputs.changed == 'true' && steps.radius.outputs.refused == 'false'
         run: |
           set -euo pipefail
           curl -sSfL --retry 3 -o "$RUNNER_TEMP/gitleaks.tgz" \
@@ -526,16 +936,21 @@ jobs:
             if (!Array.isArray(r)) process.exit(1);
             process.stdout.write(String(r.length));
           ')
+          # This run's own callback key matches no gitleaks rule, and an
+          # agent that can read the runner's files could have copied it.
+          if grep -qF -f "$HELPER_DIR/callback.key" "$RUNNER_TEMP/added-lines.txt"; then
+            COUNT=$((COUNT + 1))
+          fi
           echo "count=$COUNT" >> "$GITHUB_OUTPUT"
           if [ "$COUNT" != "0" ]; then
             echo "clean=false" >> "$GITHUB_OUTPUT"
-            echo "::error::gitleaks found $COUNT secret(s) in the lines this patch adds — refusing to push."
+            echo "::error::Found $COUNT secret(s) in the lines this patch adds — refusing to push."
           else
             echo "clean=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Abort on leaked secret
-        if: steps.codex.outputs.changed == 'true' && steps.secrets.outputs.clean == 'false'
+        if: steps.collect.outputs.changed == 'true' && steps.secrets.outputs.clean == 'false'
         env:
           LEAK_COUNT: ${{ steps.secrets.outputs.count }}
         run: |
@@ -544,7 +959,7 @@ jobs:
             process.stdout.write(JSON.stringify({
               event: "workflow.failed",
               error: "Refused to push: the lines this patch adds contain " +
-                     process.env.LEAK_COUNT + " secret(s) per gitleaks. " +
+                     process.env.LEAK_COUNT + " secret(s). " +
                      "A remediation must never commit a credential.",
               verification: { secrets_clean: false, ok: false, checks: [] },
             }));
@@ -553,23 +968,24 @@ jobs:
           exit 1
 
       # ── Does the patched tree still work? ──────────────────────────────
-      # Failures are reported, not fatal: a reviewer must be able to see a
-      # broken fix rather than have it silently discarded. Run in a copy, so
-      # whatever the checks do to their tree cannot reach the commit.
+      # The base as checked out plus the patch: exactly the tree that is
+      # committed, not the agent's working copy. The checks run the
+      # repository's code, and the code the model just wrote, so they run as
+      # a user of their own — one that can read none of this job's files
+      # (the callback key, the event payload) and none of the environment of
+      # the steps that hold a token — and whatever they start is killed with
+      # them.
       - name: Verify the patched tree
         id: verify
-        if: steps.codex.outputs.changed == 'true' && steps.secrets.outputs.clean == 'true'
+        if: steps.collect.outputs.changed == 'true' && steps.secrets.outputs.clean == 'true'
         continue-on-error: true
         run: |
           set -uo pipefail
-          VERIFY_DIR="$RUNNER_TEMP/verify-tree"
-          rm -rf "$VERIFY_DIR"
-          cp -a . "$VERIFY_DIR"
-          cd "$VERIFY_DIR"
           cat > "$RUNNER_TEMP/verify.mjs" <<'VERIFY'
           import { execSync } from "node:child_process";
           import fs from "node:fs";
 
+          const out = process.argv[2];
           const checks = [];
           const hasPkg = fs.existsSync("package.json");
 
@@ -579,10 +995,12 @@ jobs:
               fn();
               checks.push({ name, ok: true, skipped: false, ms: Date.now() - started });
               console.log(`PASS ${name}`);
+              return true;
             } catch (err) {
-              const detail = String(err.stdout || err.message || err).slice(-1500);
+              const detail = String(`${err.stdout || ""}${err.stderr || ""}` || err.message || err).slice(-1500);
               checks.push({ name, ok: false, skipped: false, ms: Date.now() - started, detail });
               console.log(`FAIL ${name}\n${detail}`);
+              return false;
             }
           }
 
@@ -600,9 +1018,13 @@ jobs:
             const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
             const scripts = pkg.scripts || {};
 
-            record(
+            // Exactly what the lockfile pins, as CI installs it: a lockfile
+            // that disagrees with package.json fails here instead of being
+            // quietly re-resolved.
+            const locked = fs.existsSync("package-lock.json") || fs.existsSync("npm-shrinkwrap.json");
+            const installed = record(
               "install",
-              run("npm ci --no-audit --no-fund || npm install --no-audit --no-fund", 10 * 60_000),
+              run(locked ? "npm ci --no-audit --no-fund" : "npm install --no-audit --no-fund", 15 * 60_000),
             );
 
             // Run whichever of these the repo actually defines, in the order
@@ -617,36 +1039,111 @@ jobs:
               ["build", scripts.build ? "build" : null],
             ];
             for (const [label, script] of candidates) {
-              if (!script) {
+              if (!script || !installed) {
                 checks.push({
                   name: label,
-                  ok: true,
+                  ok: !installed && script ? false : true,
                   skipped: true,
-                  detail: "not defined in package.json",
+                  detail: script ? "not run: the install failed" : "not defined in package.json",
                 });
                 continue;
               }
-              record(label, run(`npm run ${script} --silent`, 10 * 60_000));
+              record(label, run(`npm run ${script} --silent`, 20 * 60_000));
             }
           }
 
           const ran = checks.filter((c) => !c.skipped);
           const ok = ran.length > 0 && ran.every((c) => c.ok);
-          fs.writeFileSync(
-            process.env.RUNNER_TEMP + "/verification.json",
-            JSON.stringify({ checks, ok: ran.length === 0 ? null : ok, secrets_clean: true }),
-          );
-          console.log(`verification: ${ran.length === 0 ? "UNKNOWN" : ok ? "PASS" : "FAIL"}`);
+          fs.writeFileSync(out, JSON.stringify({ checks, ok: ran.length === 0 ? null : ok }));
+          console.log(`checks: ${ran.length === 0 ? "NONE RAN" : ok ? "PASS" : "FAIL"}`);
           VERIFY
-          node "$RUNNER_TEMP/verify.mjs"
+
+          # One failed "check" standing for everything that did not run.
+          fail() {
+            node -e '
+              require("fs").writeFileSync(process.env.RUNNER_TEMP + "/verification.json", JSON.stringify({
+                checks: [{ name: process.argv[1], ok: false, skipped: false, detail: process.argv[2] }],
+                ok: false,
+              }));
+            ' "$1" "$2"
+          }
+
+          VERIFY_DIR="$RUNNER_TEMP/verify-tree"
+          rm -rf "$VERIFY_DIR"
+          cp -a "$RUNNER_TEMP/base-tree" "$VERIFY_DIR"
+          if ! git -C "$VERIFY_DIR" -c core.hooksPath=/dev/null apply --binary "$RUNNER_TEMP/fix.patch" 2> "$RUNNER_TEMP/apply.log"; then
+            fail "apply" "The patch does not apply to the base: $(tail -c 1000 "$RUNNER_TEMP/apply.log")"
+          elif ! sudo useradd --create-home --shell /bin/bash fixcheck; then
+            fail "isolation" "Could not create the user the checks run as."
+          else
+            CHECK_HOME=$(getent passwd fixcheck | cut -d: -f6)
+            # The script is root's, outside the checks' reach.
+            sudo install -d -m 0755 -o root -g root /usr/local/lib/fixcheck
+            sudo install -m 0644 -o root -g root "$RUNNER_TEMP/verify.mjs" /usr/local/lib/fixcheck/verify.mjs
+            sudo cp -a "$VERIFY_DIR" "$CHECK_HOME/tree"
+            sudo chown -R fixcheck:fixcheck "$CHECK_HOME/tree"
+            sudo -u fixcheck -H env -i PATH="$PATH" HOME="$CHECK_HOME" CI=true LANG=C.UTF-8 \
+              bash -c 'cd "$HOME/tree" && exec node /usr/local/lib/fixcheck/verify.mjs "$HOME/verification.json"'
+            # Nothing the checks started outlives them.
+            sudo pkill -KILL -u fixcheck || true
+            if ! sudo cat "$CHECK_HOME/verification.json" > "$RUNNER_TEMP/verification.json" 2>/dev/null; then
+              fail "checks" "The checks did not report a result."
+            fi
+          fi
+
+          # Written by the checks' own user, so held to the shape Mission
+          # Control accepts, and the verdict recomputed from the checks.
           node -e '
             const fs = require("fs");
-            let ok = null;
-            try {
-              ok = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + "/verification.json","utf8")).ok;
-            } catch {}
+            const file = process.env.RUNNER_TEMP + "/verification.json";
+            let raw = null;
+            try { raw = JSON.parse(fs.readFileSync(file, "utf8")); } catch {}
+            const clean = (v) => String(v ?? "").replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "");
+            const checks = (Array.isArray(raw?.checks) ? raw.checks : []).slice(0, 20).map((c) => ({
+              name: clean(c?.name).slice(0, 100) || "check",
+              ok: c?.ok === true,
+              skipped: c?.skipped === true,
+              ...(Number.isFinite(c?.ms) ? { ms: Math.round(c.ms) } : {}),
+              ...(c?.detail ? { detail: clean(c.detail).slice(-1500) } : {}),
+            }));
+            const ran = checks.filter((c) => !c.skipped);
+            const ok = !raw ? false : ran.length === 0 ? (raw.ok === null ? null : false) : ran.every((c) => c.ok);
+            fs.writeFileSync(file, JSON.stringify({ checks, ok, secrets_clean: true }));
             fs.appendFileSync(process.env.GITHUB_OUTPUT, `ok=${ok}\n`);
+            console.log(`verification: ${ok === null ? "UNKNOWN" : ok ? "PASS" : "FAIL"}`);
           '
+
+      # A fix that fails the checks can never merge, and no person reviews
+      # fixes, so it is not pushed: the run reports what broke and shows the
+      # patch, and the finding is tried again on a later night.
+      - name: Report failed checks
+        id: checksfail
+        if: steps.collect.outputs.changed == 'true' && steps.secrets.outputs.clean == 'true' && steps.verify.outputs.ok != 'true'
+        run: |
+          set -euo pipefail
+          ARG=$(node -e '
+            const fs = require("fs");
+            let v = { checks: [], ok: false };
+            try {
+              v = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + "/verification.json", "utf8"));
+            } catch {}
+            const failed = (v.checks || []).filter((c) => !c.ok && !c.skipped).map((c) => c.name);
+            const what = failed.length
+              ? "failed these checks: " + failed.join(", ")
+              : v.ok === null
+                ? "could not be checked: the repository defines no checks"
+                : "could not be checked";
+            process.stdout.write(JSON.stringify({
+              event: "workflow.failed",
+              error: "Not pushed: the drafted fix " + what + ".",
+              verification: { checks: v.checks || [], ok: v.ok === null ? null : false, secrets_clean: true },
+            }));
+          ')
+          node "$HELPER_DIR/notify.mjs" "$ARG" || true
+          echo "::error::The fix did not pass the repository's checks; nothing was pushed."
+          echo "The patch that was tried:"
+          head -n 400 "$RUNNER_TEMP/fix.patch"
+          exit 1
 
       # ── Ship it as a draft ─────────────────────────────────────────────
       # Built in a fresh repository from the patch file, never from the
@@ -656,7 +1153,7 @@ jobs:
       # or hook runs either.
       - name: Commit and push
         id: push
-        if: steps.codex.outputs.changed == 'true' && steps.secrets.outputs.clean == 'true'
+        if: steps.collect.outputs.changed == 'true' && steps.secrets.outputs.clean == 'true' && steps.verify.outputs.ok == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -684,14 +1181,51 @@ jobs:
           ARG=$(node -e 'process.stdout.write(JSON.stringify({ event: "branch.pushed", head_sha: process.argv[1] }))' "$COMMIT")
           node "$HELPER_DIR/notify.mjs" "$ARG" || echo "::warning::branch.pushed was not delivered"
 
+      # Which CI Mission Control runs on this fix before merging it. Pull
+      # requests this workflow's token opens start no workflows, and the token
+      # is not given `actions: write` to start one, so Mission Control
+      # dispatches it with its own and merges only once it passes on this
+      # exact commit.
+      - name: Find the repository's CI
+        if: steps.push.outcome == 'success'
+        env:
+          FIX_CI_WORKFLOW: ${{ vars.FIX_CI_WORKFLOW }}
+        run: |
+          set -euo pipefail
+          node <<'CI'
+          const fs = require("fs");
+          const tmp = process.env.RUNNER_TEMP;
+          const name = process.env.FIX_CI_WORKFLOW || "ci.yml";
+          let ci = { workflow: null, dispatchable: false };
+          if (/^[A-Za-z0-9._-]{1,100}\.ya?ml$/.test(name)) {
+            // The base's copy: the patch cannot change CI.
+            const file = `${tmp}/base-tree/.github/workflows/${name}`;
+            if (fs.existsSync(file)) {
+              ci = {
+                workflow: `.github/workflows/${name}`,
+                dispatchable: /\bworkflow_dispatch\b/.test(fs.readFileSync(file, "utf8")),
+              };
+            }
+          } else {
+            console.log("::warning::FIX_CI_WORKFLOW is not a workflow file name; no CI is named.");
+          }
+          fs.writeFileSync(`${tmp}/ci.json`, JSON.stringify(ci));
+          console.log(
+            ci.workflow
+              ? `CI: ${ci.workflow}${ci.dispatchable ? "" : " (no workflow_dispatch trigger)"}`
+              : "No CI workflow found.",
+          );
+          CI
+
       - name: Open draft PR
         id: openpr
         if: steps.push.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          FILES:   ${{ steps.radius.outputs.files }}
-          ADDED:   ${{ steps.radius.outputs.added }}
-          REMOVED: ${{ steps.radius.outputs.removed }}
+          FILES:     ${{ steps.radius.outputs.files }}
+          ADDED:     ${{ steps.radius.outputs.added }}
+          REMOVED:   ${{ steps.radius.outputs.removed }}
+          LOCKFILES: ${{ steps.radius.outputs.lockfiles }}
         run: |
           set -euo pipefail
           # Not inside the checkout: gh would run git there, with the token
@@ -701,7 +1235,11 @@ jobs:
           # as data — no finding-derived text is interpolated here.
           {
             cat "$RUNNER_TEMP/pr-header.md"
-            echo "- Blast radius: ${FILES} file(s), +${ADDED} / -${REMOVED}"
+            if [ "${LOCKFILES:-0}" = "0" ]; then
+              echo "- Blast radius: ${FILES} file(s), +${ADDED} / -${REMOVED}"
+            else
+              echo "- Blast radius: ${FILES} file(s), +${ADDED} / -${REMOVED}, plus ${LOCKFILES} regenerated lockfile(s), not counted"
+            fi
             echo "- Secret scan of the added lines: clean"
             echo
             echo "## What changed"
@@ -725,22 +1263,26 @@ jobs:
               for (const c of v.checks || []) {
                 const mark = c.skipped ? "-" : c.ok ? "PASS" : "FAIL";
                 console.log(`- **${c.name}**: ${c.skipped ? "skipped" : mark}`);
-                if (!c.ok && c.detail) {
-                  console.log("  <details><summary>output</summary>\n");
-                  console.log("  ```\n  " + String(c.detail).replace(/```/g, "` ` `").split("\n").join("\n  ") + "\n  ```");
-                  console.log("  </details>");
-                }
               }
             '
             echo
             echo "## How this merges"
             echo
-            echo "Opened as a **draft**; nothing in this workflow merges it. Mission Control"
-            echo "merges it only after **two independent admin approvals of its current"
-            echo "commit** — approvals given before a new commit do not count — or, when an"
-            echo "administrator has set a self-healing auto-merge ceiling that covers this"
-            echo "finding's severity, through the self-healing queue (off by default). Either"
-            echo "way the merge is pinned to the commit that was checked."
+            node -e '
+              const fs = require("fs");
+              let ci = { workflow: null, dispatchable: false };
+              try { ci = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + "/ci.json", "utf8")); } catch {}
+              console.log(
+                "No person reviews this pull request. " +
+                  (ci.workflow && ci.dispatchable
+                    ? "Mission Control runs `" + ci.workflow + "` on it and merges it by itself once that passes on this exact commit"
+                    : ci.workflow
+                      ? "`" + ci.workflow + "` has no workflow_dispatch trigger, so Mission Control cannot run it here and does not merge this"
+                      : "Mission Control merges it by itself on the checks above") +
+                  ", provided the patch stays within its size limits. Otherwise Mission Control closes it, and the " +
+                  "finding is tried again on a later night. A push to this branch stops it merging.",
+              );
+            '
           } > "$RUNNER_TEMP/pr-body.md"
 
           # "$(cat ...)" passes the title as one argv element; the shell never
@@ -768,12 +1310,16 @@ jobs:
           set -euo pipefail
           ARG=$(node -e '
             const fs = require("fs");
-            let verification = { checks: [], ok: null, secrets_clean: true };
-            try {
-              verification = JSON.parse(
-                fs.readFileSync(process.env.RUNNER_TEMP + "/verification.json", "utf8"),
-              );
-            } catch {}
+            const read = (name, fallback) => {
+              try {
+                return JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + "/" + name, "utf8"));
+              } catch {
+                return fallback;
+              }
+            };
+            const verification = read("verification.json", { checks: [], ok: null, secrets_clean: true });
+            // The CI Mission Control must see pass on this commit before it merges.
+            verification.ci = read("ci.json", { workflow: null, dispatchable: false });
             process.stdout.write(JSON.stringify({
               event: "pr.opened",
               pr_number: Number(process.env.PR_NUMBER),
@@ -791,13 +1337,23 @@ jobs:
       # Skipped when a guard already reported a specific failure, so its
       # precise reason is not overwritten by this generic one.
       - name: Notify failure
-        if: (failure() || cancelled()) && steps.secrets.outputs.clean != 'false' && steps.radius.outputs.workflows != 'true' && steps.radius.outputs.silences != 'true'
+        if: (failure() || cancelled()) && steps.secrets.outputs.clean != 'false' && steps.radius.outputs.refused != 'true' && steps.checksfail.outcome != 'failure'
         env:
           JOB_STATUS: ${{ job.status }}
         run: |
           [ -s "${HELPER_DIR:-/nonexistent}/notify.mjs" ] || exit 0
-          if [ "$JOB_STATUS" = "cancelled" ]; then
-            node "$HELPER_DIR/notify.mjs" '{"event":"workflow.failed","error":"The Codex remediation run was cancelled."}' || true
-          else
-            node "$HELPER_DIR/notify.mjs" '{"event":"workflow.failed","error":"Codex remediation workflow failed. See the run log."}' || true
-          fi
+          # A step that knew why it failed left the reason behind.
+          ARG=$(node -e '
+            const fs = require("fs");
+            const label = process.env.FIX_ENGINE_LABEL ? process.env.FIX_ENGINE_LABEL + " " : "";
+            let reason = "";
+            try {
+              reason = fs.readFileSync(process.env.HELPER_DIR + "/failure-reason.txt", "utf8").trim();
+            } catch {}
+            const error =
+              process.env.JOB_STATUS === "cancelled"
+                ? "The " + label + "fix run was cancelled."
+                : reason || "The " + label + "fix workflow failed. See the run log.";
+            process.stdout.write(JSON.stringify({ event: "workflow.failed", error: error.slice(0, 2000) }));
+          ')
+          node "$HELPER_DIR/notify.mjs" "$ARG" || true

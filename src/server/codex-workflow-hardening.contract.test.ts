@@ -9,7 +9,10 @@
 //     osv-scanner downloads meant a clean result could change with no code
 //     change, or a compromised release ran with a repository token;
 //   - the OpenAI key and a push-capable token were visible to every step,
-//     including the ones running code the model had just written.
+//     including the ones running code the model had just written;
+//   - with fixes merging unattended, the checks ran the model's code as the
+//     job's own user, beside files holding the callback key, and on the
+//     agent's working copy rather than the tree that is committed.
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { load as loadYaml } from "js-yaml";
@@ -31,9 +34,14 @@ type Job = { env?: Record<string, unknown>; steps?: Step[] };
 
 function read(file: string) {
   const text = readFileSync(path.join(process.cwd(), ".github", "workflows", file), "utf8");
-  const doc = loadYaml(text) as { jobs: Record<string, Job> };
+  const doc = loadYaml(text) as { jobs: Record<string, Job>; permissions?: Record<string, string> };
   const job = Object.values(doc.jobs)[0];
-  return { text, job, steps: job.steps ?? [] };
+  return { text, job, steps: job.steps ?? [], permissions: doc.permissions ?? {} };
+}
+
+/** A step's shell commands, with heredoc bodies (prompt text, inline scripts) removed. */
+function commands(step: Step | undefined): string {
+  return (step?.run ?? "").replace(/<<'(\w+)'[\s\S]*?\n\1(\n|$)/g, "");
 }
 
 const SCAN = read("codex-security-scan.yml");
@@ -172,9 +180,103 @@ describe("the remediation workflow", () => {
     expect(push).not.toMatch(/--force|\s-f\s/);
   });
 
-  it("scans only the lines the patch adds for secrets, and refuses CI changes", () => {
+  it("scans only the lines the patch adds for secrets, and for this run's callback key", () => {
     expect(REMEDIATION.text).toContain('"$RUNNER_TEMP/gitleaks" stdin');
-    expect(REMEDIATION.text).toContain("grep -Eq '^\\.github/workflows/'");
+    expect(REMEDIATION.text).toContain('grep -qF -f "$HELPER_DIR/callback.key"');
+  });
+
+  it("refuses CI changes (codex-remediation-guards.contract.test.ts runs the guards)", () => {
+    const measure = REMEDIATION.steps.find((s) => s.name === "Measure the patch")?.run ?? "";
+    expect(measure).toContain("/^\\.github\\//.test(p)");
+  });
+
+  it("gives the Anthropic key to the Claude step only", () => {
+    expect(stepsReferencing(REMEDIATION.steps, /secrets\.ANTHROPIC_API_KEY/)).toEqual([
+      "Author the fix with Claude",
+    ]);
+  });
+
+  it("runs nothing but Claude Code beside the Anthropic key, restricted to file tools", () => {
+    const claude = commands(REMEDIATION.steps.find((s) => s.name === "Author the fix with Claude"));
+    expect(claude).toContain("claude -p");
+    for (const flag of [
+      "--bare",
+      "--restricted",
+      '--tools "Read,Glob,Grep,Edit,Write"',
+      "--permission-mode acceptEdits",
+      "--permission-prompts none",
+      "--strict-mcp-config",
+      "--no-session-persistence",
+      "--max-budget-usd",
+    ]) {
+      expect(claude, flag).toContain(flag);
+    }
+    expect(claude).not.toMatch(/Bash|WebFetch|bypassPermissions|dangerously/);
+    expect(claude).not.toMatch(/(^|[;&|(]\s*)(git|node|npm|npx)\s/m);
+  });
+
+  it("installs both agents pinned, before any key is in reach", () => {
+    const install = REMEDIATION.steps.find((s) => s.name === "Install the fix agent");
+    expect(JSON.stringify(install?.env ?? {})).not.toContain("secrets.");
+    expect(REMEDIATION.job.env?.CLAUDE_CODE_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(install?.run).toContain('"@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"');
+    expect(install?.run).toContain('"@openai/codex@${CODEX_CLI_VERSION}"');
+    const agents = ["Author the fix with Codex", "Author the fix with Claude"];
+    for (const name of agents) {
+      expect(commands(REMEDIATION.steps.find((s) => s.name === name))).not.toMatch(/npm install/);
+    }
+  });
+
+  it("keeps the job's own files from every other user", () => {
+    expect(REMEDIATION.steps[0]?.run).toContain('chmod 700 "$RUNNER_TEMP"');
+    expect(REMEDIATION.steps[0]?.run).toContain('chmod o-rwx "$HOME"');
+  });
+
+  it("stages the patch in a copy of .git taken before the agent ran", () => {
+    for (const name of ["Collect the fix", "Measure the patch"]) {
+      const run = REMEDIATION.steps.find((s) => s.name === name)?.run ?? "";
+      expect(run, name).toContain('--git-dir="$RUNNER_TEMP/collect.git"');
+    }
+    const record = REMEDIATION.steps.find((s) => s.name === "Record the base commit")?.run ?? "";
+    expect(record).toContain('cp -a .git "$RUNNER_TEMP/collect.git"');
+  });
+
+  it("checks the committed tree, as a user of its own, and kills what the checks leave", () => {
+    const verify = REMEDIATION.steps.find((s) => s.name === "Verify the patched tree")?.run ?? "";
+    expect(verify).toContain('cp -a "$RUNNER_TEMP/base-tree" "$VERIFY_DIR"');
+    expect(verify).toContain('apply --binary "$RUNNER_TEMP/fix.patch"');
+    expect(verify).toContain("sudo -u fixcheck -H env -i");
+    expect(verify).toContain("sudo pkill -KILL -u fixcheck");
+    // The lockfile is the one CI installs from: no silent re-resolve.
+    expect(verify).toContain('locked ? "npm ci --no-audit --no-fund"');
+  });
+
+  it("pushes only a fix that passed its checks", () => {
+    const push = REMEDIATION.steps.find((s) => s.name === "Commit and push") as Step & {
+      if?: string;
+    };
+    expect(push.if).toContain("steps.verify.outputs.ok == 'true'");
+  });
+
+  it("regenerates lockfiles without running any package's install script", () => {
+    const lock = REMEDIATION.steps.find((s) => s.name === "Regenerate lockfiles")?.run ?? "";
+    expect(lock).toContain("npm install --package-lock-only --ignore-scripts");
+    expect(lock).toContain("install --lockfile-only --ignore-scripts");
+    // bun from a prefix of its own: `npx bun` would run one the checkout provides.
+    expect(lock).toContain('env -C "$RUNNER_TEMP" npm install --prefix "$RUNNER_TEMP/bun"');
+    const code = lock
+      .split("\n")
+      .filter((line) => !line.trim().startsWith("#"))
+      .join("\n");
+    expect(code).not.toMatch(/\bnpx\b/);
+    expect(REMEDIATION.job.env?.BUN_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+
+  it("names the repository's CI for Mission Control and cannot start a workflow itself", () => {
+    expect(REMEDIATION.permissions).toEqual({ contents: "write", "pull-requests": "write" });
+    expect(REMEDIATION.text).not.toMatch(/gh workflow run|actions\/workflows/);
+    const notify = REMEDIATION.steps.find((s) => s.name === "Notify PR opened")?.run ?? "";
+    expect(notify).toContain('verification.ci = read("ci.json"');
   });
 
   it("only ever pushes a codex/fix- branch", () => {

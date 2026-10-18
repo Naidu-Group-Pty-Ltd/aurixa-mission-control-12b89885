@@ -11086,6 +11086,8 @@ export type Database = {
           clone_gate_default_hours: number
           clone_gate_enabled: boolean
           codex_auto_merge_ceiling: string
+          codex_autofix_enabled: boolean
+          codex_autofix_max_per_night: number
           codex_cascade_gate: string
           codex_deep_scan_scope: string
           codex_nightly_cron: string
@@ -11115,6 +11117,8 @@ export type Database = {
           clone_gate_default_hours?: number
           clone_gate_enabled?: boolean
           codex_auto_merge_ceiling?: string
+          codex_autofix_enabled?: boolean
+          codex_autofix_max_per_night?: number
           codex_cascade_gate?: string
           codex_deep_scan_scope?: string
           codex_nightly_cron?: string
@@ -11144,6 +11148,8 @@ export type Database = {
           clone_gate_default_hours?: number
           clone_gate_enabled?: boolean
           codex_auto_merge_ceiling?: string
+          codex_autofix_enabled?: boolean
+          codex_autofix_max_per_night?: number
           codex_cascade_gate?: string
           codex_deep_scan_scope?: string
           codex_nightly_cron?: string

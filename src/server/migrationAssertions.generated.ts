@@ -1124,4 +1124,12 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "column", table: "codex_findings", column: "assigned_at" },
     ],
   },
+  {
+    migration: "20261018120000_codex_autofix_settings.sql",
+    version: "20261018120000",
+    assertions: [
+      { kind: "column", table: "prime_config", column: "codex_autofix_enabled" },
+      { kind: "column", table: "prime_config", column: "codex_autofix_max_per_night" },
+    ],
+  },
 ];

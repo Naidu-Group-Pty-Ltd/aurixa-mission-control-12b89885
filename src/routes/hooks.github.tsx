@@ -3,7 +3,6 @@ import crypto from "crypto";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { createCascadeForAllClones } from "@/server/cascade-trigger.server";
 import { executeCascade } from "@/server/cascade-engine.server";
-import { enqueueScanNoAuth, resolveScanTarget } from "@/server/codex-scheduling.server";
 import { writeAuditLog } from "@/server/audit.server";
 import {
   closePullRequestFindings,
@@ -60,9 +59,9 @@ export const Route = createFileRoute("/hooks/github")({
           });
         }
 
-        // Phase 4 — PR-driven Codex Security scans. `pull_request` opens,
-        // synchronizes, or reopens trigger a scan against the PR head SHA;
-        // scans are deduped within prime_config.codex_scan_dedup_hours.
+        // Pull requests: Codex fix PR bookkeeping, and a merged PR cascading.
+        // They are no longer scanned — security scans run nightly on Prime
+        // only (src/lib/codex-scan-policy.ts).
         if (eventType === "pull_request") {
           let prPayload: any;
           try {
@@ -148,9 +147,9 @@ export const Route = createFileRoute("/hooks/github")({
               repoName.toLowerCase() === primeCfgForMerge!.github_repo.toLowerCase();
 
             // A Codex fix PR cascades from its `push`, never from here: only
-            // the push carries the merge commit's title, which is what says
-            // whether this was an unattended self-healing merge whose cascade
-            // must wait for a person. The push always follows a merge.
+            // the push carries the merge commit's title, which is what marks
+            // it as a security fix that passes the cascade security gate. The
+            // push always follows a merge.
             const codexFixBranch = String(prPayload?.pull_request?.head?.ref ?? "").startsWith(
               "codex/fix-",
             );
@@ -249,69 +248,13 @@ export const Route = createFileRoute("/hooks/github")({
             );
           }
 
-          if (
-            !action ||
-            !["opened", "reopened", "synchronize", "ready_for_review"].includes(action)
-          ) {
-            return new Response(
-              JSON.stringify({
-                skipped: true,
-                reason: `pull_request action ${action ?? "?"} ignored`,
-              }),
-              { headers: { "Content-Type": "application/json" } },
-            );
-          }
-          const headSha = prPayload?.pull_request?.head?.sha ?? null;
-          const prNumber = prPayload?.pull_request?.number ?? null;
-          const baseRef = prPayload?.pull_request?.base?.ref ?? null;
-
-          const { data: primeCfg } = await supabaseAdmin
-            .from("prime_config")
-            .select("codex_pr_scan_enabled, codex_scan_dedup_hours")
-            .limit(1)
-            .maybeSingle();
-          if (!primeCfg?.codex_pr_scan_enabled) {
-            return new Response(
-              JSON.stringify({ skipped: true, reason: "codex_pr_scan_disabled" }),
-              { headers: { "Content-Type": "application/json" } },
-            );
-          }
-          const target = repoFullName ? await resolveScanTarget(repoFullName) : null;
-          if (!target) {
-            return new Response(
-              JSON.stringify({ skipped: true, reason: `unknown_repo:${repoFullName}` }),
-              { headers: { "Content-Type": "application/json" } },
-            );
-          }
-          try {
-            const r = await enqueueScanNoAuth({
-              kind: "pr_open",
-              targetKind: target.targetKind,
-              cloneId: target.cloneId ?? null,
-              repoFullName,
-              ref: headSha,
-              // Scope the scan to the PR's own diff: a full-tree scan on
-              // every push would take minutes and drown the PR in findings
-              // the author did not introduce.
-              diffBase: baseRef,
-              dedupWindowHours: primeCfg.codex_scan_dedup_hours ?? 6,
-              requestPayload: {
-                source: "github_pr",
-                delivery: deliveryId,
-                action,
-                pr: prNumber,
-                baseRef,
-              },
-            });
-            return new Response(JSON.stringify({ success: true, ...r }), {
-              headers: { "Content-Type": "application/json" },
-            });
-          } catch (err) {
-            return new Response(JSON.stringify({ success: false, error: (err as Error).message }), {
-              status: 500,
-              headers: { "Content-Type": "application/json" },
-            });
-          }
+          return new Response(
+            JSON.stringify({
+              skipped: true,
+              reason: `pull_request action ${action ?? "?"}: security scans run nightly on Prime only`,
+            }),
+            { headers: { "Content-Type": "application/json" } },
+          );
         }
 
         /*
@@ -496,37 +439,17 @@ export const Route = createFileRoute("/hooks/github")({
         const sourceBranch = prime.default_branch || "main";
         const summary = payload.head_commit?.message?.slice(0, 200) ?? null;
 
-        // Phase 4 — post-merge revalidate: scan the freshly merged SHA so
-        // drift and fix regressions are caught fast. FIRST, and whatever the
-        // cascade does: it used to run only after a brand-new cascade event,
-        // so a push that folded into a pending cascade, a merge whose PR event
-        // created the cascade first, or a fleet with no clones was never
-        // rescanned. Awaited: a floating promise dies with the isolate.
-        let postMergeScan: { jobId?: string; skipped?: string; error?: string } | null = null;
-        if (prime.codex_post_merge_revalidate !== false) {
-          const primeRepo = `${prime.github_owner}/${prime.github_repo}`;
-          try {
-            const r = await enqueueScanNoAuth({
-              kind: "post_merge_revalidate",
-              targetKind: "prime",
-              repoFullName: primeRepo,
-              ref: sourceSha,
-              dedupWindowHours: prime.codex_scan_dedup_hours ?? 6,
-              requestPayload: { source: "post_merge", delivery: deliveryId, sha: sourceSha },
-            });
-            postMergeScan = r.skipped ? { skipped: r.reason } : { jobId: r.jobId };
-          } catch (e) {
-            console.error("post-merge codex scan enqueue failed:", e);
-            postMergeScan = { error: e instanceof Error ? e.message : String(e) };
-          }
-        }
-
-        // An unattended self-healing merge must not fan out on its own; a
-        // fix merged through the two-key review must, even while the
-        // security gate holds other automatic cascades.
+        // No post-merge scan: Prime is scanned nightly, and that scan
+        // confirms tonight's merged fixes (src/lib/codex-scan-policy.ts).
+        //
+        // A merged security fix — merged by itself, or by a person — fans out
+        // like any other commit, and goes through even while the security gate
+        // holds other automatic cascades: it is the change that clears the
+        // gate's findings. Clones receive Prime's fixes this way and no other.
         const headTitle = payload.head_commit?.message ?? "";
-        const selfHealingMerge = SELF_HEALING_MERGE_TITLE.test(headTitle);
-        const reviewedFix = REVIEWED_REMEDIATION_MERGE_TITLE.test(headTitle);
+        const securityFix =
+          SELF_HEALING_MERGE_TITLE.test(headTitle) ||
+          REVIEWED_REMEDIATION_MERGE_TITLE.test(headTitle);
 
         const { eventId, cloneCount, error, alreadyExisted, foldedIntoPending } =
           await createCascadeForAllClones({
@@ -537,10 +460,7 @@ export const Route = createFileRoute("/hooks/github")({
             sourceSha,
             initiatedBy: null,
             summary,
-            holdReason: selfHealingMerge
-              ? "Unattended self-healing merge of a Codex security fix — approve to deliver it to the fleet."
-              : null,
-            skipSecurityGate: reviewedFix,
+            skipSecurityGate: securityFix,
           });
 
         if (error || !eventId) {
@@ -549,10 +469,9 @@ export const Route = createFileRoute("/hooks/github")({
             entityType: "cascade_event",
             metadata: { delivery: deliveryId, reason: error ?? "no event" },
           });
-          return new Response(
-            JSON.stringify({ skipped: true, reason: error ?? "no clones", postMergeScan }),
-            { headers: { "Content-Type": "application/json" } },
-          );
+          return new Response(JSON.stringify({ skipped: true, reason: error ?? "no clones" }), {
+            headers: { "Content-Type": "application/json" },
+          });
         }
 
         // An event that already existed — this SHA's own, or the pending
@@ -579,7 +498,6 @@ export const Route = createFileRoute("/hooks/github")({
                 ? "folded_into_pending_cascade"
                 : "already_cascaded_for_sha",
               cascadeEventId: eventId,
-              postMergeScan,
             }),
             { headers: { "Content-Type": "application/json" } },
           );
@@ -606,7 +524,6 @@ export const Route = createFileRoute("/hooks/github")({
             cascadeEventId: eventId,
             mode,
             cloneCount,
-            postMergeScan,
           }),
           { headers: { "Content-Type": "application/json" } },
         );

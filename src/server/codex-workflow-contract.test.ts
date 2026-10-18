@@ -178,6 +178,8 @@ describe("remediation dispatch payload", () => {
       scanner: "semgrep",
       ruleId: "javascript.lang.security.audit.sqli",
       snippet: "db.query(`SELECT * FROM reports WHERE id = ${req.params.id}`)",
+      // No engine named: Codex, which an older workflow also falls back to.
+      engine: "codex",
     });
   });
 

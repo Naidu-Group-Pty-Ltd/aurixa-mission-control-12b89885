@@ -3,16 +3,23 @@
 //
 // Everything here obeys one rulebook — decideRemediation in
 // src/lib/remediation-policy.ts. P2-and-below actions execute unattended;
-// anything the policy flags (P0/P1, destructive SQL, unverified or
-// oversized patches) parks as `awaiting_validation` and waits for an admin
-// on /support/tickets. The policy is re-checked AT EXECUTION TIME, not just
-// at planning: state can change between the two (a verification retracted,
-// a priority overridden), and the check is cheap.
+// anything the policy flags (P0/P1, destructive SQL) parks as
+// `awaiting_validation` and waits for an admin on /support/tickets. The
+// policy is re-checked AT EXECUTION TIME, not just at planning: state can
+// change between the two (a verification retracted, a priority overridden),
+// and the check is cheap.
+//
+// Security fix PRs are the exception: they merge with no person at every
+// priority once their automated checks pass — the fix workflow's own, and
+// the repository's CI, which the pr_merge lane starts on the fix itself
+// (fixCiGate.pure.ts) — and one that fails them is closed rather than parked
+// (`decideFixMerge`). The merge reaches the clones through the ordinary
+// cascade.
 //
 // Lanes:
-//   pr_merge             — squash-merge a verified codex remediation PR
-//                          (the existing scan → draft-PR pipeline authored
-//                          and verified it; this lane only releases it).
+//   pr_merge             — squash-merge a verified security fix PR, or close
+//                          it (the nightly scan → fix pipeline authored and
+//                          verified it; this lane only releases it).
 //   sql_migration        — replay pending prime migrations onto the clone's
 //                          Supabase project, scoped to what the prime has
 //                          itself applied (the fleet sync's own rule),
@@ -35,19 +42,11 @@ import {
   OversizedMigrationError,
   PrimeBodyUnavailableError,
 } from "@/server/oversizedMigration.pure";
-import {
-  decideRemediation,
-  parseAutoMergeCeiling,
-  severityWithinAutoMergeCeiling,
-  type AutoMergeCeiling,
-} from "@/lib/remediation-policy";
-import { approvalsAtHead, type ApprovalRecord } from "@/lib/remediation-approvals";
+import { decideFixMerge, decideRemediation } from "@/lib/remediation-policy";
+import { FIX_ENGINE_LABEL, isFixEngine } from "@/lib/codex-autofix-policy";
+import { decideFixCi, fixCiSpec } from "@/server/fixCiGate.pure";
 import { notifyOperators } from "@/server/audit.server";
-import {
-  severityToPriority,
-  priorityAtOrBelow,
-  type TicketPriority,
-} from "@/lib/ticket-classification";
+import { severityToPriority, type TicketPriority } from "@/lib/ticket-classification";
 import { asJson, asRow } from "@/lib/json-cast";
 import { chunkCursorFor } from "./chunkCursorStore.pure";
 import {
@@ -165,16 +164,6 @@ const RUN_STALL_MINUTES = 20;
 
 const admin = supabaseAdmin;
 
-/**
- * The configured auto-merge ceiling for Codex remediation PRs. `select("*")`
- * so an unmigrated deployment reads the default (`off`) instead of failing.
- */
-async function loadAutoMergeCeiling(): Promise<AutoMergeCeiling> {
-  const { data, error } = await admin.from("prime_config").select("*").limit(1).maybeSingle();
-  if (error || !data) return "off";
-  return parseAutoMergeCeiling((data as Record<string, unknown>).codex_auto_merge_ceiling);
-}
-
 // ── Planning ─────────────────────────────────────────────────────────────
 
 export type PlanResult = { runsPlanned: number; notes: string[] };
@@ -291,10 +280,10 @@ export async function planTicketRemediation(ticketId: string): Promise<PlanResul
 }
 
 /**
- * Find verified, still-open codex remediation PRs in the ticket's scope
- * (its clone, or prime when clone_id is null) and turn each into a
- * pr_merge run. Only findings at or below the auto-heal severity line
- * (medium ⇒ P2) qualify — critical/high stay with the two-key human gate.
+ * Find verified, still-open security fix PRs in the ticket's scope (its
+ * clone, or prime when clone_id is null) and turn each into a pr_merge run.
+ * Every severity qualifies: fix PRs merge by themselves once their checks
+ * pass (remediation-policy.ts).
  */
 async function planVerifiedMergesForScope(
   cloneId: string | null,
@@ -318,14 +307,9 @@ async function planVerifiedMergesForScope(
     _policyInput?: Record<string, unknown>;
   };
   const runs: PlannedRun[] = [];
-  // Off by default: above the configured ceiling a Codex fix is merged
-  // through the two-key review on /security/scans, not from this queue.
-  const ceiling = await loadAutoMergeCeiling();
   for (const rem of candidates ?? []) {
     const severity = rem.codex_findings?.severity ?? "medium";
-    if (!severityWithinAutoMergeCeiling(severity, ceiling)) continue;
     const findingPriority = severityToPriority(severity);
-    if (!priorityAtOrBelow(findingPriority, "P2")) continue;
     const linesChanged = (rem.lines_added ?? 0) + (rem.lines_removed ?? 0);
     runs.push({
       ticket_id: ticketId,
@@ -542,11 +526,134 @@ async function succeedRun(run: any, result: Record<string, unknown>): Promise<{ 
 
 // ── Lane: pr_merge ───────────────────────────────────────────────────────
 
+/** Remediation columns from 20261018090000 on; read separately so an unmigrated deployment still merges. */
+async function loadRemediationHead(remediationId: string): Promise<string | null> {
+  const { data, error } = await admin
+    .from("codex_remediations")
+    .select("head_sha")
+    .eq("id", remediationId)
+    .maybeSingle();
+  if (error) return null;
+  return (data as { head_sha?: string | null } | null)?.head_sha ?? null;
+}
+
+/**
+ * A fix that will not merge: close its PR, say why, and put the finding back
+ * in the queue for a later night. Nothing waits for a person (the platform
+ * owner's rule — see remediation-policy.ts); the overdue digest and the
+ * findings explorer show what stays open.
+ */
+async function declineFix(
+  run: any,
+  rem: any,
+  target: { owner: string; repo: string; installationId: string | null },
+  reasons: string[],
+  /** The commit that was checked: the branch is deleted only while it still points there. */
+  verifiedHead: string | null = null,
+): Promise<{ status: string }> {
+  const reason = reasons.join("; ").slice(0, 600);
+  const { closeRemediationPullRequest } = await import("@/server/codex-remediation.server");
+  try {
+    await closeRemediationPullRequest({
+      owner: target.owner,
+      repo: target.repo,
+      prNumber: rem.pr_number,
+      installationId: target.installationId,
+      reason,
+      branchName: rem.branch_name ?? null,
+      headSha: verifiedHead,
+    });
+  } catch (err) {
+    // Retried by the run's own budget: a PR that cannot be closed now is
+    // still open, and closing it is the whole point.
+    throw new Error(`could not close PR #${rem.pr_number}: ${(err as Error).message}`);
+  }
+  const nowIso = new Date().toISOString();
+  const { error: remErr } = await admin
+    .from("codex_remediations")
+    .update({
+      status: "closed",
+      pr_state: "closed",
+      completed_at: nowIso,
+      last_error: `Not merged: ${reason}`.slice(0, 4000),
+      last_event: { declined: true, reasons, remediation_run_id: run.id },
+    })
+    .eq("id", rem.id);
+  if (remErr) console.error("[self-healing] declined fix not recorded:", remErr.message);
+
+  const { data: finding } = await admin
+    .from("codex_findings")
+    .select("id, state")
+    .eq("id", rem.finding_id)
+    .maybeSingle();
+  if (finding && ["fix_drafted", "pr_open"].includes(finding.state)) {
+    const { error: findErr } = await admin
+      .from("codex_findings")
+      .update({ state: "open", remediation_pr_state: "closed" })
+      .eq("id", finding.id)
+      .eq("state", finding.state);
+    if (findErr) console.error("[self-healing] finding not reopened:", findErr.message);
+    const { error: evErr } = await admin.from("codex_finding_events").insert({
+      finding_id: finding.id,
+      event_type: "autofix.declined",
+      from_state: finding.state,
+      to_state: "open",
+      reason: reason.slice(0, 2000),
+      payload: asJson({ remediation_id: rem.id, pr_number: rem.pr_number, reasons }),
+    });
+    if (evErr) console.warn("[self-healing] finding event failed:", evErr.message);
+  }
+
+  await markRun(run.id, {
+    status: "failed",
+    last_error: `Not merged: ${reason}`.slice(0, 2000),
+    result: { declined: true, reasons, pr_number: rem.pr_number },
+    completed_at: nowIso,
+  });
+  await ticketEvent(run.ticket_id, "remediation.declined", {
+    run_id: run.id,
+    pr_number: rem.pr_number,
+    reasons,
+  });
+  await notifyOperators({
+    kind: "remediation_failed",
+    severity: "warning",
+    title: `Security fix not merged · PR #${rem.pr_number}`,
+    body: `${reason}. The PR was closed and the finding is open again; it is retried on a later night.`,
+    url: "/security/scans#fix-prs",
+    metadata: { remediation_id: rem.id, run_id: run.id, reasons },
+  });
+  return { status: "declined" };
+}
+
+/**
+ * Hand a merge run back to wait for the fix's CI. Attempt-neutral, like
+ * `waitForClaim`: a CI that is still running is not a failed attempt, and the
+ * wait is bounded by the gate itself (`FIX_CI_WAIT_MS`), not by the run's
+ * attempt budget. `result` carries what the wait has done so far.
+ */
+async function waitForFixCi(
+  run: any,
+  why: string,
+  result: Record<string, unknown> = {},
+): Promise<{ status: string }> {
+  const prior =
+    run.result && typeof run.result === "object" && !Array.isArray(run.result) ? run.result : {};
+  await markRun(run.id, {
+    status: "planned",
+    attempts: run.attempts ?? 0,
+    next_attempt_at: new Date(Date.now() + MONITOR_RETRY_MINUTES * 60_000).toISOString(),
+    last_error: `waiting: ${why}`.slice(0, 2000),
+    result: { ...prior, ...result },
+  });
+  return { status: "waiting" };
+}
+
 async function executePrMerge(run: any, approvedByHuman: boolean): Promise<{ status: string }> {
   const { data: rem } = await admin
     .from("codex_remediations")
     .select(
-      "id, status, repo_full_name, pr_number, clone_id, finding_id, scan_job_id, verified, verification, files_changed, lines_added, lines_removed, branch_name, base_ref, requested_by, approvals_required",
+      "id, status, repo_full_name, pr_number, clone_id, finding_id, scan_job_id, verified, verification, files_changed, lines_added, lines_removed, branch_name, base_ref, engine",
     )
     .eq("id", run.remediation_id)
     .maybeSingle();
@@ -569,7 +676,8 @@ async function executePrMerge(run: any, approvedByHuman: boolean): Promise<{ sta
     });
     return { status: "skipped" };
   }
-  if (!rem.pr_number) return parkRun(run, ["remediation has no PR yet"]);
+  // Not open yet: the workflow is still writing or verifying the fix.
+  if (!rem.pr_number) throw new Error("remediation has no PR yet");
 
   const [owner, repo] = (rem.repo_full_name || "").split("/");
   if (!owner || !repo) return parkRun(run, ["remediation has no valid repo"]);
@@ -586,78 +694,102 @@ async function executePrMerge(run: any, approvedByHuman: boolean): Promise<{ sta
       .maybeSingle();
     installationId = p?.github_app_installation_id ?? null;
   }
-
-  const { data: finding } = await admin
-    .from("codex_findings")
-    .select("severity")
-    .eq("id", rem.finding_id)
-    .maybeSingle();
-  const ceiling = await loadAutoMergeCeiling();
-  const unattendedAllowed = severityWithinAutoMergeCeiling(finding?.severity, ceiling);
+  const target = { owner, repo, installationId };
 
   // The PR as GitHub has it now. The number came from a workflow callback;
   // it must still be this remediation's own open branch before anything else.
   const { fetchRemediationPullRequest, remediationPrMismatch, mergeRemediationPRViaGitHub } =
     await import("@/server/codex-remediation.server");
-  let pr;
-  try {
-    pr = await fetchRemediationPullRequest({ owner, repo, prNumber: rem.pr_number, installationId });
-  } catch (err) {
-    return parkRun(run, [`could not read PR #${rem.pr_number}: ${(err as Error).message}`]);
-  }
+  // A read that fails is transient: thrown, so the run retries on its budget.
+  const pr = await fetchRemediationPullRequest({
+    owner,
+    repo,
+    prNumber: rem.pr_number,
+    installationId,
+  });
   const mismatch = remediationPrMismatch(pr, {
     owner,
     repo,
     branchName: rem.branch_name,
     baseRef: rem.base_ref,
   });
-  if (mismatch) return parkRun(run, [mismatch]);
+  if (mismatch) {
+    // Merged or closed on GitHub meanwhile: the webhook's sync records it.
+    if (pr.state !== "open") {
+      await markRun(run.id, {
+        status: "skipped",
+        result: { reason: mismatch },
+        completed_at: new Date().toISOString(),
+      });
+      return { status: "skipped" };
+    }
+    // An open PR that is not this fix's own branch is never merged as it.
+    return parkRun(run, [mismatch]);
+  }
 
-  let expectedHeadSha: string | null = null;
-  if (!unattendedAllowed) {
-    // Above the auto-merge ceiling a Codex fix needs the two-key review —
-    // whoever released it here. One admin approving the run in the support
-    // queue is one key, not two.
-    const withHead = await admin
-      .from("codex_remediation_reviews")
-      .select("decision, reviewer_id, head_sha")
-      .eq("remediation_id", rem.id);
-    let reviews: ApprovalRecord[] = (withHead.data ?? []) as ApprovalRecord[];
-    if (withHead.error) {
-      const base = await admin
-        .from("codex_remediation_reviews")
-        .select("decision, reviewer_id")
-        .eq("remediation_id", rem.id);
-      if (base.error) return parkRun(run, [`could not read reviews: ${base.error.message}`]);
-      reviews = (base.data ?? []) as ApprovalRecord[];
+  // Pinned to the commit the checks ran on: a push to the fix branch after
+  // verification is code nobody checked, and it does not merge.
+  const verifiedHead = await loadRemediationHead(rem.id);
+  if (!approvedByHuman) {
+    if (verifiedHead && pr.headSha !== verifiedHead) {
+      return declineFix(
+        run,
+        rem,
+        target,
+        [
+          `the PR changed after its checks ran (verified ${verifiedHead.slice(0, 7)}, now ${pr.headSha.slice(0, 7)})`,
+        ],
+        verifiedHead,
+      );
     }
-    if (reviews.some((r) => r.decision === "reject")) {
-      return parkRun(run, ["a reviewer rejected this remediation"]);
-    }
-    const { count } = approvalsAtHead(reviews, rem.requested_by, pr.headSha);
-    const required = rem.approvals_required ?? 2;
-    if (count < required) {
-      return parkRun(run, [
-        `${finding?.severity ?? "this"} findings are above the auto-merge ceiling (${ceiling}); ` +
-          `the fix needs ${required} independent approvals for commit ${pr.headSha.slice(0, 7)} ` +
-          `in /security/scans (has ${count})`,
-      ]);
-    }
-    expectedHeadSha = reviews.some((r) => r.head_sha !== undefined) ? pr.headSha : null;
-  } else if (!approvedByHuman) {
-    // Within the ceiling: re-check the policy against live state.
     const linesChanged = (rem.lines_added ?? 0) + (rem.lines_removed ?? 0);
-    const decision = decideRemediation({
-      actionType: "pr_merge",
-      priority: run.priority,
-      verified: rem.verified === true,
+    const decision = decideFixMerge({
+      verified: rem.verified,
       secretsClean: secretsCleanFromVerification(rem.verification),
       filesChanged: rem.files_changed,
       linesChanged: rem.files_changed == null ? null : linesChanged,
     });
-    if (!decision.autoExecute) return parkRun(run, decision.reasons);
+    if (!decision.merge) return declineFix(run, rem, target, decision.reasons, verifiedHead);
+
+    // The repository's own CI, on the commit that was verified. The PR was
+    // opened with the workflow's token, which starts no workflow, so this
+    // lane starts the CI the workflow named and comes back until it is done.
+    const ci = fixCiSpec(rem.verification);
+    if (ci?.workflow) {
+      const { listFixCiRuns, dispatchFixCi } = await import("@/server/codex-remediation.server");
+      const head = verifiedHead ?? pr.headSha;
+      const prior = (run.result ?? {}) as { ci_dispatched_at?: unknown };
+      const runs = ci.dispatchable
+        ? await listFixCiRuns({ owner, repo, headSha: head, installationId })
+        : [];
+      const verdict = decideFixCi({
+        spec: ci,
+        runs,
+        dispatched: typeof prior.ci_dispatched_at === "string",
+        firstLookAt: Date.parse(run.started_at ?? run.created_at ?? "") || Date.now(),
+        now: Date.now(),
+      });
+      if (verdict.kind === "refuse") return declineFix(run, rem, target, [verdict.why], head);
+      if (verdict.kind === "dispatch") {
+        const sent = await dispatchFixCi({
+          owner,
+          repo,
+          workflow: ci.workflow,
+          ref: pr.headRef,
+          installationId,
+        });
+        if (!sent.ok) return declineFix(run, rem, target, [sent.error], head);
+        return waitForFixCi(run, verdict.why, {
+          ci_workflow: ci.workflow,
+          ci_dispatched_at: new Date().toISOString(),
+          ci_head_sha: head,
+        });
+      }
+      if (verdict.kind === "wait") return waitForFixCi(run, verdict.why);
+    }
   }
 
+  const engineLabel = isFixEngine(rem.engine) ? FIX_ENGINE_LABEL[rem.engine] : "Codex";
   let merge;
   try {
     merge = await mergeRemediationPRViaGitHub({
@@ -667,15 +799,28 @@ async function executePrMerge(run: any, approvedByHuman: boolean): Promise<{ sta
       installationId,
       branchName: rem.branch_name,
       baseRef: rem.base_ref,
-      expectedHeadSha,
-      commitTitle: `Self-healing: codex remediation PR #${rem.pr_number}`,
+      expectedHeadSha: approvedByHuman ? null : (verifiedHead ?? pr.headSha),
+      commitTitle: `Self-healing: security fix PR #${rem.pr_number} (${engineLabel})`,
       commitMessage: approvedByHuman
         ? "Released by an admin through the Mission Control self-healing queue."
-        : "Auto-merged by Mission Control self-healing: verified patch within policy bounds.",
+        : `Merged by Mission Control: written by ${engineLabel}, verified against the repository's ` +
+          "own checks and within the auto-merge bounds. No person reviews security fixes, by policy.",
       method: "squash",
     });
   } catch (err) {
-    return parkRun(run, [(err as Error).message]);
+    // GitHub's refusals are answers, not outages: a conflict with a fix that
+    // merged first (405), a head that moved (409), or a required status check
+    // — which never runs on a PR the workflow's own token opened. Retrying
+    // cannot change them, so the fix is closed and retried on a later night
+    // against the updated branch. Anything else is retried on the run's budget.
+    const status = (err as { status?: number })?.status;
+    if (status === 405 || status === 409 || status === 422) {
+      const detail =
+        (err as { response?: { data?: { message?: string } } })?.response?.data?.message ??
+        (err as Error).message;
+      return declineFix(run, rem, target, [`GitHub refused the merge (${status}): ${detail}`]);
+    }
+    throw err;
   }
 
   const mergedAt = new Date().toISOString();
@@ -691,6 +836,14 @@ async function executePrMerge(run: any, approvedByHuman: boolean): Promise<{ sta
     })
     .eq("id", rem.id);
   if (remErr) console.error("[self-healing] merged but could not record it:", remErr.message);
+  const { deleteRemediationBranch } = await import("@/server/codex-remediation.server");
+  await deleteRemediationBranch({
+    owner,
+    repo,
+    branchName: rem.branch_name ?? null,
+    expectedSha: merge.headSha,
+    installationId,
+  });
   // Best effort: the columns exist from 20261018090000 on.
   const { error: viaErr } = await admin
     .from("codex_remediations")
@@ -715,29 +868,21 @@ async function executePrMerge(run: any, approvedByHuman: boolean): Promise<{ sta
         head_sha: merge.headSha,
         pr_number: rem.pr_number,
         run_id: run.id,
-        ceiling,
+        engine: rem.engine ?? null,
       }),
     });
     if (evErr) console.warn("[self-healing] audit event failed:", evErr.message);
   }
 
-  // Deliberately NO automatic fleet cascade from an unattended merge — a
-  // prime-scoped patch multiplying across every clone is exactly the blast
-  // radius the human gate exists for. The push this merge makes on prime's
-  // default branch would otherwise start an ordinary commit cascade; the
-  // GitHub webhook recognises this commit title and holds that cascade for
-  // approval instead (see hooks.github.tsx).
+  // The push this merge makes on Prime's default branch starts the ordinary
+  // commit cascade, which delivers the fix to every clone; the webhook knows
+  // the title and lets it through the security gate (hooks.github.tsx).
   if (!rem.clone_id) {
-    const { holdPendingCommitCascades } = await import("@/server/cascade-trigger.server");
-    await holdPendingCommitCascades(
-      admin,
-      `Carries the unattended self-healing merge of PR #${rem.pr_number} — approve to deliver it to the fleet.`,
-    );
     await notifyOperators({
       kind: "remediation_auto_completed",
       severity: "info",
-      title: `Self-healed: PR #${rem.pr_number} merged on prime`,
-      body: "The fleet cascade for this commit is held for approval — review and approve it from /cascades if the fix should fan out.",
+      title: `Self-healed: PR #${rem.pr_number} merged on Prime (${engineLabel})`,
+      body: "The fleet cascade for this commit delivers the fix to the clones.",
       url: "/cascades",
       metadata: { remediation_id: rem.id, run_id: run.id, sha: merge.sha },
     });
@@ -1761,54 +1906,32 @@ async function executeMonitorRecovery(run: any): Promise<{ status: string }> {
 
 // ── Lane: rescan ─────────────────────────────────────────────────────────
 
+/**
+ * Fresh evidence for a ticket — now the nightly scan's job. Security scans run
+ * on Prime once a night and never on a clone (src/lib/codex-scan-policy.ts),
+ * so this lane queues nothing: it records which scan will carry the evidence.
+ * Read-only, as before; the ticket's own follow-up reads that scan.
+ */
 async function executeRescan(run: any): Promise<{ status: string }> {
-  const { enqueueScanNoAuth } = await import("@/server/codex-scheduling.server");
-
-  // owner/repo only — naming the generated `repo_full_name` column here
-  // would fail the whole select on an unmigrated deployment (same trap the
-  // nightly fan-out documents).
-  let repoFullName = "";
-  let ref: string | null = null;
   if (run.clone_id) {
-    const { data: clone } = await admin
-      .from("clones")
-      .select("github_owner, github_repo, default_branch")
-      .eq("id", run.clone_id)
-      .maybeSingle();
-    if (clone?.github_owner && clone?.github_repo) {
-      repoFullName = `${clone.github_owner}/${clone.github_repo}`;
-      ref = clone.default_branch || "main";
-    }
-  } else {
-    const { data: prime } = await admin
-      .from("prime_config")
-      .select("github_owner, github_repo, default_branch")
-      .limit(1)
-      .maybeSingle();
-    if (prime?.github_owner && prime?.github_repo) {
-      repoFullName = `${prime.github_owner}/${prime.github_repo}`;
-      ref = prime.default_branch || "main";
-    }
+    return succeedRun(run, {
+      scan: "not_scanned",
+      reason: "Clones are not scanned; Prime's nightly scan and the cascade cover this clone.",
+    });
   }
-  if (!repoFullName) {
-    return parkRun(run, ["no scannable repo for this scope"]);
+  const { data: prime } = await admin
+    .from("prime_config")
+    .select("codex_nightly_enabled, codex_nightly_cron")
+    .limit(1)
+    .maybeSingle();
+  if (!prime?.codex_nightly_enabled) {
+    return parkRun(run, ["Prime's nightly security scan is switched off — nothing will gather this evidence"]);
   }
-
-  const result = await enqueueScanNoAuth({
-    kind: "manual",
-    targetKind: run.clone_id ? "clone" : "prime",
-    cloneId: run.clone_id ?? null,
-    repoFullName,
-    ref,
-    requestPayload: { source: "self_healing", ticket_id: run.ticket_id, run_id: run.id },
-    dedupWindowHours: 1,
+  return succeedRun(run, {
+    scan: "nightly",
+    schedule: prime.codex_nightly_cron ?? null,
+    reason: "Prime's next nightly scan carries this evidence.",
   });
-
-  if (result.skipped) {
-    // A recent identical scan already ran — that evidence is as good as ours.
-    return succeedRun(run, { scan: "skipped", reason: result.reason });
-  }
-  return succeedRun(run, { scan_job_id: result.jobId });
 }
 
 // ── The drain ────────────────────────────────────────────────────────────
@@ -1941,9 +2064,8 @@ export async function sweepSupportRemediations(): Promise<SweepResult> {
     executed.push({ runId: due.id, action: due.action_type, status: outcome.status });
   }
 
-  // 2. Ticket-less self-healing for the scan pipeline: any verified,
-  //    still-open remediation PR at P2-or-below severity gets a pr_merge
-  //    run (deduped on remediation_id).
+  // 2. Ticket-less self-healing for the scan pipeline: every open security
+  //    fix PR, at any severity, gets a pr_merge run that merges or closes it.
   const scanMergesPlanned = await planScanAutoMerges();
 
   // 3. Roll ticket statuses up.
@@ -1964,38 +2086,60 @@ export async function sweepSupportRemediations(): Promise<SweepResult> {
   return { executed, ticketsRolledUp, slaEscalations, scanMergesPlanned, runsReclaimed };
 }
 
+/** Merge runs one fix PR may have before it is left as it is (each retries on its own budget first). */
+const MAX_MERGE_RUNS_PER_FIX = 2;
+
+/**
+ * Ticket-less self-healing for the scan pipeline: every open security fix PR,
+ * at any severity, gets a pr_merge run — which merges it once its checks pass
+ * or closes it (executePrMerge). Nothing is parked for a person: a run the
+ * old auto-merge ceiling parked as `awaiting_validation` is put back on the
+ * queue under the current rule.
+ */
 async function planScanAutoMerges(): Promise<number> {
   const { data: candidates } = await admin
     .from("codex_remediations")
     .select(
       "id, finding_id, clone_id, repo_full_name, pr_number, verified, verification, files_changed, lines_added, lines_removed, codex_findings!inner(severity)",
     )
-    .eq("status", "pr_opened")
-    .eq("verified", true)
+    .in("status", ["pr_opened", "pr_updated", "approved", "changes_requested"])
+    .not("pr_number", "is", null)
+    .order("created_at", { ascending: true })
     .limit(AUTO_MERGE_SCAN_BATCH * 2);
 
   let planned = 0;
-  const ceiling = await loadAutoMergeCeiling();
   for (const rem of candidates ?? []) {
-    if (!severityWithinAutoMergeCeiling(rem.codex_findings?.severity ?? "medium", ceiling)) continue;
     const priority = severityToPriority(rem.codex_findings?.severity ?? "medium");
-    if (!priorityAtOrBelow(priority, "P2")) continue;
-
-    const { count: existing } = await admin
-      .from("remediation_runs")
-      .select("id", { count: "exact", head: true })
-      .eq("remediation_id", rem.id);
-    if ((existing ?? 0) > 0) continue;
-
     const linesChanged = (rem.lines_added ?? 0) + (rem.lines_removed ?? 0);
     const decision = decideRemediation({
       actionType: "pr_merge",
       priority,
-      verified: rem.verified === true,
+      verified: rem.verified,
       secretsClean: secretsCleanFromVerification(rem.verification),
       filesChanged: rem.files_changed,
       linesChanged: rem.files_changed == null ? null : linesChanged,
     });
+    const policy = asJson({ ...decision, requiresHuman: false, rule: "security fixes merge by themselves" });
+
+    const { data: runs, error: runsErr } = await admin
+      .from("remediation_runs")
+      .select("id, status")
+      .eq("remediation_id", rem.id)
+      .eq("action_type", "pr_merge");
+    if (runsErr) continue;
+    if ((runs ?? []).some((r) => ["planned", "approved", "executing"].includes(r.status))) continue;
+
+    const parked = (runs ?? []).find((r) => r.status === "awaiting_validation");
+    if (parked) {
+      const { error } = await admin
+        .from("remediation_runs")
+        .update({ status: "planned", requires_human: false, policy })
+        .eq("id", parked.id)
+        .eq("status", "awaiting_validation");
+      if (!error) planned += 1;
+      continue;
+    }
+    if ((runs ?? []).length >= MAX_MERGE_RUNS_PER_FIX) continue;
 
     const { error } = await admin.from("remediation_runs").insert({
       ticket_id: null,
@@ -2004,21 +2148,16 @@ async function planScanAutoMerges(): Promise<number> {
       clone_id: rem.clone_id,
       action_type: "pr_merge",
       priority,
-      status: decision.autoExecute ? "planned" : "awaiting_validation",
-      requires_human: decision.requiresHuman,
-      policy: decision,
+      status: "planned",
+      requires_human: false,
+      policy,
       plan: {
         pr_number: rem.pr_number,
         repo_full_name: rem.repo_full_name,
         source: "scan_pipeline",
       },
     });
-    if (!error) {
-      planned += 1;
-      if (!decision.autoExecute) {
-        await notifyAwaitingValidation(null, "pr_merge", decision.reasons);
-      }
-    }
+    if (!error) planned += 1;
   }
   return planned;
 }

@@ -48,7 +48,9 @@ describe("merge commit titles", () => {
       true,
     );
     expect(REVIEWED_REMEDIATION_MERGE_TITLE.test("Codex remediation #42")).toBe(true);
+    expect(SELF_HEALING_MERGE_TITLE.test("Self-healing: security fix PR #7 (Claude)")).toBe(true);
     expect(SELF_HEALING_MERGE_TITLE.test("Codex remediation #42")).toBe(false);
+    expect(SELF_HEALING_MERGE_TITLE.test("fix: Self-healing: security fix PR #7")).toBe(false);
     expect(REVIEWED_REMEDIATION_MERGE_TITLE.test("fix: Codex remediation #42")).toBe(false);
   });
 });

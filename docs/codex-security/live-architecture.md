@@ -45,6 +45,28 @@ workflow files:
 | A live token matched only by gitleaks' generic rule was filed `medium` — below the alert line, with a 90-day response time. Checked against this repository's full history, the one such hit was a cron bearer token committed in a migration | A generic match that survives every demotion and is named like a credential, with a long random value, is `high` (it alerts, 30-day response time). Publishable keys drop to `info`. On this repository the change moves exactly that one finding. |
 | A drafted fix could make a finding vanish by silencing the scanner — and then be "confirmed" by the next scan | The remediation workflow refuses a patch that adds an inline suppression (semgrep's or gitleaks') or edits an ignore file or the scan rules. Its CI guard now reads unquoted, rename-free paths: a workflow file git printed quoted (a non-ASCII name) or renamed away used to pass it. |
 
+## October 2026, third pass: nightly on Prime, fixed and merged by itself
+
+Decided by the platform owner: **scans run once a night, on Prime only**;
+**P0/P1 findings are fixed by Claude and P2 and below by Codex**; **every fix
+PR merges by itself, with no person in the loop**. Migration
+`20261018120000_codex_autofix_settings.sql` and remediation workflow
+version 4. This supersedes the two-key review, the auto-merge ceiling, PR
+scans, post-merge scans and clone scans described in the passes above.
+
+| Before | Now |
+|---|---|
+| Clones were scanned nightly and on demand, and their findings fixed on the clone | **Clones are not scanned or fixed** (`src/lib/codex-scan-policy.ts`, enforced in `enqueueScanNoAuth`). Prime's fixes reach them through the cascade. Their earlier scans stay readable on the clone page. The migration turns `codex_nightly_enabled` off on every clone; their Codex secrets are removed by the clone and fleet secret sync. |
+| Every pull request was scanned, and every push to `main` re-scanned Prime | Neither. One full scan of Prime a night (`/hooks/codex-nightly`), plus **Scan Prime now**. `/hooks/github` still does the PR bookkeeping for fix PRs and cascades merges. |
+| A fix waited for two admin approvals of its current head | After each nightly scan the sweep (`/hooks/codex-sweep` → `dispatchAutomaticFixes`) starts fixes by itself for open Prime findings, worst first, oldest first, up to `prime_config.codex_autofix_max_per_night` (default 10). A finding is tried at most twice in 30 days; credentials, info findings and anything being triaged are never auto-fixed. The scan's `autofix.dispatched` event claims it, so a night's fixes go out once. |
+| Codex wrote every fix | `codex_findings.severity` decides (`src/lib/codex-autofix-policy.ts`): critical/high → **Claude Code** (`claude -p --bare --restricted`, file tools only), medium/low → **Codex**. The engine travels inside the `finding` dispatch input, so a workflow older than version 4 ignores it and uses Codex. |
+| The fix's checks ran on the agent's working copy, as the job's own user, with `npm ci \|\| npm install` | They run on the **base plus the patch** — exactly the committed tree — as a separate user (`fixcheck`) that can read none of the job's files or the environment of the steps holding a token, with `npm ci` alone when a lockfile exists. A fix that fails them is **not pushed**: the run reports what broke and prints the patch. |
+| A dependency fix arrived with stale lockfiles (neither agent can reach the registry) | The workflow regenerates `package-lock.json` and `bun.lockb` (`bun@1.3.11`, as CI's `lovable-install` job) with no install scripts, and leaves lockfiles out of the reported size. |
+| Only CI workflows, scanner silencing and secrets were refused | Also refused: anything under `.github`, package-manager / git / hook / agent configuration (`.npmrc`, `bunfig.toml`, `.gitattributes`, `CLAUDE.md`, `AGENTS.md`, `.claude/`, …), changed `package.json` scripts, a package the project did not use, a dependency pointed at a URL, git repository or alias, a lockfile entry from a new host or carrying another package's tarball, symlinks and submodules, and the run's own callback key in the added lines. Tested by running the guard script on real diffs (`codex-remediation-guards.contract.test.ts`). |
+| A fix PR merged on the fix workflow's own checks; the repository's CI never ran on it (GitHub starts no workflow for a PR that `GITHUB_TOKEN` opened) | The pr_merge lane **dispatches the repository's CI** (`ci.yml`, named by the workflow as `verification.ci`) on the fix branch with the App token, waits — without spending attempts, up to 3 hours — and merges only once that run passed on the verified commit (`src/server/fixCiGate.pure.ts`). A fix whose CI fails, or that changed after its checks, is **closed**, its branch deleted, and the finding reopened for a later night. |
+| Merged fixes were held from the cascade until a post-merge scan | They cascade like any commit and pass the security gate (`SELF_HEALING_MERGE_TITLE`). |
+| The scan and remediation master secrets were synced into repositories' Actions secrets | They never leave Mission Control; the Prime sync deletes the old copies. `ANTHROPIC_API_KEY` is synced alongside `OPENAI_API_KEY`. |
+
 ## Why nothing was running
 
 | # | Fault | Effect |
@@ -60,8 +82,8 @@ workflow files:
 ## What runs now
 
 ```
- Mission Control                         Target repo (Prime or clone)
- ───────────────                         ────────────────────────────
+ Mission Control                         Prime
+ ───────────────                         ─────
  enqueueScanNoAuth
    ├── insert codex_scan_jobs (queued)
    └── dispatchCodexScan ──────────────► workflow_dispatch
@@ -140,11 +162,11 @@ exercised by tests):
 
 | Trigger | Route | Scope |
 |---|---|---|
-| pg_cron `0 7 * * *` | `POST /hooks/codex-nightly` | Prime + every clone with `codex_nightly_enabled` |
-| pg_cron `*/10 * * * *` | `POST /hooks/codex-sweep` | Re-dispatch stranded jobs, retire hung runs |
-| GitHub `pull_request` | `POST /hooks/github` | PR head SHA, scoped to the diff vs the base ref |
-| GitHub `push` to default branch | `POST /hooks/github` | Post-merge revalidation of Prime |
-| Operator | `/security/scans` | Prime, a single clone, or the whole fleet |
+| pg_cron `0 7 * * *` | `POST /hooks/codex-nightly` | Prime, a full scan (when `codex_nightly_enabled` on `prime_config`) |
+| pg_cron `*/10 * * * *` | `POST /hooks/codex-sweep` | Re-dispatch stranded jobs, retire hung runs, then start the night's fixes once the scan has completed |
+| Operator | `/security/scans` | **Scan Prime now** |
+
+Pull requests, pushes and clones are not scanned (`src/lib/codex-scan-policy.ts`).
 
 Both cron endpoints authenticate with `CRON_SECRET` as a Bearer token.
 
@@ -154,96 +176,112 @@ it. A `running` job with no terminal callback after 75 minutes (the workflow
 itself times out at 60) is failed as `scan_timeout`; one never started after
 6 hours is failed too. Either way its PR check, if any, is completed.
 
-## Remediation — what "Draft Fix PR" actually does
+## Remediation — how a finding gets fixed
 
-Yes, it writes real code. The button does **not** apply a patch from an API;
-it starts an agent inside the target repository.
+Mission Control never edits code itself; it starts an agent on Prime's own
+runner, and the agent's patch must survive the workflow's guards, the
+repository's checks and the repository's CI before it merges. Nobody
+reviews it, by policy. **Draft Fix PR** starts the same pipeline for one
+finding now.
 
 ```
- Mission Control                          Target repo (Prime or clone)
- ───────────────                          ────────────────────────────
- draftRemediationPR(findingId)
-   ├── admin gate + in-flight dedup
-   ├── insert codex_remediations (queued)
-   └── workflow_dispatch ───────────────► codex-remediation.yml
-        (GitHub App, awaited)               │
-                                            ├─ checkout base_ref (no stored token)
-                                            ├─ codex exec --sandbox workspace-write
-                                            │    ← edits real files in the tree
-                                            ├─ measure blast radius → fix.patch
-                                            ├─ refuse .github/workflows changes
-                                            ├─ gitleaks on ADDED lines ── HARD STOP
-                                            ├─ repo's own checks on a copy (report only)
-                                            ├─ commit from fix.patch in a fresh repo + push
-                                            └─ gh pr create --draft
-                                                    │
- /api/public/hooks/codex-remediation ◄─────────────┘
-   ├── persist PR + verification + blast radius
-   └── mirror finding state
+ Mission Control                          Prime
+ ───────────────                          ─────
+ nightly scan completes
+ /hooks/codex-sweep → dispatchAutomaticFixes
+   ├── claim the scan (autofix.dispatched)
+   ├── pick open findings, worst first, ≤ codex_autofix_max_per_night
+   └── startRemediation (per finding) ───► codex-remediation.yml
+        engine: Claude for P0/P1,            ├─ checkout base_ref (no stored token)
+        Codex for P2 and below               ├─ claude -p --bare --restricted   (P0/P1)
+                                             │  or codex exec --sandbox workspace-write
+                                             │    ← edits real files, no network
+                                             ├─ regenerate lockfiles (no install scripts)
+                                             ├─ stage in a pristine copy of .git → fix.patch
+                                             ├─ refuse CI / config / dependency / link /
+                                             │  silencing changes
+                                             ├─ gitleaks + callback key on ADDED lines ─ HARD STOP
+                                             ├─ checks on base + patch, as user `fixcheck`
+                                             │    fail ─► report, push nothing
+                                             ├─ commit from fix.patch in a fresh repo + push
+                                             └─ gh pr create --draft (names ci.yml)
+                                                     │
+ /api/public/hooks/codex-remediation ◄──────────────┘
+   └── persist PR, verification (+ ci), size, engine, model
                 │
-     two independent admin approvals of the PR's current head
+ self-healing pr_merge lane (every 2 minutes)
+   ├── PR is the fix's own branch, at the verified commit
+   ├── decideFixMerge: verified, no secret, ≤ 10 files, ≤ 400 lines
+   ├── dispatch ci.yml on the fix branch ─► CI (App token, so it runs)
+   ├── wait (attempt-neutral, ≤ 3 h) until it passed on that commit
+   └── mark ready, squash-merge pinned to that commit, delete the branch
+        (otherwise: close the PR, delete the branch, reopen the finding)
                 │
-        mergeRemediationPR ──────────────► re-read PR, mark ready, merge pinned to head
+        cascade to the fleet
                 │
-        cascade to fleet (Prime only)
-                │
-        next full scan ── finding gone? ── fix_confirmed_at
+        next nightly scan ── finding gone? ── fix_confirmed_at
 ```
 
-### The engine
+### The engines
 
-**OpenAI Codex CLI (`@openai/codex`)**, run headless as `codex exec` on the
-target repo's own GitHub Actions runner, sandboxed with
-`--sandbox workspace-write`. It gets a checkout of `base_ref` and edits files
-directly — which is why the patch follows the conventions of the surrounding
-code rather than being a context-free diff.
+| | Claude Code | OpenAI Codex CLI |
+|---|---|---|
+| Fixes | P0, P1 (critical, high) | P2, P3 (medium, low) |
+| Package | `@anthropic-ai/claude-code@2.1.289` | `@openai/codex@0.160.1` |
+| Runs as | `claude -p --bare --restricted --tools "Read,Glob,Grep,Edit,Write" --permission-mode acceptEdits --permission-prompts none --strict-mcp-config` | `codex exec --sandbox workspace-write --ephemeral` |
+| Can | read and edit files in the checkout | read the runner, write the checkout, run commands without network |
+| Cannot | run commands, reach the web, write outside the checkout, write settings, git or package-manager files | reach the network |
+| Key | `ANTHROPIC_API_KEY`, in its step only | `OPENAI_API_KEY`, in its step only |
+| Limits | 30 minutes, 100 turns, `CLAUDE_FIX_MAX_BUDGET_USD` (default $10) | 30 minutes |
 
-It is given the finding's title, severity, file, line, CWE, description, the
-reporting scanner and rule id, and the offending source excerpt captured at
-scan time. Authentication is `OPENAI_API_KEY`, pushed into each managed repo
-by the settings-page secret sync. **Without that key remediation cannot run
-at all** — scans still work, since gitleaks/semgrep/osv-scanner need no key.
+Both are installed, pinned, before any key is in reach, and get the same
+prompt: the finding's title, severity, location, CWE, description, scanner,
+rule and offending excerpt, framed as material to work on rather than
+instructions. The repository variable `CLAUDE_FIX_MODEL` picks Claude's
+model (unset: the CLI's default) and `CLAUDE_FIX_EFFORT` its effort
+(default `high`). Each remediation row records its `engine`, and Claude's
+records the `model` that did most of the writing.
 
-Recorded on every remediation row as `engine` (`codex_cli`), so a future
-engine swap stays auditable.
-
-### What stands between the model and your default branch
+### What stands between the model and Prime's `main`
 
 | Guard | Behaviour |
 |---|---|
-| Secret-leak scan | gitleaks scans the lines the patch adds. A patch adding a secret is **never pushed**. |
-| CI changes | A patch touching `.github/workflows` — including a file git would print quoted, or one renamed away — is refused. |
-| Scanner silencing | A patch that adds an inline suppression (semgrep's or gitleaks'), or edits `.gitleaks.toml`, `.gitleaksignore`, `.semgrepignore`, `osv-scanner.toml` or `.github/codex-security/`, is refused: the finding would vanish from the next scan and the fix be "confirmed" with the vulnerability in place. |
-| Credentials | The OpenAI key exists only in the Codex step. `GITHUB_TOKEN` exists only in the push and PR steps, which never run git in the checkout: the commit is built from `fix.patch` in a fresh repository, applied to the index only, hooks disabled. |
-| Repo's own checks | `typecheck`, `lint`, `test`, `build` — whichever `package.json` defines — run against a copy of the patched tree. Failures are reported, not fatal: a reviewer must be able to see a broken fix rather than have it silently discarded. |
-| Blast radius | Files touched and lines added/removed are measured and shown, so a "smallest possible change" that sprawled across 40 files is visible before approval. |
-| Draft PR | Always opened as a draft. |
-| Two-key merge | Two distinct admin approvals **of the PR's current head** required; the requester cannot approve their own; a push after an approval needs approving again. The merge re-reads the PR (branch, repository, base) and is pinned to that head. Enforced server-side from the database. |
-| Auto-merge ceiling | `prime_config.codex_auto_merge_ceiling`, default `off`. Only fixes at or below it may merge through the self-healing queue unattended; anything above needs the two-key rule even when released from the support queue. |
-| Draft→ready | GitHub refuses to merge a draft and has no REST endpoint to clear the flag, so the merge path clears it via the GraphQL `markPullRequestReadyForReview` mutation first. |
-| Fix confirmation | Merging proves a patch landed, not that the vulnerability is gone. When a later full-tree scan no longer reports the finding, the remediation is stamped `fix_confirmed_at`. |
-
-Only the commit step is scoped to the exact paths Codex touched — captured
-before the verification step runs, so `npm ci` / build output can never end
-up in the PR.
+| Secrets | gitleaks scans the lines the patch adds, and so does a check for the run's own callback key. A patch adding a secret is **never pushed**. |
+| CI and automation | A patch touching anything under `.github` — workflows, local actions, the scripts they call — is refused. |
+| Configuration | A patch touching package-manager, git, hook or agent configuration is refused: those decide what installs and runs, and what the next agent reads. |
+| Dependencies | Changed `package.json` scripts are refused; so is a package the project did not already use, a dependency pointed at a URL, git repository or alias, and a lockfile entry from a new host or carrying another package's tarball. |
+| Links | A symlink or a submodule is refused. |
+| Scanner silencing | An added inline suppression, or an edit to `.gitleaks.toml`, `.gitleaksignore`, `.semgrepignore`, `osv-scanner.toml` or `.github/codex-security/`, is refused. |
+| Credentials | Each API key exists only in its agent's step; `GITHUB_TOKEN` only in the push and PR steps, which never run git in the checkout. The job's temporary directory is closed to other users. |
+| Checks | install (`npm ci` when a lockfile exists), typecheck, lint, test, build — whichever `package.json` defines — on the base plus the patch, as `fixcheck`, whose leftover processes are killed. A fix that fails is not pushed. |
+| Repository CI | Dispatched by Mission Control on the fix branch; the fix merges only once it passed on the verified commit. |
+| Size | At most 10 files and 400 lines, lockfiles not counted (`decideFixMerge`). |
+| Pinning | The merge is pinned to the commit the checks and CI ran on; a push to the branch closes the fix. |
+| Retries | A declined fix is closed, its branch deleted, the finding reopened. Automatic attempts that did not merge count: two in 30 days, then the finding waits for a person. |
+| Fix confirmation | When a later full scan no longer reports the finding, the remediation is stamped `fix_confirmed_at`; if it still does, the finding reopens as "fix ineffective". |
 
 ### Failure modes, and what each one leaves behind
 
 | Outcome | Result |
 |---|---|
-| No `OPENAI_API_KEY` in the repo | Workflow fails immediately with a message pointing at the settings-page secret sync. |
-| Codex changes nothing (e.g. judges it a false positive) | Reported as `workflow.failed` carrying Codex's own reasoning from `CODEX_FIX_NOTES.md`; no PR is opened. |
-| Patch introduces a secret | Push refused, remediation failed with the leak count. |
-| Repo checks fail | Draft PR still opened, marked ⚠️ on the PR and in Mission Control. |
-| Workflow dies at any point | Remediation set to `failed`, and the finding is returned to `open` — it must not sit in `fix_drafted` with no PR behind it. |
+| No `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` on Prime | The run fails at once, naming the secret sync; the finding returns to `open`. |
+| The agent changes nothing (e.g. judges it a false positive) | `workflow.failed` with the agent's reasoning from `CODEX_FIX_NOTES.md`; no PR. |
+| The agent stops early (turn or budget limit, timeout, error) | `workflow.failed` naming why; nothing pushed. |
+| The lockfiles cannot be regenerated | `workflow.failed` with npm's or bun's error; nothing pushed. |
+| A guard refuses the patch | `workflow.failed` naming what it touched; nothing pushed. |
+| The checks fail | `workflow.failed` naming the failed checks, with their output; nothing pushed. |
+| CI fails, or does not finish within 3 hours, on the fix | The PR is closed with the reason, its branch deleted, the finding reopened. |
+| GitHub refuses the merge (conflict with an earlier fix, branch protection) | As above; the finding is tried again on a later night against the new `main`. |
+| Workflow dies at any point | Remediation `failed`, the finding returned to `open`. |
 
-### Reviewing one
+### Following one
 
-The scan-detail sheet shows, per finding: the engine that wrote the patch,
-blast radius, secret-scan verdict, each verification check with output for
-failures, the PR and run links, the approval count, and whether a later scan
-has confirmed the fix. An expandable explainer above the findings list spells
-out the whole pipeline in-product.
+`/security/scans#fix-prs` lists the fixes in flight with their engine, PR,
+and what each is waiting for — "Waiting for CI — `.github/workflows/ci.yml`
+is in_progress on the fix" — and the scan-detail sheet shows, per finding,
+the engine, blast radius, secret scan, each check and the CI. Declined and
+failed fixes notify operators (`remediation_failed`); merged ones
+`remediation_auto_completed`.
 
 ## Secrets
 
@@ -256,34 +294,47 @@ out the whole pipeline in-product.
 | `CODEX_SECURITY_WEBHOOK_SECRET_PREVIOUS` | optional | The scan master being rotated out, still accepted. Remove it a day after the rotation. |
 | `CODEX_REMEDIATION_WEBHOOK_SECRET` | optional | The remediation master. Falls back to the scan master. |
 | `CODEX_REMEDIATION_WEBHOOK_SECRET_PREVIOUS` | optional | As above, for the remediation master. |
-| `OPENAI_API_KEY` | optional for scans, **required for remediation** | Synced into each managed repo as an Actions secret. Without it, scans still run gitleaks/semgrep/osv-scanner; remediation cannot author patches. |
+| `ANTHROPIC_API_KEY` | **required for P0/P1 fixes** | Synced into Prime's Actions secrets by the Prime secret sync. Without it, critical and high findings cannot be fixed. |
+| `OPENAI_API_KEY` | optional for scans, **required for P2 and below fixes** | Synced into Prime's Actions secrets. Without it, scans still run gitleaks/semgrep/osv-scanner; medium and low findings cannot be fixed. |
+
+The masters never leave Mission Control: each scan job and remediation is
+dispatched with a key derived for it alone, and the Prime sync deletes any
+copy of a master an earlier version left in Prime's Actions secrets. Clones
+hold no Codex secrets; the clone and fleet syncs remove them.
+
+Repository variables on Prime (all optional): `CLAUDE_FIX_MODEL`,
+`CLAUDE_FIX_EFFORT`, `CLAUDE_FIX_MAX_BUDGET_USD`, and `FIX_CI_WORKFLOW` (the
+CI the merge lane runs on each fix, default `ci.yml`).
 
 ## Bringing it up
 
-1. Apply `supabase/migrations/20260727140000_codex_security_engine_live.sql`
-   and `supabase/migrations/20261018090000_codex_findings_canonical.sql`.
-2. Copy `.github/workflows/codex-security-scan.yml` and
-   `.github/workflows/codex-remediation.yml` into Prime; the fleet cascade
-   carries them to every clone (clone provisioning pushes the secrets
-   automatically). Engine health shows which repositories still report an
-   older workflow version.
-3. Once every repository reports version 2, **rotate the signing key**
-   (engine health): older copies printed the previous one in their logs.
-4. Open **/security/scans** and read the **Engine health** card. Every
-   blocking misconfiguration is listed there with its exact fix — missing
-   secret, missing App permission, missing workflow file, dead cron.
-5. Click **Scan Prime Now** and watch the job go
-   `queued → running → completed` with findings attached. Triage Prime's
-   first results before turning on the cascade gate or PR-check failure.
+1. Apply the migrations (they apply on merge to `main`), including
+   `20261018120000_codex_autofix_settings.sql`.
+2. Merge `.github/workflows/codex-security-scan.yml` and
+   `.github/workflows/codex-remediation.yml` to Prime's `main`. Engine health
+   reads both and reports their versions.
+3. Set `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` in Mission Control, then run
+   the **Actions secret sync for Prime** in Settings. Run the fleet sync once
+   to remove the Codex secrets from the clones.
+4. Make sure Prime's `ci.yml` keeps its `workflow_dispatch` trigger (engine
+   health's "CI that fixes must pass" check), and that branch protection lets
+   the App merge once those checks pass — a required check that never runs on
+   a fix PR (for example the retired "Codex Security" PR check) makes GitHub
+   refuse every merge.
+5. **Rotate both master secrets** (engine health): earlier versions synced
+   them into repositories' Actions secrets.
+6. Open **/security/scans**, read the **Engine health** card, and click
+   **Scan Prime now**. Once it completes, the next sweep starts the night's
+   fixes; **Automatic fixes** in the scheduling panel turns them off.
 
 ## Verifying without waiting for cron
 
 ```bash
-# nightly fan-out
+# nightly scan of Prime
 curl -X POST https://<mission-control>/hooks/codex-nightly \
   -H "Authorization: Bearer $CRON_SECRET"
 
-# sweeper
+# sweeper (also starts the night's fixes once the scan has completed)
 curl -X POST https://<mission-control>/hooks/codex-sweep \
   -H "Authorization: Bearer $CRON_SECRET"
 ```
@@ -293,8 +344,8 @@ curl -X POST https://<mission-control>/hooks/codex-sweep \
 - Fleet overview moved from "fetch 500 jobs + every open finding, group in
   JS on each 30s poll" to the `codex_fleet_overview()` RPC, which does the
   `DISTINCT ON` and severity roll-up against partial indexes.
-- Nightly fan-out dispatches 5 clones concurrently instead of serially.
+- The nightly run is one scan of Prime; the fleet pays nothing for it.
 - The partner bridge went from 3 queries per finding to one lookup plus two
   batched writes.
-- PR scans are diff-scoped, so they cost seconds rather than minutes and
-  only report what the PR actually introduced.
+- Each fix is one Actions run on Prime plus one CI run, and each merge one
+  cascade, which is why `codex_autofix_max_per_night` paces a backlog.

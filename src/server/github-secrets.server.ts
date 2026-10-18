@@ -195,11 +195,15 @@ export type SyncSecretsInput = {
   installationId?: string | null;
   /** Explicit map of secret name → value. Undefined/empty values are skipped. */
   secrets: Record<string, string | undefined | null>;
+  /** Names to delete from the repository (an absent one is not an error). */
+  remove?: readonly string[];
 };
 
 export type SyncSecretsResult = {
   ok: boolean;
   written: string[];
+  /** Deleted, or already absent. */
+  removed: string[];
   skipped: { name: string; reason: string }[];
   failed: { name: string; error: string }[];
   /** True when nothing was written because nothing was configured to write. */
@@ -217,6 +221,7 @@ export type SyncSecretsResult = {
  */
 export async function syncRepoSecrets(input: SyncSecretsInput): Promise<SyncSecretsResult> {
   const written: string[] = [];
+  const removed: string[] = [];
   const skipped: { name: string; reason: string }[] = [];
   const failed: { name: string; error: string }[] = [];
 
@@ -260,9 +265,33 @@ export async function syncRepoSecrets(input: SyncSecretsInput): Promise<SyncSecr
     }
   }
 
+  for (const name of input.remove ?? []) {
+    if (fatal) {
+      failed.push({
+        name,
+        error: "not attempted — see the failure above, it affects every secret",
+      });
+      continue;
+    }
+    try {
+      await deleteRepoSecret({
+        owner: input.owner,
+        repo: input.repo,
+        name,
+        installationId: input.installationId ?? null,
+      });
+      removed.push(name);
+    } catch (e) {
+      const { message, fatal: isFatal } = describeSecretError(e, input.owner, input.repo);
+      failed.push({ name, error: message });
+      if (isFatal) fatal = message;
+    }
+  }
+
   return {
-    ok: failed.length === 0 && configured.length > 0,
+    ok: failed.length === 0 && (configured.length > 0 || (input.remove ?? []).length > 0),
     written,
+    removed,
     skipped,
     failed,
     nothingConfigured: configured.length === 0,
@@ -270,28 +299,53 @@ export async function syncRepoSecrets(input: SyncSecretsInput): Promise<SyncSecr
 }
 
 /**
- * The canonical set of Actions secrets that every Aurixa-managed repo
- * (Prime and each clone) needs for the Codex Security workflows.
+ * The Actions secrets Prime's repository needs for the Codex Security
+ * workflows. Prime only: clones are neither scanned nor fixed on their own
+ * (src/lib/codex-scan-policy.ts), so they need none of these.
  *
- * The scan and remediation workflows receive their callback URL and HMAC
- * secret as workflow_dispatch inputs, so the only secret they genuinely
- * require in the repo is the model API key. The rest are written for
- * operator convenience and for workflows that run outside a dispatch.
+ * The workflows receive their callback URL and a per-run callback key as
+ * workflow_dispatch inputs, so all they genuinely need from the repository is
+ * the two model keys: OpenAI's for Codex (P2-and-below fixes and the scan's
+ * reasoning pass), Anthropic's for Claude (P0/P1 fixes).
  */
 export async function buildCodexRepoSecrets(): Promise<Record<string, string | undefined>> {
   const { remediationCallbackUrl, scanCallbackUrl } =
     await import("@/server/codex-security-client.server");
   return {
-    // Authenticates the Codex CLI in both the scan reasoning pass and the
-    // remediation patch author. CODEX_SECURITY_API_KEY is the legacy alias.
+    // CODEX_SECURITY_API_KEY is the legacy alias for the OpenAI key.
     OPENAI_API_KEY: process.env.OPENAI_API_KEY ?? process.env.CODEX_SECURITY_API_KEY,
     CODEX_SECURITY_API_KEY: process.env.CODEX_SECURITY_API_KEY,
-    CODEX_REMEDIATION_WEBHOOK_SECRET: process.env.CODEX_REMEDIATION_WEBHOOK_SECRET,
-    CODEX_SECURITY_WEBHOOK_SECRET: process.env.CODEX_SECURITY_WEBHOOK_SECRET,
+    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
     CODEX_CALLBACK_URL: remediationCallbackUrl(),
     CODEX_SCAN_CALLBACK_URL: scanCallbackUrl(),
   };
 }
+
+/**
+ * Removed from Prime's repository on every sync: the callback-signing
+ * MASTERS. Earlier syncs wrote them "for convenience", but per-run keys are
+ * derived from them and they must never leave Mission Control — no workflow
+ * reads them, and any workflow in the repository (Prime's is public) could.
+ * Rotate both masters once they are gone (engine health → "Rotate signing key").
+ */
+export const RETIRED_CODEX_REPO_SECRETS = [
+  "CODEX_REMEDIATION_WEBHOOK_SECRET",
+  "CODEX_SECURITY_WEBHOOK_SECRET",
+] as const;
+
+/**
+ * Removed from a clone's repository when its secrets are synced: everything
+ * the Codex workflows used. Clones no longer run them, and only those two
+ * workflows read these names.
+ */
+export const CLONE_CODEX_REPO_SECRETS = [
+  "OPENAI_API_KEY",
+  "CODEX_SECURITY_API_KEY",
+  "ANTHROPIC_API_KEY",
+  "CODEX_CALLBACK_URL",
+  "CODEX_SCAN_CALLBACK_URL",
+  ...RETIRED_CODEX_REPO_SECRETS,
+] as const;
 
 export type SecretPreviewEntry = {
   name: string;
@@ -303,20 +357,16 @@ export type SecretPreviewEntry = {
 
 const SECRET_PURPOSES: Record<string, { purpose: string; required: boolean }> = {
   OPENAI_API_KEY: {
-    purpose: "Codex CLI auth — the scan reasoning pass and every remediation patch",
+    purpose: "Codex CLI auth — P2-and-below fixes and the scan reasoning pass",
     required: true,
   },
   CODEX_SECURITY_API_KEY: {
     purpose: "Legacy alias for OPENAI_API_KEY, kept for older workflow revisions",
     required: false,
   },
-  CODEX_REMEDIATION_WEBHOOK_SECRET: {
-    purpose: "Signs remediation PR callbacks (normally passed as a dispatch input)",
-    required: false,
-  },
-  CODEX_SECURITY_WEBHOOK_SECRET: {
-    purpose: "Signs scan result callbacks (normally passed as a dispatch input)",
-    required: false,
+  ANTHROPIC_API_KEY: {
+    purpose: "Claude Code auth — P0/P1 fixes",
+    required: true,
   },
   CODEX_CALLBACK_URL: {
     purpose: "Remediation callback endpoint",

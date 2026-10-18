@@ -5,21 +5,26 @@
 // and is responsible for producing the draft PR and calling the
 // remediation callback with the resulting PR URL / state.
 //
-// Engine: the patch is authored by the OpenAI Codex CLI (`@openai/codex`)
-// running inside the target repo's GitHub Actions runner with
-// `--sandbox workspace-write`. It edits real files in a checkout of
-// `base_ref`; the workflow then verifies the patched tree against the
-// repo's own checks, commits, and opens a DRAFT pull request. Mission
-// Control never writes code itself. Merging follows the review policy: two
-// independent approvals for the PR's current commit, unless the finding sits
-// at or below the auto-merge ceiling an admin set (off by default).
+// Engines: P0/P1 fixes are written by Claude (the Claude Code CLI), P2 and
+// below by the OpenAI Codex CLI (`@openai/codex`) — src/lib/codex-autofix-policy.ts.
+// Either runs inside the target repo's GitHub Actions runner, limited to
+// editing files in a checkout of `base_ref`; the workflow then verifies the
+// patched tree against the repo's own checks, commits, and opens a DRAFT
+// pull request. Mission Control never writes code itself. The self-healing
+// queue then runs the repository's CI on the PR (`dispatchFixCi`: a PR the
+// workflow's own token opened starts no workflow) and merges it by itself
+// once the patch is verified and that CI has passed on its commit, or closes
+// it (src/lib/remediation-policy.ts `decideFixMerge`,
+// src/server/fixCiGate.pure.ts) — no person in the loop.
 //
 // Callbacks are authenticated by codex-remediation-callback.server.ts with a
 // key derived for each remediation; the master secret never leaves here.
 
 import { getAppOctokit } from "@/server/github-app.server";
 import { withRetry, isTransientHttpError } from "@/lib/with-retry";
+import type { FixCiRun } from "@/server/fixCiGate.pure";
 
+/** The engine recorded for a remediation when none was chosen (rows from before engines). */
 export const REMEDIATION_ENGINE = "codex_cli";
 
 export type DispatchRemediationInput = {
@@ -41,6 +46,14 @@ export type DispatchRemediationInput = {
     snippet?: string | null;
     scanner?: string | null;
     ruleId?: string | null;
+    /**
+     * Which agent writes the fix: `claude` or `codex`. Carried inside the
+     * finding rather than as its own dispatch input: GitHub rejects a dispatch
+     * naming an input the target's workflow file does not declare, and the
+     * workflow file reaches `main` separately from this code. An older
+     * workflow ignores the field and uses Codex.
+     */
+    engine?: "claude" | "codex";
   };
   callbackUrl: string;
   callbackSecret: string;
@@ -76,6 +89,7 @@ export function buildFindingInput(finding: DispatchRemediationInput["finding"]):
     scanner: finding.scanner ?? "",
     ruleId: finding.ruleId ?? "",
     snippet: (finding.snippet ?? "").slice(0, 2000),
+    engine: finding.engine ?? "codex",
   });
 }
 
@@ -175,9 +189,8 @@ function describeRemediationDispatchError(
  * Remediation PRs are opened as drafts on purpose, but GitHub refuses to
  * merge a draft ("Draft pull requests cannot be merged", 405) and the REST
  * API has no endpoint to clear the flag — only the GraphQL
- * `markPullRequestReadyForReview` mutation can. Without this step the
- * two-key merge gate could be fully satisfied and merging would still
- * always fail.
+ * `markPullRequestReadyForReview` mutation can. Without this step a fix
+ * could pass every check and merging it would still always fail.
  */
 export async function markPullRequestReady(input: {
   owner: string;
@@ -334,4 +347,163 @@ export async function mergeRemediationPRViaGitHub(input: {
 
   const merged = res.data as { sha: string; merged: boolean };
   return { sha: merged.sha, merged: merged.merged, wasDraft, headSha: pr.headSha };
+}
+
+/**
+ * Close a fix PR that is not going to merge, and say why on it. A security fix
+ * either merges by itself or is closed; nothing waits for a person. The
+ * comment is best effort — the close is what matters.
+ */
+export async function closeRemediationPullRequest(input: {
+  owner: string;
+  repo: string;
+  prNumber: number;
+  installationId?: string | null;
+  reason: string;
+  /** The fix branch and the commit it should still point at, to delete it after. */
+  branchName?: string | null;
+  headSha?: string | null;
+}): Promise<void> {
+  const octokit = getAppOctokit(input.installationId ?? undefined);
+  try {
+    await octokit.request("POST /repos/{owner}/{repo}/issues/{issue_number}/comments", {
+      owner: input.owner,
+      repo: input.repo,
+      issue_number: input.prNumber,
+      body:
+        `Closed by Mission Control without merging: ${input.reason}.\n\n` +
+        "Security fixes merge by themselves only when the repository's checks and CI pass, the " +
+        "patch adds no secret and it stays small. The finding stays open and is retried on a " +
+        "later night.",
+    });
+  } catch (err) {
+    console.warn("[codex-remediation] could not comment on the closed PR:", (err as Error).message);
+  }
+  await octokit.request("PATCH /repos/{owner}/{repo}/pulls/{pull_number}", {
+    owner: input.owner,
+    repo: input.repo,
+    pull_number: input.prNumber,
+    state: "closed",
+  });
+  await deleteRemediationBranch({
+    owner: input.owner,
+    repo: input.repo,
+    branchName: input.branchName ?? null,
+    expectedSha: input.headSha ?? null,
+    installationId: input.installationId,
+  });
+}
+
+/**
+ * Delete a fix branch once its PR has merged or been closed, so a nightly
+ * pipeline does not leave a branch behind for every attempt. Only a
+ * `codex/fix-` branch, and only while it still points at the commit
+ * Mission Control knows: a branch somebody has pushed to since is theirs.
+ * Best effort — a branch left behind costs nothing but clutter.
+ */
+export async function deleteRemediationBranch(input: {
+  owner: string;
+  repo: string;
+  branchName: string | null;
+  expectedSha: string | null;
+  installationId?: string | null;
+}): Promise<boolean> {
+  if (!input.branchName?.startsWith("codex/fix-") || !input.expectedSha) return false;
+  const octokit = getAppOctokit(input.installationId ?? undefined);
+  const ref = `heads/${input.branchName}`;
+  try {
+    const { data } = await octokit.request("GET /repos/{owner}/{repo}/git/ref/{ref}", {
+      owner: input.owner,
+      repo: input.repo,
+      ref,
+    });
+    if ((data as { object?: { sha?: string } }).object?.sha !== input.expectedSha) return false;
+    await octokit.request("DELETE /repos/{owner}/{repo}/git/refs/{ref}", {
+      owner: input.owner,
+      repo: input.repo,
+      ref,
+    });
+    return true;
+  } catch (err) {
+    console.warn("[codex-remediation] fix branch not deleted:", (err as Error).message);
+    return false;
+  }
+}
+
+/**
+ * The workflow runs GitHub reports on a fix's head commit, for the CI gate
+ * (fixCiGate.pure.ts). Throws on a failed read: an unread CI is no evidence
+ * either way, and the merge run retries on its budget.
+ */
+export async function listFixCiRuns(input: {
+  owner: string;
+  repo: string;
+  headSha: string;
+  installationId?: string | null;
+}): Promise<FixCiRun[]> {
+  const octokit = getAppOctokit(input.installationId ?? undefined);
+  const { data } = await octokit.request("GET /repos/{owner}/{repo}/actions/runs", {
+    owner: input.owner,
+    repo: input.repo,
+    head_sha: input.headSha,
+    per_page: 50,
+  });
+  return ((data as { workflow_runs?: unknown[] }).workflow_runs ?? []).map((raw) => {
+    const r = raw as {
+      id: number;
+      path?: string | null;
+      status?: string | null;
+      conclusion?: string | null;
+    };
+    return {
+      id: r.id,
+      path: r.path ?? null,
+      status: r.status ?? null,
+      conclusion: r.conclusion ?? null,
+    };
+  });
+}
+
+/**
+ * Start the repository's CI on a fix branch. The remediation workflow's own
+ * token opened the PR, and GitHub starts no workflow for that; a dispatch
+ * from the App does. A refusal GitHub will repeat (the workflow is gone, has
+ * no `workflow_dispatch`, or the branch is) is returned rather than thrown,
+ * so the fix is closed instead of retried.
+ */
+export async function dispatchFixCi(input: {
+  owner: string;
+  repo: string;
+  /** `.github/workflows/<file>`. */
+  workflow: string;
+  ref: string;
+  installationId?: string | null;
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+  const octokit = getAppOctokit(input.installationId ?? undefined);
+  const file = input.workflow.replace(/^\.github\/workflows\//, "");
+  try {
+    await withRetry(
+      () =>
+        octokit.request("POST /repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches", {
+          owner: input.owner,
+          repo: input.repo,
+          workflow_id: file,
+          ref: input.ref,
+        }),
+      { attempts: 3, shouldRetry: isTransientHttpError },
+    );
+    return { ok: true };
+  } catch (err) {
+    const status = (err as { status?: number })?.status;
+    if (status === 404 || status === 422) {
+      const message =
+        (err as { response?: { data?: { message?: string } } })?.response?.data?.message ??
+        (err instanceof Error ? err.message : String(err));
+      return {
+        ok: false,
+        error: `GitHub would not start ${input.workflow} on ${input.ref} (${status}): ${message}`,
+      };
+    }
+    throw err;
+  }
 }

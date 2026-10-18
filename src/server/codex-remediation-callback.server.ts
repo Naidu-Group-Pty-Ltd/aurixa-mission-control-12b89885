@@ -45,6 +45,15 @@ const VerificationSchema = z.object({
     )
     .max(50)
     .optional(),
+  // The CI the workflow found in the base (workflow version 4 on). The merge
+  // lane runs it on the fix and merges only once it passes there
+  // (src/server/fixCiGate.pure.ts); without this field it would be stripped.
+  ci: z
+    .object({
+      workflow: z.string().max(200).nullable(),
+      dispatchable: z.boolean(),
+    })
+    .optional(),
 });
 
 export const RemediationPayloadSchema = z.object({

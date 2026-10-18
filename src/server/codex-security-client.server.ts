@@ -213,7 +213,13 @@ export async function checkScanWorkflowPresent(input: {
   ref?: string | null;
   installationId?: string | null;
   workflowFile?: string;
-}): Promise<{ present: boolean; detail: string; version: number | null }> {
+}): Promise<{
+  present: boolean;
+  detail: string;
+  version: number | null;
+  /** Whether the file declares `workflow_dispatch` (null when it was not read). */
+  dispatchable: boolean | null;
+}> {
   const workflowFile = input.workflowFile ?? scanWorkflowFile();
   try {
     const octokit = getAppOctokit(input.installationId ?? undefined);
@@ -229,7 +235,12 @@ export async function checkScanWorkflowPresent(input: {
         ? Buffer.from(content.replace(/\n/g, ""), "base64").toString("utf8")
         : "";
     const version = text ? declaredWorkflowVersion(text) : null;
-    return { present: true, detail: `.github/workflows/${workflowFile} found`, version };
+    return {
+      present: true,
+      detail: `.github/workflows/${workflowFile} found`,
+      version,
+      dispatchable: text ? /\bworkflow_dispatch\b/.test(text) : null,
+    };
   } catch (err) {
     const status = (err as { status?: number })?.status;
     if (status === 404) {
@@ -237,6 +248,7 @@ export async function checkScanWorkflowPresent(input: {
         present: false,
         detail: `.github/workflows/${workflowFile} is missing from ${input.owner}/${input.repo}`,
         version: null,
+        dispatchable: null,
       };
     }
     return {
@@ -246,6 +258,7 @@ export async function checkScanWorkflowPresent(input: {
           ? `Could not verify workflow file: ${err.message}`
           : "Could not verify workflow file",
       version: null,
+      dispatchable: null,
     };
   }
 }

@@ -27,11 +27,7 @@ import {
   XCircle,
   Activity,
 } from "lucide-react";
-import {
-  getCodexEngineHealth,
-  getFleetWorkflowVersions,
-} from "@/lib/codex-engine-health.functions";
-import { CODEX_SCAN_WORKFLOW_VERSION } from "@/lib/codex-workflow-contract";
+import { getCodexEngineHealth } from "@/lib/codex-engine-health.functions";
 import {
   compareRulesets,
   normalizeRuleset,
@@ -47,11 +43,7 @@ import {
   getSchedulingConfig,
   updateSchedulingConfig,
   runNightlyNow,
-  listCloneCodexOverview,
-  runCloneScanNow,
-  setCloneNightly,
   setNightlySchedule,
-  runFleetScan,
   rotateScanSigningKey,
 } from "@/lib/codex-security.functions";
 import {
@@ -59,7 +51,8 @@ import {
   type FindingsScope,
 } from "@/components/security/codex-findings-explorer";
 import { PrimePostureCard } from "@/components/security/prime-posture-card";
-import { approvalsAtHead } from "@/lib/remediation-approvals";
+import { FIX_ENGINE_LABEL, isFixEngine } from "@/lib/codex-autofix-policy";
+import { SCAN_POLICY_SUMMARY } from "@/lib/codex-scan-policy";
 import { degradedScanners } from "@/lib/codex-finding-lifecycle";
 import { reportedWorkflowVersion } from "@/lib/codex-workflow-contract";
 import {
@@ -69,20 +62,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Link } from "@tanstack/react-router";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
 import { draftRemediationPR, listRemediations } from "@/lib/codex-remediation.functions";
-import {
-  reviewRemediation,
-  listRemediationReviews,
-  mergeRemediationPR,
-} from "@/lib/codex-remediation-reviews.functions";
-import { useAuth } from "@/lib/auth";
-import { Textarea } from "@/components/ui/textarea";
-import { ThumbsUp, ThumbsDown, GitMerge, MessageSquareWarning } from "lucide-react";
 
 import { ProtectedRoute } from "@/components/protected-route";
 import { useConfirm } from "@/components/confirm-dialog";
@@ -155,7 +139,7 @@ function CodexScansPage() {
         eyebrow="security"
         icon={<ShieldAlert className="h-6 w-6 text-primary" />}
         title="Scans & Findings"
-        description="Autonomous repository scans — gitleaks, semgrep, osv-scanner and a Codex reasoning pass, run in GitHub Actions against Prime and every clone."
+        description={`Gitleaks, semgrep, osv-scanner and a Codex reasoning pass, run in GitHub Actions. ${SCAN_POLICY_SUMMARY} Findings are fixed by Claude (P0/P1) or Codex (P2 and below), and every fix merges by itself once its checks pass.`}
         actions={
           <>
             <Button variant="outline" onClick={() => jobsQ.refetch()}>
@@ -179,7 +163,7 @@ function CodexScansPage() {
         onOpenScan={(jobId) => setOpenJob(jobId)}
       />
 
-      <FixReviewQueue />
+      <FixesInFlight />
 
       <div ref={findingsRef}>
         <CodexFindingsExplorer
@@ -189,14 +173,15 @@ function CodexScansPage() {
         />
       </div>
 
-      <FleetOverviewPanel onOpenScan={(jobId) => setOpenJob(jobId)} />
-
       <SchedulingPanel />
 
       <Card>
         <CardHeader>
           <CardTitle>Recent scans</CardTitle>
-          <CardDescription>Last 100 jobs across Prime and clone fleet.</CardDescription>
+          <CardDescription>
+            The last 100 scans. Prime is scanned nightly; clone rows are from before clones stopped
+            being scanned.
+          </CardDescription>
         </CardHeader>
         <CardContent>
           <Table>
@@ -368,9 +353,7 @@ function ScanDetail({ jobId }: { jobId: string }) {
                       )}
                     </div>
                     {rem && <RemediationEvidence remediation={rem} />}
-                    {rem && !["failed", "closed"].includes(rem.status) && (
-                      <RemediationReviewPanel remediation={rem} />
-                    )}
+                    {rem && <AutoMergeNote remediation={rem} />}
                   </div>
                 );
               })}
@@ -400,15 +383,15 @@ function ScanDetail({ jobId }: { jobId: string }) {
 }
 
 /**
- * Every Codex fix PR waiting on a person, in one place. A fix could only be
- * reviewed from inside the scan that first reported its finding, so a PR
- * whose scan had scrolled off the recent list had no way to be approved.
+ * Every security fix in flight, in one place: what wrote it, where its PR
+ * is, and what happens to it next. Nothing here waits on a person — a fix
+ * merges by itself once its checks pass, or is closed.
  */
-function FixReviewQueue() {
+function FixesInFlight() {
   const [open, setOpen] = useState<string | null>(null);
   const q = useQuery({
-    queryKey: ["codex-remediations", "awaiting-review"],
-    queryFn: () => listRemediations({ data: { awaitingReview: true } }),
+    queryKey: ["codex-remediations", "in-flight"],
+    queryFn: () => listRemediations({ data: { inFlight: true } }),
     refetchInterval: 30_000,
   });
   const rows: any[] = q.data?.remediations ?? [];
@@ -417,18 +400,18 @@ function FixReviewQueue() {
     <Card id="fix-prs">
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
-          <GitPullRequest className="h-4 w-4" /> Fix PRs awaiting review
+          <GitPullRequest className="h-4 w-4" /> Fixes in flight
           <Badge variant="outline">{rows.length}</Badge>
         </CardTitle>
         <CardDescription>
-          Draft pull requests Codex opened for a finding. Each merges only after two independent
-          admin approvals of its current commit.
+          Written by Claude for P0/P1 findings and by Codex for P2 and below, after each nightly
+          scan. Each PR merges by itself once its checks and the repository&apos;s CI pass on it —
+          or is closed and retried on a later night — and the cascade delivers merged fixes to the
+          clones.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-2">
-        {rows.length === 0 && (
-          <p className="text-sm text-muted-foreground">No fix PRs are waiting on anyone.</p>
-        )}
+        {rows.length === 0 && <p className="text-sm text-muted-foreground">No fixes in flight.</p>}
         {rows.map((r) => (
           <div key={r.id} className="border p-2 text-xs">
             <button
@@ -442,12 +425,14 @@ function FixReviewQueue() {
                 />
               )}
               <span className="font-medium">{r.finding?.title ?? "Finding"}</span>
-              <span className="font-mono text-muted-foreground">{r.repo_full_name}</span>
+              <Badge variant="outline" className="text-[10px]">
+                {isFixEngine(r.engine) ? FIX_ENGINE_LABEL[r.engine] : "Codex"}
+              </Badge>
               <Badge variant="outline" className="text-[10px]">
                 {r.status.replace("_", " ")}
               </Badge>
               <span className="ml-auto text-muted-foreground">
-                {open === r.id ? "hide" : "review"}
+                {open === r.id ? "hide" : "details"}
               </span>
             </button>
             <div className="mt-1 flex flex-wrap items-center gap-2">
@@ -468,12 +453,8 @@ function FixReviewQueue() {
                 </span>
               )}
             </div>
-            {open === r.id && (
-              <>
-                <RemediationEvidence remediation={r} />
-                <RemediationReviewPanel remediation={r} />
-              </>
-            )}
+            <AutoMergeNote remediation={r} />
+            {open === r.id && <RemediationEvidence remediation={r} />}
           </div>
         ))}
       </CardContent>
@@ -757,44 +738,47 @@ function RemediationExplainer() {
         className="flex w-full items-center gap-1 text-left font-medium"
       >
         <GitPullRequest className="h-3 w-3" />
-        What “Draft Fix PR” does
+        How a finding gets fixed
         <span className="ml-auto text-muted-foreground">{open ? "hide" : "show"}</span>
       </button>
       {open && (
         <ol className="mt-2 list-decimal space-y-1 pl-4 text-muted-foreground">
           <li>
-            Mission Control dispatches <code>codex-remediation.yml</code> in the finding&apos;s own
-            repository through the Aurixa GitHub App. It never edits code itself.
+            After each nightly scan of Prime, Mission Control dispatches{" "}
+            <code>codex-remediation.yml</code> on Prime for the open findings, worst first, up to
+            the nightly limit. &ldquo;Draft Fix PR&rdquo; starts one now. It never edits code
+            itself.
           </li>
           <li>
-            On that runner, the <strong>OpenAI Codex CLI</strong> (<code>codex exec</code>,
-            sandboxed to the workspace) reads the repo and edits real files to fix the finding — it
-            is given the title, severity, file, line, CWE and the offending code excerpt.
+            On that runner, <strong>Claude</strong> writes the fix for a P0 or P1 finding (critical,
+            high) and the <strong>OpenAI Codex CLI</strong> for P2 and below. Either may only read
+            and edit files in the checkout, with no network; it is given the title, severity, file,
+            line, CWE and the offending code excerpt. When the fix changes <code>package.json</code>
+            , the lockfiles are regenerated without running any install script.
           </li>
           <li>
-            The patch is measured (files touched, lines added/removed), refused if it touches CI
-            workflows, and the lines it adds are scanned with gitleaks.
+            The patch is measured and refused if it touches CI, package-manager, git or agent
+            configuration, changes <code>package.json</code> scripts, adds a package the project did
+            not use or installs one from somewhere new, or silences a scanner. The lines it adds are
+            scanned with gitleaks.
             <strong> A patch that introduces a secret is never pushed.</strong>
           </li>
           <li>
-            The repo&apos;s own checks — typecheck, lint, test, build, whichever exist — run against
-            a copy of the patched tree. Failures do not block the PR; they are reported on it so you
-            can see a broken fix rather than have it discarded.
+            The repo&apos;s own checks — install, typecheck, lint, test, build, whichever exist —
+            run against the base plus the patch, exactly the tree that is committed, as a user of
+            their own. A fix that fails them is not pushed. Neither the agent nor those checks ever
+            hold a push token.
           </li>
           <li>
-            Neither Codex nor those checks ever hold a credential: the OpenAI key exists only in the
-            Codex step, and the push is made from a fresh repository with the token only there.
+            A pull request is opened. Mission Control runs the repository&apos;s CI (
+            <code>ci.yml</code>) on it and it <strong>merges by itself</strong> once that passes on
+            the commit that was checked, provided the patch stays within the size bounds. Otherwise
+            it is closed and the finding retried on a later night. No person reviews it, by policy.
           </li>
           <li>
-            A <strong>draft</strong> pull request is opened. Merging requires two independent admin
-            approvals <strong>of its current commit</strong> — a push after an approval needs
-            approving again — and the requester cannot approve their own. The merge is pinned to
-            that commit. Only when an admin sets a self-healing auto-merge ceiling (off by default)
-            can a fix at or below it merge through the self-healing queue instead.
-          </li>
-          <li>
-            After merge, a Prime patch cascades to the fleet, and the next full scan confirms the
-            finding is actually gone — or reopens it as &ldquo;fix ineffective&rdquo;.
+            The merge on Prime cascades to every clone, and the next nightly scan confirms the
+            finding is gone — or reopens it as &ldquo;fix ineffective&rdquo;. Committed credentials
+            are not fixed automatically: they must be rotated.
           </li>
         </ol>
       )}
@@ -823,7 +807,11 @@ function RemediationEvidence({ remediation: rem }: { remediation: any }) {
         <span className="text-muted-foreground">
           patched by{" "}
           <span className="font-mono text-foreground">
-            {rem.engine === "codex_cli" ? "OpenAI Codex CLI" : (rem.engine ?? "unknown")}
+            {rem.engine === "claude_code"
+              ? "Claude (Claude Code)"
+              : rem.engine === "codex_cli"
+                ? "OpenAI Codex CLI"
+                : (rem.engine ?? "unknown")}
           </span>
         </span>
         {hasRadius && (
@@ -879,200 +867,58 @@ function RemediationEvidence({ remediation: rem }: { remediation: any }) {
 
       {rem.verified === false && (
         <p className="text-muted-foreground">
-          The fix is still opened as a draft PR on purpose — review it rather than merging.
+          The checks failed on the patched tree, so this fix does not merge.
         </p>
       )}
     </div>
   );
 }
 
-function RemediationReviewPanel({ remediation }: { remediation: any }) {
-  const qc = useQueryClient();
-  const { user } = useAuth();
-  const uid = user?.id;
-  const [comment, setComment] = useState("");
-  const reviewsQ = useQuery({
-    queryKey: ["codex-rem-reviews", remediation.id],
-    queryFn: () => listRemediationReviews({ data: { remediationId: remediation.id } }),
-    refetchInterval: 10000,
-  });
-  const reviewFn = useServerFn(reviewRemediation);
-  const mergeFn = useServerFn(mergeRemediationPR);
-  const review = useMutation({
-    mutationFn: (decision: "approve" | "reject" | "changes_requested") =>
-      reviewFn({
-        data: { remediationId: remediation.id, decision, comment: comment || undefined },
-      }),
-    onSuccess: () => {
-      toast.success("Review recorded");
-      setComment("");
-      qc.invalidateQueries({ queryKey: ["codex-rem-reviews", remediation.id] });
-      qc.invalidateQueries({ queryKey: ["codex-remediations"] });
-    },
-    onError: (e: Error) => toast.error(e.message),
-  });
-  const merge = useMutation({
-    mutationFn: () => mergeFn({ data: { remediationId: remediation.id } }),
-    onSuccess: (r: any) => {
-      const sha = r?.sha ? ` ${r.sha.slice(0, 7)}` : "";
-      if (r?.wasDraft) {
-        // GitHub cannot merge a draft; the server clears the flag first.
-        toast.info("PR was in draft — marked ready for review before merging.");
-      }
-      if (r?.cascadeEventId) {
-        toast.success(`Merged${sha} — cascade queued`);
-      } else if (r?.cascadeError) {
-        toast.warning(`Merged${sha}, cascade skipped: ${r.cascadeError}`);
-      } else {
-        toast.success(`Merged${sha}`);
-      }
-      qc.invalidateQueries({ queryKey: ["codex-remediations"] });
-      qc.invalidateQueries({ queryKey: ["codex-rem-reviews", remediation.id] });
-    },
-    onError: (e: Error) => toast.error(e.message),
-  });
-
-  const reviews = reviewsQ.data?.reviews ?? [];
-  // An approval is for the commit it was given on: one given before a push
-  // no longer counts, exactly as the merge itself decides.
-  const { count: approvalCount, stale: staleApprovals } = approvalsAtHead(
-    reviews as any[],
-    remediation.requested_by ?? null,
-    remediation.head_sha ?? null,
-  );
-  const rejected = reviews.some((r: any) => r.decision === "reject");
-  const required = remediation.approvals_required ?? 2;
-  const isRequester = uid && uid === remediation.requested_by;
-  const alreadyReviewed = reviews.some((r: any) => r.reviewer_id === uid);
-  const canMerge =
-    !!remediation.pr_number &&
-    approvalCount >= required &&
-    !rejected &&
-    !["merged", "rejected"].includes(remediation.status);
-
+/**
+ * What happens to a fix PR next. There is no review: it merges by itself
+ * once its checks pass, or is closed (src/lib/remediation-policy.ts).
+ */
+function AutoMergeNote({ remediation: rem }: { remediation: any }) {
+  const engine = isFixEngine(rem.engine) ? FIX_ENGINE_LABEL[rem.engine] : "Codex";
+  let text: string;
+  let tone = "text-muted-foreground";
+  if (rem.status === "merged") {
+    text = `Merged by itself${rem.merged_at ? ` at ${String(rem.merged_at).slice(0, 16).replace("T", " ")}` : ""}; the cascade delivers it to the clones.`;
+  } else if (rem.status === "closed" || rem.status === "rejected") {
+    text = rem.last_error ?? "Closed without merging; the finding is retried on a later night.";
+    tone = "text-amber-500";
+  } else if (rem.status === "failed") {
+    text = rem.last_error ?? `${engine} could not produce a fix.`;
+    tone = "text-red-500";
+  } else if (!rem.pr_number) {
+    text = `${engine} is writing the fix in GitHub Actions.`;
+  } else if (rem.verified === false) {
+    text = "Its checks failed: it will be closed and the finding retried on a later night.";
+    tone = "text-amber-500";
+  } else if (String(rem.merge_run?.last_error ?? "").startsWith("waiting: ")) {
+    // The merge lane started the repository's CI on the fix and is waiting
+    // for it (fixCiGate.pure.ts).
+    text = `Waiting for CI — ${String(rem.merge_run.last_error).slice(9)}. Merges by itself once it passes.`;
+  } else {
+    text =
+      "Merges by itself once the repository's CI passes on it — Mission Control starts the run. " +
+      "No review needed.";
+  }
   return (
-    <div className="mt-2 border-t pt-2 space-y-2">
-      <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-        <span>
-          Approvals:{" "}
-          <b className={approvalCount >= required ? "text-emerald-500" : ""}>{approvalCount}</b>/
-          {required}
-          {remediation.head_sha ? (
-            <span className="font-mono"> of {String(remediation.head_sha).slice(0, 7)}</span>
-          ) : null}
-        </span>
-        {staleApprovals > 0 && (
-          <span className="text-amber-500" title="Given before the PR's latest commit">
-            {staleApprovals} for an earlier commit — approve again
-          </span>
-        )}
-        {rejected && (
-          <Badge variant="destructive" className="text-[10px]">
-            rejected
-          </Badge>
-        )}
-        {remediation.status === "approved" && (
-          <Badge className="text-[10px] bg-emerald-600">approved</Badge>
-        )}
-        {remediation.status === "merged" && (
-          <Badge className="text-[10px] bg-blue-600">merged</Badge>
-        )}
-        {remediation.cascade_event_id && (
+    <p className={`mt-1 text-[11px] ${tone}`}>
+      {text}
+      {rem.cascade_event_id && (
+        <>
+          {" "}
           <a
-            href={`/cascades/${remediation.cascade_event_id}`}
+            href={`/cascades/${rem.cascade_event_id}`}
             className="underline underline-offset-2 hover:text-foreground"
-            title="Fleet cascade of this patch"
           >
             cascade →
           </a>
-        )}
-      </div>
-      {reviews.length > 0 && (
-        <div className="text-[10px] space-y-0.5">
-          {reviews.map((r: any) => (
-            <div key={r.id} className="flex gap-2">
-              <span className="font-mono">{r.reviewer_id.slice(0, 8)}</span>
-              <Badge
-                variant="outline"
-                className={
-                  r.decision === "approve"
-                    ? "text-emerald-500 border-emerald-500/40"
-                    : r.decision === "reject"
-                      ? "text-red-500 border-red-500/40"
-                      : "text-amber-500 border-amber-500/40"
-                }
-              >
-                {r.decision}
-              </Badge>
-              {r.comment && (
-                <span className="italic text-muted-foreground truncate">{r.comment}</span>
-              )}
-            </div>
-          ))}
-        </div>
+        </>
       )}
-      {!isRequester && !["merged", "rejected"].includes(remediation.status) && (
-        <div className="space-y-1">
-          <Textarea
-            value={comment}
-            onChange={(e) => setComment(e.target.value)}
-            placeholder={
-              alreadyReviewed ? "Update comment (optional)" : "Review comment (optional)"
-            }
-            className="text-xs min-h-[48px]"
-          />
-          <div className="flex gap-1 flex-wrap">
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-7 text-xs"
-              onClick={() => review.mutate("approve")}
-              disabled={review.isPending}
-            >
-              <ThumbsUp className="h-3 w-3 mr-1" /> Approve
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-7 text-xs"
-              onClick={() => review.mutate("changes_requested")}
-              disabled={review.isPending}
-            >
-              <MessageSquareWarning className="h-3 w-3 mr-1" /> Request changes
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-7 text-xs text-red-500 border-red-500/40 hover:bg-red-500/10"
-              onClick={() => review.mutate("reject")}
-              disabled={review.isPending}
-            >
-              <ThumbsDown className="h-3 w-3 mr-1" /> Reject
-            </Button>
-          </div>
-        </div>
-      )}
-      {isRequester && (
-        <p className="text-[10px] text-muted-foreground">
-          You requested this remediation — you can't approve your own.
-        </p>
-      )}
-      <div>
-        <Button
-          size="sm"
-          className="h-7 text-xs"
-          onClick={() => merge.mutate()}
-          disabled={!canMerge || merge.isPending}
-        >
-          <GitMerge className="h-3 w-3 mr-1" />
-          {merge.isPending
-            ? "Merging…"
-            : canMerge
-              ? "Merge PR"
-              : `Needs ${Math.max(0, required - approvalCount)} more approval${required - approvalCount === 1 ? "" : "s"}`}
-        </Button>
-      </div>
-    </div>
+    </p>
   );
 }
 
@@ -1262,15 +1108,18 @@ function SchedulingPanel() {
   const scheduleFn = useServerFn(setNightlySchedule);
   const [dedup, setDedup] = useState<number | null>(null);
   const [cron, setCron] = useState<string | null>(null);
+  const [perNight, setPerNight] = useState<number | null>(null);
 
   const cfg = cfgQ.data?.config;
   const migrated = cfgQ.data?.migrated ?? false;
+  const autofixMigrated = cfgQ.data?.autofixMigrated ?? false;
 
   const save = useMutation({
     mutationFn: (patch: any) => updateFn({ data: patch }),
     onSuccess: () => {
       toast.success("Settings updated");
       qc.invalidateQueries({ queryKey: ["codex-scheduling-config"] });
+      qc.invalidateQueries({ queryKey: ["codex-engine-health"] });
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -1293,9 +1142,8 @@ function SchedulingPanel() {
   const runNow = useMutation({
     mutationFn: () => runNowFn({}),
     onSuccess: (r: any) => {
-      toast.success(
-        `Nightly triggered — ${r.enqueued?.length ?? 0} queued, ${r.skipped?.length ?? 0} skipped`,
-      );
+      if (r.enqueued?.length) toast.success("Prime's nightly scan queued");
+      else toast.info(`Not queued: ${r.skipped?.[0]?.reason ?? "unknown"}`);
       qc.invalidateQueries({ queryKey: ["codex-scan-jobs"] });
     },
     onError: (e: Error) => toast.error(e.message),
@@ -1307,10 +1155,10 @@ function SchedulingPanel() {
     <Card>
       <CardHeader className="flex flex-row items-start justify-between">
         <div>
-          <CardTitle>Scheduling and policy</CardTitle>
+          <CardTitle>Scheduling and fixes</CardTitle>
           <CardDescription>
-            When scans run, what a pull request&apos;s check enforces, and what may merge or cascade
-            without a person.
+            {SCAN_POLICY_SUMMARY} After each nightly scan, Claude fixes P0/P1 findings and Codex
+            fixes P2 and below; every fix merges by itself once its checks pass.
           </CardDescription>
         </div>
         <Button
@@ -1320,44 +1168,21 @@ function SchedulingPanel() {
           disabled={runNow.isPending}
         >
           <PlayCircle className="h-4 w-4 mr-1" />
-          {runNow.isPending ? "Running…" : "Run nightly now"}
+          {runNow.isPending ? "Queuing…" : "Run nightly scan now"}
         </Button>
       </CardHeader>
       <CardContent className="grid gap-4 md:grid-cols-2">
         <div className="flex items-center justify-between border p-3">
           <div>
-            <Label className="font-medium">Nightly full scans</Label>
+            <Label className="font-medium">Nightly scan of Prime</Label>
             <p className="text-xs text-muted-foreground">
-              Prime + every clone with nightly enabled.
+              The only scheduled scan. Clones are not scanned; Prime&apos;s fixes reach them through
+              the cascade.
             </p>
           </div>
           <Switch
             checked={!!cfg.codex_nightly_enabled}
             onCheckedChange={(v) => save.mutate({ codex_nightly_enabled: v })}
-          />
-        </div>
-        <div className="flex items-center justify-between border p-3">
-          <div>
-            <Label className="font-medium">PR-open scans</Label>
-            <p className="text-xs text-muted-foreground">
-              Scan what every opened or updated pull request adds.
-            </p>
-          </div>
-          <Switch
-            checked={!!cfg.codex_pr_scan_enabled}
-            onCheckedChange={(v) => save.mutate({ codex_pr_scan_enabled: v })}
-          />
-        </div>
-        <div className="flex items-center justify-between border p-3">
-          <div>
-            <Label className="font-medium">Post-merge revalidate</Label>
-            <p className="text-xs text-muted-foreground">
-              Re-scan Prime after each merge to confirm fixes and catch regressions.
-            </p>
-          </div>
-          <Switch
-            checked={cfg.codex_post_merge_revalidate !== false}
-            onCheckedChange={(v) => save.mutate({ codex_post_merge_revalidate: v })}
           />
         </div>
         <div className="border p-3 space-y-2">
@@ -1380,7 +1205,71 @@ function SchedulingPanel() {
             </Button>
           </div>
           <p className="text-xs text-muted-foreground">
-            Suppress duplicate scans for the same target+kind within this window.
+            A second nightly scan inside this window is skipped.
+          </p>
+        </div>
+
+        {!autofixMigrated && (
+          <p className="md:col-span-2 border border-amber-500/40 bg-amber-500/5 p-2 text-xs">
+            The automatic-fix settings arrive with migration 20261018120000_codex_autofix_settings.
+            Until it is applied, fixes run with their defaults (on, ten a night) and the settings
+            cannot be changed.
+          </p>
+        )}
+        <div className="flex items-center justify-between border p-3">
+          <div>
+            <Label className="font-medium">Automatic fixes</Label>
+            <p className="text-xs text-muted-foreground">
+              After each nightly scan: Claude for P0/P1, Codex for P2 and below. Fix PRs merge by
+              themselves once their checks and the repository&apos;s CI pass — no review. Committed
+              credentials are not fixed: they must be rotated.
+            </p>
+          </div>
+          <Switch
+            checked={cfg.codex_autofix_enabled !== false}
+            disabled={!autofixMigrated}
+            onCheckedChange={async (v) => {
+              if (v) {
+                const ok = await confirm({
+                  title: "Fix and merge findings automatically?",
+                  description:
+                    "After each nightly scan, AI-written fixes are opened against Prime and merged with nobody reviewing them, once the repository's checks and CI pass. Each merge then cascades to every clone.",
+                  confirmText: "Turn on",
+                  destructive: true,
+                });
+                if (!ok) return;
+              }
+              save.mutate({ codex_autofix_enabled: v });
+            }}
+          />
+        </div>
+        <div className="border p-3 space-y-2">
+          <Label className="font-medium">Fixes per night</Label>
+          <div className="flex gap-2">
+            <Input
+              type="number"
+              min={0}
+              max={50}
+              disabled={!autofixMigrated}
+              defaultValue={cfg.codex_autofix_max_per_night ?? 10}
+              onChange={(e) => setPerNight(Number(e.target.value))}
+            />
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={
+                !autofixMigrated ||
+                perNight === null ||
+                perNight === cfg.codex_autofix_max_per_night
+              }
+              onClick={() => save.mutate({ codex_autofix_max_per_night: perNight })}
+            >
+              Save
+            </Button>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Worst first, then oldest. Each fix is an Actions run, model spend and — once merged — a
+            cascade, so a large backlog drains over several nights.
           </p>
         </div>
 
@@ -1390,78 +1279,20 @@ function SchedulingPanel() {
             it is applied they show their defaults and cannot be changed.
           </p>
         )}
-
         <SettingSelect
           label="Codex reasoning pass"
-          hint="Which scheduled scans also run the AI review. Manual scans always do. It spends OpenAI credit on every scan it runs on."
-          value={cfg.codex_deep_scan_scope ?? "prime"}
+          hint="Whether the nightly scan also runs the AI review. Manual scans always do. It spends OpenAI credit on every scan it runs on."
+          value={cfg.codex_deep_scan_scope === "off" ? "off" : "prime"}
           disabled={!migrated}
           onChange={(v) => save.mutate({ codex_deep_scan_scope: v })}
           options={[
             { value: "off", label: "Off (manual scans only)" },
-            { value: "prime", label: "Prime only" },
-            { value: "fleet", label: "Prime and every clone" },
-          ]}
-        />
-        <div className="border p-3 space-y-2">
-          <div className="flex items-center justify-between">
-            <Label className="font-medium">“Codex Security” PR check</Label>
-            <Switch
-              checked={cfg.codex_pr_check_enabled !== false}
-              disabled={!migrated}
-              onCheckedChange={(v) => save.mutate({ codex_pr_check_enabled: v })}
-            />
-          </div>
-          <Select
-            value={cfg.codex_pr_check_fail_on ?? "high"}
-            disabled={!migrated || cfg.codex_pr_check_enabled === false}
-            onValueChange={(v) => save.mutate({ codex_pr_check_fail_on: v })}
-          >
-            <SelectTrigger className="h-8 text-xs">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="critical">Fails on critical findings</SelectItem>
-              <SelectItem value="high">Fails on high or worse</SelectItem>
-              <SelectItem value="medium">Fails on medium or worse</SelectItem>
-              <SelectItem value="low">Fails on low or worse</SelectItem>
-              <SelectItem value="never">Reports only, never fails</SelectItem>
-            </SelectContent>
-          </Select>
-          <p className="text-xs text-muted-foreground">
-            Posted on the pull request with an annotation per finding. It blocks merging only once
-            branch protection requires it, and needs the GitHub App&apos;s “Checks: read &amp;
-            write” permission.
-          </p>
-        </div>
-        <SettingSelect
-          label="Self-healing auto-merge ceiling"
-          hint="The worst severity whose Codex fix may merge with no person, through the self-healing queue. Anything above it needs two admin approvals of its current commit — even when released from the support queue."
-          value={cfg.codex_auto_merge_ceiling ?? "off"}
-          disabled={!migrated}
-          onChange={async (v) => {
-            if (v !== "off") {
-              const ok = await confirm({
-                title: `Let ${v}-severity fixes merge unattended?`,
-                description:
-                  "An AI-written patch at or below this severity can then merge to its repository's default branch with nobody reviewing it, as long as its checks pass. On Prime, that patch then cascades to every clone.",
-                confirmText: "Allow",
-                destructive: true,
-              });
-              if (!ok) return;
-            }
-            save.mutate({ codex_auto_merge_ceiling: v });
-          }}
-          options={[
-            { value: "off", label: "Off — every fix needs two approvals" },
-            { value: "info", label: "Info only" },
-            { value: "low", label: "Low and info" },
-            { value: "medium", label: "Medium, low and info" },
+            { value: "prime", label: "On, every night" },
           ]}
         />
         <SettingSelect
           label="Cascade security gate"
-          hint="Hold automatic fleet cascades for approval while Prime has open findings at this severity. Triage Prime's first scans before turning it on — a gate tripped by noise teaches people to approve blindly."
+          hint="Hold automatic fleet cascades for approval while Prime has open findings at this severity. Merged security fixes always go through — they are what clears the gate."
           value={cfg.codex_cascade_gate ?? "off"}
           disabled={!migrated}
           onChange={(v) => save.mutate({ codex_cascade_gate: v })}
@@ -1491,294 +1322,10 @@ function SchedulingPanel() {
             </Button>
           </div>
           <p className="text-xs text-muted-foreground">
-            Five fields, minute hour day month weekday. Saving reschedules the pg_cron job itself.
+            Five fields, minute hour day month weekday — once a day. Saving reschedules the pg_cron
+            job itself.
           </p>
         </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-const sevBadge: Record<string, string> = {
-  critical: "bg-red-600 text-white",
-  high: "bg-orange-500 text-white",
-  medium: "bg-amber-500 text-white",
-  low: "bg-blue-500 text-white",
-  info: "bg-slate-500 text-white",
-};
-
-/**
- * One word for where a clone stands. "Clean" used to mean only "no open
- * findings" — including for a clone never scanned, or one whose last scan
- * failed or ran with its scanners broken.
- */
-function fleetStatus(
-  last: any,
-  open: Record<string, number>,
-): { label: string; tone: string; detail?: string } {
-  if (!last) return { label: "Never scanned", tone: "text-muted-foreground" };
-  if (last.status === "queued") return { label: "Queued", tone: "text-blue-500" };
-  if (last.status === "running") return { label: "Scanning", tone: "text-blue-500" };
-  if (last.status === "failed" || last.status === "canceled") {
-    return {
-      label: "Last scan failed",
-      tone: "text-red-500",
-      detail: last.last_error ?? undefined,
-    };
-  }
-  const summary = last.result_summary ?? null;
-  const degraded = summary ? degradedScanners(summary) : [];
-  if (summary?.incomplete === true || degraded.length > 0) {
-    return {
-      label: "Degraded",
-      tone: "text-amber-500",
-      detail: degraded.length
-        ? degraded.map((d) => `${d.name}: ${d.reason}`).join(" · ")
-        : "results incomplete",
-    };
-  }
-  const anyOpen = ["critical", "high", "medium", "low"].some((k) => (open[k] ?? 0) > 0);
-  return anyOpen
-    ? { label: "Findings open", tone: "" }
-    : { label: "Clean", tone: "text-emerald-500" };
-}
-
-/** Which Codex workflow a clone's default branch carries. */
-function WorkflowCell({
-  state,
-  loading,
-  unavailable,
-}: {
-  state: any;
-  loading: boolean;
-  unavailable: string | null;
-}) {
-  if (loading) return <span className="text-muted-foreground">…</span>;
-  if (unavailable)
-    return (
-      <span className="text-muted-foreground" title={unavailable}>
-        not checked
-      </span>
-    );
-  if (!state) return <span className="text-muted-foreground">—</span>;
-  if (!state.scan.present) {
-    return (
-      <span className="text-red-500" title={state.scan.detail}>
-        missing
-      </span>
-    );
-  }
-  const v = state.scan.version ?? 1;
-  return (
-    <span
-      className={state.current ? "text-emerald-500" : "text-amber-500"}
-      title={`scan v${v}; fix workflow ${state.remediation.present ? `v${state.remediation.version ?? 1}` : "missing"}`}
-    >
-      v{v}
-      {v < CODEX_SCAN_WORKFLOW_VERSION
-        ? " · update"
-        : state.current
-          ? ""
-          : " · fix workflow behind"}
-    </span>
-  );
-}
-
-function FleetOverviewPanel({ onOpenScan }: { onOpenScan: (jobId: string) => void }) {
-  const qc = useQueryClient();
-  const fleetQ = useQuery({
-    queryKey: ["codex-fleet-overview"],
-    queryFn: () => listCloneCodexOverview(),
-    refetchInterval: 30000,
-  });
-  // Read from each clone's repository, not inferred from its scans; cached
-  // server-side, so a slow refresh is plenty.
-  const workflowsQ = useQuery({
-    queryKey: ["codex-fleet-workflows"],
-    queryFn: () => getFleetWorkflowVersions(),
-    staleTime: 10 * 60_000,
-    refetchInterval: 10 * 60_000,
-    retry: false,
-  });
-  const workflowByClone = new Map<string, any>(
-    workflowsQ.data && workflowsQ.data.ok
-      ? workflowsQ.data.clones.map((c: any) => [c.cloneId, c])
-      : [],
-  );
-  const runFn = useServerFn(runCloneScanNow);
-  const fleetFn = useServerFn(runFleetScan);
-  const nightlyFn = useServerFn(setCloneNightly);
-
-  const runOne = useMutation({
-    mutationFn: (cloneId: string) => runFn({ data: { cloneId } }),
-    onSuccess: (r: any) => {
-      if (r?.skipped) toast.info(`Skipped: ${r.reason}`);
-      else toast.success("Scan queued");
-      qc.invalidateQueries({ queryKey: ["codex-fleet-overview"] });
-      qc.invalidateQueries({ queryKey: ["codex-scan-jobs"] });
-    },
-    onError: (e: Error) => toast.error(e.message),
-  });
-
-  // Server-side: the old loop ran in this tab and stopped wherever it was
-  // closed.
-  const scanAll = useMutation({
-    mutationFn: () => fleetFn({}),
-    onSuccess: (r: any) => {
-      const skipped = r.skipped?.length ?? 0;
-      if (skipped) {
-        toast.warning(
-          `Fleet scan: ${r.queued} queued, ${skipped} skipped (${r.skipped[0].target}: ${r.skipped[0].reason}${skipped > 1 ? " …" : ""})`,
-        );
-      } else {
-        toast.success(`Fleet scan: ${r.queued} queued`);
-      }
-      qc.invalidateQueries({ queryKey: ["codex-fleet-overview"] });
-      qc.invalidateQueries({ queryKey: ["codex-scan-jobs"] });
-    },
-    onError: (e: Error) => toast.error(e.message),
-  });
-
-  const toggleNightly = useMutation({
-    mutationFn: ({ cloneId, enabled }: { cloneId: string; enabled: boolean }) =>
-      nightlyFn({ data: { cloneId, enabled } }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["codex-fleet-overview"] }),
-    onError: (e: Error) => toast.error(e.message),
-  });
-
-  const rows = fleetQ.data?.clones ?? [];
-
-  return (
-    <Card>
-      <CardHeader className="flex flex-row items-start justify-between">
-        <div>
-          <CardTitle>Clone fleet</CardTitle>
-          <CardDescription>
-            Per-clone Codex status, open findings, and nightly enrollment.
-          </CardDescription>
-        </div>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => scanAll.mutate()}
-          disabled={scanAll.isPending || rows.length === 0}
-        >
-          <PlayCircle className="h-4 w-4 mr-1" />
-          {scanAll.isPending ? "Queuing…" : "Scan every clone"}
-        </Button>
-      </CardHeader>
-      <CardContent>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Clone</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Last scan</TableHead>
-              <TableHead>Workflow</TableHead>
-              <TableHead>Open findings</TableHead>
-              <TableHead>Nightly</TableHead>
-              <TableHead />
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.map((c: any) => {
-              const last = c.lastScan;
-              const of = c.openFindings ?? {};
-              const status = fleetStatus(last, of);
-              return (
-                <TableRow key={c.id}>
-                  <TableCell>
-                    <Link
-                      to="/clones/$cloneId"
-                      params={{ cloneId: c.id }}
-                      className="font-medium hover:underline"
-                    >
-                      {c.name}
-                    </Link>
-                    <div className="text-xs text-muted-foreground font-mono">
-                      {c.repo_full_name || `${c.github_owner ?? ""}/${c.github_repo ?? ""}`}
-                    </div>
-                  </TableCell>
-                  <TableCell className="text-xs">
-                    <span className={`font-medium ${status.tone}`} title={status.detail}>
-                      {status.label}
-                    </span>
-                    {status.detail && (
-                      <div
-                        className="max-w-[220px] truncate text-muted-foreground"
-                        title={status.detail}
-                      >
-                        {status.detail}
-                      </div>
-                    )}
-                  </TableCell>
-                  <TableCell className="text-xs">
-                    {last ? (
-                      <button
-                        type="button"
-                        className="text-left text-muted-foreground hover:underline"
-                        onClick={() => onOpenScan(last.id)}
-                      >
-                        {(last.completed_at ?? last.started_at ?? last.created_at)
-                          ?.slice(0, 16)
-                          .replace("T", " ")}
-                        <div>{last.kind}</div>
-                      </button>
-                    ) : (
-                      <span className="text-muted-foreground">—</span>
-                    )}
-                  </TableCell>
-                  <TableCell className="text-xs">
-                    <WorkflowCell
-                      state={workflowByClone.get(c.id)}
-                      loading={workflowsQ.isLoading}
-                      unavailable={
-                        workflowsQ.data && !workflowsQ.data.ok ? workflowsQ.data.reason : null
-                      }
-                    />
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex flex-wrap gap-1">
-                      {["critical", "high", "medium", "low"].map((s) =>
-                        (of[s] ?? 0) > 0 ? (
-                          <Badge key={s} className={sevBadge[s]}>
-                            {s[0].toUpperCase()}:{of[s]}
-                          </Badge>
-                        ) : null,
-                      )}
-                      {["critical", "high", "medium", "low"].every((s) => !(of[s] > 0)) && (
-                        <span className="text-xs text-muted-foreground">None open</span>
-                      )}
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <Switch
-                      checked={c.codex_nightly_enabled !== false}
-                      onCheckedChange={(v) => toggleNightly.mutate({ cloneId: c.id, enabled: v })}
-                    />
-                  </TableCell>
-                  <TableCell>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => runOne.mutate(c.id)}
-                      disabled={runOne.isPending}
-                    >
-                      Scan
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              );
-            })}
-            {!fleetQ.isLoading && rows.length === 0 && (
-              <TableRow>
-                <TableCell colSpan={7} className="text-center text-muted-foreground py-8">
-                  No clones yet.
-                </TableCell>
-              </TableRow>
-            )}
-          </TableBody>
-        </Table>
       </CardContent>
     </Card>
   );

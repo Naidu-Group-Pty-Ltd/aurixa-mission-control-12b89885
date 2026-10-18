@@ -45,7 +45,15 @@ export function securityGateDecision(
   };
 }
 
-/** Commit title the self-healing queue gives an unattended merge. */
-export const SELF_HEALING_MERGE_TITLE = /^Self-healing: codex remediation PR #\d+/;
-/** Commit title the two-key merge on /security/scans gives a reviewed fix. */
+/**
+ * Commit title the self-healing queue gives a fix it merged by itself
+ * ("Self-healing: security fix PR #12 (Claude)"; older merges said "codex
+ * remediation PR"). Such a fix cascades like any commit and passes this gate.
+ */
+export const SELF_HEALING_MERGE_TITLE = /^Self-healing: (?:codex remediation|security fix) PR #\d+/;
+/**
+ * Commit title of a fix merged after two admin approvals on /security/scans,
+ * before fixes merged by themselves. Still recognised: such a commit's
+ * cascade passes this gate like a self-healing merge's.
+ */
 export const REVIEWED_REMEDIATION_MERGE_TITLE = /^Codex remediation #\d+/;

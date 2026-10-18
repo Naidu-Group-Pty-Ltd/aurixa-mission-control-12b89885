@@ -3,9 +3,8 @@ import { assessSqlDestructiveness } from "./destructive-sql";
 import {
   AUTO_MERGE_MAX_FILES,
   AUTO_MERGE_MAX_LINES,
+  decideFixMerge,
   decideRemediation,
-  parseAutoMergeCeiling,
-  severityWithinAutoMergeCeiling,
 } from "./remediation-policy";
 
 const verifiedSmallPatch = {
@@ -16,22 +15,24 @@ const verifiedSmallPatch = {
 } as const;
 
 describe("decideRemediation", () => {
-  it("never auto-executes a P0 or P1 action, even a perfect one", () => {
+  it("never auto-executes a P0 or P1 action other than a security fix, even a perfect one", () => {
     for (const priority of ["P0", "P1"] as const) {
-      const d = decideRemediation({ actionType: "pr_merge", priority, ...verifiedSmallPatch });
-      expect(d.autoExecute).toBe(false);
-      expect(d.requiresHuman).toBe(true);
+      for (const actionType of ["sql_migration", "edge_function_deploy"] as const) {
+        const d = decideRemediation({ actionType, priority, sqlAssessedByLane: true });
+        expect(d.autoExecute).toBe(false);
+        expect(d.requiresHuman).toBe(true);
+      }
     }
   });
 
-  it("auto-merges a verified, bounded patch at P2 and below", () => {
-    for (const priority of ["P2", "P3", "P4"] as const) {
+  it("auto-merges a verified, bounded security fix at every priority", () => {
+    for (const priority of ["P0", "P1", "P2", "P3", "P4"] as const) {
       const d = decideRemediation({ actionType: "pr_merge", priority, ...verifiedSmallPatch });
       expect(d.autoExecute).toBe(true);
     }
   });
 
-  it("parks an unverified patch for a human", () => {
+  it("does not merge an unverified patch", () => {
     const d = decideRemediation({
       actionType: "pr_merge",
       priority: "P3",
@@ -39,7 +40,7 @@ describe("decideRemediation", () => {
       verified: false,
     });
     expect(d.autoExecute).toBe(false);
-    expect(d.reasons.join(" ")).toMatch(/verification/);
+    expect(d.reasons.join(" ")).toMatch(/own checks/);
   });
 
   it("parks a patch whose secret scan failed", () => {
@@ -178,29 +179,31 @@ describe("decideRemediation", () => {
   });
 });
 
-describe("the self-healing auto-merge ceiling", () => {
-  it("is off unless set to a known value", () => {
-    expect(parseAutoMergeCeiling("low")).toBe("low");
-    expect(parseAutoMergeCeiling("critical")).toBe("off");
-    expect(parseAutoMergeCeiling(undefined)).toBe("off");
+describe("decideFixMerge", () => {
+  it("merges a verified, clean, bounded fix", () => {
+    expect(decideFixMerge(verifiedSmallPatch)).toEqual({
+      merge: true,
+      reasons: ["verified patch within auto-merge bounds (2 files, 40 lines)"],
+    });
   });
 
-  it("lets nothing merge unattended while off", () => {
-    for (const s of ["info", "low", "medium", "high", "critical"]) {
-      expect(severityWithinAutoMergeCeiling(s, "off")).toBe(false);
-    }
+  it("says why an unverified fix does not merge", () => {
+    expect(decideFixMerge({ ...verifiedSmallPatch, verified: false }).reasons[0]).toMatch(
+      /failed the repository's own checks/,
+    );
+    expect(decideFixMerge({ ...verifiedSmallPatch, verified: null }).reasons[0]).toMatch(
+      /no passing verification/,
+    );
   });
 
-  it("covers the ceiling's severity and everything below it", () => {
-    expect(severityWithinAutoMergeCeiling("medium", "medium")).toBe(true);
-    expect(severityWithinAutoMergeCeiling("low", "medium")).toBe(true);
-    expect(severityWithinAutoMergeCeiling("info", "medium")).toBe(true);
-    expect(severityWithinAutoMergeCeiling("high", "medium")).toBe(false);
-    expect(severityWithinAutoMergeCeiling("low", "info")).toBe(false);
-  });
-
-  it("treats an unknown severity as the most severe", () => {
-    expect(severityWithinAutoMergeCeiling(null, "medium")).toBe(false);
-    expect(severityWithinAutoMergeCeiling("urgent", "medium")).toBe(false);
+  it("never merges a fix that adds a secret, or one too large or of unknown size", () => {
+    expect(decideFixMerge({ ...verifiedSmallPatch, secretsClean: false }).merge).toBe(false);
+    expect(decideFixMerge({ ...verifiedSmallPatch, filesChanged: null }).merge).toBe(false);
+    expect(
+      decideFixMerge({ ...verifiedSmallPatch, linesChanged: AUTO_MERGE_MAX_LINES + 1 }).merge,
+    ).toBe(false);
+    expect(
+      decideFixMerge({ ...verifiedSmallPatch, filesChanged: AUTO_MERGE_MAX_FILES + 1 }).merge,
+    ).toBe(false);
   });
 });

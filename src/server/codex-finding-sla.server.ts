@@ -24,6 +24,9 @@ export async function notifyOverdueFindings(nowMs = Date.now()): Promise<{
     .from("codex_findings")
     .select("id, title, severity, first_seen_at, clone_id", { count: "exact" })
     .in("state", [...SLA_OPEN_STATES])
+    // Prime's findings: clones are not scanned, and their old findings are
+    // fixed by the cascade from Prime (src/lib/codex-scan-policy.ts).
+    .is("clone_id", null)
     .is("pr_number", null)
     .or(filter)
     .order("first_seen_at", { ascending: true })

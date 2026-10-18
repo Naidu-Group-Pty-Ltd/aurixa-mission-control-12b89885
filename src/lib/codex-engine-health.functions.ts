@@ -30,85 +30,6 @@ async function cachedGitHub<T>(key: string, load: () => Promise<T>): Promise<T> 
 
 const CODEX_CRON_JOBS = ["codex-security-nightly", "codex-security-sweep"] as const;
 
-export type WorkflowFileState = { present: boolean; version: number | null; detail: string };
-export type CloneWorkflowVersions = {
-  cloneId: string;
-  name: string;
-  repo: string;
-  scan: WorkflowFileState;
-  remediation: WorkflowFileState;
-  current: boolean;
-};
-
-/**
- * Which Codex workflow each clone's default branch carries, read from GitHub
- * rather than inferred from scans: a clone that has never scanned — or whose
- * scans all fail before reporting — is exactly the one whose file is wrong.
- * Cached (see cachedGitHub) and refused below the App's scan budget floor.
- */
-async function loadFleetWorkflowVersions(): Promise<
-  { ok: true; clones: CloneWorkflowVersions[] } | { ok: false; reason: string }
-> {
-  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-  const { data: clones, error } = await supabaseAdmin
-    .from("clones")
-    .select("id, name, github_owner, github_repo, default_branch, github_app_installation_id")
-    .order("name", { ascending: true });
-  if (error) return { ok: false, reason: error.message };
-  const rows = (clones ?? []).filter((c) => c.github_owner && c.github_repo);
-  if (rows.length === 0) return { ok: true, clones: [] };
-
-  const cacheKey = `fleet-workflows:${rows.map((c) => `${c.github_owner}/${c.github_repo}@${c.default_branch ?? ""}`).join(",")}`;
-  const hit = githubCache.get(cacheKey);
-  if (hit && Date.now() - hit.at < GITHUB_CACHE_MS) {
-    return { ok: true, clones: hit.value as CloneWorkflowVersions[] };
-  }
-
-  const { decideSpend } = await import("@/server/cascade/githubBudget.pure");
-  const { readGitHubRemaining } = await import("@/server/githubAllowance.server");
-  const spend = decideSpend({ role: "scan", remaining: await readGitHubRemaining() });
-  if (!spend.proceed) return { ok: false, reason: spend.why };
-
-  const { checkScanWorkflowPresent } = await import("@/server/codex-security-client.server");
-  const { mapWithConcurrency } = await import("@/lib/concurrency");
-  const read = (c: (typeof rows)[number], workflowFile?: string) =>
-    checkScanWorkflowPresent({
-      owner: c.github_owner as string,
-      repo: c.github_repo as string,
-      ref: c.default_branch || undefined,
-      installationId: c.github_app_installation_id ?? null,
-      ...(workflowFile ? { workflowFile } : {}),
-    }).catch((err) => ({ present: false, version: null, detail: (err as Error).message }));
-  const result = await mapWithConcurrency(rows, 4, async (c) => {
-    const [scan, remediation] = await Promise.all([read(c), read(c, "codex-remediation.yml")]);
-    return {
-      cloneId: c.id,
-      name: c.name ?? c.id,
-      repo: `${c.github_owner}/${c.github_repo}`,
-      scan,
-      remediation,
-      current:
-        scan.present &&
-        (scan.version ?? 1) >= CODEX_SCAN_WORKFLOW_VERSION &&
-        remediation.present &&
-        (remediation.version ?? 1) >= CODEX_REMEDIATION_WORKFLOW_VERSION,
-    } satisfies CloneWorkflowVersions;
-  });
-  githubCache.set(cacheKey, { at: Date.now(), value: result });
-  return { ok: true, clones: result };
-}
-
-/** The fleet's workflow files, for the fleet table's per-clone column. */
-export const getFleetWorkflowVersions = createServerFn({ method: "GET" })
-  .middleware([requireSupabaseAuth])
-  .handler(async ({ context }: { context: any }) => {
-    const { supabase, userId } = context;
-    const { data: isOperator } = await supabase.rpc("is_operator", { _user_id: userId });
-    const { data: isAdmin } = await supabase.rpc("is_admin", { _user_id: userId });
-    if (!isOperator && !isAdmin) throw new Error("Forbidden: operator or admin only");
-    return loadFleetWorkflowVersions();
-  });
-
 export type HealthCheck = {
   key: string;
   label: string;
@@ -230,20 +151,32 @@ export const getCodexEngineHealth = createServerFn({ method: "GET" })
       });
     }
 
+    // ── The two fix engines' keys (synced into Prime's Actions secrets) ────
     checks.push({
-      key: "deep_scan",
-      label: "Codex reasoning pass",
-      status: process.env.OPENAI_API_KEY ? "ok" : "warn",
+      key: "openai_key",
+      label: "Codex key (P2 and below fixes, reasoning pass)",
+      status: process.env.OPENAI_API_KEY ? "ok" : "fail",
       detail: process.env.OPENAI_API_KEY
-        ? "OPENAI_API_KEY available to sync into repo Actions secrets"
-        : "No OPENAI_API_KEY in Mission Control — scans still run gitleaks, semgrep and osv-scanner",
+        ? "OPENAI_API_KEY available to sync into Prime's Actions secrets"
+        : "No OPENAI_API_KEY in Mission Control — medium and low findings cannot be fixed, and scans skip the reasoning pass",
       fix: process.env.OPENAI_API_KEY
         ? undefined
-        : "Optional. Set OPENAI_API_KEY and re-run the Actions secret sync to enable the Codex CLI reasoning pass in scan workflows.",
+        : "Set OPENAI_API_KEY, then run the Actions secret sync for Prime in Settings.",
+    });
+    checks.push({
+      key: "anthropic_key",
+      label: "Claude key (P0 and P1 fixes)",
+      status: process.env.ANTHROPIC_API_KEY ? "ok" : "fail",
+      detail: process.env.ANTHROPIC_API_KEY
+        ? "ANTHROPIC_API_KEY available to sync into Prime's Actions secrets"
+        : "No ANTHROPIC_API_KEY in Mission Control — critical and high findings cannot be fixed",
+      fix: process.env.ANTHROPIC_API_KEY
+        ? undefined
+        : "Set ANTHROPIC_API_KEY, then run the Actions secret sync for Prime in Settings.",
     });
 
     // ── Prime repo + workflow presence ───────────────────────────────────
-    // `*`: the PR-check setting arrives with 20261018090000.
+    // `*`: settings arrive with 20261018090000 and 20261018120000.
     const { data: primeRow } = await supabase
       .from("prime_config")
       .select("*")
@@ -277,21 +210,23 @@ export const getCodexEngineHealth = createServerFn({ method: "GET" })
         ref: prime.default_branch || undefined,
         installationId: prime.github_app_installation_id ?? null,
       };
-      const [scanWf, remWf] = await cachedGitHub(`workflows:${primeRepo}:${where.ref ?? ""}`, () =>
-        Promise.all([
-          checkScanWorkflowPresent(where).catch((err) => ({
-            present: false,
-            detail: (err as Error).message,
-            version: null,
-          })),
-          checkScanWorkflowPresent({ ...where, workflowFile: "codex-remediation.yml" }).catch(
-            (err) => ({
-              present: false,
-              detail: (err as Error).message,
-              version: null,
-            }),
-          ),
-        ]),
+      const unread = (err: unknown) => ({
+        present: false,
+        detail: (err as Error).message,
+        version: null,
+        dispatchable: null,
+      });
+      const [scanWf, remWf, ciWf] = await cachedGitHub(
+        `workflows:${primeRepo}:${where.ref ?? ""}`,
+        () =>
+          Promise.all([
+            checkScanWorkflowPresent(where).catch(unread),
+            checkScanWorkflowPresent({ ...where, workflowFile: "codex-remediation.yml" }).catch(
+              unread,
+            ),
+            // The CI every fix must pass before it merges (fixCiGate.pure.ts).
+            checkScanWorkflowPresent({ ...where, workflowFile: "ci.yml" }).catch(unread),
+          ]),
       );
       const branch = prime.default_branch || "main";
       const scanCurrent = (scanWf.version ?? 1) >= CODEX_SCAN_WORKFLOW_VERSION;
@@ -306,7 +241,7 @@ export const getCodexEngineHealth = createServerFn({ method: "GET" })
           ? `Commit .github/workflows/${scanWorkflowFile()} to ${primeRepo} on branch ${branch} (a reference copy lives in this repo).`
           : scanCurrent
             ? undefined
-            : `Copy .github/workflows/${scanWorkflowFile()} from Mission Control into ${primeRepo}; the fleet cascade carries it to every clone. Older copies leak their callback key into Actions logs and report failed scanners as clean.`,
+            : `Copy .github/workflows/${scanWorkflowFile()} from Mission Control into ${primeRepo}. Older copies leak their callback key into Actions logs, report failed scanners as clean, and let a change's own ignore-file edits exempt it.`,
       });
       const remCurrent = (remWf.version ?? 1) >= CODEX_REMEDIATION_WORKFLOW_VERSION;
       checks.push({
@@ -318,7 +253,25 @@ export const getCodexEngineHealth = createServerFn({ method: "GET" })
           : `${remWf.detail} — “Draft Fix PR” cannot run there`,
         fix: remCurrent
           ? undefined
-          : `Copy .github/workflows/codex-remediation.yml from Mission Control into ${primeRepo}. Older copies give the OpenAI key and a push-capable token to the code they are fixing.`,
+          : `Copy .github/workflows/codex-remediation.yml from Mission Control into ${primeRepo}. Older copies write every fix with Codex (no Claude for P0/P1), accept fixes that silence a scanner, and do not ask for the repository's CI before a fix merges.`,
+      });
+      // A fix PR opened by the workflow's token starts no CI, so the merge
+      // lane dispatches ci.yml itself — which needs a workflow_dispatch
+      // trigger. Without one no fix can merge.
+      checks.push({
+        key: "fix_ci",
+        label: "CI that fixes must pass",
+        status: !ciWf.present ? "warn" : ciWf.dispatchable === false ? "fail" : "ok",
+        detail: !ciWf.present
+          ? `${ciWf.detail} — fixes merge on the fix workflow's own checks alone`
+          : ciWf.dispatchable === false
+            ? ".github/workflows/ci.yml has no workflow_dispatch trigger, so it cannot run on a fix PR and no fix merges"
+            : ".github/workflows/ci.yml runs on every fix PR before it merges",
+        fix: !ciWf.present
+          ? undefined
+          : ciWf.dispatchable === false
+            ? `Add \`workflow_dispatch:\` to the \`on:\` block of .github/workflows/ci.yml in ${primeRepo}.`
+            : undefined,
       });
     }
 
@@ -372,51 +325,17 @@ export const getCodexEngineHealth = createServerFn({ method: "GET" })
           : "The sweeper (/hooks/codex-sweep, every 10 minutes) retries or retires these. Check that the pg_cron job exists and CRON_SECRET matches.",
     });
 
-    // ── What the fleet's repositories carry, read from GitHub ────────────
-    if (engine === "github_actions") {
-      const fleet = await loadFleetWorkflowVersions();
-      if (!fleet.ok) {
-        checks.push({
-          key: "fleet_workflow_files",
-          label: "Workflow files across the fleet",
-          status: "warn",
-          detail: `Not checked: ${fleet.reason}`,
-        });
-      } else if (fleet.clones.length > 0) {
-        const behind = fleet.clones.filter((c) => !c.current);
-        checks.push({
-          key: "fleet_workflow_files",
-          label: "Workflow files across the fleet",
-          status: behind.length === 0 ? "ok" : "warn",
-          detail:
-            behind.length === 0
-              ? `All ${fleet.clones.length} clones carry scan and fix workflows at the current version`
-              : `${behind.length} of ${fleet.clones.length} clones carry a missing or older workflow: ` +
-                behind
-                  .slice(0, 5)
-                  .map(
-                    (c) =>
-                      `${c.name} (scan ${c.scan.present ? `v${c.scan.version ?? 1}` : "missing"}, fix ${c.remediation.present ? `v${c.remediation.version ?? 1}` : "missing"})`,
-                  )
-                  .join(", ") +
-                (behind.length > 5 ? ` and ${behind.length - 5} more` : ""),
-          fix:
-            behind.length === 0
-              ? undefined
-              : "Update Prime's copies and let the cascade deliver them; a clone excluded from cascades needs the files committed directly.",
-        });
-      }
-    }
-
-    // ── What the fleet is actually running, and how well ─────────────────
+    // ── What Prime's scans actually ran, and how well ────────────────────
+    // Prime only: clones are no longer scanned (src/lib/codex-scan-policy.ts).
     const fortnight = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
     const { data: recentCompleted } = await supabase
       .from("codex_scan_jobs")
       .select("repo_full_name, completed_at, result_summary")
       .eq("status", "completed")
+      .eq("target_kind", "prime")
       .gte("completed_at", fortnight)
       .order("completed_at", { ascending: false })
-      .limit(500);
+      .limit(100);
     const latestByRepo = new Map<string, any>();
     for (const j of recentCompleted ?? []) {
       if (!latestByRepo.has(j.repo_full_name)) latestByRepo.set(j.repo_full_name, j);
@@ -425,14 +344,14 @@ export const getCodexEngineHealth = createServerFn({ method: "GET" })
       (j) => reportedWorkflowVersion(j.result_summary) < CODEX_SCAN_WORKFLOW_VERSION,
     );
     checks.push({
-      key: "fleet_workflow_versions",
-      label: "Workflow versions across the fleet",
+      key: "reported_workflow_version",
+      label: "Workflow version Prime's scans ran",
       status: latestByRepo.size === 0 || outdated.length === 0 ? "ok" : "warn",
       detail:
         latestByRepo.size === 0
           ? "No completed scans in the last 14 days to read versions from"
           : outdated.length === 0
-            ? `All ${latestByRepo.size} recently scanned repositories run scan workflow version ${CODEX_SCAN_WORKFLOW_VERSION}`
+            ? `The latest scan ran scan workflow version ${CODEX_SCAN_WORKFLOW_VERSION}`
             : `${outdated.length} of ${latestByRepo.size} repositories still report an older scan workflow: ` +
               outdated
                 .slice(0, 5)
@@ -442,7 +361,7 @@ export const getCodexEngineHealth = createServerFn({ method: "GET" })
       fix:
         outdated.length === 0
           ? undefined
-          : "Update Prime's copy (see above) and let the cascade deliver it. Until then those repositories sign with the shared master and cannot resolve dependency or AI findings by absence.",
+          : "Update Prime's copy (see above). Until then its scans sign with the shared master and cannot resolve dependency or AI findings by absence.",
     });
 
     const week = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
@@ -477,31 +396,38 @@ export const getCodexEngineHealth = createServerFn({ method: "GET" })
           : "A failed scanner never resolves findings by their absence, so its findings stay as they were until it runs cleanly. Open the scan's run to see why.",
     });
 
-    if (prime && prime.codex_pr_scan_enabled && prime.codex_pr_check_enabled !== false) {
-      const { data: refused } = await supabase
-        .from("codex_scan_events")
-        .select("payload, created_at")
-        .eq("event_type", "check_run_unavailable")
-        .gte("created_at", week)
-        .order("created_at", { ascending: false })
-        .limit(20);
-      const forbidden = (refused ?? []).filter((e: any) => e.payload?.http_status === 403);
-      checks.push({
-        key: "pr_checks",
-        label: "Pull request checks",
-        status: forbidden.length ? "fail" : (refused ?? []).length ? "warn" : "ok",
-        detail: forbidden.length
-          ? `GitHub refused to create the “Codex Security” check ${forbidden.length} time(s) this week (403)`
-          : (refused ?? []).length
-            ? `The check could not be created ${(refused ?? []).length} time(s) this week`
-            : "PR scans open a “Codex Security” check on the pull request",
-        fix: forbidden.length
-          ? "Grant the Aurixa GitHub App “Checks: read & write”, accept the new permission on the installation, then require “Codex Security” in branch protection."
-          : (refused ?? []).length
-            ? "See the check_run_unavailable events on the affected scans."
-            : undefined,
-      });
-    }
+    // ── Automatic fixes (src/lib/codex-autofix-policy.ts) ────────────────
+    const autofixOn = prime ? prime.codex_autofix_enabled !== false : false;
+    const { data: lastAutofix } = await supabase
+      .from("codex_scan_events")
+      .select("payload, created_at")
+      .eq("event_type", "autofix.summary")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const lastRun = lastAutofix?.payload as
+      | { dispatched?: number; by_engine?: Record<string, number>; failed?: unknown[] }
+      | undefined;
+    checks.push({
+      key: "autofix",
+      label: "Automatic fixes",
+      status: !autofixOn ? "warn" : (lastRun?.failed?.length ?? 0) > 0 ? "warn" : "ok",
+      detail: !autofixOn
+        ? "Switched off — findings are not fixed until someone drafts a fix"
+        : lastAutofix
+          ? `After the last nightly scan (${String(lastAutofix.created_at).slice(0, 16).replace("T", " ")}): ` +
+            `${lastRun?.dispatched ?? 0} dispatched (Claude ${lastRun?.by_engine?.claude_code ?? 0}, ` +
+            `Codex ${lastRun?.by_engine?.codex_cli ?? 0})` +
+            ((lastRun?.failed?.length ?? 0) > 0
+              ? `, ${lastRun?.failed?.length} could not be dispatched`
+              : "")
+          : "On — the first nightly scan of Prime will dispatch fixes",
+      fix: !autofixOn
+        ? "Turn automatic fixes on in the scheduling card below."
+        : (lastRun?.failed?.length ?? 0) > 0
+          ? "See the autofix.summary event on the last nightly scan for each failure."
+          : undefined,
+    });
 
     // pg_cron, read with the service role: `cron` is not exposed to users.
     try {
@@ -554,7 +480,7 @@ export const getCodexEngineHealth = createServerFn({ method: "GET" })
       failing: checks.filter((c) => c.status === "fail").length,
       warnings: checks.filter((c) => c.status === "warn").length,
       nightlyEnabled: prime?.codex_nightly_enabled ?? null,
-      prScanEnabled: prime?.codex_pr_scan_enabled ?? null,
+      autofixEnabled: prime ? prime.codex_autofix_enabled !== false : null,
       recentFailures: failedCount,
       signingKeyMode: masters.mode,
       signingKeyRotatable: masters.mode === "intake_source",
