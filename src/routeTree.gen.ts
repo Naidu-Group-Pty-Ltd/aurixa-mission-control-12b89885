@@ -9,383 +9,238 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as YggdrasilRouteImport } from './routes/yggdrasil'
-import { Route as SloRouteImport } from './routes/slo'
-import { Route as SettingsRouteImport } from './routes/settings'
-import { Route as SecurityPartnersRouteImport } from './routes/security-partners'
-import { Route as SchedulesRouteImport } from './routes/schedules'
-import { Route as RouteErrorsRouteImport } from './routes/route-errors'
-import { Route as ResetPasswordRouteImport } from './routes/reset-password'
-import { Route as ReportJobsRouteImport } from './routes/report-jobs'
-import { Route as PrimeMigrationsRouteImport } from './routes/prime-migrations'
-import { Route as PrimeRouteImport } from './routes/prime'
-import { Route as PartnerPortalRouteImport } from './routes/partner-portal'
-import { Route as OversightRouteImport } from './routes/oversight'
-import { Route as NotificationsRouteImport } from './routes/notifications'
-import { Route as ModulesRouteImport } from './routes/modules'
-import { Route as MetricsRouteImport } from './routes/metrics'
-import { Route as MarketingRouteImport } from './routes/marketing'
-import { Route as LeadsRouteImport } from './routes/leads'
-import { Route as HealthRouteImport } from './routes/health'
-import { Route as HandoffsRouteImport } from './routes/handoffs'
-import { Route as FleetManagerRouteImport } from './routes/fleet-manager'
-import { Route as DriftRouteImport } from './routes/drift'
-import { Route as DigestsRouteImport } from './routes/digests'
-import { Route as DashboardRouteImport } from './routes/dashboard'
-import { Route as CloudflareRouteImport } from './routes/cloudflare'
-import { Route as CascadesRouteImport } from './routes/cascades'
-import { Route as BuildersNetworkRouteImport } from './routes/builders-network'
-import { Route as BrandingRouteImport } from './routes/branding'
-import { Route as AuthRouteImport } from './routes/auth'
-import { Route as AuditLogRouteImport } from './routes/audit-log'
-import { Route as ApprovalsRouteImport } from './routes/approvals'
-import { Route as AnnouncementsRouteImport } from './routes/announcements'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as SettingsIndexRouteImport } from './routes/settings.index'
-import { Route as SecurityIndexRouteImport } from './routes/security.index'
-import { Route as MarketingIndexRouteImport } from './routes/marketing.index'
-import { Route as EmailIndexRouteImport } from './routes/email.index'
-import { Route as CrmIndexRouteImport } from './routes/crm.index'
+import { Route as AnnouncementsRouteImport } from './routes/announcements'
+import { Route as ApprovalsRouteImport } from './routes/approvals'
+import { Route as AuditLogRouteImport } from './routes/audit-log'
+import { Route as AuthRouteImport } from './routes/auth'
+import { Route as BrandingRouteImport } from './routes/branding'
+import { Route as BuildersNetworkRouteImport } from './routes/builders-network'
+import { Route as CascadesRouteImport } from './routes/cascades'
+import { Route as CloudflareRouteImport } from './routes/cloudflare'
+import { Route as DashboardRouteImport } from './routes/dashboard'
+import { Route as DigestsRouteImport } from './routes/digests'
+import { Route as DriftRouteImport } from './routes/drift'
+import { Route as FleetManagerRouteImport } from './routes/fleet-manager'
+import { Route as HandoffsRouteImport } from './routes/handoffs'
+import { Route as HealthRouteImport } from './routes/health'
+import { Route as LeadsRouteImport } from './routes/leads'
+import { Route as MarketingRouteImport } from './routes/marketing'
+import { Route as MetricsRouteImport } from './routes/metrics'
+import { Route as ModulesRouteImport } from './routes/modules'
+import { Route as NotificationsRouteImport } from './routes/notifications'
+import { Route as OversightRouteImport } from './routes/oversight'
+import { Route as PartnerPortalRouteImport } from './routes/partner-portal'
+import { Route as PrimeRouteImport } from './routes/prime'
+import { Route as PrimeMigrationsRouteImport } from './routes/prime-migrations'
+import { Route as ReportJobsRouteImport } from './routes/report-jobs'
+import { Route as ResetPasswordRouteImport } from './routes/reset-password'
+import { Route as RouteErrorsRouteImport } from './routes/route-errors'
+import { Route as SchedulesRouteImport } from './routes/schedules'
+import { Route as SecurityPartnersRouteImport } from './routes/security-partners'
+import { Route as SettingsRouteImport } from './routes/settings'
+import { Route as SloRouteImport } from './routes/slo'
+import { Route as YggdrasilRouteImport } from './routes/yggdrasil'
 import { Route as AgreementsIndexRouteImport } from './routes/agreements.index'
-import { Route as VoicePhoneRouteImport } from './routes/voice.phone'
-import { Route as VoiceOutboundRouteImport } from './routes/voice.outbound'
-import { Route as VoiceCallsRouteImport } from './routes/voice.calls'
-import { Route as VoiceAgentsRouteImport } from './routes/voice.agents'
-import { Route as SupportTicketsRouteImport } from './routes/support.tickets'
-import { Route as SettingsRolesRouteImport } from './routes/settings.roles'
-import { Route as SettingsRoleAuditRouteImport } from './routes/settings.role-audit'
-import { Route as SettingsProvisioningPreviewRouteImport } from './routes/settings.provisioning-preview'
-import { Route as SettingsPermissionMatrixRouteImport } from './routes/settings.permission-matrix'
-import { Route as SettingsNotificationsRouteImport } from './routes/settings.notifications'
-import { Route as SettingsInvitesRouteImport } from './routes/settings.invites'
-import { Route as SettingsHandoffTermsRouteImport } from './routes/settings.handoff-terms'
-import { Route as SettingsHandoffPoliciesRouteImport } from './routes/settings.handoff-policies'
-import { Route as SettingsGithubAccessRouteImport } from './routes/settings.github-access'
-import { Route as SettingsGiftTokensRouteImport } from './routes/settings.gift-tokens'
-import { Route as SettingsDomainsRouteImport } from './routes/settings.domains'
-import { Route as SettingsCloneStripeRouteImport } from './routes/settings.clone-stripe'
-import { Route as SettingsClientAccountsRouteImport } from './routes/settings.client-accounts'
-import { Route as SettingsBillingRouteImport } from './routes/settings.billing'
-import { Route as SecurityScansRouteImport } from './routes/security.scans'
-import { Route as SecurityIntakeRouteImport } from './routes/security.intake'
-import { Route as ModulesBuilderRouteImport } from './routes/modules.builder'
-import { Route as ModulesSlugRouteImport } from './routes/modules.$slug'
-import { Route as MarketingYoutubeRouteImport } from './routes/marketing.youtube'
-import { Route as MarketingTiktokRouteImport } from './routes/marketing.tiktok'
-import { Route as MarketingMetaRouteImport } from './routes/marketing.meta'
-import { Route as MarketingConnectionsRouteImport } from './routes/marketing.connections'
-import { Route as MarketingBriefsRouteImport } from './routes/marketing.briefs'
-import { Route as MarketingAttributionRouteImport } from './routes/marketing.attribution'
-import { Route as JoinTokenRouteImport } from './routes/join.$token'
-import { Route as HooksWarmHealthRouteImport } from './routes/hooks.warm-health'
-import { Route as HooksVoiceStudioPlanRouteImport } from './routes/hooks.voice-studio-plan'
-import { Route as HooksVoiceStudioDeployRouteImport } from './routes/hooks.voice-studio-deploy'
-import { Route as HooksVoiceStackDrainRouteImport } from './routes/hooks.voice-stack-drain'
-import { Route as HooksVoiceOutboundDispatchRouteImport } from './routes/hooks.voice-outbound-dispatch'
-import { Route as HooksVoiceCallDrainRouteImport } from './routes/hooks.voice-call-drain'
-import { Route as HooksVoiceAutomationDrainRouteImport } from './routes/hooks.voice-automation-drain'
-import { Route as HooksVerificationSelftestRouteImport } from './routes/hooks.verification-selftest'
-import { Route as HooksVercelRouteImport } from './routes/hooks.vercel'
-import { Route as HooksTurnstileReconcileRouteImport } from './routes/hooks.turnstile-reconcile'
-import { Route as HooksTokenAlertsRouteImport } from './routes/hooks.token-alerts'
-import { Route as HooksSupportRemediationDrainRouteImport } from './routes/hooks.support-remediation-drain'
-import { Route as HooksRunSchedulesRouteImport } from './routes/hooks.run-schedules'
-import { Route as HooksReferenceDataSyncRouteImport } from './routes/hooks.reference-data-sync'
-import { Route as HooksPrimeSecretPairsRouteImport } from './routes/hooks.prime-secret-pairs'
-import { Route as HooksMigrationEnqueueRouteImport } from './routes/hooks.migration-enqueue'
-import { Route as HooksMigrationDriftRouteImport } from './routes/hooks.migration-drift'
-import { Route as HooksMarketingSnapshotsRouteImport } from './routes/hooks.marketing-snapshots'
-import { Route as HooksLeadStageEmailsRouteImport } from './routes/hooks.lead-stage-emails'
-import { Route as HooksHeldFileDriftRouteImport } from './routes/hooks.held-file-drift'
-import { Route as HooksHandoffParityRefreshRouteImport } from './routes/hooks.handoff-parity-refresh'
-import { Route as HooksHandoffObservabilityPollRouteImport } from './routes/hooks.handoff-observability-poll'
-import { Route as HooksGithubRouteImport } from './routes/hooks.github'
-import { Route as HooksFleetSecretForwardReconcileRouteImport } from './routes/hooks.fleet-secret-forward-reconcile'
-import { Route as HooksFleetMigrationSyncRouteImport } from './routes/hooks.fleet-migration-sync'
-import { Route as HooksFleetMigrationDrainRouteImport } from './routes/hooks.fleet-migration-drain'
-import { Route as HooksFleetDriftRouteImport } from './routes/hooks.fleet-drift'
-import { Route as HooksFeedbackForwardRetryRouteImport } from './routes/hooks.feedback-forward-retry'
-import { Route as HooksExpireReservationsRouteImport } from './routes/hooks.expire-reservations'
-import { Route as HooksEntitlementDrainRouteImport } from './routes/hooks.entitlement-drain'
-import { Route as HooksEmailWarmupRouteImport } from './routes/hooks.email-warmup'
-import { Route as HooksEmailIdentityDrainRouteImport } from './routes/hooks.email-identity-drain'
-import { Route as HooksEmailCampaignDispatchRouteImport } from './routes/hooks.email-campaign-dispatch'
-import { Route as HooksEmailBounceScanRouteImport } from './routes/hooks.email-bounce-scan'
-import { Route as HooksEdgeDriftRouteImport } from './routes/hooks.edge-drift'
-import { Route as HooksEdgeDrainRouteImport } from './routes/hooks.edge-drain'
-import { Route as HooksDriftRefreshRouteImport } from './routes/hooks.drift-refresh'
-import { Route as HooksDeploymentDrainRouteImport } from './routes/hooks.deployment-drain'
-import { Route as HooksCrmSweepRouteImport } from './routes/hooks.crm-sweep'
-import { Route as HooksCodexSweepRouteImport } from './routes/hooks.codex-sweep'
-import { Route as HooksCodexNightlyRouteImport } from './routes/hooks.codex-nightly'
-import { Route as HooksCloneSigningPairReconcileRouteImport } from './routes/hooks.clone-signing-pair-reconcile'
-import { Route as HooksCloneSecretsReconcileRouteImport } from './routes/hooks.clone-secrets-reconcile'
-import { Route as HooksCloneSecretWithholdRouteImport } from './routes/hooks.clone-secret-withhold'
-import { Route as HooksCloneSecretForwardReconcileRouteImport } from './routes/hooks.clone-secret-forward-reconcile'
-import { Route as HooksClonePrivilegeReconcileRouteImport } from './routes/hooks.clone-privilege-reconcile'
-import { Route as HooksCloneJwtSecretReconcileRouteImport } from './routes/hooks.clone-jwt-secret-reconcile'
-import { Route as HooksCloneDeployerDeclarationReconcileRouteImport } from './routes/hooks.clone-deployer-declaration-reconcile'
-import { Route as HooksCascadeMergeDrainRouteImport } from './routes/hooks.cascade-merge-drain'
-import { Route as HooksCascadeDrainRouteImport } from './routes/hooks.cascade-drain'
-import { Route as HooksCascadeAuditRouteImport } from './routes/hooks.cascade-audit'
-import { Route as HooksBrandDriftRouteImport } from './routes/hooks.brand-drift'
-import { Route as HooksBackendProvisioningRetryRouteImport } from './routes/hooks.backend-provisioning-retry'
-import { Route as HooksBackendProvisioningRepairRouteImport } from './routes/hooks.backend-provisioning-repair'
-import { Route as HooksBackendProvisioningDrainRouteImport } from './routes/hooks.backend-provisioning-drain'
-import { Route as HooksBackendCatchupRouteImport } from './routes/hooks.backend-catchup'
-import { Route as HooksApiUsageSettleRouteImport } from './routes/hooks.api-usage-settle'
-import { Route as HooksAllowedOriginsReconcileRouteImport } from './routes/hooks.allowed-origins-reconcile'
-import { Route as HooksAirtableSyncRouteImport } from './routes/hooks.airtable-sync'
-import { Route as HooksAgreementsRefreshRouteImport } from './routes/hooks.agreements-refresh'
-import { Route as HandoffsNewRouteImport } from './routes/handoffs.new'
-import { Route as HandoffsHandoffIdRouteImport } from './routes/handoffs.$handoffId'
-import { Route as FleetEdgeRouteImport } from './routes/fleet.edge'
-import { Route as FleetDeploymentsRouteImport } from './routes/fleet.deployments'
-import { Route as EmailWarmupRouteImport } from './routes/email.warmup'
-import { Route as EmailSuppressionsRouteImport } from './routes/email.suppressions'
-import { Route as CrmTicketsRouteImport } from './routes/crm.tickets'
-import { Route as CrmJourneyRouteImport } from './routes/crm.journey'
-import { Route as CrmFitRouteImport } from './routes/crm.fit'
-import { Route as CrmDealsRouteImport } from './routes/crm.deals'
-import { Route as ClonesNewRouteImport } from './routes/clones.new'
-import { Route as ClonesCloneIdRouteImport } from './routes/clones.$cloneId'
-import { Route as CascadesEventIdRouteImport } from './routes/cascades.$eventId'
-import { Route as BillingTopupRouteImport } from './routes/billing.topup'
-import { Route as BillingSuccessRouteImport } from './routes/billing.success'
-import { Route as BillingSeatsRouteImport } from './routes/billing.seats'
-import { Route as BillingPurchasesRouteImport } from './routes/billing.purchases'
-import { Route as BillingInvoicesRouteImport } from './routes/billing.invoices'
-import { Route as BillingGatesRouteImport } from './routes/billing.gates'
-import { Route as BillingCatalogRouteImport } from './routes/billing.catalog'
-import { Route as BillingCancelRouteImport } from './routes/billing.cancel'
-import { Route as BillingApiUsageRouteImport } from './routes/billing.api-usage'
-import { Route as ApiHealthRouteImport } from './routes/api.health'
-import { Route as AgreementsIssuingProfileRouteImport } from './routes/agreements.issuing-profile'
-import { Route as AgreementsBuilderPartnerTermsRouteImport } from './routes/agreements.builder-partner-terms'
 import { Route as AgreementsAgreementIdRouteImport } from './routes/agreements.$agreementId'
-import { Route as VoiceStudioIndexRouteImport } from './routes/voice.studio.index'
-import { Route as CrmAccountsIndexRouteImport } from './routes/crm.accounts.index'
-import { Route as VoiceStudioProjectIdRouteImport } from './routes/voice.studio.$projectId'
-import { Route as EmailCampaignsCampaignIdRouteImport } from './routes/email.campaigns.$campaignId'
-import { Route as CrmAccountsAccountIdRouteImport } from './routes/crm.accounts.$accountId'
-import { Route as ClonesCloneIdSecretsRouteImport } from './routes/clones.$cloneId.secrets'
-import { Route as ClientsHandoffTokenRouteImport } from './routes/clients.handoff.$token'
+import { Route as AgreementsBuilderPartnerTermsRouteImport } from './routes/agreements.builder-partner-terms'
+import { Route as AgreementsIssuingProfileRouteImport } from './routes/agreements.issuing-profile'
+import { Route as ApiHealthRouteImport } from './routes/api.health'
+import { Route as BillingApiUsageRouteImport } from './routes/billing.api-usage'
+import { Route as BillingCancelRouteImport } from './routes/billing.cancel'
+import { Route as BillingCatalogRouteImport } from './routes/billing.catalog'
+import { Route as BillingGatesRouteImport } from './routes/billing.gates'
+import { Route as BillingInvoicesRouteImport } from './routes/billing.invoices'
+import { Route as BillingPurchasesRouteImport } from './routes/billing.purchases'
+import { Route as BillingSeatsRouteImport } from './routes/billing.seats'
+import { Route as BillingSuccessRouteImport } from './routes/billing.success'
+import { Route as BillingTopupRouteImport } from './routes/billing.topup'
+import { Route as CascadesEventIdRouteImport } from './routes/cascades.$eventId'
+import { Route as ClonesCloneIdRouteImport } from './routes/clones.$cloneId'
+import { Route as ClonesNewRouteImport } from './routes/clones.new'
+import { Route as CrmIndexRouteImport } from './routes/crm.index'
+import { Route as CrmDealsRouteImport } from './routes/crm.deals'
+import { Route as CrmFitRouteImport } from './routes/crm.fit'
+import { Route as CrmJourneyRouteImport } from './routes/crm.journey'
+import { Route as CrmTicketsRouteImport } from './routes/crm.tickets'
+import { Route as EmailIndexRouteImport } from './routes/email.index'
+import { Route as EmailSuppressionsRouteImport } from './routes/email.suppressions'
+import { Route as EmailWarmupRouteImport } from './routes/email.warmup'
+import { Route as FleetDeploymentsRouteImport } from './routes/fleet.deployments'
+import { Route as FleetEdgeRouteImport } from './routes/fleet.edge'
+import { Route as HandoffsHandoffIdRouteImport } from './routes/handoffs.$handoffId'
+import { Route as HandoffsNewRouteImport } from './routes/handoffs.new'
+import { Route as HooksAgreementsRefreshRouteImport } from './routes/hooks.agreements-refresh'
+import { Route as HooksAirtableSyncRouteImport } from './routes/hooks.airtable-sync'
+import { Route as HooksAllowedOriginsReconcileRouteImport } from './routes/hooks.allowed-origins-reconcile'
+import { Route as HooksApiUsageSettleRouteImport } from './routes/hooks.api-usage-settle'
+import { Route as HooksBackendCatchupRouteImport } from './routes/hooks.backend-catchup'
+import { Route as HooksBackendProvisioningDrainRouteImport } from './routes/hooks.backend-provisioning-drain'
+import { Route as HooksBackendProvisioningRepairRouteImport } from './routes/hooks.backend-provisioning-repair'
+import { Route as HooksBackendProvisioningRetryRouteImport } from './routes/hooks.backend-provisioning-retry'
+import { Route as HooksBrandDriftRouteImport } from './routes/hooks.brand-drift'
+import { Route as HooksCascadeAuditRouteImport } from './routes/hooks.cascade-audit'
+import { Route as HooksCascadeDrainRouteImport } from './routes/hooks.cascade-drain'
+import { Route as HooksCascadeMergeDrainRouteImport } from './routes/hooks.cascade-merge-drain'
+import { Route as HooksCloneDeployerDeclarationReconcileRouteImport } from './routes/hooks.clone-deployer-declaration-reconcile'
+import { Route as HooksCloneJwtSecretReconcileRouteImport } from './routes/hooks.clone-jwt-secret-reconcile'
+import { Route as HooksClonePrivilegeReconcileRouteImport } from './routes/hooks.clone-privilege-reconcile'
+import { Route as HooksCloneSecretForwardReconcileRouteImport } from './routes/hooks.clone-secret-forward-reconcile'
+import { Route as HooksCloneSecretWithholdRouteImport } from './routes/hooks.clone-secret-withhold'
+import { Route as HooksCloneSecretsReconcileRouteImport } from './routes/hooks.clone-secrets-reconcile'
+import { Route as HooksCloneSigningPairReconcileRouteImport } from './routes/hooks.clone-signing-pair-reconcile'
+import { Route as HooksCodexNightlyRouteImport } from './routes/hooks.codex-nightly'
+import { Route as HooksCodexSweepRouteImport } from './routes/hooks.codex-sweep'
+import { Route as HooksCrmSweepRouteImport } from './routes/hooks.crm-sweep'
+import { Route as HooksDeploymentDrainRouteImport } from './routes/hooks.deployment-drain'
+import { Route as HooksDriftRefreshRouteImport } from './routes/hooks.drift-refresh'
+import { Route as HooksEdgeDrainRouteImport } from './routes/hooks.edge-drain'
+import { Route as HooksEdgeDriftRouteImport } from './routes/hooks.edge-drift'
+import { Route as HooksEmailBounceScanRouteImport } from './routes/hooks.email-bounce-scan'
+import { Route as HooksEmailCampaignDispatchRouteImport } from './routes/hooks.email-campaign-dispatch'
+import { Route as HooksEmailIdentityDrainRouteImport } from './routes/hooks.email-identity-drain'
+import { Route as HooksEmailWarmupRouteImport } from './routes/hooks.email-warmup'
+import { Route as HooksEntitlementDrainRouteImport } from './routes/hooks.entitlement-drain'
+import { Route as HooksExpireReservationsRouteImport } from './routes/hooks.expire-reservations'
+import { Route as HooksFeedbackForwardRetryRouteImport } from './routes/hooks.feedback-forward-retry'
+import { Route as HooksFleetDriftRouteImport } from './routes/hooks.fleet-drift'
+import { Route as HooksFleetMigrationDrainRouteImport } from './routes/hooks.fleet-migration-drain'
+import { Route as HooksFleetMigrationSyncRouteImport } from './routes/hooks.fleet-migration-sync'
+import { Route as HooksFleetSecretForwardReconcileRouteImport } from './routes/hooks.fleet-secret-forward-reconcile'
+import { Route as HooksGithubRouteImport } from './routes/hooks.github'
+import { Route as HooksHandoffObservabilityPollRouteImport } from './routes/hooks.handoff-observability-poll'
+import { Route as HooksHandoffParityRefreshRouteImport } from './routes/hooks.handoff-parity-refresh'
+import { Route as HooksHeldFileDriftRouteImport } from './routes/hooks.held-file-drift'
+import { Route as HooksLeadStageEmailsRouteImport } from './routes/hooks.lead-stage-emails'
+import { Route as HooksMarketingSnapshotsRouteImport } from './routes/hooks.marketing-snapshots'
+import { Route as HooksMigrationDriftRouteImport } from './routes/hooks.migration-drift'
+import { Route as HooksMigrationEnqueueRouteImport } from './routes/hooks.migration-enqueue'
+import { Route as HooksPrimeSecretPairsRouteImport } from './routes/hooks.prime-secret-pairs'
+import { Route as HooksReferenceDataSyncRouteImport } from './routes/hooks.reference-data-sync'
+import { Route as HooksRunSchedulesRouteImport } from './routes/hooks.run-schedules'
+import { Route as HooksSupportRemediationDrainRouteImport } from './routes/hooks.support-remediation-drain'
+import { Route as HooksTokenAlertsRouteImport } from './routes/hooks.token-alerts'
+import { Route as HooksTurnstileReconcileRouteImport } from './routes/hooks.turnstile-reconcile'
+import { Route as HooksVercelRouteImport } from './routes/hooks.vercel'
+import { Route as HooksVerificationSelftestRouteImport } from './routes/hooks.verification-selftest'
+import { Route as HooksVoiceAutomationDrainRouteImport } from './routes/hooks.voice-automation-drain'
+import { Route as HooksVoiceCallDrainRouteImport } from './routes/hooks.voice-call-drain'
+import { Route as HooksVoiceOutboundDispatchRouteImport } from './routes/hooks.voice-outbound-dispatch'
+import { Route as HooksVoiceStackDrainRouteImport } from './routes/hooks.voice-stack-drain'
+import { Route as HooksVoiceStudioDeployRouteImport } from './routes/hooks.voice-studio-deploy'
+import { Route as HooksVoiceStudioPlanRouteImport } from './routes/hooks.voice-studio-plan'
+import { Route as HooksWarmHealthRouteImport } from './routes/hooks.warm-health'
+import { Route as JoinTokenRouteImport } from './routes/join.$token'
+import { Route as MarketingIndexRouteImport } from './routes/marketing.index'
+import { Route as MarketingAttributionRouteImport } from './routes/marketing.attribution'
+import { Route as MarketingBriefsRouteImport } from './routes/marketing.briefs'
+import { Route as MarketingConnectionsRouteImport } from './routes/marketing.connections'
+import { Route as MarketingMetaRouteImport } from './routes/marketing.meta'
+import { Route as MarketingTiktokRouteImport } from './routes/marketing.tiktok'
+import { Route as MarketingYoutubeRouteImport } from './routes/marketing.youtube'
+import { Route as ModulesSlugRouteImport } from './routes/modules.$slug'
+import { Route as ModulesBuilderRouteImport } from './routes/modules.builder'
+import { Route as SecurityIndexRouteImport } from './routes/security.index'
+import { Route as SecurityIntakeRouteImport } from './routes/security.intake'
+import { Route as SecurityScansRouteImport } from './routes/security.scans'
+import { Route as SettingsIndexRouteImport } from './routes/settings.index'
+import { Route as SettingsBillingRouteImport } from './routes/settings.billing'
+import { Route as SettingsClientAccountsRouteImport } from './routes/settings.client-accounts'
+import { Route as SettingsCloneStripeRouteImport } from './routes/settings.clone-stripe'
+import { Route as SettingsDomainsRouteImport } from './routes/settings.domains'
+import { Route as SettingsGiftTokensRouteImport } from './routes/settings.gift-tokens'
+import { Route as SettingsGithubAccessRouteImport } from './routes/settings.github-access'
+import { Route as SettingsHandoffPoliciesRouteImport } from './routes/settings.handoff-policies'
+import { Route as SettingsHandoffTermsRouteImport } from './routes/settings.handoff-terms'
+import { Route as SettingsInvitesRouteImport } from './routes/settings.invites'
+import { Route as SettingsNotificationsRouteImport } from './routes/settings.notifications'
+import { Route as SettingsPermissionMatrixRouteImport } from './routes/settings.permission-matrix'
+import { Route as SettingsProvisioningPreviewRouteImport } from './routes/settings.provisioning-preview'
+import { Route as SettingsRoleAuditRouteImport } from './routes/settings.role-audit'
+import { Route as SettingsRolesRouteImport } from './routes/settings.roles'
+import { Route as SupportTicketsRouteImport } from './routes/support.tickets'
+import { Route as VoiceAgentsRouteImport } from './routes/voice.agents'
+import { Route as VoiceCallsRouteImport } from './routes/voice.calls'
+import { Route as VoiceOutboundRouteImport } from './routes/voice.outbound'
+import { Route as VoicePhoneRouteImport } from './routes/voice.phone'
 import { Route as ApiPublicPurchasesRouteImport } from './routes/api.public.purchases'
-import { Route as ApiPublicVoiceWebhookRouteImport } from './routes/api.public.voice.webhook'
-import { Route as ApiPublicVoiceAutomationOperationRouteImport } from './routes/api.public.voice-automation.$operation'
-import { Route as ApiPublicVerificationOperationRouteImport } from './routes/api.public.verification.$operation'
-import { Route as ApiPublicUsageReportRouteImport } from './routes/api.public.usage.report'
-import { Route as ApiPublicTokensReserveRouteImport } from './routes/api.public.tokens.reserve'
-import { Route as ApiPublicTokensPlanChangeRouteImport } from './routes/api.public.tokens.plan-change'
-import { Route as ApiPublicTokensPacksRouteImport } from './routes/api.public.tokens.packs'
-import { Route as ApiPublicTokensFeedbackPromptRouteImport } from './routes/api.public.tokens.feedback-prompt'
-import { Route as ApiPublicTokensCommitRouteImport } from './routes/api.public.tokens.commit'
-import { Route as ApiPublicTokensCancelRouteImport } from './routes/api.public.tokens.cancel'
-import { Route as ApiPublicTokensBalanceRouteImport } from './routes/api.public.tokens.balance'
-import { Route as ApiPublicTelephonyVoiceRouteImport } from './routes/api.public.telephony.voice'
-import { Route as ApiPublicTelephonyStatusRouteImport } from './routes/api.public.telephony.status'
-import { Route as ApiPublicTelephonyIncomingRouteImport } from './routes/api.public.telephony.incoming'
-import { Route as ApiPublicSupportTicketsRouteImport } from './routes/api.public.support.tickets'
-import { Route as ApiPublicSupportAssistantActivityRouteImport } from './routes/api.public.support.assistant-activity'
-import { Route as ApiPublicStripeWebhookRouteImport } from './routes/api.public.stripe.webhook'
-import { Route as ApiPublicStorefrontWalletRouteImport } from './routes/api.public.storefront.wallet'
-import { Route as ApiPublicStorefrontStrategicReviewRouteImport } from './routes/api.public.storefront.strategic-review'
-import { Route as ApiPublicStorefrontSetupRouteImport } from './routes/api.public.storefront.setup'
-import { Route as ApiPublicStorefrontSessionRouteImport } from './routes/api.public.storefront.session'
-import { Route as ApiPublicStorefrontPlanChangeRouteImport } from './routes/api.public.storefront.plan-change'
-import { Route as ApiPublicStorefrontIdentityRouteImport } from './routes/api.public.storefront.identity'
-import { Route as ApiPublicStorefrontHandoffRouteImport } from './routes/api.public.storefront.handoff'
-import { Route as ApiPublicStorefrontFeedbackRouteImport } from './routes/api.public.storefront.feedback'
-import { Route as ApiPublicStorefrontCheckoutRouteImport } from './routes/api.public.storefront.checkout'
-import { Route as ApiPublicStorefrontCatalogRouteImport } from './routes/api.public.storefront.catalog'
-import { Route as ApiPublicStorefrontAccessRouteImport } from './routes/api.public.storefront.access'
-import { Route as ApiPublicSecurityIntakeRouteImport } from './routes/api.public.security.intake'
-import { Route as ApiPublicSeatsReserveRouteImport } from './routes/api.public.seats.reserve'
-import { Route as ApiPublicSeatsReleaseRouteImport } from './routes/api.public.seats.release'
-import { Route as ApiPublicSeatsListRouteImport } from './routes/api.public.seats.list'
-import { Route as ApiPublicSeatsEntitlementRouteImport } from './routes/api.public.seats.entitlement'
-import { Route as ApiPublicSeatsCommitRouteImport } from './routes/api.public.seats.commit'
-import { Route as ApiPublicPricingCatalogRouteImport } from './routes/api.public.pricing.catalog'
-import { Route as ApiPublicListingsOperationRouteImport } from './routes/api.public.listings.$operation'
-import { Route as ApiPublicLeadsCaptureRouteImport } from './routes/api.public.leads.capture'
-import { Route as ApiPublicIntegrationsSecretsRouteImport } from './routes/api.public.integrations.secrets'
-import { Route as ApiPublicHooksDocusignRouteImport } from './routes/api.public.hooks.docusign'
-import { Route as ApiPublicHooksCodexSecurityRouteImport } from './routes/api.public.hooks.codex-security'
-import { Route as ApiPublicHooksCodexRemediationRouteImport } from './routes/api.public.hooks.codex-remediation'
-import { Route as ApiPublicHooksCalcomRouteImport } from './routes/api.public.hooks.calcom'
-import { Route as ApiPublicHandoffsConsentRouteImport } from './routes/api.public.handoffs.consent'
-import { Route as ApiPublicHandoffBeaconRouteImport } from './routes/api.public.handoff.beacon'
-import { Route as ApiPublicHandoffAuditIngestRouteImport } from './routes/api.public.handoff.audit-ingest'
-import { Route as ApiPublicEmailUnsubscribeRouteImport } from './routes/api.public.email.unsubscribe'
-import { Route as ApiPublicEdgeStatusRouteImport } from './routes/api.public.edge.status'
-import { Route as ApiPublicClonesRotateKeyRouteImport } from './routes/api.public.clones.rotate-key'
-import { Route as ApiPublicClonesGateRouteImport } from './routes/api.public.clones.gate'
-import { Route as ApiPublicClonesAnnouncementsRouteImport } from './routes/api.public.clones.announcements'
-import { Route as ApiPublicBuildersJwksRouteImport } from './routes/api.public.builders.jwks'
-import { Route as ApiPublicBuildersIdentityRouteImport } from './routes/api.public.builders.identity'
-import { Route as ApiPublicBuildersApplyRouteImport } from './routes/api.public.builders.apply'
-import { Route as ApiPublicBillingPaymentMethodsRouteImport } from './routes/api.public.billing.payment-methods'
-import { Route as ApiPublicBillingInvoicesRouteImport } from './routes/api.public.billing.invoices'
-import { Route as ApiPublicBillingInvoicePdfRouteImport } from './routes/api.public.billing.invoice-pdf'
-import { Route as ApiPublicBillingHandoffRouteImport } from './routes/api.public.billing.handoff'
-import { Route as ApiPublicAnthropicJwksRouteImport } from './routes/api.public.anthropic.jwks'
+import { Route as ClientsHandoffTokenRouteImport } from './routes/clients.handoff.$token'
+import { Route as ClonesCloneIdSecretsRouteImport } from './routes/clones.$cloneId.secrets'
+import { Route as CrmAccountsIndexRouteImport } from './routes/crm.accounts.index'
+import { Route as CrmAccountsAccountIdRouteImport } from './routes/crm.accounts.$accountId'
+import { Route as EmailCampaignsCampaignIdRouteImport } from './routes/email.campaigns.$campaignId'
+import { Route as VoiceStudioIndexRouteImport } from './routes/voice.studio.index'
+import { Route as VoiceStudioProjectIdRouteImport } from './routes/voice.studio.$projectId'
 import { Route as ApiPublicAnthropicIdentityRouteImport } from './routes/api.public.anthropic.identity'
-import { Route as ApiPublicStripeWebhookCloneIdRouteImport } from './routes/api.public.stripe.webhook.$cloneId'
-import { Route as ApiPublicSeatsDevicesReleaseRouteImport } from './routes/api.public.seats.devices.release'
-import { Route as ApiPublicSeatsDevicesRegisterRouteImport } from './routes/api.public.seats.devices.register'
-import { Route as ApiPublicSeatsDevicesListRouteImport } from './routes/api.public.seats.devices.list'
-import { Route as ApiPublicSeatsDevicesHeartbeatRouteImport } from './routes/api.public.seats.devices.heartbeat'
+import { Route as ApiPublicAnthropicJwksRouteImport } from './routes/api.public.anthropic.jwks'
+import { Route as ApiPublicBillingHandoffRouteImport } from './routes/api.public.billing.handoff'
+import { Route as ApiPublicBillingInvoicePdfRouteImport } from './routes/api.public.billing.invoice-pdf'
+import { Route as ApiPublicBillingInvoicesRouteImport } from './routes/api.public.billing.invoices'
+import { Route as ApiPublicBillingPaymentMethodsRouteImport } from './routes/api.public.billing.payment-methods'
+import { Route as ApiPublicBuildersApplyRouteImport } from './routes/api.public.builders.apply'
+import { Route as ApiPublicBuildersIdentityRouteImport } from './routes/api.public.builders.identity'
+import { Route as ApiPublicBuildersJwksRouteImport } from './routes/api.public.builders.jwks'
+import { Route as ApiPublicClonesAnnouncementsRouteImport } from './routes/api.public.clones.announcements'
+import { Route as ApiPublicClonesGateRouteImport } from './routes/api.public.clones.gate'
+import { Route as ApiPublicClonesRotateKeyRouteImport } from './routes/api.public.clones.rotate-key'
+import { Route as ApiPublicEdgeStatusRouteImport } from './routes/api.public.edge.status'
+import { Route as ApiPublicEmailUnsubscribeRouteImport } from './routes/api.public.email.unsubscribe'
+import { Route as ApiPublicHandoffAuditIngestRouteImport } from './routes/api.public.handoff.audit-ingest'
+import { Route as ApiPublicHandoffBeaconRouteImport } from './routes/api.public.handoff.beacon'
+import { Route as ApiPublicHandoffsConsentRouteImport } from './routes/api.public.handoffs.consent'
+import { Route as ApiPublicHooksCalcomRouteImport } from './routes/api.public.hooks.calcom'
+import { Route as ApiPublicHooksCodexRemediationRouteImport } from './routes/api.public.hooks.codex-remediation'
+import { Route as ApiPublicHooksCodexSecurityRouteImport } from './routes/api.public.hooks.codex-security'
+import { Route as ApiPublicHooksDocusignRouteImport } from './routes/api.public.hooks.docusign'
+import { Route as ApiPublicIntegrationsSecretsRouteImport } from './routes/api.public.integrations.secrets'
+import { Route as ApiPublicLeadsCaptureRouteImport } from './routes/api.public.leads.capture'
+import { Route as ApiPublicListingsOperationRouteImport } from './routes/api.public.listings.$operation'
+import { Route as ApiPublicPricingCatalogRouteImport } from './routes/api.public.pricing.catalog'
+import { Route as ApiPublicSeatsCommitRouteImport } from './routes/api.public.seats.commit'
+import { Route as ApiPublicSeatsEntitlementRouteImport } from './routes/api.public.seats.entitlement'
+import { Route as ApiPublicSeatsListRouteImport } from './routes/api.public.seats.list'
+import { Route as ApiPublicSeatsReleaseRouteImport } from './routes/api.public.seats.release'
+import { Route as ApiPublicSeatsReserveRouteImport } from './routes/api.public.seats.reserve'
+import { Route as ApiPublicSecurityIntakeRouteImport } from './routes/api.public.security.intake'
+import { Route as ApiPublicStorefrontAccessRouteImport } from './routes/api.public.storefront.access'
+import { Route as ApiPublicStorefrontCatalogRouteImport } from './routes/api.public.storefront.catalog'
+import { Route as ApiPublicStorefrontCheckoutRouteImport } from './routes/api.public.storefront.checkout'
+import { Route as ApiPublicStorefrontFeedbackRouteImport } from './routes/api.public.storefront.feedback'
+import { Route as ApiPublicStorefrontHandoffRouteImport } from './routes/api.public.storefront.handoff'
+import { Route as ApiPublicStorefrontIdentityRouteImport } from './routes/api.public.storefront.identity'
+import { Route as ApiPublicStorefrontPlanChangeRouteImport } from './routes/api.public.storefront.plan-change'
+import { Route as ApiPublicStorefrontSessionRouteImport } from './routes/api.public.storefront.session'
+import { Route as ApiPublicStorefrontSetupRouteImport } from './routes/api.public.storefront.setup'
+import { Route as ApiPublicStorefrontStrategicReviewRouteImport } from './routes/api.public.storefront.strategic-review'
+import { Route as ApiPublicStorefrontWalletRouteImport } from './routes/api.public.storefront.wallet'
+import { Route as ApiPublicStripeWebhookRouteImport } from './routes/api.public.stripe.webhook'
+import { Route as ApiPublicSupportAssistantActivityRouteImport } from './routes/api.public.support.assistant-activity'
+import { Route as ApiPublicSupportTicketsRouteImport } from './routes/api.public.support.tickets'
+import { Route as ApiPublicTelephonyIncomingRouteImport } from './routes/api.public.telephony.incoming'
+import { Route as ApiPublicTelephonyStatusRouteImport } from './routes/api.public.telephony.status'
+import { Route as ApiPublicTelephonyVoiceRouteImport } from './routes/api.public.telephony.voice'
+import { Route as ApiPublicTokensBalanceRouteImport } from './routes/api.public.tokens.balance'
+import { Route as ApiPublicTokensCancelRouteImport } from './routes/api.public.tokens.cancel'
+import { Route as ApiPublicTokensCommitRouteImport } from './routes/api.public.tokens.commit'
+import { Route as ApiPublicTokensFeedbackPromptRouteImport } from './routes/api.public.tokens.feedback-prompt'
+import { Route as ApiPublicTokensPacksRouteImport } from './routes/api.public.tokens.packs'
+import { Route as ApiPublicTokensPlanChangeRouteImport } from './routes/api.public.tokens.plan-change'
+import { Route as ApiPublicTokensReserveRouteImport } from './routes/api.public.tokens.reserve'
+import { Route as ApiPublicUsageReportRouteImport } from './routes/api.public.usage.report'
+import { Route as ApiPublicVerificationOperationRouteImport } from './routes/api.public.verification.$operation'
+import { Route as ApiPublicVoiceAutomationOperationRouteImport } from './routes/api.public.voice-automation.$operation'
+import { Route as ApiPublicVoiceWebhookRouteImport } from './routes/api.public.voice.webhook'
 import { Route as ApiPublicClonesGateCheckoutRouteImport } from './routes/api.public.clones.gate.checkout'
+import { Route as ApiPublicSeatsDevicesHeartbeatRouteImport } from './routes/api.public.seats.devices.heartbeat'
+import { Route as ApiPublicSeatsDevicesListRouteImport } from './routes/api.public.seats.devices.list'
+import { Route as ApiPublicSeatsDevicesRegisterRouteImport } from './routes/api.public.seats.devices.register'
+import { Route as ApiPublicSeatsDevicesReleaseRouteImport } from './routes/api.public.seats.devices.release'
+import { Route as ApiPublicStripeWebhookCloneIdRouteImport } from './routes/api.public.stripe.webhook.$cloneId'
 import { Route as ApiPublicVoiceTTenantKeyWebhookRouteImport } from './routes/api.public.voice.t.$tenantKey.webhook'
 
-const YggdrasilRoute = YggdrasilRouteImport.update({
-  id: '/yggdrasil',
-  path: '/yggdrasil',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const SloRoute = SloRouteImport.update({
-  id: '/slo',
-  path: '/slo',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const SettingsRoute = SettingsRouteImport.update({
-  id: '/settings',
-  path: '/settings',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const SecurityPartnersRoute = SecurityPartnersRouteImport.update({
-  id: '/security-partners',
-  path: '/security-partners',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const SchedulesRoute = SchedulesRouteImport.update({
-  id: '/schedules',
-  path: '/schedules',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const RouteErrorsRoute = RouteErrorsRouteImport.update({
-  id: '/route-errors',
-  path: '/route-errors',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ResetPasswordRoute = ResetPasswordRouteImport.update({
-  id: '/reset-password',
-  path: '/reset-password',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ReportJobsRoute = ReportJobsRouteImport.update({
-  id: '/report-jobs',
-  path: '/report-jobs',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const PrimeMigrationsRoute = PrimeMigrationsRouteImport.update({
-  id: '/prime-migrations',
-  path: '/prime-migrations',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const PrimeRoute = PrimeRouteImport.update({
-  id: '/prime',
-  path: '/prime',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const PartnerPortalRoute = PartnerPortalRouteImport.update({
-  id: '/partner-portal',
-  path: '/partner-portal',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const OversightRoute = OversightRouteImport.update({
-  id: '/oversight',
-  path: '/oversight',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const NotificationsRoute = NotificationsRouteImport.update({
-  id: '/notifications',
-  path: '/notifications',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ModulesRoute = ModulesRouteImport.update({
-  id: '/modules',
-  path: '/modules',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const MetricsRoute = MetricsRouteImport.update({
-  id: '/metrics',
-  path: '/metrics',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const MarketingRoute = MarketingRouteImport.update({
-  id: '/marketing',
-  path: '/marketing',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const LeadsRoute = LeadsRouteImport.update({
-  id: '/leads',
-  path: '/leads',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const HealthRoute = HealthRouteImport.update({
-  id: '/health',
-  path: '/health',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const HandoffsRoute = HandoffsRouteImport.update({
-  id: '/handoffs',
-  path: '/handoffs',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const FleetManagerRoute = FleetManagerRouteImport.update({
-  id: '/fleet-manager',
-  path: '/fleet-manager',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const DriftRoute = DriftRouteImport.update({
-  id: '/drift',
-  path: '/drift',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const DigestsRoute = DigestsRouteImport.update({
-  id: '/digests',
-  path: '/digests',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const DashboardRoute = DashboardRouteImport.update({
-  id: '/dashboard',
-  path: '/dashboard',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const CloudflareRoute = CloudflareRouteImport.update({
-  id: '/cloudflare',
-  path: '/cloudflare',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const CascadesRoute = CascadesRouteImport.update({
-  id: '/cascades',
-  path: '/cascades',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const BuildersNetworkRoute = BuildersNetworkRouteImport.update({
-  id: '/builders-network',
-  path: '/builders-network',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const BrandingRoute = BrandingRouteImport.update({
-  id: '/branding',
-  path: '/branding',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const AuthRoute = AuthRouteImport.update({
-  id: '/auth',
-  path: '/auth',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const AuditLogRoute = AuditLogRouteImport.update({
-  id: '/audit-log',
-  path: '/audit-log',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApprovalsRoute = ApprovalsRouteImport.update({
-  id: '/approvals',
-  path: '/approvals',
+const IndexRoute = IndexRouteImport.update({
+  id: '/',
+  path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AnnouncementsRoute = AnnouncementsRouteImport.update({
@@ -393,34 +248,154 @@ const AnnouncementsRoute = AnnouncementsRouteImport.update({
   path: '/announcements',
   getParentRoute: () => rootRouteImport,
 } as any)
-const IndexRoute = IndexRouteImport.update({
-  id: '/',
-  path: '/',
+const ApprovalsRoute = ApprovalsRouteImport.update({
+  id: '/approvals',
+  path: '/approvals',
   getParentRoute: () => rootRouteImport,
 } as any)
-const SettingsIndexRoute = SettingsIndexRouteImport.update({
-  id: '/',
-  path: '/',
-  getParentRoute: () => SettingsRoute,
-} as any)
-const SecurityIndexRoute = SecurityIndexRouteImport.update({
-  id: '/security/',
-  path: '/security/',
+const AuditLogRoute = AuditLogRouteImport.update({
+  id: '/audit-log',
+  path: '/audit-log',
   getParentRoute: () => rootRouteImport,
 } as any)
-const MarketingIndexRoute = MarketingIndexRouteImport.update({
-  id: '/',
-  path: '/',
-  getParentRoute: () => MarketingRoute,
-} as any)
-const EmailIndexRoute = EmailIndexRouteImport.update({
-  id: '/email/',
-  path: '/email/',
+const AuthRoute = AuthRouteImport.update({
+  id: '/auth',
+  path: '/auth',
   getParentRoute: () => rootRouteImport,
 } as any)
-const CrmIndexRoute = CrmIndexRouteImport.update({
-  id: '/crm/',
-  path: '/crm/',
+const BrandingRoute = BrandingRouteImport.update({
+  id: '/branding',
+  path: '/branding',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const BuildersNetworkRoute = BuildersNetworkRouteImport.update({
+  id: '/builders-network',
+  path: '/builders-network',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const CascadesRoute = CascadesRouteImport.update({
+  id: '/cascades',
+  path: '/cascades',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const CloudflareRoute = CloudflareRouteImport.update({
+  id: '/cloudflare',
+  path: '/cloudflare',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DashboardRoute = DashboardRouteImport.update({
+  id: '/dashboard',
+  path: '/dashboard',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DigestsRoute = DigestsRouteImport.update({
+  id: '/digests',
+  path: '/digests',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DriftRoute = DriftRouteImport.update({
+  id: '/drift',
+  path: '/drift',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const FleetManagerRoute = FleetManagerRouteImport.update({
+  id: '/fleet-manager',
+  path: '/fleet-manager',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HandoffsRoute = HandoffsRouteImport.update({
+  id: '/handoffs',
+  path: '/handoffs',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HealthRoute = HealthRouteImport.update({
+  id: '/health',
+  path: '/health',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LeadsRoute = LeadsRouteImport.update({
+  id: '/leads',
+  path: '/leads',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const MarketingRoute = MarketingRouteImport.update({
+  id: '/marketing',
+  path: '/marketing',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const MetricsRoute = MetricsRouteImport.update({
+  id: '/metrics',
+  path: '/metrics',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ModulesRoute = ModulesRouteImport.update({
+  id: '/modules',
+  path: '/modules',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const NotificationsRoute = NotificationsRouteImport.update({
+  id: '/notifications',
+  path: '/notifications',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const OversightRoute = OversightRouteImport.update({
+  id: '/oversight',
+  path: '/oversight',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PartnerPortalRoute = PartnerPortalRouteImport.update({
+  id: '/partner-portal',
+  path: '/partner-portal',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PrimeRoute = PrimeRouteImport.update({
+  id: '/prime',
+  path: '/prime',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PrimeMigrationsRoute = PrimeMigrationsRouteImport.update({
+  id: '/prime-migrations',
+  path: '/prime-migrations',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ReportJobsRoute = ReportJobsRouteImport.update({
+  id: '/report-jobs',
+  path: '/report-jobs',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ResetPasswordRoute = ResetPasswordRouteImport.update({
+  id: '/reset-password',
+  path: '/reset-password',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const RouteErrorsRoute = RouteErrorsRouteImport.update({
+  id: '/route-errors',
+  path: '/route-errors',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SchedulesRoute = SchedulesRouteImport.update({
+  id: '/schedules',
+  path: '/schedules',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SecurityPartnersRoute = SecurityPartnersRouteImport.update({
+  id: '/security-partners',
+  path: '/security-partners',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SettingsRoute = SettingsRouteImport.update({
+  id: '/settings',
+  path: '/settings',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SloRoute = SloRouteImport.update({
+  id: '/slo',
+  path: '/slo',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const YggdrasilRoute = YggdrasilRouteImport.update({
+  id: '/yggdrasil',
+  path: '/yggdrasil',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AgreementsIndexRoute = AgreementsIndexRouteImport.update({
@@ -428,461 +403,156 @@ const AgreementsIndexRoute = AgreementsIndexRouteImport.update({
   path: '/agreements/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const VoicePhoneRoute = VoicePhoneRouteImport.update({
-  id: '/voice/phone',
-  path: '/voice/phone',
+const AgreementsAgreementIdRoute = AgreementsAgreementIdRouteImport.update({
+  id: '/agreements/$agreementId',
+  path: '/agreements/$agreementId',
   getParentRoute: () => rootRouteImport,
 } as any)
-const VoiceOutboundRoute = VoiceOutboundRouteImport.update({
-  id: '/voice/outbound',
-  path: '/voice/outbound',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const VoiceCallsRoute = VoiceCallsRouteImport.update({
-  id: '/voice/calls',
-  path: '/voice/calls',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const VoiceAgentsRoute = VoiceAgentsRouteImport.update({
-  id: '/voice/agents',
-  path: '/voice/agents',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const SupportTicketsRoute = SupportTicketsRouteImport.update({
-  id: '/support/tickets',
-  path: '/support/tickets',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const SettingsRolesRoute = SettingsRolesRouteImport.update({
-  id: '/roles',
-  path: '/roles',
-  getParentRoute: () => SettingsRoute,
-} as any)
-const SettingsRoleAuditRoute = SettingsRoleAuditRouteImport.update({
-  id: '/role-audit',
-  path: '/role-audit',
-  getParentRoute: () => SettingsRoute,
-} as any)
-const SettingsProvisioningPreviewRoute =
-  SettingsProvisioningPreviewRouteImport.update({
-    id: '/provisioning-preview',
-    path: '/provisioning-preview',
-    getParentRoute: () => SettingsRoute,
-  } as any)
-const SettingsPermissionMatrixRoute =
-  SettingsPermissionMatrixRouteImport.update({
-    id: '/permission-matrix',
-    path: '/permission-matrix',
-    getParentRoute: () => SettingsRoute,
-  } as any)
-const SettingsNotificationsRoute = SettingsNotificationsRouteImport.update({
-  id: '/notifications',
-  path: '/notifications',
-  getParentRoute: () => SettingsRoute,
-} as any)
-const SettingsInvitesRoute = SettingsInvitesRouteImport.update({
-  id: '/invites',
-  path: '/invites',
-  getParentRoute: () => SettingsRoute,
-} as any)
-const SettingsHandoffTermsRoute = SettingsHandoffTermsRouteImport.update({
-  id: '/handoff-terms',
-  path: '/handoff-terms',
-  getParentRoute: () => SettingsRoute,
-} as any)
-const SettingsHandoffPoliciesRoute = SettingsHandoffPoliciesRouteImport.update({
-  id: '/handoff-policies',
-  path: '/handoff-policies',
-  getParentRoute: () => SettingsRoute,
-} as any)
-const SettingsGithubAccessRoute = SettingsGithubAccessRouteImport.update({
-  id: '/github-access',
-  path: '/github-access',
-  getParentRoute: () => SettingsRoute,
-} as any)
-const SettingsGiftTokensRoute = SettingsGiftTokensRouteImport.update({
-  id: '/gift-tokens',
-  path: '/gift-tokens',
-  getParentRoute: () => SettingsRoute,
-} as any)
-const SettingsDomainsRoute = SettingsDomainsRouteImport.update({
-  id: '/domains',
-  path: '/domains',
-  getParentRoute: () => SettingsRoute,
-} as any)
-const SettingsCloneStripeRoute = SettingsCloneStripeRouteImport.update({
-  id: '/clone-stripe',
-  path: '/clone-stripe',
-  getParentRoute: () => SettingsRoute,
-} as any)
-const SettingsClientAccountsRoute = SettingsClientAccountsRouteImport.update({
-  id: '/client-accounts',
-  path: '/client-accounts',
-  getParentRoute: () => SettingsRoute,
-} as any)
-const SettingsBillingRoute = SettingsBillingRouteImport.update({
-  id: '/billing',
-  path: '/billing',
-  getParentRoute: () => SettingsRoute,
-} as any)
-const SecurityScansRoute = SecurityScansRouteImport.update({
-  id: '/security/scans',
-  path: '/security/scans',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const SecurityIntakeRoute = SecurityIntakeRouteImport.update({
-  id: '/security/intake',
-  path: '/security/intake',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ModulesBuilderRoute = ModulesBuilderRouteImport.update({
-  id: '/builder',
-  path: '/builder',
-  getParentRoute: () => ModulesRoute,
-} as any)
-const ModulesSlugRoute = ModulesSlugRouteImport.update({
-  id: '/$slug',
-  path: '/$slug',
-  getParentRoute: () => ModulesRoute,
-} as any)
-const MarketingYoutubeRoute = MarketingYoutubeRouteImport.update({
-  id: '/youtube',
-  path: '/youtube',
-  getParentRoute: () => MarketingRoute,
-} as any)
-const MarketingTiktokRoute = MarketingTiktokRouteImport.update({
-  id: '/tiktok',
-  path: '/tiktok',
-  getParentRoute: () => MarketingRoute,
-} as any)
-const MarketingMetaRoute = MarketingMetaRouteImport.update({
-  id: '/meta',
-  path: '/meta',
-  getParentRoute: () => MarketingRoute,
-} as any)
-const MarketingConnectionsRoute = MarketingConnectionsRouteImport.update({
-  id: '/connections',
-  path: '/connections',
-  getParentRoute: () => MarketingRoute,
-} as any)
-const MarketingBriefsRoute = MarketingBriefsRouteImport.update({
-  id: '/briefs',
-  path: '/briefs',
-  getParentRoute: () => MarketingRoute,
-} as any)
-const MarketingAttributionRoute = MarketingAttributionRouteImport.update({
-  id: '/attribution',
-  path: '/attribution',
-  getParentRoute: () => MarketingRoute,
-} as any)
-const JoinTokenRoute = JoinTokenRouteImport.update({
-  id: '/join/$token',
-  path: '/join/$token',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const HooksWarmHealthRoute = HooksWarmHealthRouteImport.update({
-  id: '/hooks/warm-health',
-  path: '/hooks/warm-health',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const HooksVoiceStudioPlanRoute = HooksVoiceStudioPlanRouteImport.update({
-  id: '/hooks/voice-studio-plan',
-  path: '/hooks/voice-studio-plan',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const HooksVoiceStudioDeployRoute = HooksVoiceStudioDeployRouteImport.update({
-  id: '/hooks/voice-studio-deploy',
-  path: '/hooks/voice-studio-deploy',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const HooksVoiceStackDrainRoute = HooksVoiceStackDrainRouteImport.update({
-  id: '/hooks/voice-stack-drain',
-  path: '/hooks/voice-stack-drain',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const HooksVoiceOutboundDispatchRoute =
-  HooksVoiceOutboundDispatchRouteImport.update({
-    id: '/hooks/voice-outbound-dispatch',
-    path: '/hooks/voice-outbound-dispatch',
+const AgreementsBuilderPartnerTermsRoute =
+  AgreementsBuilderPartnerTermsRouteImport.update({
+    id: '/agreements/builder-partner-terms',
+    path: '/agreements/builder-partner-terms',
     getParentRoute: () => rootRouteImport,
   } as any)
-const HooksVoiceCallDrainRoute = HooksVoiceCallDrainRouteImport.update({
-  id: '/hooks/voice-call-drain',
-  path: '/hooks/voice-call-drain',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const HooksVoiceAutomationDrainRoute =
-  HooksVoiceAutomationDrainRouteImport.update({
-    id: '/hooks/voice-automation-drain',
-    path: '/hooks/voice-automation-drain',
+const AgreementsIssuingProfileRoute =
+  AgreementsIssuingProfileRouteImport.update({
+    id: '/agreements/issuing-profile',
+    path: '/agreements/issuing-profile',
     getParentRoute: () => rootRouteImport,
   } as any)
-const HooksVerificationSelftestRoute =
-  HooksVerificationSelftestRouteImport.update({
-    id: '/hooks/verification-selftest',
-    path: '/hooks/verification-selftest',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const HooksVercelRoute = HooksVercelRouteImport.update({
-  id: '/hooks/vercel',
-  path: '/hooks/vercel',
+const ApiHealthRoute = ApiHealthRouteImport.update({
+  id: '/api/health',
+  path: '/api/health',
   getParentRoute: () => rootRouteImport,
 } as any)
-const HooksTurnstileReconcileRoute = HooksTurnstileReconcileRouteImport.update({
-  id: '/hooks/turnstile-reconcile',
-  path: '/hooks/turnstile-reconcile',
+const BillingApiUsageRoute = BillingApiUsageRouteImport.update({
+  id: '/billing/api-usage',
+  path: '/billing/api-usage',
   getParentRoute: () => rootRouteImport,
 } as any)
-const HooksTokenAlertsRoute = HooksTokenAlertsRouteImport.update({
-  id: '/hooks/token-alerts',
-  path: '/hooks/token-alerts',
+const BillingCancelRoute = BillingCancelRouteImport.update({
+  id: '/billing/cancel',
+  path: '/billing/cancel',
   getParentRoute: () => rootRouteImport,
 } as any)
-const HooksSupportRemediationDrainRoute =
-  HooksSupportRemediationDrainRouteImport.update({
-    id: '/hooks/support-remediation-drain',
-    path: '/hooks/support-remediation-drain',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const HooksRunSchedulesRoute = HooksRunSchedulesRouteImport.update({
-  id: '/hooks/run-schedules',
-  path: '/hooks/run-schedules',
+const BillingCatalogRoute = BillingCatalogRouteImport.update({
+  id: '/billing/catalog',
+  path: '/billing/catalog',
   getParentRoute: () => rootRouteImport,
 } as any)
-const HooksReferenceDataSyncRoute = HooksReferenceDataSyncRouteImport.update({
-  id: '/hooks/reference-data-sync',
-  path: '/hooks/reference-data-sync',
+const BillingGatesRoute = BillingGatesRouteImport.update({
+  id: '/billing/gates',
+  path: '/billing/gates',
   getParentRoute: () => rootRouteImport,
 } as any)
-const HooksPrimeSecretPairsRoute = HooksPrimeSecretPairsRouteImport.update({
-  id: '/hooks/prime-secret-pairs',
-  path: '/hooks/prime-secret-pairs',
+const BillingInvoicesRoute = BillingInvoicesRouteImport.update({
+  id: '/billing/invoices',
+  path: '/billing/invoices',
   getParentRoute: () => rootRouteImport,
 } as any)
-const HooksMigrationEnqueueRoute = HooksMigrationEnqueueRouteImport.update({
-  id: '/hooks/migration-enqueue',
-  path: '/hooks/migration-enqueue',
+const BillingPurchasesRoute = BillingPurchasesRouteImport.update({
+  id: '/billing/purchases',
+  path: '/billing/purchases',
   getParentRoute: () => rootRouteImport,
 } as any)
-const HooksMigrationDriftRoute = HooksMigrationDriftRouteImport.update({
-  id: '/hooks/migration-drift',
-  path: '/hooks/migration-drift',
+const BillingSeatsRoute = BillingSeatsRouteImport.update({
+  id: '/billing/seats',
+  path: '/billing/seats',
   getParentRoute: () => rootRouteImport,
 } as any)
-const HooksMarketingSnapshotsRoute = HooksMarketingSnapshotsRouteImport.update({
-  id: '/hooks/marketing-snapshots',
-  path: '/hooks/marketing-snapshots',
+const BillingSuccessRoute = BillingSuccessRouteImport.update({
+  id: '/billing/success',
+  path: '/billing/success',
   getParentRoute: () => rootRouteImport,
 } as any)
-const HooksLeadStageEmailsRoute = HooksLeadStageEmailsRouteImport.update({
-  id: '/hooks/lead-stage-emails',
-  path: '/hooks/lead-stage-emails',
+const BillingTopupRoute = BillingTopupRouteImport.update({
+  id: '/billing/topup',
+  path: '/billing/topup',
   getParentRoute: () => rootRouteImport,
 } as any)
-const HooksHeldFileDriftRoute = HooksHeldFileDriftRouteImport.update({
-  id: '/hooks/held-file-drift',
-  path: '/hooks/held-file-drift',
+const CascadesEventIdRoute = CascadesEventIdRouteImport.update({
+  id: '/$eventId',
+  path: '/$eventId',
+  getParentRoute: () => CascadesRoute,
+} as any)
+const ClonesCloneIdRoute = ClonesCloneIdRouteImport.update({
+  id: '/clones/$cloneId',
+  path: '/clones/$cloneId',
   getParentRoute: () => rootRouteImport,
 } as any)
-const HooksHandoffParityRefreshRoute =
-  HooksHandoffParityRefreshRouteImport.update({
-    id: '/hooks/handoff-parity-refresh',
-    path: '/hooks/handoff-parity-refresh',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const HooksHandoffObservabilityPollRoute =
-  HooksHandoffObservabilityPollRouteImport.update({
-    id: '/hooks/handoff-observability-poll',
-    path: '/hooks/handoff-observability-poll',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const HooksGithubRoute = HooksGithubRouteImport.update({
-  id: '/hooks/github',
-  path: '/hooks/github',
+const ClonesNewRoute = ClonesNewRouteImport.update({
+  id: '/clones/new',
+  path: '/clones/new',
   getParentRoute: () => rootRouteImport,
 } as any)
-const HooksFleetSecretForwardReconcileRoute =
-  HooksFleetSecretForwardReconcileRouteImport.update({
-    id: '/hooks/fleet-secret-forward-reconcile',
-    path: '/hooks/fleet-secret-forward-reconcile',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const HooksFleetMigrationSyncRoute = HooksFleetMigrationSyncRouteImport.update({
-  id: '/hooks/fleet-migration-sync',
-  path: '/hooks/fleet-migration-sync',
+const CrmIndexRoute = CrmIndexRouteImport.update({
+  id: '/crm/',
+  path: '/crm/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const HooksFleetMigrationDrainRoute =
-  HooksFleetMigrationDrainRouteImport.update({
-    id: '/hooks/fleet-migration-drain',
-    path: '/hooks/fleet-migration-drain',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const HooksFleetDriftRoute = HooksFleetDriftRouteImport.update({
-  id: '/hooks/fleet-drift',
-  path: '/hooks/fleet-drift',
+const CrmDealsRoute = CrmDealsRouteImport.update({
+  id: '/crm/deals',
+  path: '/crm/deals',
   getParentRoute: () => rootRouteImport,
 } as any)
-const HooksFeedbackForwardRetryRoute =
-  HooksFeedbackForwardRetryRouteImport.update({
-    id: '/hooks/feedback-forward-retry',
-    path: '/hooks/feedback-forward-retry',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const HooksExpireReservationsRoute = HooksExpireReservationsRouteImport.update({
-  id: '/hooks/expire-reservations',
-  path: '/hooks/expire-reservations',
+const CrmFitRoute = CrmFitRouteImport.update({
+  id: '/crm/fit',
+  path: '/crm/fit',
   getParentRoute: () => rootRouteImport,
 } as any)
-const HooksEntitlementDrainRoute = HooksEntitlementDrainRouteImport.update({
-  id: '/hooks/entitlement-drain',
-  path: '/hooks/entitlement-drain',
+const CrmJourneyRoute = CrmJourneyRouteImport.update({
+  id: '/crm/journey',
+  path: '/crm/journey',
   getParentRoute: () => rootRouteImport,
 } as any)
-const HooksEmailWarmupRoute = HooksEmailWarmupRouteImport.update({
-  id: '/hooks/email-warmup',
-  path: '/hooks/email-warmup',
+const CrmTicketsRoute = CrmTicketsRouteImport.update({
+  id: '/crm/tickets',
+  path: '/crm/tickets',
   getParentRoute: () => rootRouteImport,
 } as any)
-const HooksEmailIdentityDrainRoute = HooksEmailIdentityDrainRouteImport.update({
-  id: '/hooks/email-identity-drain',
-  path: '/hooks/email-identity-drain',
+const EmailIndexRoute = EmailIndexRouteImport.update({
+  id: '/email/',
+  path: '/email/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const HooksEmailCampaignDispatchRoute =
-  HooksEmailCampaignDispatchRouteImport.update({
-    id: '/hooks/email-campaign-dispatch',
-    path: '/hooks/email-campaign-dispatch',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const HooksEmailBounceScanRoute = HooksEmailBounceScanRouteImport.update({
-  id: '/hooks/email-bounce-scan',
-  path: '/hooks/email-bounce-scan',
+const EmailSuppressionsRoute = EmailSuppressionsRouteImport.update({
+  id: '/email/suppressions',
+  path: '/email/suppressions',
   getParentRoute: () => rootRouteImport,
 } as any)
-const HooksEdgeDriftRoute = HooksEdgeDriftRouteImport.update({
-  id: '/hooks/edge-drift',
-  path: '/hooks/edge-drift',
+const EmailWarmupRoute = EmailWarmupRouteImport.update({
+  id: '/email/warmup',
+  path: '/email/warmup',
   getParentRoute: () => rootRouteImport,
 } as any)
-const HooksEdgeDrainRoute = HooksEdgeDrainRouteImport.update({
-  id: '/hooks/edge-drain',
-  path: '/hooks/edge-drain',
+const FleetDeploymentsRoute = FleetDeploymentsRouteImport.update({
+  id: '/fleet/deployments',
+  path: '/fleet/deployments',
   getParentRoute: () => rootRouteImport,
 } as any)
-const HooksDriftRefreshRoute = HooksDriftRefreshRouteImport.update({
-  id: '/hooks/drift-refresh',
-  path: '/hooks/drift-refresh',
+const FleetEdgeRoute = FleetEdgeRouteImport.update({
+  id: '/fleet/edge',
+  path: '/fleet/edge',
   getParentRoute: () => rootRouteImport,
 } as any)
-const HooksDeploymentDrainRoute = HooksDeploymentDrainRouteImport.update({
-  id: '/hooks/deployment-drain',
-  path: '/hooks/deployment-drain',
+const HandoffsHandoffIdRoute = HandoffsHandoffIdRouteImport.update({
+  id: '/$handoffId',
+  path: '/$handoffId',
+  getParentRoute: () => HandoffsRoute,
+} as any)
+const HandoffsNewRoute = HandoffsNewRouteImport.update({
+  id: '/new',
+  path: '/new',
+  getParentRoute: () => HandoffsRoute,
+} as any)
+const HooksAgreementsRefreshRoute = HooksAgreementsRefreshRouteImport.update({
+  id: '/hooks/agreements-refresh',
+  path: '/hooks/agreements-refresh',
   getParentRoute: () => rootRouteImport,
 } as any)
-const HooksCrmSweepRoute = HooksCrmSweepRouteImport.update({
-  id: '/hooks/crm-sweep',
-  path: '/hooks/crm-sweep',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const HooksCodexSweepRoute = HooksCodexSweepRouteImport.update({
-  id: '/hooks/codex-sweep',
-  path: '/hooks/codex-sweep',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const HooksCodexNightlyRoute = HooksCodexNightlyRouteImport.update({
-  id: '/hooks/codex-nightly',
-  path: '/hooks/codex-nightly',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const HooksCloneSigningPairReconcileRoute =
-  HooksCloneSigningPairReconcileRouteImport.update({
-    id: '/hooks/clone-signing-pair-reconcile',
-    path: '/hooks/clone-signing-pair-reconcile',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const HooksCloneSecretsReconcileRoute =
-  HooksCloneSecretsReconcileRouteImport.update({
-    id: '/hooks/clone-secrets-reconcile',
-    path: '/hooks/clone-secrets-reconcile',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const HooksCloneSecretWithholdRoute =
-  HooksCloneSecretWithholdRouteImport.update({
-    id: '/hooks/clone-secret-withhold',
-    path: '/hooks/clone-secret-withhold',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const HooksCloneSecretForwardReconcileRoute =
-  HooksCloneSecretForwardReconcileRouteImport.update({
-    id: '/hooks/clone-secret-forward-reconcile',
-    path: '/hooks/clone-secret-forward-reconcile',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const HooksClonePrivilegeReconcileRoute =
-  HooksClonePrivilegeReconcileRouteImport.update({
-    id: '/hooks/clone-privilege-reconcile',
-    path: '/hooks/clone-privilege-reconcile',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const HooksCloneJwtSecretReconcileRoute =
-  HooksCloneJwtSecretReconcileRouteImport.update({
-    id: '/hooks/clone-jwt-secret-reconcile',
-    path: '/hooks/clone-jwt-secret-reconcile',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const HooksCloneDeployerDeclarationReconcileRoute =
-  HooksCloneDeployerDeclarationReconcileRouteImport.update({
-    id: '/hooks/clone-deployer-declaration-reconcile',
-    path: '/hooks/clone-deployer-declaration-reconcile',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const HooksCascadeMergeDrainRoute = HooksCascadeMergeDrainRouteImport.update({
-  id: '/hooks/cascade-merge-drain',
-  path: '/hooks/cascade-merge-drain',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const HooksCascadeDrainRoute = HooksCascadeDrainRouteImport.update({
-  id: '/hooks/cascade-drain',
-  path: '/hooks/cascade-drain',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const HooksCascadeAuditRoute = HooksCascadeAuditRouteImport.update({
-  id: '/hooks/cascade-audit',
-  path: '/hooks/cascade-audit',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const HooksBrandDriftRoute = HooksBrandDriftRouteImport.update({
-  id: '/hooks/brand-drift',
-  path: '/hooks/brand-drift',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const HooksBackendProvisioningRetryRoute =
-  HooksBackendProvisioningRetryRouteImport.update({
-    id: '/hooks/backend-provisioning-retry',
-    path: '/hooks/backend-provisioning-retry',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const HooksBackendProvisioningRepairRoute =
-  HooksBackendProvisioningRepairRouteImport.update({
-    id: '/hooks/backend-provisioning-repair',
-    path: '/hooks/backend-provisioning-repair',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const HooksBackendProvisioningDrainRoute =
-  HooksBackendProvisioningDrainRouteImport.update({
-    id: '/hooks/backend-provisioning-drain',
-    path: '/hooks/backend-provisioning-drain',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const HooksBackendCatchupRoute = HooksBackendCatchupRouteImport.update({
-  id: '/hooks/backend-catchup',
-  path: '/hooks/backend-catchup',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const HooksApiUsageSettleRoute = HooksApiUsageSettleRouteImport.update({
-  id: '/hooks/api-usage-settle',
-  path: '/hooks/api-usage-settle',
+const HooksAirtableSyncRoute = HooksAirtableSyncRouteImport.update({
+  id: '/hooks/airtable-sync',
+  path: '/hooks/airtable-sync',
   getParentRoute: () => rootRouteImport,
 } as any)
 const HooksAllowedOriginsReconcileRoute =
@@ -891,161 +561,501 @@ const HooksAllowedOriginsReconcileRoute =
     path: '/hooks/allowed-origins-reconcile',
     getParentRoute: () => rootRouteImport,
   } as any)
-const HooksAirtableSyncRoute = HooksAirtableSyncRouteImport.update({
-  id: '/hooks/airtable-sync',
-  path: '/hooks/airtable-sync',
+const HooksApiUsageSettleRoute = HooksApiUsageSettleRouteImport.update({
+  id: '/hooks/api-usage-settle',
+  path: '/hooks/api-usage-settle',
   getParentRoute: () => rootRouteImport,
 } as any)
-const HooksAgreementsRefreshRoute = HooksAgreementsRefreshRouteImport.update({
-  id: '/hooks/agreements-refresh',
-  path: '/hooks/agreements-refresh',
+const HooksBackendCatchupRoute = HooksBackendCatchupRouteImport.update({
+  id: '/hooks/backend-catchup',
+  path: '/hooks/backend-catchup',
   getParentRoute: () => rootRouteImport,
 } as any)
-const HandoffsNewRoute = HandoffsNewRouteImport.update({
-  id: '/new',
-  path: '/new',
-  getParentRoute: () => HandoffsRoute,
-} as any)
-const HandoffsHandoffIdRoute = HandoffsHandoffIdRouteImport.update({
-  id: '/$handoffId',
-  path: '/$handoffId',
-  getParentRoute: () => HandoffsRoute,
-} as any)
-const FleetEdgeRoute = FleetEdgeRouteImport.update({
-  id: '/fleet/edge',
-  path: '/fleet/edge',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const FleetDeploymentsRoute = FleetDeploymentsRouteImport.update({
-  id: '/fleet/deployments',
-  path: '/fleet/deployments',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const EmailWarmupRoute = EmailWarmupRouteImport.update({
-  id: '/email/warmup',
-  path: '/email/warmup',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const EmailSuppressionsRoute = EmailSuppressionsRouteImport.update({
-  id: '/email/suppressions',
-  path: '/email/suppressions',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const CrmTicketsRoute = CrmTicketsRouteImport.update({
-  id: '/crm/tickets',
-  path: '/crm/tickets',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const CrmJourneyRoute = CrmJourneyRouteImport.update({
-  id: '/crm/journey',
-  path: '/crm/journey',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const CrmFitRoute = CrmFitRouteImport.update({
-  id: '/crm/fit',
-  path: '/crm/fit',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const CrmDealsRoute = CrmDealsRouteImport.update({
-  id: '/crm/deals',
-  path: '/crm/deals',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ClonesNewRoute = ClonesNewRouteImport.update({
-  id: '/clones/new',
-  path: '/clones/new',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ClonesCloneIdRoute = ClonesCloneIdRouteImport.update({
-  id: '/clones/$cloneId',
-  path: '/clones/$cloneId',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const CascadesEventIdRoute = CascadesEventIdRouteImport.update({
-  id: '/$eventId',
-  path: '/$eventId',
-  getParentRoute: () => CascadesRoute,
-} as any)
-const BillingTopupRoute = BillingTopupRouteImport.update({
-  id: '/billing/topup',
-  path: '/billing/topup',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const BillingSuccessRoute = BillingSuccessRouteImport.update({
-  id: '/billing/success',
-  path: '/billing/success',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const BillingSeatsRoute = BillingSeatsRouteImport.update({
-  id: '/billing/seats',
-  path: '/billing/seats',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const BillingPurchasesRoute = BillingPurchasesRouteImport.update({
-  id: '/billing/purchases',
-  path: '/billing/purchases',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const BillingInvoicesRoute = BillingInvoicesRouteImport.update({
-  id: '/billing/invoices',
-  path: '/billing/invoices',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const BillingGatesRoute = BillingGatesRouteImport.update({
-  id: '/billing/gates',
-  path: '/billing/gates',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const BillingCatalogRoute = BillingCatalogRouteImport.update({
-  id: '/billing/catalog',
-  path: '/billing/catalog',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const BillingCancelRoute = BillingCancelRouteImport.update({
-  id: '/billing/cancel',
-  path: '/billing/cancel',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const BillingApiUsageRoute = BillingApiUsageRouteImport.update({
-  id: '/billing/api-usage',
-  path: '/billing/api-usage',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiHealthRoute = ApiHealthRouteImport.update({
-  id: '/api/health',
-  path: '/api/health',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const AgreementsIssuingProfileRoute =
-  AgreementsIssuingProfileRouteImport.update({
-    id: '/agreements/issuing-profile',
-    path: '/agreements/issuing-profile',
+const HooksBackendProvisioningDrainRoute =
+  HooksBackendProvisioningDrainRouteImport.update({
+    id: '/hooks/backend-provisioning-drain',
+    path: '/hooks/backend-provisioning-drain',
     getParentRoute: () => rootRouteImport,
   } as any)
-const AgreementsBuilderPartnerTermsRoute =
-  AgreementsBuilderPartnerTermsRouteImport.update({
-    id: '/agreements/builder-partner-terms',
-    path: '/agreements/builder-partner-terms',
+const HooksBackendProvisioningRepairRoute =
+  HooksBackendProvisioningRepairRouteImport.update({
+    id: '/hooks/backend-provisioning-repair',
+    path: '/hooks/backend-provisioning-repair',
     getParentRoute: () => rootRouteImport,
   } as any)
-const AgreementsAgreementIdRoute = AgreementsAgreementIdRouteImport.update({
-  id: '/agreements/$agreementId',
-  path: '/agreements/$agreementId',
+const HooksBackendProvisioningRetryRoute =
+  HooksBackendProvisioningRetryRouteImport.update({
+    id: '/hooks/backend-provisioning-retry',
+    path: '/hooks/backend-provisioning-retry',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const HooksBrandDriftRoute = HooksBrandDriftRouteImport.update({
+  id: '/hooks/brand-drift',
+  path: '/hooks/brand-drift',
   getParentRoute: () => rootRouteImport,
 } as any)
-const VoiceStudioIndexRoute = VoiceStudioIndexRouteImport.update({
-  id: '/voice/studio/',
-  path: '/voice/studio/',
+const HooksCascadeAuditRoute = HooksCascadeAuditRouteImport.update({
+  id: '/hooks/cascade-audit',
+  path: '/hooks/cascade-audit',
   getParentRoute: () => rootRouteImport,
+} as any)
+const HooksCascadeDrainRoute = HooksCascadeDrainRouteImport.update({
+  id: '/hooks/cascade-drain',
+  path: '/hooks/cascade-drain',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksCascadeMergeDrainRoute = HooksCascadeMergeDrainRouteImport.update({
+  id: '/hooks/cascade-merge-drain',
+  path: '/hooks/cascade-merge-drain',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksCloneDeployerDeclarationReconcileRoute =
+  HooksCloneDeployerDeclarationReconcileRouteImport.update({
+    id: '/hooks/clone-deployer-declaration-reconcile',
+    path: '/hooks/clone-deployer-declaration-reconcile',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const HooksCloneJwtSecretReconcileRoute =
+  HooksCloneJwtSecretReconcileRouteImport.update({
+    id: '/hooks/clone-jwt-secret-reconcile',
+    path: '/hooks/clone-jwt-secret-reconcile',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const HooksClonePrivilegeReconcileRoute =
+  HooksClonePrivilegeReconcileRouteImport.update({
+    id: '/hooks/clone-privilege-reconcile',
+    path: '/hooks/clone-privilege-reconcile',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const HooksCloneSecretForwardReconcileRoute =
+  HooksCloneSecretForwardReconcileRouteImport.update({
+    id: '/hooks/clone-secret-forward-reconcile',
+    path: '/hooks/clone-secret-forward-reconcile',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const HooksCloneSecretWithholdRoute =
+  HooksCloneSecretWithholdRouteImport.update({
+    id: '/hooks/clone-secret-withhold',
+    path: '/hooks/clone-secret-withhold',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const HooksCloneSecretsReconcileRoute =
+  HooksCloneSecretsReconcileRouteImport.update({
+    id: '/hooks/clone-secrets-reconcile',
+    path: '/hooks/clone-secrets-reconcile',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const HooksCloneSigningPairReconcileRoute =
+  HooksCloneSigningPairReconcileRouteImport.update({
+    id: '/hooks/clone-signing-pair-reconcile',
+    path: '/hooks/clone-signing-pair-reconcile',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const HooksCodexNightlyRoute = HooksCodexNightlyRouteImport.update({
+  id: '/hooks/codex-nightly',
+  path: '/hooks/codex-nightly',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksCodexSweepRoute = HooksCodexSweepRouteImport.update({
+  id: '/hooks/codex-sweep',
+  path: '/hooks/codex-sweep',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksCrmSweepRoute = HooksCrmSweepRouteImport.update({
+  id: '/hooks/crm-sweep',
+  path: '/hooks/crm-sweep',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksDeploymentDrainRoute = HooksDeploymentDrainRouteImport.update({
+  id: '/hooks/deployment-drain',
+  path: '/hooks/deployment-drain',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksDriftRefreshRoute = HooksDriftRefreshRouteImport.update({
+  id: '/hooks/drift-refresh',
+  path: '/hooks/drift-refresh',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksEdgeDrainRoute = HooksEdgeDrainRouteImport.update({
+  id: '/hooks/edge-drain',
+  path: '/hooks/edge-drain',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksEdgeDriftRoute = HooksEdgeDriftRouteImport.update({
+  id: '/hooks/edge-drift',
+  path: '/hooks/edge-drift',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksEmailBounceScanRoute = HooksEmailBounceScanRouteImport.update({
+  id: '/hooks/email-bounce-scan',
+  path: '/hooks/email-bounce-scan',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksEmailCampaignDispatchRoute =
+  HooksEmailCampaignDispatchRouteImport.update({
+    id: '/hooks/email-campaign-dispatch',
+    path: '/hooks/email-campaign-dispatch',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const HooksEmailIdentityDrainRoute = HooksEmailIdentityDrainRouteImport.update({
+  id: '/hooks/email-identity-drain',
+  path: '/hooks/email-identity-drain',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksEmailWarmupRoute = HooksEmailWarmupRouteImport.update({
+  id: '/hooks/email-warmup',
+  path: '/hooks/email-warmup',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksEntitlementDrainRoute = HooksEntitlementDrainRouteImport.update({
+  id: '/hooks/entitlement-drain',
+  path: '/hooks/entitlement-drain',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksExpireReservationsRoute = HooksExpireReservationsRouteImport.update({
+  id: '/hooks/expire-reservations',
+  path: '/hooks/expire-reservations',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksFeedbackForwardRetryRoute =
+  HooksFeedbackForwardRetryRouteImport.update({
+    id: '/hooks/feedback-forward-retry',
+    path: '/hooks/feedback-forward-retry',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const HooksFleetDriftRoute = HooksFleetDriftRouteImport.update({
+  id: '/hooks/fleet-drift',
+  path: '/hooks/fleet-drift',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksFleetMigrationDrainRoute =
+  HooksFleetMigrationDrainRouteImport.update({
+    id: '/hooks/fleet-migration-drain',
+    path: '/hooks/fleet-migration-drain',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const HooksFleetMigrationSyncRoute = HooksFleetMigrationSyncRouteImport.update({
+  id: '/hooks/fleet-migration-sync',
+  path: '/hooks/fleet-migration-sync',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksFleetSecretForwardReconcileRoute =
+  HooksFleetSecretForwardReconcileRouteImport.update({
+    id: '/hooks/fleet-secret-forward-reconcile',
+    path: '/hooks/fleet-secret-forward-reconcile',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const HooksGithubRoute = HooksGithubRouteImport.update({
+  id: '/hooks/github',
+  path: '/hooks/github',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksHandoffObservabilityPollRoute =
+  HooksHandoffObservabilityPollRouteImport.update({
+    id: '/hooks/handoff-observability-poll',
+    path: '/hooks/handoff-observability-poll',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const HooksHandoffParityRefreshRoute =
+  HooksHandoffParityRefreshRouteImport.update({
+    id: '/hooks/handoff-parity-refresh',
+    path: '/hooks/handoff-parity-refresh',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const HooksHeldFileDriftRoute = HooksHeldFileDriftRouteImport.update({
+  id: '/hooks/held-file-drift',
+  path: '/hooks/held-file-drift',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksLeadStageEmailsRoute = HooksLeadStageEmailsRouteImport.update({
+  id: '/hooks/lead-stage-emails',
+  path: '/hooks/lead-stage-emails',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksMarketingSnapshotsRoute = HooksMarketingSnapshotsRouteImport.update({
+  id: '/hooks/marketing-snapshots',
+  path: '/hooks/marketing-snapshots',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksMigrationDriftRoute = HooksMigrationDriftRouteImport.update({
+  id: '/hooks/migration-drift',
+  path: '/hooks/migration-drift',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksMigrationEnqueueRoute = HooksMigrationEnqueueRouteImport.update({
+  id: '/hooks/migration-enqueue',
+  path: '/hooks/migration-enqueue',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksPrimeSecretPairsRoute = HooksPrimeSecretPairsRouteImport.update({
+  id: '/hooks/prime-secret-pairs',
+  path: '/hooks/prime-secret-pairs',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksReferenceDataSyncRoute = HooksReferenceDataSyncRouteImport.update({
+  id: '/hooks/reference-data-sync',
+  path: '/hooks/reference-data-sync',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksRunSchedulesRoute = HooksRunSchedulesRouteImport.update({
+  id: '/hooks/run-schedules',
+  path: '/hooks/run-schedules',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksSupportRemediationDrainRoute =
+  HooksSupportRemediationDrainRouteImport.update({
+    id: '/hooks/support-remediation-drain',
+    path: '/hooks/support-remediation-drain',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const HooksTokenAlertsRoute = HooksTokenAlertsRouteImport.update({
+  id: '/hooks/token-alerts',
+  path: '/hooks/token-alerts',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksTurnstileReconcileRoute = HooksTurnstileReconcileRouteImport.update({
+  id: '/hooks/turnstile-reconcile',
+  path: '/hooks/turnstile-reconcile',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksVercelRoute = HooksVercelRouteImport.update({
+  id: '/hooks/vercel',
+  path: '/hooks/vercel',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksVerificationSelftestRoute =
+  HooksVerificationSelftestRouteImport.update({
+    id: '/hooks/verification-selftest',
+    path: '/hooks/verification-selftest',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const HooksVoiceAutomationDrainRoute =
+  HooksVoiceAutomationDrainRouteImport.update({
+    id: '/hooks/voice-automation-drain',
+    path: '/hooks/voice-automation-drain',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const HooksVoiceCallDrainRoute = HooksVoiceCallDrainRouteImport.update({
+  id: '/hooks/voice-call-drain',
+  path: '/hooks/voice-call-drain',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksVoiceOutboundDispatchRoute =
+  HooksVoiceOutboundDispatchRouteImport.update({
+    id: '/hooks/voice-outbound-dispatch',
+    path: '/hooks/voice-outbound-dispatch',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const HooksVoiceStackDrainRoute = HooksVoiceStackDrainRouteImport.update({
+  id: '/hooks/voice-stack-drain',
+  path: '/hooks/voice-stack-drain',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksVoiceStudioDeployRoute = HooksVoiceStudioDeployRouteImport.update({
+  id: '/hooks/voice-studio-deploy',
+  path: '/hooks/voice-studio-deploy',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksVoiceStudioPlanRoute = HooksVoiceStudioPlanRouteImport.update({
+  id: '/hooks/voice-studio-plan',
+  path: '/hooks/voice-studio-plan',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksWarmHealthRoute = HooksWarmHealthRouteImport.update({
+  id: '/hooks/warm-health',
+  path: '/hooks/warm-health',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const JoinTokenRoute = JoinTokenRouteImport.update({
+  id: '/join/$token',
+  path: '/join/$token',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const MarketingIndexRoute = MarketingIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => MarketingRoute,
+} as any)
+const MarketingAttributionRoute = MarketingAttributionRouteImport.update({
+  id: '/attribution',
+  path: '/attribution',
+  getParentRoute: () => MarketingRoute,
+} as any)
+const MarketingBriefsRoute = MarketingBriefsRouteImport.update({
+  id: '/briefs',
+  path: '/briefs',
+  getParentRoute: () => MarketingRoute,
+} as any)
+const MarketingConnectionsRoute = MarketingConnectionsRouteImport.update({
+  id: '/connections',
+  path: '/connections',
+  getParentRoute: () => MarketingRoute,
+} as any)
+const MarketingMetaRoute = MarketingMetaRouteImport.update({
+  id: '/meta',
+  path: '/meta',
+  getParentRoute: () => MarketingRoute,
+} as any)
+const MarketingTiktokRoute = MarketingTiktokRouteImport.update({
+  id: '/tiktok',
+  path: '/tiktok',
+  getParentRoute: () => MarketingRoute,
+} as any)
+const MarketingYoutubeRoute = MarketingYoutubeRouteImport.update({
+  id: '/youtube',
+  path: '/youtube',
+  getParentRoute: () => MarketingRoute,
+} as any)
+const ModulesSlugRoute = ModulesSlugRouteImport.update({
+  id: '/$slug',
+  path: '/$slug',
+  getParentRoute: () => ModulesRoute,
+} as any)
+const ModulesBuilderRoute = ModulesBuilderRouteImport.update({
+  id: '/builder',
+  path: '/builder',
+  getParentRoute: () => ModulesRoute,
+} as any)
+const SecurityIndexRoute = SecurityIndexRouteImport.update({
+  id: '/security/',
+  path: '/security/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SecurityIntakeRoute = SecurityIntakeRouteImport.update({
+  id: '/security/intake',
+  path: '/security/intake',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SecurityScansRoute = SecurityScansRouteImport.update({
+  id: '/security/scans',
+  path: '/security/scans',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SettingsIndexRoute = SettingsIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsBillingRoute = SettingsBillingRouteImport.update({
+  id: '/billing',
+  path: '/billing',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsClientAccountsRoute = SettingsClientAccountsRouteImport.update({
+  id: '/client-accounts',
+  path: '/client-accounts',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsCloneStripeRoute = SettingsCloneStripeRouteImport.update({
+  id: '/clone-stripe',
+  path: '/clone-stripe',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsDomainsRoute = SettingsDomainsRouteImport.update({
+  id: '/domains',
+  path: '/domains',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsGiftTokensRoute = SettingsGiftTokensRouteImport.update({
+  id: '/gift-tokens',
+  path: '/gift-tokens',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsGithubAccessRoute = SettingsGithubAccessRouteImport.update({
+  id: '/github-access',
+  path: '/github-access',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsHandoffPoliciesRoute = SettingsHandoffPoliciesRouteImport.update({
+  id: '/handoff-policies',
+  path: '/handoff-policies',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsHandoffTermsRoute = SettingsHandoffTermsRouteImport.update({
+  id: '/handoff-terms',
+  path: '/handoff-terms',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsInvitesRoute = SettingsInvitesRouteImport.update({
+  id: '/invites',
+  path: '/invites',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsNotificationsRoute = SettingsNotificationsRouteImport.update({
+  id: '/notifications',
+  path: '/notifications',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsPermissionMatrixRoute =
+  SettingsPermissionMatrixRouteImport.update({
+    id: '/permission-matrix',
+    path: '/permission-matrix',
+    getParentRoute: () => SettingsRoute,
+  } as any)
+const SettingsProvisioningPreviewRoute =
+  SettingsProvisioningPreviewRouteImport.update({
+    id: '/provisioning-preview',
+    path: '/provisioning-preview',
+    getParentRoute: () => SettingsRoute,
+  } as any)
+const SettingsRoleAuditRoute = SettingsRoleAuditRouteImport.update({
+  id: '/role-audit',
+  path: '/role-audit',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsRolesRoute = SettingsRolesRouteImport.update({
+  id: '/roles',
+  path: '/roles',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SupportTicketsRoute = SupportTicketsRouteImport.update({
+  id: '/support/tickets',
+  path: '/support/tickets',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const VoiceAgentsRoute = VoiceAgentsRouteImport.update({
+  id: '/voice/agents',
+  path: '/voice/agents',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const VoiceCallsRoute = VoiceCallsRouteImport.update({
+  id: '/voice/calls',
+  path: '/voice/calls',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const VoiceOutboundRoute = VoiceOutboundRouteImport.update({
+  id: '/voice/outbound',
+  path: '/voice/outbound',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const VoicePhoneRoute = VoicePhoneRouteImport.update({
+  id: '/voice/phone',
+  path: '/voice/phone',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicPurchasesRoute = ApiPublicPurchasesRouteImport.update({
+  id: '/api/public/purchases',
+  path: '/api/public/purchases',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ClientsHandoffTokenRoute = ClientsHandoffTokenRouteImport.update({
+  id: '/clients/handoff/$token',
+  path: '/clients/handoff/$token',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ClonesCloneIdSecretsRoute = ClonesCloneIdSecretsRouteImport.update({
+  id: '/secrets',
+  path: '/secrets',
+  getParentRoute: () => ClonesCloneIdRoute,
 } as any)
 const CrmAccountsIndexRoute = CrmAccountsIndexRouteImport.update({
   id: '/crm/accounts/',
   path: '/crm/accounts/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const VoiceStudioProjectIdRoute = VoiceStudioProjectIdRouteImport.update({
-  id: '/voice/studio/$projectId',
-  path: '/voice/studio/$projectId',
+const CrmAccountsAccountIdRoute = CrmAccountsAccountIdRouteImport.update({
+  id: '/crm/accounts/$accountId',
+  path: '/crm/accounts/$accountId',
   getParentRoute: () => rootRouteImport,
 } as any)
 const EmailCampaignsCampaignIdRoute =
@@ -1054,346 +1064,14 @@ const EmailCampaignsCampaignIdRoute =
     path: '/email/campaigns/$campaignId',
     getParentRoute: () => rootRouteImport,
   } as any)
-const CrmAccountsAccountIdRoute = CrmAccountsAccountIdRouteImport.update({
-  id: '/crm/accounts/$accountId',
-  path: '/crm/accounts/$accountId',
+const VoiceStudioIndexRoute = VoiceStudioIndexRouteImport.update({
+  id: '/voice/studio/',
+  path: '/voice/studio/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ClonesCloneIdSecretsRoute = ClonesCloneIdSecretsRouteImport.update({
-  id: '/secrets',
-  path: '/secrets',
-  getParentRoute: () => ClonesCloneIdRoute,
-} as any)
-const ClientsHandoffTokenRoute = ClientsHandoffTokenRouteImport.update({
-  id: '/clients/handoff/$token',
-  path: '/clients/handoff/$token',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiPublicPurchasesRoute = ApiPublicPurchasesRouteImport.update({
-  id: '/api/public/purchases',
-  path: '/api/public/purchases',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiPublicVoiceWebhookRoute = ApiPublicVoiceWebhookRouteImport.update({
-  id: '/api/public/voice/webhook',
-  path: '/api/public/voice/webhook',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiPublicVoiceAutomationOperationRoute =
-  ApiPublicVoiceAutomationOperationRouteImport.update({
-    id: '/api/public/voice-automation/$operation',
-    path: '/api/public/voice-automation/$operation',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicVerificationOperationRoute =
-  ApiPublicVerificationOperationRouteImport.update({
-    id: '/api/public/verification/$operation',
-    path: '/api/public/verification/$operation',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicUsageReportRoute = ApiPublicUsageReportRouteImport.update({
-  id: '/api/public/usage/report',
-  path: '/api/public/usage/report',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiPublicTokensReserveRoute = ApiPublicTokensReserveRouteImport.update({
-  id: '/api/public/tokens/reserve',
-  path: '/api/public/tokens/reserve',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiPublicTokensPlanChangeRoute =
-  ApiPublicTokensPlanChangeRouteImport.update({
-    id: '/api/public/tokens/plan-change',
-    path: '/api/public/tokens/plan-change',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicTokensPacksRoute = ApiPublicTokensPacksRouteImport.update({
-  id: '/api/public/tokens/packs',
-  path: '/api/public/tokens/packs',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiPublicTokensFeedbackPromptRoute =
-  ApiPublicTokensFeedbackPromptRouteImport.update({
-    id: '/api/public/tokens/feedback-prompt',
-    path: '/api/public/tokens/feedback-prompt',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicTokensCommitRoute = ApiPublicTokensCommitRouteImport.update({
-  id: '/api/public/tokens/commit',
-  path: '/api/public/tokens/commit',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiPublicTokensCancelRoute = ApiPublicTokensCancelRouteImport.update({
-  id: '/api/public/tokens/cancel',
-  path: '/api/public/tokens/cancel',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiPublicTokensBalanceRoute = ApiPublicTokensBalanceRouteImport.update({
-  id: '/api/public/tokens/balance',
-  path: '/api/public/tokens/balance',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiPublicTelephonyVoiceRoute = ApiPublicTelephonyVoiceRouteImport.update({
-  id: '/api/public/telephony/voice',
-  path: '/api/public/telephony/voice',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiPublicTelephonyStatusRoute =
-  ApiPublicTelephonyStatusRouteImport.update({
-    id: '/api/public/telephony/status',
-    path: '/api/public/telephony/status',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicTelephonyIncomingRoute =
-  ApiPublicTelephonyIncomingRouteImport.update({
-    id: '/api/public/telephony/incoming',
-    path: '/api/public/telephony/incoming',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicSupportTicketsRoute = ApiPublicSupportTicketsRouteImport.update({
-  id: '/api/public/support/tickets',
-  path: '/api/public/support/tickets',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiPublicSupportAssistantActivityRoute =
-  ApiPublicSupportAssistantActivityRouteImport.update({
-    id: '/api/public/support/assistant-activity',
-    path: '/api/public/support/assistant-activity',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicStripeWebhookRoute = ApiPublicStripeWebhookRouteImport.update({
-  id: '/api/public/stripe/webhook',
-  path: '/api/public/stripe/webhook',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiPublicStorefrontWalletRoute =
-  ApiPublicStorefrontWalletRouteImport.update({
-    id: '/api/public/storefront/wallet',
-    path: '/api/public/storefront/wallet',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicStorefrontStrategicReviewRoute =
-  ApiPublicStorefrontStrategicReviewRouteImport.update({
-    id: '/api/public/storefront/strategic-review',
-    path: '/api/public/storefront/strategic-review',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicStorefrontSetupRoute =
-  ApiPublicStorefrontSetupRouteImport.update({
-    id: '/api/public/storefront/setup',
-    path: '/api/public/storefront/setup',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicStorefrontSessionRoute =
-  ApiPublicStorefrontSessionRouteImport.update({
-    id: '/api/public/storefront/session',
-    path: '/api/public/storefront/session',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicStorefrontPlanChangeRoute =
-  ApiPublicStorefrontPlanChangeRouteImport.update({
-    id: '/api/public/storefront/plan-change',
-    path: '/api/public/storefront/plan-change',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicStorefrontIdentityRoute =
-  ApiPublicStorefrontIdentityRouteImport.update({
-    id: '/api/public/storefront/identity',
-    path: '/api/public/storefront/identity',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicStorefrontHandoffRoute =
-  ApiPublicStorefrontHandoffRouteImport.update({
-    id: '/api/public/storefront/handoff',
-    path: '/api/public/storefront/handoff',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicStorefrontFeedbackRoute =
-  ApiPublicStorefrontFeedbackRouteImport.update({
-    id: '/api/public/storefront/feedback',
-    path: '/api/public/storefront/feedback',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicStorefrontCheckoutRoute =
-  ApiPublicStorefrontCheckoutRouteImport.update({
-    id: '/api/public/storefront/checkout',
-    path: '/api/public/storefront/checkout',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicStorefrontCatalogRoute =
-  ApiPublicStorefrontCatalogRouteImport.update({
-    id: '/api/public/storefront/catalog',
-    path: '/api/public/storefront/catalog',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicStorefrontAccessRoute =
-  ApiPublicStorefrontAccessRouteImport.update({
-    id: '/api/public/storefront/access',
-    path: '/api/public/storefront/access',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicSecurityIntakeRoute = ApiPublicSecurityIntakeRouteImport.update({
-  id: '/api/public/security/intake',
-  path: '/api/public/security/intake',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiPublicSeatsReserveRoute = ApiPublicSeatsReserveRouteImport.update({
-  id: '/api/public/seats/reserve',
-  path: '/api/public/seats/reserve',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiPublicSeatsReleaseRoute = ApiPublicSeatsReleaseRouteImport.update({
-  id: '/api/public/seats/release',
-  path: '/api/public/seats/release',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiPublicSeatsListRoute = ApiPublicSeatsListRouteImport.update({
-  id: '/api/public/seats/list',
-  path: '/api/public/seats/list',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiPublicSeatsEntitlementRoute =
-  ApiPublicSeatsEntitlementRouteImport.update({
-    id: '/api/public/seats/entitlement',
-    path: '/api/public/seats/entitlement',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicSeatsCommitRoute = ApiPublicSeatsCommitRouteImport.update({
-  id: '/api/public/seats/commit',
-  path: '/api/public/seats/commit',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiPublicPricingCatalogRoute = ApiPublicPricingCatalogRouteImport.update({
-  id: '/api/public/pricing/catalog',
-  path: '/api/public/pricing/catalog',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiPublicListingsOperationRoute =
-  ApiPublicListingsOperationRouteImport.update({
-    id: '/api/public/listings/$operation',
-    path: '/api/public/listings/$operation',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicLeadsCaptureRoute = ApiPublicLeadsCaptureRouteImport.update({
-  id: '/api/public/leads/capture',
-  path: '/api/public/leads/capture',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiPublicIntegrationsSecretsRoute =
-  ApiPublicIntegrationsSecretsRouteImport.update({
-    id: '/api/public/integrations/secrets',
-    path: '/api/public/integrations/secrets',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicHooksDocusignRoute = ApiPublicHooksDocusignRouteImport.update({
-  id: '/api/public/hooks/docusign',
-  path: '/api/public/hooks/docusign',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiPublicHooksCodexSecurityRoute =
-  ApiPublicHooksCodexSecurityRouteImport.update({
-    id: '/api/public/hooks/codex-security',
-    path: '/api/public/hooks/codex-security',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicHooksCodexRemediationRoute =
-  ApiPublicHooksCodexRemediationRouteImport.update({
-    id: '/api/public/hooks/codex-remediation',
-    path: '/api/public/hooks/codex-remediation',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicHooksCalcomRoute = ApiPublicHooksCalcomRouteImport.update({
-  id: '/api/public/hooks/calcom',
-  path: '/api/public/hooks/calcom',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiPublicHandoffsConsentRoute =
-  ApiPublicHandoffsConsentRouteImport.update({
-    id: '/api/public/handoffs/consent',
-    path: '/api/public/handoffs/consent',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicHandoffBeaconRoute = ApiPublicHandoffBeaconRouteImport.update({
-  id: '/api/public/handoff/beacon',
-  path: '/api/public/handoff/beacon',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiPublicHandoffAuditIngestRoute =
-  ApiPublicHandoffAuditIngestRouteImport.update({
-    id: '/api/public/handoff/audit-ingest',
-    path: '/api/public/handoff/audit-ingest',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicEmailUnsubscribeRoute =
-  ApiPublicEmailUnsubscribeRouteImport.update({
-    id: '/api/public/email/unsubscribe',
-    path: '/api/public/email/unsubscribe',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicEdgeStatusRoute = ApiPublicEdgeStatusRouteImport.update({
-  id: '/api/public/edge/status',
-  path: '/api/public/edge/status',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiPublicClonesRotateKeyRoute =
-  ApiPublicClonesRotateKeyRouteImport.update({
-    id: '/api/public/clones/rotate-key',
-    path: '/api/public/clones/rotate-key',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicClonesGateRoute = ApiPublicClonesGateRouteImport.update({
-  id: '/api/public/clones/gate',
-  path: '/api/public/clones/gate',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiPublicClonesAnnouncementsRoute =
-  ApiPublicClonesAnnouncementsRouteImport.update({
-    id: '/api/public/clones/announcements',
-    path: '/api/public/clones/announcements',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicBuildersJwksRoute = ApiPublicBuildersJwksRouteImport.update({
-  id: '/api/public/builders/jwks',
-  path: '/api/public/builders/jwks',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiPublicBuildersIdentityRoute =
-  ApiPublicBuildersIdentityRouteImport.update({
-    id: '/api/public/builders/identity',
-    path: '/api/public/builders/identity',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicBuildersApplyRoute = ApiPublicBuildersApplyRouteImport.update({
-  id: '/api/public/builders/apply',
-  path: '/api/public/builders/apply',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiPublicBillingPaymentMethodsRoute =
-  ApiPublicBillingPaymentMethodsRouteImport.update({
-    id: '/api/public/billing/payment-methods',
-    path: '/api/public/billing/payment-methods',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicBillingInvoicesRoute =
-  ApiPublicBillingInvoicesRouteImport.update({
-    id: '/api/public/billing/invoices',
-    path: '/api/public/billing/invoices',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicBillingInvoicePdfRoute =
-  ApiPublicBillingInvoicePdfRouteImport.update({
-    id: '/api/public/billing/invoice-pdf',
-    path: '/api/public/billing/invoice-pdf',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPublicBillingHandoffRoute = ApiPublicBillingHandoffRouteImport.update({
-  id: '/api/public/billing/handoff',
-  path: '/api/public/billing/handoff',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiPublicAnthropicJwksRoute = ApiPublicAnthropicJwksRouteImport.update({
-  id: '/api/public/anthropic/jwks',
-  path: '/api/public/anthropic/jwks',
+const VoiceStudioProjectIdRoute = VoiceStudioProjectIdRouteImport.update({
+  id: '/voice/studio/$projectId',
+  path: '/voice/studio/$projectId',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ApiPublicAnthropicIdentityRoute =
@@ -1402,22 +1080,338 @@ const ApiPublicAnthropicIdentityRoute =
     path: '/api/public/anthropic/identity',
     getParentRoute: () => rootRouteImport,
   } as any)
-const ApiPublicStripeWebhookCloneIdRoute =
-  ApiPublicStripeWebhookCloneIdRouteImport.update({
-    id: '/$cloneId',
-    path: '/$cloneId',
-    getParentRoute: () => ApiPublicStripeWebhookRoute,
-  } as any)
-const ApiPublicSeatsDevicesReleaseRoute =
-  ApiPublicSeatsDevicesReleaseRouteImport.update({
-    id: '/api/public/seats/devices/release',
-    path: '/api/public/seats/devices/release',
+const ApiPublicAnthropicJwksRoute = ApiPublicAnthropicJwksRouteImport.update({
+  id: '/api/public/anthropic/jwks',
+  path: '/api/public/anthropic/jwks',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicBillingHandoffRoute = ApiPublicBillingHandoffRouteImport.update({
+  id: '/api/public/billing/handoff',
+  path: '/api/public/billing/handoff',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicBillingInvoicePdfRoute =
+  ApiPublicBillingInvoicePdfRouteImport.update({
+    id: '/api/public/billing/invoice-pdf',
+    path: '/api/public/billing/invoice-pdf',
     getParentRoute: () => rootRouteImport,
   } as any)
-const ApiPublicSeatsDevicesRegisterRoute =
-  ApiPublicSeatsDevicesRegisterRouteImport.update({
-    id: '/api/public/seats/devices/register',
-    path: '/api/public/seats/devices/register',
+const ApiPublicBillingInvoicesRoute =
+  ApiPublicBillingInvoicesRouteImport.update({
+    id: '/api/public/billing/invoices',
+    path: '/api/public/billing/invoices',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicBillingPaymentMethodsRoute =
+  ApiPublicBillingPaymentMethodsRouteImport.update({
+    id: '/api/public/billing/payment-methods',
+    path: '/api/public/billing/payment-methods',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicBuildersApplyRoute = ApiPublicBuildersApplyRouteImport.update({
+  id: '/api/public/builders/apply',
+  path: '/api/public/builders/apply',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicBuildersIdentityRoute =
+  ApiPublicBuildersIdentityRouteImport.update({
+    id: '/api/public/builders/identity',
+    path: '/api/public/builders/identity',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicBuildersJwksRoute = ApiPublicBuildersJwksRouteImport.update({
+  id: '/api/public/builders/jwks',
+  path: '/api/public/builders/jwks',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicClonesAnnouncementsRoute =
+  ApiPublicClonesAnnouncementsRouteImport.update({
+    id: '/api/public/clones/announcements',
+    path: '/api/public/clones/announcements',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicClonesGateRoute = ApiPublicClonesGateRouteImport.update({
+  id: '/api/public/clones/gate',
+  path: '/api/public/clones/gate',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicClonesRotateKeyRoute =
+  ApiPublicClonesRotateKeyRouteImport.update({
+    id: '/api/public/clones/rotate-key',
+    path: '/api/public/clones/rotate-key',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicEdgeStatusRoute = ApiPublicEdgeStatusRouteImport.update({
+  id: '/api/public/edge/status',
+  path: '/api/public/edge/status',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicEmailUnsubscribeRoute =
+  ApiPublicEmailUnsubscribeRouteImport.update({
+    id: '/api/public/email/unsubscribe',
+    path: '/api/public/email/unsubscribe',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicHandoffAuditIngestRoute =
+  ApiPublicHandoffAuditIngestRouteImport.update({
+    id: '/api/public/handoff/audit-ingest',
+    path: '/api/public/handoff/audit-ingest',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicHandoffBeaconRoute = ApiPublicHandoffBeaconRouteImport.update({
+  id: '/api/public/handoff/beacon',
+  path: '/api/public/handoff/beacon',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicHandoffsConsentRoute =
+  ApiPublicHandoffsConsentRouteImport.update({
+    id: '/api/public/handoffs/consent',
+    path: '/api/public/handoffs/consent',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicHooksCalcomRoute = ApiPublicHooksCalcomRouteImport.update({
+  id: '/api/public/hooks/calcom',
+  path: '/api/public/hooks/calcom',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicHooksCodexRemediationRoute =
+  ApiPublicHooksCodexRemediationRouteImport.update({
+    id: '/api/public/hooks/codex-remediation',
+    path: '/api/public/hooks/codex-remediation',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicHooksCodexSecurityRoute =
+  ApiPublicHooksCodexSecurityRouteImport.update({
+    id: '/api/public/hooks/codex-security',
+    path: '/api/public/hooks/codex-security',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicHooksDocusignRoute = ApiPublicHooksDocusignRouteImport.update({
+  id: '/api/public/hooks/docusign',
+  path: '/api/public/hooks/docusign',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicIntegrationsSecretsRoute =
+  ApiPublicIntegrationsSecretsRouteImport.update({
+    id: '/api/public/integrations/secrets',
+    path: '/api/public/integrations/secrets',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicLeadsCaptureRoute = ApiPublicLeadsCaptureRouteImport.update({
+  id: '/api/public/leads/capture',
+  path: '/api/public/leads/capture',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicListingsOperationRoute =
+  ApiPublicListingsOperationRouteImport.update({
+    id: '/api/public/listings/$operation',
+    path: '/api/public/listings/$operation',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicPricingCatalogRoute = ApiPublicPricingCatalogRouteImport.update({
+  id: '/api/public/pricing/catalog',
+  path: '/api/public/pricing/catalog',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicSeatsCommitRoute = ApiPublicSeatsCommitRouteImport.update({
+  id: '/api/public/seats/commit',
+  path: '/api/public/seats/commit',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicSeatsEntitlementRoute =
+  ApiPublicSeatsEntitlementRouteImport.update({
+    id: '/api/public/seats/entitlement',
+    path: '/api/public/seats/entitlement',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicSeatsListRoute = ApiPublicSeatsListRouteImport.update({
+  id: '/api/public/seats/list',
+  path: '/api/public/seats/list',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicSeatsReleaseRoute = ApiPublicSeatsReleaseRouteImport.update({
+  id: '/api/public/seats/release',
+  path: '/api/public/seats/release',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicSeatsReserveRoute = ApiPublicSeatsReserveRouteImport.update({
+  id: '/api/public/seats/reserve',
+  path: '/api/public/seats/reserve',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicSecurityIntakeRoute = ApiPublicSecurityIntakeRouteImport.update({
+  id: '/api/public/security/intake',
+  path: '/api/public/security/intake',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicStorefrontAccessRoute =
+  ApiPublicStorefrontAccessRouteImport.update({
+    id: '/api/public/storefront/access',
+    path: '/api/public/storefront/access',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicStorefrontCatalogRoute =
+  ApiPublicStorefrontCatalogRouteImport.update({
+    id: '/api/public/storefront/catalog',
+    path: '/api/public/storefront/catalog',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicStorefrontCheckoutRoute =
+  ApiPublicStorefrontCheckoutRouteImport.update({
+    id: '/api/public/storefront/checkout',
+    path: '/api/public/storefront/checkout',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicStorefrontFeedbackRoute =
+  ApiPublicStorefrontFeedbackRouteImport.update({
+    id: '/api/public/storefront/feedback',
+    path: '/api/public/storefront/feedback',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicStorefrontHandoffRoute =
+  ApiPublicStorefrontHandoffRouteImport.update({
+    id: '/api/public/storefront/handoff',
+    path: '/api/public/storefront/handoff',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicStorefrontIdentityRoute =
+  ApiPublicStorefrontIdentityRouteImport.update({
+    id: '/api/public/storefront/identity',
+    path: '/api/public/storefront/identity',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicStorefrontPlanChangeRoute =
+  ApiPublicStorefrontPlanChangeRouteImport.update({
+    id: '/api/public/storefront/plan-change',
+    path: '/api/public/storefront/plan-change',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicStorefrontSessionRoute =
+  ApiPublicStorefrontSessionRouteImport.update({
+    id: '/api/public/storefront/session',
+    path: '/api/public/storefront/session',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicStorefrontSetupRoute =
+  ApiPublicStorefrontSetupRouteImport.update({
+    id: '/api/public/storefront/setup',
+    path: '/api/public/storefront/setup',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicStorefrontStrategicReviewRoute =
+  ApiPublicStorefrontStrategicReviewRouteImport.update({
+    id: '/api/public/storefront/strategic-review',
+    path: '/api/public/storefront/strategic-review',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicStorefrontWalletRoute =
+  ApiPublicStorefrontWalletRouteImport.update({
+    id: '/api/public/storefront/wallet',
+    path: '/api/public/storefront/wallet',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicStripeWebhookRoute = ApiPublicStripeWebhookRouteImport.update({
+  id: '/api/public/stripe/webhook',
+  path: '/api/public/stripe/webhook',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicSupportAssistantActivityRoute =
+  ApiPublicSupportAssistantActivityRouteImport.update({
+    id: '/api/public/support/assistant-activity',
+    path: '/api/public/support/assistant-activity',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicSupportTicketsRoute = ApiPublicSupportTicketsRouteImport.update({
+  id: '/api/public/support/tickets',
+  path: '/api/public/support/tickets',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicTelephonyIncomingRoute =
+  ApiPublicTelephonyIncomingRouteImport.update({
+    id: '/api/public/telephony/incoming',
+    path: '/api/public/telephony/incoming',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicTelephonyStatusRoute =
+  ApiPublicTelephonyStatusRouteImport.update({
+    id: '/api/public/telephony/status',
+    path: '/api/public/telephony/status',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicTelephonyVoiceRoute = ApiPublicTelephonyVoiceRouteImport.update({
+  id: '/api/public/telephony/voice',
+  path: '/api/public/telephony/voice',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicTokensBalanceRoute = ApiPublicTokensBalanceRouteImport.update({
+  id: '/api/public/tokens/balance',
+  path: '/api/public/tokens/balance',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicTokensCancelRoute = ApiPublicTokensCancelRouteImport.update({
+  id: '/api/public/tokens/cancel',
+  path: '/api/public/tokens/cancel',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicTokensCommitRoute = ApiPublicTokensCommitRouteImport.update({
+  id: '/api/public/tokens/commit',
+  path: '/api/public/tokens/commit',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicTokensFeedbackPromptRoute =
+  ApiPublicTokensFeedbackPromptRouteImport.update({
+    id: '/api/public/tokens/feedback-prompt',
+    path: '/api/public/tokens/feedback-prompt',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicTokensPacksRoute = ApiPublicTokensPacksRouteImport.update({
+  id: '/api/public/tokens/packs',
+  path: '/api/public/tokens/packs',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicTokensPlanChangeRoute =
+  ApiPublicTokensPlanChangeRouteImport.update({
+    id: '/api/public/tokens/plan-change',
+    path: '/api/public/tokens/plan-change',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicTokensReserveRoute = ApiPublicTokensReserveRouteImport.update({
+  id: '/api/public/tokens/reserve',
+  path: '/api/public/tokens/reserve',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicUsageReportRoute = ApiPublicUsageReportRouteImport.update({
+  id: '/api/public/usage/report',
+  path: '/api/public/usage/report',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicVerificationOperationRoute =
+  ApiPublicVerificationOperationRouteImport.update({
+    id: '/api/public/verification/$operation',
+    path: '/api/public/verification/$operation',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicVoiceAutomationOperationRoute =
+  ApiPublicVoiceAutomationOperationRouteImport.update({
+    id: '/api/public/voice-automation/$operation',
+    path: '/api/public/voice-automation/$operation',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicVoiceWebhookRoute = ApiPublicVoiceWebhookRouteImport.update({
+  id: '/api/public/voice/webhook',
+  path: '/api/public/voice/webhook',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicClonesGateCheckoutRoute =
+  ApiPublicClonesGateCheckoutRouteImport.update({
+    id: '/checkout',
+    path: '/checkout',
+    getParentRoute: () => ApiPublicClonesGateRoute,
+  } as any)
+const ApiPublicSeatsDevicesHeartbeatRoute =
+  ApiPublicSeatsDevicesHeartbeatRouteImport.update({
+    id: '/api/public/seats/devices/heartbeat',
+    path: '/api/public/seats/devices/heartbeat',
     getParentRoute: () => rootRouteImport,
   } as any)
 const ApiPublicSeatsDevicesListRoute =
@@ -1426,17 +1420,23 @@ const ApiPublicSeatsDevicesListRoute =
     path: '/api/public/seats/devices/list',
     getParentRoute: () => rootRouteImport,
   } as any)
-const ApiPublicSeatsDevicesHeartbeatRoute =
-  ApiPublicSeatsDevicesHeartbeatRouteImport.update({
-    id: '/api/public/seats/devices/heartbeat',
-    path: '/api/public/seats/devices/heartbeat',
+const ApiPublicSeatsDevicesRegisterRoute =
+  ApiPublicSeatsDevicesRegisterRouteImport.update({
+    id: '/api/public/seats/devices/register',
+    path: '/api/public/seats/devices/register',
     getParentRoute: () => rootRouteImport,
   } as any)
-const ApiPublicClonesGateCheckoutRoute =
-  ApiPublicClonesGateCheckoutRouteImport.update({
-    id: '/checkout',
-    path: '/checkout',
-    getParentRoute: () => ApiPublicClonesGateRoute,
+const ApiPublicSeatsDevicesReleaseRoute =
+  ApiPublicSeatsDevicesReleaseRouteImport.update({
+    id: '/api/public/seats/devices/release',
+    path: '/api/public/seats/devices/release',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicStripeWebhookCloneIdRoute =
+  ApiPublicStripeWebhookCloneIdRouteImport.update({
+    id: '/$cloneId',
+    path: '/$cloneId',
+    getParentRoute: () => ApiPublicStripeWebhookRoute,
   } as any)
 const ApiPublicVoiceTTenantKeyWebhookRoute =
   ApiPublicVoiceTTenantKeyWebhookRouteImport.update({
@@ -3028,214 +3028,11 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/yggdrasil': {
-      id: '/yggdrasil'
-      path: '/yggdrasil'
-      fullPath: '/yggdrasil'
-      preLoaderRoute: typeof YggdrasilRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/slo': {
-      id: '/slo'
-      path: '/slo'
-      fullPath: '/slo'
-      preLoaderRoute: typeof SloRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/settings': {
-      id: '/settings'
-      path: '/settings'
-      fullPath: '/settings'
-      preLoaderRoute: typeof SettingsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/security-partners': {
-      id: '/security-partners'
-      path: '/security-partners'
-      fullPath: '/security-partners'
-      preLoaderRoute: typeof SecurityPartnersRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/schedules': {
-      id: '/schedules'
-      path: '/schedules'
-      fullPath: '/schedules'
-      preLoaderRoute: typeof SchedulesRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/route-errors': {
-      id: '/route-errors'
-      path: '/route-errors'
-      fullPath: '/route-errors'
-      preLoaderRoute: typeof RouteErrorsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/reset-password': {
-      id: '/reset-password'
-      path: '/reset-password'
-      fullPath: '/reset-password'
-      preLoaderRoute: typeof ResetPasswordRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/report-jobs': {
-      id: '/report-jobs'
-      path: '/report-jobs'
-      fullPath: '/report-jobs'
-      preLoaderRoute: typeof ReportJobsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/prime-migrations': {
-      id: '/prime-migrations'
-      path: '/prime-migrations'
-      fullPath: '/prime-migrations'
-      preLoaderRoute: typeof PrimeMigrationsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/prime': {
-      id: '/prime'
-      path: '/prime'
-      fullPath: '/prime'
-      preLoaderRoute: typeof PrimeRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/partner-portal': {
-      id: '/partner-portal'
-      path: '/partner-portal'
-      fullPath: '/partner-portal'
-      preLoaderRoute: typeof PartnerPortalRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/oversight': {
-      id: '/oversight'
-      path: '/oversight'
-      fullPath: '/oversight'
-      preLoaderRoute: typeof OversightRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/notifications': {
-      id: '/notifications'
-      path: '/notifications'
-      fullPath: '/notifications'
-      preLoaderRoute: typeof NotificationsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/modules': {
-      id: '/modules'
-      path: '/modules'
-      fullPath: '/modules'
-      preLoaderRoute: typeof ModulesRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/metrics': {
-      id: '/metrics'
-      path: '/metrics'
-      fullPath: '/metrics'
-      preLoaderRoute: typeof MetricsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/marketing': {
-      id: '/marketing'
-      path: '/marketing'
-      fullPath: '/marketing'
-      preLoaderRoute: typeof MarketingRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/leads': {
-      id: '/leads'
-      path: '/leads'
-      fullPath: '/leads'
-      preLoaderRoute: typeof LeadsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/health': {
-      id: '/health'
-      path: '/health'
-      fullPath: '/health'
-      preLoaderRoute: typeof HealthRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/handoffs': {
-      id: '/handoffs'
-      path: '/handoffs'
-      fullPath: '/handoffs'
-      preLoaderRoute: typeof HandoffsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/fleet-manager': {
-      id: '/fleet-manager'
-      path: '/fleet-manager'
-      fullPath: '/fleet-manager'
-      preLoaderRoute: typeof FleetManagerRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/drift': {
-      id: '/drift'
-      path: '/drift'
-      fullPath: '/drift'
-      preLoaderRoute: typeof DriftRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/digests': {
-      id: '/digests'
-      path: '/digests'
-      fullPath: '/digests'
-      preLoaderRoute: typeof DigestsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/dashboard': {
-      id: '/dashboard'
-      path: '/dashboard'
-      fullPath: '/dashboard'
-      preLoaderRoute: typeof DashboardRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/cloudflare': {
-      id: '/cloudflare'
-      path: '/cloudflare'
-      fullPath: '/cloudflare'
-      preLoaderRoute: typeof CloudflareRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/cascades': {
-      id: '/cascades'
-      path: '/cascades'
-      fullPath: '/cascades'
-      preLoaderRoute: typeof CascadesRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/builders-network': {
-      id: '/builders-network'
-      path: '/builders-network'
-      fullPath: '/builders-network'
-      preLoaderRoute: typeof BuildersNetworkRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/branding': {
-      id: '/branding'
-      path: '/branding'
-      fullPath: '/branding'
-      preLoaderRoute: typeof BrandingRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/auth': {
-      id: '/auth'
-      path: '/auth'
-      fullPath: '/auth'
-      preLoaderRoute: typeof AuthRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/audit-log': {
-      id: '/audit-log'
-      path: '/audit-log'
-      fullPath: '/audit-log'
-      preLoaderRoute: typeof AuditLogRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/approvals': {
-      id: '/approvals'
-      path: '/approvals'
-      fullPath: '/approvals'
-      preLoaderRoute: typeof ApprovalsRouteImport
+    '/': {
+      id: '/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/announcements': {
@@ -3245,46 +3042,214 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AnnouncementsRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/': {
-      id: '/'
-      path: '/'
-      fullPath: '/'
-      preLoaderRoute: typeof IndexRouteImport
+    '/approvals': {
+      id: '/approvals'
+      path: '/approvals'
+      fullPath: '/approvals'
+      preLoaderRoute: typeof ApprovalsRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/settings/': {
-      id: '/settings/'
-      path: '/'
-      fullPath: '/settings/'
-      preLoaderRoute: typeof SettingsIndexRouteImport
-      parentRoute: typeof SettingsRoute
-    }
-    '/security/': {
-      id: '/security/'
-      path: '/security'
-      fullPath: '/security/'
-      preLoaderRoute: typeof SecurityIndexRouteImport
+    '/audit-log': {
+      id: '/audit-log'
+      path: '/audit-log'
+      fullPath: '/audit-log'
+      preLoaderRoute: typeof AuditLogRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/marketing/': {
-      id: '/marketing/'
-      path: '/'
-      fullPath: '/marketing/'
-      preLoaderRoute: typeof MarketingIndexRouteImport
-      parentRoute: typeof MarketingRoute
-    }
-    '/email/': {
-      id: '/email/'
-      path: '/email'
-      fullPath: '/email/'
-      preLoaderRoute: typeof EmailIndexRouteImport
+    '/auth': {
+      id: '/auth'
+      path: '/auth'
+      fullPath: '/auth'
+      preLoaderRoute: typeof AuthRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/crm/': {
-      id: '/crm/'
-      path: '/crm'
-      fullPath: '/crm/'
-      preLoaderRoute: typeof CrmIndexRouteImport
+    '/branding': {
+      id: '/branding'
+      path: '/branding'
+      fullPath: '/branding'
+      preLoaderRoute: typeof BrandingRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/builders-network': {
+      id: '/builders-network'
+      path: '/builders-network'
+      fullPath: '/builders-network'
+      preLoaderRoute: typeof BuildersNetworkRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/cascades': {
+      id: '/cascades'
+      path: '/cascades'
+      fullPath: '/cascades'
+      preLoaderRoute: typeof CascadesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/cloudflare': {
+      id: '/cloudflare'
+      path: '/cloudflare'
+      fullPath: '/cloudflare'
+      preLoaderRoute: typeof CloudflareRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/dashboard': {
+      id: '/dashboard'
+      path: '/dashboard'
+      fullPath: '/dashboard'
+      preLoaderRoute: typeof DashboardRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/digests': {
+      id: '/digests'
+      path: '/digests'
+      fullPath: '/digests'
+      preLoaderRoute: typeof DigestsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/drift': {
+      id: '/drift'
+      path: '/drift'
+      fullPath: '/drift'
+      preLoaderRoute: typeof DriftRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/fleet-manager': {
+      id: '/fleet-manager'
+      path: '/fleet-manager'
+      fullPath: '/fleet-manager'
+      preLoaderRoute: typeof FleetManagerRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/handoffs': {
+      id: '/handoffs'
+      path: '/handoffs'
+      fullPath: '/handoffs'
+      preLoaderRoute: typeof HandoffsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/health': {
+      id: '/health'
+      path: '/health'
+      fullPath: '/health'
+      preLoaderRoute: typeof HealthRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/leads': {
+      id: '/leads'
+      path: '/leads'
+      fullPath: '/leads'
+      preLoaderRoute: typeof LeadsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/marketing': {
+      id: '/marketing'
+      path: '/marketing'
+      fullPath: '/marketing'
+      preLoaderRoute: typeof MarketingRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/metrics': {
+      id: '/metrics'
+      path: '/metrics'
+      fullPath: '/metrics'
+      preLoaderRoute: typeof MetricsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/modules': {
+      id: '/modules'
+      path: '/modules'
+      fullPath: '/modules'
+      preLoaderRoute: typeof ModulesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/notifications': {
+      id: '/notifications'
+      path: '/notifications'
+      fullPath: '/notifications'
+      preLoaderRoute: typeof NotificationsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/oversight': {
+      id: '/oversight'
+      path: '/oversight'
+      fullPath: '/oversight'
+      preLoaderRoute: typeof OversightRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/partner-portal': {
+      id: '/partner-portal'
+      path: '/partner-portal'
+      fullPath: '/partner-portal'
+      preLoaderRoute: typeof PartnerPortalRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/prime': {
+      id: '/prime'
+      path: '/prime'
+      fullPath: '/prime'
+      preLoaderRoute: typeof PrimeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/prime-migrations': {
+      id: '/prime-migrations'
+      path: '/prime-migrations'
+      fullPath: '/prime-migrations'
+      preLoaderRoute: typeof PrimeMigrationsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/report-jobs': {
+      id: '/report-jobs'
+      path: '/report-jobs'
+      fullPath: '/report-jobs'
+      preLoaderRoute: typeof ReportJobsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/reset-password': {
+      id: '/reset-password'
+      path: '/reset-password'
+      fullPath: '/reset-password'
+      preLoaderRoute: typeof ResetPasswordRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/route-errors': {
+      id: '/route-errors'
+      path: '/route-errors'
+      fullPath: '/route-errors'
+      preLoaderRoute: typeof RouteErrorsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/schedules': {
+      id: '/schedules'
+      path: '/schedules'
+      fullPath: '/schedules'
+      preLoaderRoute: typeof SchedulesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/security-partners': {
+      id: '/security-partners'
+      path: '/security-partners'
+      fullPath: '/security-partners'
+      preLoaderRoute: typeof SecurityPartnersRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/settings': {
+      id: '/settings'
+      path: '/settings'
+      fullPath: '/settings'
+      preLoaderRoute: typeof SettingsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/slo': {
+      id: '/slo'
+      path: '/slo'
+      fullPath: '/slo'
+      preLoaderRoute: typeof SloRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/yggdrasil': {
+      id: '/yggdrasil'
+      path: '/yggdrasil'
+      fullPath: '/yggdrasil'
+      preLoaderRoute: typeof YggdrasilRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/agreements/': {
@@ -3294,802 +3259,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AgreementsIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/voice/phone': {
-      id: '/voice/phone'
-      path: '/voice/phone'
-      fullPath: '/voice/phone'
-      preLoaderRoute: typeof VoicePhoneRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/voice/outbound': {
-      id: '/voice/outbound'
-      path: '/voice/outbound'
-      fullPath: '/voice/outbound'
-      preLoaderRoute: typeof VoiceOutboundRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/voice/calls': {
-      id: '/voice/calls'
-      path: '/voice/calls'
-      fullPath: '/voice/calls'
-      preLoaderRoute: typeof VoiceCallsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/voice/agents': {
-      id: '/voice/agents'
-      path: '/voice/agents'
-      fullPath: '/voice/agents'
-      preLoaderRoute: typeof VoiceAgentsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/support/tickets': {
-      id: '/support/tickets'
-      path: '/support/tickets'
-      fullPath: '/support/tickets'
-      preLoaderRoute: typeof SupportTicketsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/settings/roles': {
-      id: '/settings/roles'
-      path: '/roles'
-      fullPath: '/settings/roles'
-      preLoaderRoute: typeof SettingsRolesRouteImport
-      parentRoute: typeof SettingsRoute
-    }
-    '/settings/role-audit': {
-      id: '/settings/role-audit'
-      path: '/role-audit'
-      fullPath: '/settings/role-audit'
-      preLoaderRoute: typeof SettingsRoleAuditRouteImport
-      parentRoute: typeof SettingsRoute
-    }
-    '/settings/provisioning-preview': {
-      id: '/settings/provisioning-preview'
-      path: '/provisioning-preview'
-      fullPath: '/settings/provisioning-preview'
-      preLoaderRoute: typeof SettingsProvisioningPreviewRouteImport
-      parentRoute: typeof SettingsRoute
-    }
-    '/settings/permission-matrix': {
-      id: '/settings/permission-matrix'
-      path: '/permission-matrix'
-      fullPath: '/settings/permission-matrix'
-      preLoaderRoute: typeof SettingsPermissionMatrixRouteImport
-      parentRoute: typeof SettingsRoute
-    }
-    '/settings/notifications': {
-      id: '/settings/notifications'
-      path: '/notifications'
-      fullPath: '/settings/notifications'
-      preLoaderRoute: typeof SettingsNotificationsRouteImport
-      parentRoute: typeof SettingsRoute
-    }
-    '/settings/invites': {
-      id: '/settings/invites'
-      path: '/invites'
-      fullPath: '/settings/invites'
-      preLoaderRoute: typeof SettingsInvitesRouteImport
-      parentRoute: typeof SettingsRoute
-    }
-    '/settings/handoff-terms': {
-      id: '/settings/handoff-terms'
-      path: '/handoff-terms'
-      fullPath: '/settings/handoff-terms'
-      preLoaderRoute: typeof SettingsHandoffTermsRouteImport
-      parentRoute: typeof SettingsRoute
-    }
-    '/settings/handoff-policies': {
-      id: '/settings/handoff-policies'
-      path: '/handoff-policies'
-      fullPath: '/settings/handoff-policies'
-      preLoaderRoute: typeof SettingsHandoffPoliciesRouteImport
-      parentRoute: typeof SettingsRoute
-    }
-    '/settings/github-access': {
-      id: '/settings/github-access'
-      path: '/github-access'
-      fullPath: '/settings/github-access'
-      preLoaderRoute: typeof SettingsGithubAccessRouteImport
-      parentRoute: typeof SettingsRoute
-    }
-    '/settings/gift-tokens': {
-      id: '/settings/gift-tokens'
-      path: '/gift-tokens'
-      fullPath: '/settings/gift-tokens'
-      preLoaderRoute: typeof SettingsGiftTokensRouteImport
-      parentRoute: typeof SettingsRoute
-    }
-    '/settings/domains': {
-      id: '/settings/domains'
-      path: '/domains'
-      fullPath: '/settings/domains'
-      preLoaderRoute: typeof SettingsDomainsRouteImport
-      parentRoute: typeof SettingsRoute
-    }
-    '/settings/clone-stripe': {
-      id: '/settings/clone-stripe'
-      path: '/clone-stripe'
-      fullPath: '/settings/clone-stripe'
-      preLoaderRoute: typeof SettingsCloneStripeRouteImport
-      parentRoute: typeof SettingsRoute
-    }
-    '/settings/client-accounts': {
-      id: '/settings/client-accounts'
-      path: '/client-accounts'
-      fullPath: '/settings/client-accounts'
-      preLoaderRoute: typeof SettingsClientAccountsRouteImport
-      parentRoute: typeof SettingsRoute
-    }
-    '/settings/billing': {
-      id: '/settings/billing'
-      path: '/billing'
-      fullPath: '/settings/billing'
-      preLoaderRoute: typeof SettingsBillingRouteImport
-      parentRoute: typeof SettingsRoute
-    }
-    '/security/scans': {
-      id: '/security/scans'
-      path: '/security/scans'
-      fullPath: '/security/scans'
-      preLoaderRoute: typeof SecurityScansRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/security/intake': {
-      id: '/security/intake'
-      path: '/security/intake'
-      fullPath: '/security/intake'
-      preLoaderRoute: typeof SecurityIntakeRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/modules/builder': {
-      id: '/modules/builder'
-      path: '/builder'
-      fullPath: '/modules/builder'
-      preLoaderRoute: typeof ModulesBuilderRouteImport
-      parentRoute: typeof ModulesRoute
-    }
-    '/modules/$slug': {
-      id: '/modules/$slug'
-      path: '/$slug'
-      fullPath: '/modules/$slug'
-      preLoaderRoute: typeof ModulesSlugRouteImport
-      parentRoute: typeof ModulesRoute
-    }
-    '/marketing/youtube': {
-      id: '/marketing/youtube'
-      path: '/youtube'
-      fullPath: '/marketing/youtube'
-      preLoaderRoute: typeof MarketingYoutubeRouteImport
-      parentRoute: typeof MarketingRoute
-    }
-    '/marketing/tiktok': {
-      id: '/marketing/tiktok'
-      path: '/tiktok'
-      fullPath: '/marketing/tiktok'
-      preLoaderRoute: typeof MarketingTiktokRouteImport
-      parentRoute: typeof MarketingRoute
-    }
-    '/marketing/meta': {
-      id: '/marketing/meta'
-      path: '/meta'
-      fullPath: '/marketing/meta'
-      preLoaderRoute: typeof MarketingMetaRouteImport
-      parentRoute: typeof MarketingRoute
-    }
-    '/marketing/connections': {
-      id: '/marketing/connections'
-      path: '/connections'
-      fullPath: '/marketing/connections'
-      preLoaderRoute: typeof MarketingConnectionsRouteImport
-      parentRoute: typeof MarketingRoute
-    }
-    '/marketing/briefs': {
-      id: '/marketing/briefs'
-      path: '/briefs'
-      fullPath: '/marketing/briefs'
-      preLoaderRoute: typeof MarketingBriefsRouteImport
-      parentRoute: typeof MarketingRoute
-    }
-    '/marketing/attribution': {
-      id: '/marketing/attribution'
-      path: '/attribution'
-      fullPath: '/marketing/attribution'
-      preLoaderRoute: typeof MarketingAttributionRouteImport
-      parentRoute: typeof MarketingRoute
-    }
-    '/join/$token': {
-      id: '/join/$token'
-      path: '/join/$token'
-      fullPath: '/join/$token'
-      preLoaderRoute: typeof JoinTokenRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/warm-health': {
-      id: '/hooks/warm-health'
-      path: '/hooks/warm-health'
-      fullPath: '/hooks/warm-health'
-      preLoaderRoute: typeof HooksWarmHealthRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/voice-studio-plan': {
-      id: '/hooks/voice-studio-plan'
-      path: '/hooks/voice-studio-plan'
-      fullPath: '/hooks/voice-studio-plan'
-      preLoaderRoute: typeof HooksVoiceStudioPlanRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/voice-studio-deploy': {
-      id: '/hooks/voice-studio-deploy'
-      path: '/hooks/voice-studio-deploy'
-      fullPath: '/hooks/voice-studio-deploy'
-      preLoaderRoute: typeof HooksVoiceStudioDeployRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/voice-stack-drain': {
-      id: '/hooks/voice-stack-drain'
-      path: '/hooks/voice-stack-drain'
-      fullPath: '/hooks/voice-stack-drain'
-      preLoaderRoute: typeof HooksVoiceStackDrainRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/voice-outbound-dispatch': {
-      id: '/hooks/voice-outbound-dispatch'
-      path: '/hooks/voice-outbound-dispatch'
-      fullPath: '/hooks/voice-outbound-dispatch'
-      preLoaderRoute: typeof HooksVoiceOutboundDispatchRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/voice-call-drain': {
-      id: '/hooks/voice-call-drain'
-      path: '/hooks/voice-call-drain'
-      fullPath: '/hooks/voice-call-drain'
-      preLoaderRoute: typeof HooksVoiceCallDrainRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/voice-automation-drain': {
-      id: '/hooks/voice-automation-drain'
-      path: '/hooks/voice-automation-drain'
-      fullPath: '/hooks/voice-automation-drain'
-      preLoaderRoute: typeof HooksVoiceAutomationDrainRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/verification-selftest': {
-      id: '/hooks/verification-selftest'
-      path: '/hooks/verification-selftest'
-      fullPath: '/hooks/verification-selftest'
-      preLoaderRoute: typeof HooksVerificationSelftestRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/vercel': {
-      id: '/hooks/vercel'
-      path: '/hooks/vercel'
-      fullPath: '/hooks/vercel'
-      preLoaderRoute: typeof HooksVercelRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/turnstile-reconcile': {
-      id: '/hooks/turnstile-reconcile'
-      path: '/hooks/turnstile-reconcile'
-      fullPath: '/hooks/turnstile-reconcile'
-      preLoaderRoute: typeof HooksTurnstileReconcileRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/token-alerts': {
-      id: '/hooks/token-alerts'
-      path: '/hooks/token-alerts'
-      fullPath: '/hooks/token-alerts'
-      preLoaderRoute: typeof HooksTokenAlertsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/support-remediation-drain': {
-      id: '/hooks/support-remediation-drain'
-      path: '/hooks/support-remediation-drain'
-      fullPath: '/hooks/support-remediation-drain'
-      preLoaderRoute: typeof HooksSupportRemediationDrainRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/run-schedules': {
-      id: '/hooks/run-schedules'
-      path: '/hooks/run-schedules'
-      fullPath: '/hooks/run-schedules'
-      preLoaderRoute: typeof HooksRunSchedulesRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/reference-data-sync': {
-      id: '/hooks/reference-data-sync'
-      path: '/hooks/reference-data-sync'
-      fullPath: '/hooks/reference-data-sync'
-      preLoaderRoute: typeof HooksReferenceDataSyncRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/prime-secret-pairs': {
-      id: '/hooks/prime-secret-pairs'
-      path: '/hooks/prime-secret-pairs'
-      fullPath: '/hooks/prime-secret-pairs'
-      preLoaderRoute: typeof HooksPrimeSecretPairsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/migration-enqueue': {
-      id: '/hooks/migration-enqueue'
-      path: '/hooks/migration-enqueue'
-      fullPath: '/hooks/migration-enqueue'
-      preLoaderRoute: typeof HooksMigrationEnqueueRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/migration-drift': {
-      id: '/hooks/migration-drift'
-      path: '/hooks/migration-drift'
-      fullPath: '/hooks/migration-drift'
-      preLoaderRoute: typeof HooksMigrationDriftRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/marketing-snapshots': {
-      id: '/hooks/marketing-snapshots'
-      path: '/hooks/marketing-snapshots'
-      fullPath: '/hooks/marketing-snapshots'
-      preLoaderRoute: typeof HooksMarketingSnapshotsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/lead-stage-emails': {
-      id: '/hooks/lead-stage-emails'
-      path: '/hooks/lead-stage-emails'
-      fullPath: '/hooks/lead-stage-emails'
-      preLoaderRoute: typeof HooksLeadStageEmailsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/held-file-drift': {
-      id: '/hooks/held-file-drift'
-      path: '/hooks/held-file-drift'
-      fullPath: '/hooks/held-file-drift'
-      preLoaderRoute: typeof HooksHeldFileDriftRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/handoff-parity-refresh': {
-      id: '/hooks/handoff-parity-refresh'
-      path: '/hooks/handoff-parity-refresh'
-      fullPath: '/hooks/handoff-parity-refresh'
-      preLoaderRoute: typeof HooksHandoffParityRefreshRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/handoff-observability-poll': {
-      id: '/hooks/handoff-observability-poll'
-      path: '/hooks/handoff-observability-poll'
-      fullPath: '/hooks/handoff-observability-poll'
-      preLoaderRoute: typeof HooksHandoffObservabilityPollRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/github': {
-      id: '/hooks/github'
-      path: '/hooks/github'
-      fullPath: '/hooks/github'
-      preLoaderRoute: typeof HooksGithubRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/fleet-secret-forward-reconcile': {
-      id: '/hooks/fleet-secret-forward-reconcile'
-      path: '/hooks/fleet-secret-forward-reconcile'
-      fullPath: '/hooks/fleet-secret-forward-reconcile'
-      preLoaderRoute: typeof HooksFleetSecretForwardReconcileRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/fleet-migration-sync': {
-      id: '/hooks/fleet-migration-sync'
-      path: '/hooks/fleet-migration-sync'
-      fullPath: '/hooks/fleet-migration-sync'
-      preLoaderRoute: typeof HooksFleetMigrationSyncRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/fleet-migration-drain': {
-      id: '/hooks/fleet-migration-drain'
-      path: '/hooks/fleet-migration-drain'
-      fullPath: '/hooks/fleet-migration-drain'
-      preLoaderRoute: typeof HooksFleetMigrationDrainRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/fleet-drift': {
-      id: '/hooks/fleet-drift'
-      path: '/hooks/fleet-drift'
-      fullPath: '/hooks/fleet-drift'
-      preLoaderRoute: typeof HooksFleetDriftRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/feedback-forward-retry': {
-      id: '/hooks/feedback-forward-retry'
-      path: '/hooks/feedback-forward-retry'
-      fullPath: '/hooks/feedback-forward-retry'
-      preLoaderRoute: typeof HooksFeedbackForwardRetryRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/expire-reservations': {
-      id: '/hooks/expire-reservations'
-      path: '/hooks/expire-reservations'
-      fullPath: '/hooks/expire-reservations'
-      preLoaderRoute: typeof HooksExpireReservationsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/entitlement-drain': {
-      id: '/hooks/entitlement-drain'
-      path: '/hooks/entitlement-drain'
-      fullPath: '/hooks/entitlement-drain'
-      preLoaderRoute: typeof HooksEntitlementDrainRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/email-warmup': {
-      id: '/hooks/email-warmup'
-      path: '/hooks/email-warmup'
-      fullPath: '/hooks/email-warmup'
-      preLoaderRoute: typeof HooksEmailWarmupRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/email-identity-drain': {
-      id: '/hooks/email-identity-drain'
-      path: '/hooks/email-identity-drain'
-      fullPath: '/hooks/email-identity-drain'
-      preLoaderRoute: typeof HooksEmailIdentityDrainRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/email-campaign-dispatch': {
-      id: '/hooks/email-campaign-dispatch'
-      path: '/hooks/email-campaign-dispatch'
-      fullPath: '/hooks/email-campaign-dispatch'
-      preLoaderRoute: typeof HooksEmailCampaignDispatchRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/email-bounce-scan': {
-      id: '/hooks/email-bounce-scan'
-      path: '/hooks/email-bounce-scan'
-      fullPath: '/hooks/email-bounce-scan'
-      preLoaderRoute: typeof HooksEmailBounceScanRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/edge-drift': {
-      id: '/hooks/edge-drift'
-      path: '/hooks/edge-drift'
-      fullPath: '/hooks/edge-drift'
-      preLoaderRoute: typeof HooksEdgeDriftRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/edge-drain': {
-      id: '/hooks/edge-drain'
-      path: '/hooks/edge-drain'
-      fullPath: '/hooks/edge-drain'
-      preLoaderRoute: typeof HooksEdgeDrainRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/drift-refresh': {
-      id: '/hooks/drift-refresh'
-      path: '/hooks/drift-refresh'
-      fullPath: '/hooks/drift-refresh'
-      preLoaderRoute: typeof HooksDriftRefreshRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/deployment-drain': {
-      id: '/hooks/deployment-drain'
-      path: '/hooks/deployment-drain'
-      fullPath: '/hooks/deployment-drain'
-      preLoaderRoute: typeof HooksDeploymentDrainRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/crm-sweep': {
-      id: '/hooks/crm-sweep'
-      path: '/hooks/crm-sweep'
-      fullPath: '/hooks/crm-sweep'
-      preLoaderRoute: typeof HooksCrmSweepRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/codex-sweep': {
-      id: '/hooks/codex-sweep'
-      path: '/hooks/codex-sweep'
-      fullPath: '/hooks/codex-sweep'
-      preLoaderRoute: typeof HooksCodexSweepRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/codex-nightly': {
-      id: '/hooks/codex-nightly'
-      path: '/hooks/codex-nightly'
-      fullPath: '/hooks/codex-nightly'
-      preLoaderRoute: typeof HooksCodexNightlyRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/clone-signing-pair-reconcile': {
-      id: '/hooks/clone-signing-pair-reconcile'
-      path: '/hooks/clone-signing-pair-reconcile'
-      fullPath: '/hooks/clone-signing-pair-reconcile'
-      preLoaderRoute: typeof HooksCloneSigningPairReconcileRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/clone-secrets-reconcile': {
-      id: '/hooks/clone-secrets-reconcile'
-      path: '/hooks/clone-secrets-reconcile'
-      fullPath: '/hooks/clone-secrets-reconcile'
-      preLoaderRoute: typeof HooksCloneSecretsReconcileRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/clone-secret-withhold': {
-      id: '/hooks/clone-secret-withhold'
-      path: '/hooks/clone-secret-withhold'
-      fullPath: '/hooks/clone-secret-withhold'
-      preLoaderRoute: typeof HooksCloneSecretWithholdRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/clone-secret-forward-reconcile': {
-      id: '/hooks/clone-secret-forward-reconcile'
-      path: '/hooks/clone-secret-forward-reconcile'
-      fullPath: '/hooks/clone-secret-forward-reconcile'
-      preLoaderRoute: typeof HooksCloneSecretForwardReconcileRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/clone-privilege-reconcile': {
-      id: '/hooks/clone-privilege-reconcile'
-      path: '/hooks/clone-privilege-reconcile'
-      fullPath: '/hooks/clone-privilege-reconcile'
-      preLoaderRoute: typeof HooksClonePrivilegeReconcileRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/clone-jwt-secret-reconcile': {
-      id: '/hooks/clone-jwt-secret-reconcile'
-      path: '/hooks/clone-jwt-secret-reconcile'
-      fullPath: '/hooks/clone-jwt-secret-reconcile'
-      preLoaderRoute: typeof HooksCloneJwtSecretReconcileRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/clone-deployer-declaration-reconcile': {
-      id: '/hooks/clone-deployer-declaration-reconcile'
-      path: '/hooks/clone-deployer-declaration-reconcile'
-      fullPath: '/hooks/clone-deployer-declaration-reconcile'
-      preLoaderRoute: typeof HooksCloneDeployerDeclarationReconcileRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/cascade-merge-drain': {
-      id: '/hooks/cascade-merge-drain'
-      path: '/hooks/cascade-merge-drain'
-      fullPath: '/hooks/cascade-merge-drain'
-      preLoaderRoute: typeof HooksCascadeMergeDrainRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/cascade-drain': {
-      id: '/hooks/cascade-drain'
-      path: '/hooks/cascade-drain'
-      fullPath: '/hooks/cascade-drain'
-      preLoaderRoute: typeof HooksCascadeDrainRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/cascade-audit': {
-      id: '/hooks/cascade-audit'
-      path: '/hooks/cascade-audit'
-      fullPath: '/hooks/cascade-audit'
-      preLoaderRoute: typeof HooksCascadeAuditRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/brand-drift': {
-      id: '/hooks/brand-drift'
-      path: '/hooks/brand-drift'
-      fullPath: '/hooks/brand-drift'
-      preLoaderRoute: typeof HooksBrandDriftRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/backend-provisioning-retry': {
-      id: '/hooks/backend-provisioning-retry'
-      path: '/hooks/backend-provisioning-retry'
-      fullPath: '/hooks/backend-provisioning-retry'
-      preLoaderRoute: typeof HooksBackendProvisioningRetryRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/backend-provisioning-repair': {
-      id: '/hooks/backend-provisioning-repair'
-      path: '/hooks/backend-provisioning-repair'
-      fullPath: '/hooks/backend-provisioning-repair'
-      preLoaderRoute: typeof HooksBackendProvisioningRepairRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/backend-provisioning-drain': {
-      id: '/hooks/backend-provisioning-drain'
-      path: '/hooks/backend-provisioning-drain'
-      fullPath: '/hooks/backend-provisioning-drain'
-      preLoaderRoute: typeof HooksBackendProvisioningDrainRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/backend-catchup': {
-      id: '/hooks/backend-catchup'
-      path: '/hooks/backend-catchup'
-      fullPath: '/hooks/backend-catchup'
-      preLoaderRoute: typeof HooksBackendCatchupRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/api-usage-settle': {
-      id: '/hooks/api-usage-settle'
-      path: '/hooks/api-usage-settle'
-      fullPath: '/hooks/api-usage-settle'
-      preLoaderRoute: typeof HooksApiUsageSettleRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/allowed-origins-reconcile': {
-      id: '/hooks/allowed-origins-reconcile'
-      path: '/hooks/allowed-origins-reconcile'
-      fullPath: '/hooks/allowed-origins-reconcile'
-      preLoaderRoute: typeof HooksAllowedOriginsReconcileRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/airtable-sync': {
-      id: '/hooks/airtable-sync'
-      path: '/hooks/airtable-sync'
-      fullPath: '/hooks/airtable-sync'
-      preLoaderRoute: typeof HooksAirtableSyncRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/hooks/agreements-refresh': {
-      id: '/hooks/agreements-refresh'
-      path: '/hooks/agreements-refresh'
-      fullPath: '/hooks/agreements-refresh'
-      preLoaderRoute: typeof HooksAgreementsRefreshRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/handoffs/new': {
-      id: '/handoffs/new'
-      path: '/new'
-      fullPath: '/handoffs/new'
-      preLoaderRoute: typeof HandoffsNewRouteImport
-      parentRoute: typeof HandoffsRoute
-    }
-    '/handoffs/$handoffId': {
-      id: '/handoffs/$handoffId'
-      path: '/$handoffId'
-      fullPath: '/handoffs/$handoffId'
-      preLoaderRoute: typeof HandoffsHandoffIdRouteImport
-      parentRoute: typeof HandoffsRoute
-    }
-    '/fleet/edge': {
-      id: '/fleet/edge'
-      path: '/fleet/edge'
-      fullPath: '/fleet/edge'
-      preLoaderRoute: typeof FleetEdgeRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/fleet/deployments': {
-      id: '/fleet/deployments'
-      path: '/fleet/deployments'
-      fullPath: '/fleet/deployments'
-      preLoaderRoute: typeof FleetDeploymentsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/email/warmup': {
-      id: '/email/warmup'
-      path: '/email/warmup'
-      fullPath: '/email/warmup'
-      preLoaderRoute: typeof EmailWarmupRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/email/suppressions': {
-      id: '/email/suppressions'
-      path: '/email/suppressions'
-      fullPath: '/email/suppressions'
-      preLoaderRoute: typeof EmailSuppressionsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/crm/tickets': {
-      id: '/crm/tickets'
-      path: '/crm/tickets'
-      fullPath: '/crm/tickets'
-      preLoaderRoute: typeof CrmTicketsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/crm/journey': {
-      id: '/crm/journey'
-      path: '/crm/journey'
-      fullPath: '/crm/journey'
-      preLoaderRoute: typeof CrmJourneyRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/crm/fit': {
-      id: '/crm/fit'
-      path: '/crm/fit'
-      fullPath: '/crm/fit'
-      preLoaderRoute: typeof CrmFitRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/crm/deals': {
-      id: '/crm/deals'
-      path: '/crm/deals'
-      fullPath: '/crm/deals'
-      preLoaderRoute: typeof CrmDealsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/clones/new': {
-      id: '/clones/new'
-      path: '/clones/new'
-      fullPath: '/clones/new'
-      preLoaderRoute: typeof ClonesNewRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/clones/$cloneId': {
-      id: '/clones/$cloneId'
-      path: '/clones/$cloneId'
-      fullPath: '/clones/$cloneId'
-      preLoaderRoute: typeof ClonesCloneIdRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/cascades/$eventId': {
-      id: '/cascades/$eventId'
-      path: '/$eventId'
-      fullPath: '/cascades/$eventId'
-      preLoaderRoute: typeof CascadesEventIdRouteImport
-      parentRoute: typeof CascadesRoute
-    }
-    '/billing/topup': {
-      id: '/billing/topup'
-      path: '/billing/topup'
-      fullPath: '/billing/topup'
-      preLoaderRoute: typeof BillingTopupRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/billing/success': {
-      id: '/billing/success'
-      path: '/billing/success'
-      fullPath: '/billing/success'
-      preLoaderRoute: typeof BillingSuccessRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/billing/seats': {
-      id: '/billing/seats'
-      path: '/billing/seats'
-      fullPath: '/billing/seats'
-      preLoaderRoute: typeof BillingSeatsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/billing/purchases': {
-      id: '/billing/purchases'
-      path: '/billing/purchases'
-      fullPath: '/billing/purchases'
-      preLoaderRoute: typeof BillingPurchasesRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/billing/invoices': {
-      id: '/billing/invoices'
-      path: '/billing/invoices'
-      fullPath: '/billing/invoices'
-      preLoaderRoute: typeof BillingInvoicesRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/billing/gates': {
-      id: '/billing/gates'
-      path: '/billing/gates'
-      fullPath: '/billing/gates'
-      preLoaderRoute: typeof BillingGatesRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/billing/catalog': {
-      id: '/billing/catalog'
-      path: '/billing/catalog'
-      fullPath: '/billing/catalog'
-      preLoaderRoute: typeof BillingCatalogRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/billing/cancel': {
-      id: '/billing/cancel'
-      path: '/billing/cancel'
-      fullPath: '/billing/cancel'
-      preLoaderRoute: typeof BillingCancelRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/billing/api-usage': {
-      id: '/billing/api-usage'
-      path: '/billing/api-usage'
-      fullPath: '/billing/api-usage'
-      preLoaderRoute: typeof BillingApiUsageRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/health': {
-      id: '/api/health'
-      path: '/api/health'
-      fullPath: '/api/health'
-      preLoaderRoute: typeof ApiHealthRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/agreements/issuing-profile': {
-      id: '/agreements/issuing-profile'
-      path: '/agreements/issuing-profile'
-      fullPath: '/agreements/issuing-profile'
-      preLoaderRoute: typeof AgreementsIssuingProfileRouteImport
+    '/agreements/$agreementId': {
+      id: '/agreements/$agreementId'
+      path: '/agreements/$agreementId'
+      fullPath: '/agreements/$agreementId'
+      preLoaderRoute: typeof AgreementsAgreementIdRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/agreements/builder-partner-terms': {
@@ -4099,60 +3273,837 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AgreementsBuilderPartnerTermsRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/agreements/$agreementId': {
-      id: '/agreements/$agreementId'
-      path: '/agreements/$agreementId'
-      fullPath: '/agreements/$agreementId'
-      preLoaderRoute: typeof AgreementsAgreementIdRouteImport
+    '/agreements/issuing-profile': {
+      id: '/agreements/issuing-profile'
+      path: '/agreements/issuing-profile'
+      fullPath: '/agreements/issuing-profile'
+      preLoaderRoute: typeof AgreementsIssuingProfileRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/voice/studio/': {
-      id: '/voice/studio/'
-      path: '/voice/studio'
-      fullPath: '/voice/studio/'
-      preLoaderRoute: typeof VoiceStudioIndexRouteImport
+    '/api/health': {
+      id: '/api/health'
+      path: '/api/health'
+      fullPath: '/api/health'
+      preLoaderRoute: typeof ApiHealthRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/crm/accounts/': {
-      id: '/crm/accounts/'
-      path: '/crm/accounts'
-      fullPath: '/crm/accounts/'
-      preLoaderRoute: typeof CrmAccountsIndexRouteImport
+    '/billing/api-usage': {
+      id: '/billing/api-usage'
+      path: '/billing/api-usage'
+      fullPath: '/billing/api-usage'
+      preLoaderRoute: typeof BillingApiUsageRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/voice/studio/$projectId': {
-      id: '/voice/studio/$projectId'
-      path: '/voice/studio/$projectId'
-      fullPath: '/voice/studio/$projectId'
-      preLoaderRoute: typeof VoiceStudioProjectIdRouteImport
+    '/billing/cancel': {
+      id: '/billing/cancel'
+      path: '/billing/cancel'
+      fullPath: '/billing/cancel'
+      preLoaderRoute: typeof BillingCancelRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/email/campaigns/$campaignId': {
-      id: '/email/campaigns/$campaignId'
-      path: '/email/campaigns/$campaignId'
-      fullPath: '/email/campaigns/$campaignId'
-      preLoaderRoute: typeof EmailCampaignsCampaignIdRouteImport
+    '/billing/catalog': {
+      id: '/billing/catalog'
+      path: '/billing/catalog'
+      fullPath: '/billing/catalog'
+      preLoaderRoute: typeof BillingCatalogRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/crm/accounts/$accountId': {
-      id: '/crm/accounts/$accountId'
-      path: '/crm/accounts/$accountId'
-      fullPath: '/crm/accounts/$accountId'
-      preLoaderRoute: typeof CrmAccountsAccountIdRouteImport
+    '/billing/gates': {
+      id: '/billing/gates'
+      path: '/billing/gates'
+      fullPath: '/billing/gates'
+      preLoaderRoute: typeof BillingGatesRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/clones/$cloneId/secrets': {
-      id: '/clones/$cloneId/secrets'
-      path: '/secrets'
-      fullPath: '/clones/$cloneId/secrets'
-      preLoaderRoute: typeof ClonesCloneIdSecretsRouteImport
-      parentRoute: typeof ClonesCloneIdRoute
+    '/billing/invoices': {
+      id: '/billing/invoices'
+      path: '/billing/invoices'
+      fullPath: '/billing/invoices'
+      preLoaderRoute: typeof BillingInvoicesRouteImport
+      parentRoute: typeof rootRouteImport
     }
-    '/clients/handoff/$token': {
-      id: '/clients/handoff/$token'
-      path: '/clients/handoff/$token'
-      fullPath: '/clients/handoff/$token'
-      preLoaderRoute: typeof ClientsHandoffTokenRouteImport
+    '/billing/purchases': {
+      id: '/billing/purchases'
+      path: '/billing/purchases'
+      fullPath: '/billing/purchases'
+      preLoaderRoute: typeof BillingPurchasesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/billing/seats': {
+      id: '/billing/seats'
+      path: '/billing/seats'
+      fullPath: '/billing/seats'
+      preLoaderRoute: typeof BillingSeatsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/billing/success': {
+      id: '/billing/success'
+      path: '/billing/success'
+      fullPath: '/billing/success'
+      preLoaderRoute: typeof BillingSuccessRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/billing/topup': {
+      id: '/billing/topup'
+      path: '/billing/topup'
+      fullPath: '/billing/topup'
+      preLoaderRoute: typeof BillingTopupRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/cascades/$eventId': {
+      id: '/cascades/$eventId'
+      path: '/$eventId'
+      fullPath: '/cascades/$eventId'
+      preLoaderRoute: typeof CascadesEventIdRouteImport
+      parentRoute: typeof CascadesRoute
+    }
+    '/clones/$cloneId': {
+      id: '/clones/$cloneId'
+      path: '/clones/$cloneId'
+      fullPath: '/clones/$cloneId'
+      preLoaderRoute: typeof ClonesCloneIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/clones/new': {
+      id: '/clones/new'
+      path: '/clones/new'
+      fullPath: '/clones/new'
+      preLoaderRoute: typeof ClonesNewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/crm/': {
+      id: '/crm/'
+      path: '/crm'
+      fullPath: '/crm/'
+      preLoaderRoute: typeof CrmIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/crm/deals': {
+      id: '/crm/deals'
+      path: '/crm/deals'
+      fullPath: '/crm/deals'
+      preLoaderRoute: typeof CrmDealsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/crm/fit': {
+      id: '/crm/fit'
+      path: '/crm/fit'
+      fullPath: '/crm/fit'
+      preLoaderRoute: typeof CrmFitRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/crm/journey': {
+      id: '/crm/journey'
+      path: '/crm/journey'
+      fullPath: '/crm/journey'
+      preLoaderRoute: typeof CrmJourneyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/crm/tickets': {
+      id: '/crm/tickets'
+      path: '/crm/tickets'
+      fullPath: '/crm/tickets'
+      preLoaderRoute: typeof CrmTicketsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/email/': {
+      id: '/email/'
+      path: '/email'
+      fullPath: '/email/'
+      preLoaderRoute: typeof EmailIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/email/suppressions': {
+      id: '/email/suppressions'
+      path: '/email/suppressions'
+      fullPath: '/email/suppressions'
+      preLoaderRoute: typeof EmailSuppressionsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/email/warmup': {
+      id: '/email/warmup'
+      path: '/email/warmup'
+      fullPath: '/email/warmup'
+      preLoaderRoute: typeof EmailWarmupRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/fleet/deployments': {
+      id: '/fleet/deployments'
+      path: '/fleet/deployments'
+      fullPath: '/fleet/deployments'
+      preLoaderRoute: typeof FleetDeploymentsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/fleet/edge': {
+      id: '/fleet/edge'
+      path: '/fleet/edge'
+      fullPath: '/fleet/edge'
+      preLoaderRoute: typeof FleetEdgeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/handoffs/$handoffId': {
+      id: '/handoffs/$handoffId'
+      path: '/$handoffId'
+      fullPath: '/handoffs/$handoffId'
+      preLoaderRoute: typeof HandoffsHandoffIdRouteImport
+      parentRoute: typeof HandoffsRoute
+    }
+    '/handoffs/new': {
+      id: '/handoffs/new'
+      path: '/new'
+      fullPath: '/handoffs/new'
+      preLoaderRoute: typeof HandoffsNewRouteImport
+      parentRoute: typeof HandoffsRoute
+    }
+    '/hooks/agreements-refresh': {
+      id: '/hooks/agreements-refresh'
+      path: '/hooks/agreements-refresh'
+      fullPath: '/hooks/agreements-refresh'
+      preLoaderRoute: typeof HooksAgreementsRefreshRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/airtable-sync': {
+      id: '/hooks/airtable-sync'
+      path: '/hooks/airtable-sync'
+      fullPath: '/hooks/airtable-sync'
+      preLoaderRoute: typeof HooksAirtableSyncRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/allowed-origins-reconcile': {
+      id: '/hooks/allowed-origins-reconcile'
+      path: '/hooks/allowed-origins-reconcile'
+      fullPath: '/hooks/allowed-origins-reconcile'
+      preLoaderRoute: typeof HooksAllowedOriginsReconcileRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/api-usage-settle': {
+      id: '/hooks/api-usage-settle'
+      path: '/hooks/api-usage-settle'
+      fullPath: '/hooks/api-usage-settle'
+      preLoaderRoute: typeof HooksApiUsageSettleRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/backend-catchup': {
+      id: '/hooks/backend-catchup'
+      path: '/hooks/backend-catchup'
+      fullPath: '/hooks/backend-catchup'
+      preLoaderRoute: typeof HooksBackendCatchupRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/backend-provisioning-drain': {
+      id: '/hooks/backend-provisioning-drain'
+      path: '/hooks/backend-provisioning-drain'
+      fullPath: '/hooks/backend-provisioning-drain'
+      preLoaderRoute: typeof HooksBackendProvisioningDrainRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/backend-provisioning-repair': {
+      id: '/hooks/backend-provisioning-repair'
+      path: '/hooks/backend-provisioning-repair'
+      fullPath: '/hooks/backend-provisioning-repair'
+      preLoaderRoute: typeof HooksBackendProvisioningRepairRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/backend-provisioning-retry': {
+      id: '/hooks/backend-provisioning-retry'
+      path: '/hooks/backend-provisioning-retry'
+      fullPath: '/hooks/backend-provisioning-retry'
+      preLoaderRoute: typeof HooksBackendProvisioningRetryRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/brand-drift': {
+      id: '/hooks/brand-drift'
+      path: '/hooks/brand-drift'
+      fullPath: '/hooks/brand-drift'
+      preLoaderRoute: typeof HooksBrandDriftRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/cascade-audit': {
+      id: '/hooks/cascade-audit'
+      path: '/hooks/cascade-audit'
+      fullPath: '/hooks/cascade-audit'
+      preLoaderRoute: typeof HooksCascadeAuditRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/cascade-drain': {
+      id: '/hooks/cascade-drain'
+      path: '/hooks/cascade-drain'
+      fullPath: '/hooks/cascade-drain'
+      preLoaderRoute: typeof HooksCascadeDrainRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/cascade-merge-drain': {
+      id: '/hooks/cascade-merge-drain'
+      path: '/hooks/cascade-merge-drain'
+      fullPath: '/hooks/cascade-merge-drain'
+      preLoaderRoute: typeof HooksCascadeMergeDrainRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/clone-deployer-declaration-reconcile': {
+      id: '/hooks/clone-deployer-declaration-reconcile'
+      path: '/hooks/clone-deployer-declaration-reconcile'
+      fullPath: '/hooks/clone-deployer-declaration-reconcile'
+      preLoaderRoute: typeof HooksCloneDeployerDeclarationReconcileRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/clone-jwt-secret-reconcile': {
+      id: '/hooks/clone-jwt-secret-reconcile'
+      path: '/hooks/clone-jwt-secret-reconcile'
+      fullPath: '/hooks/clone-jwt-secret-reconcile'
+      preLoaderRoute: typeof HooksCloneJwtSecretReconcileRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/clone-privilege-reconcile': {
+      id: '/hooks/clone-privilege-reconcile'
+      path: '/hooks/clone-privilege-reconcile'
+      fullPath: '/hooks/clone-privilege-reconcile'
+      preLoaderRoute: typeof HooksClonePrivilegeReconcileRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/clone-secret-forward-reconcile': {
+      id: '/hooks/clone-secret-forward-reconcile'
+      path: '/hooks/clone-secret-forward-reconcile'
+      fullPath: '/hooks/clone-secret-forward-reconcile'
+      preLoaderRoute: typeof HooksCloneSecretForwardReconcileRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/clone-secret-withhold': {
+      id: '/hooks/clone-secret-withhold'
+      path: '/hooks/clone-secret-withhold'
+      fullPath: '/hooks/clone-secret-withhold'
+      preLoaderRoute: typeof HooksCloneSecretWithholdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/clone-secrets-reconcile': {
+      id: '/hooks/clone-secrets-reconcile'
+      path: '/hooks/clone-secrets-reconcile'
+      fullPath: '/hooks/clone-secrets-reconcile'
+      preLoaderRoute: typeof HooksCloneSecretsReconcileRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/clone-signing-pair-reconcile': {
+      id: '/hooks/clone-signing-pair-reconcile'
+      path: '/hooks/clone-signing-pair-reconcile'
+      fullPath: '/hooks/clone-signing-pair-reconcile'
+      preLoaderRoute: typeof HooksCloneSigningPairReconcileRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/codex-nightly': {
+      id: '/hooks/codex-nightly'
+      path: '/hooks/codex-nightly'
+      fullPath: '/hooks/codex-nightly'
+      preLoaderRoute: typeof HooksCodexNightlyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/codex-sweep': {
+      id: '/hooks/codex-sweep'
+      path: '/hooks/codex-sweep'
+      fullPath: '/hooks/codex-sweep'
+      preLoaderRoute: typeof HooksCodexSweepRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/crm-sweep': {
+      id: '/hooks/crm-sweep'
+      path: '/hooks/crm-sweep'
+      fullPath: '/hooks/crm-sweep'
+      preLoaderRoute: typeof HooksCrmSweepRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/deployment-drain': {
+      id: '/hooks/deployment-drain'
+      path: '/hooks/deployment-drain'
+      fullPath: '/hooks/deployment-drain'
+      preLoaderRoute: typeof HooksDeploymentDrainRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/drift-refresh': {
+      id: '/hooks/drift-refresh'
+      path: '/hooks/drift-refresh'
+      fullPath: '/hooks/drift-refresh'
+      preLoaderRoute: typeof HooksDriftRefreshRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/edge-drain': {
+      id: '/hooks/edge-drain'
+      path: '/hooks/edge-drain'
+      fullPath: '/hooks/edge-drain'
+      preLoaderRoute: typeof HooksEdgeDrainRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/edge-drift': {
+      id: '/hooks/edge-drift'
+      path: '/hooks/edge-drift'
+      fullPath: '/hooks/edge-drift'
+      preLoaderRoute: typeof HooksEdgeDriftRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/email-bounce-scan': {
+      id: '/hooks/email-bounce-scan'
+      path: '/hooks/email-bounce-scan'
+      fullPath: '/hooks/email-bounce-scan'
+      preLoaderRoute: typeof HooksEmailBounceScanRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/email-campaign-dispatch': {
+      id: '/hooks/email-campaign-dispatch'
+      path: '/hooks/email-campaign-dispatch'
+      fullPath: '/hooks/email-campaign-dispatch'
+      preLoaderRoute: typeof HooksEmailCampaignDispatchRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/email-identity-drain': {
+      id: '/hooks/email-identity-drain'
+      path: '/hooks/email-identity-drain'
+      fullPath: '/hooks/email-identity-drain'
+      preLoaderRoute: typeof HooksEmailIdentityDrainRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/email-warmup': {
+      id: '/hooks/email-warmup'
+      path: '/hooks/email-warmup'
+      fullPath: '/hooks/email-warmup'
+      preLoaderRoute: typeof HooksEmailWarmupRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/entitlement-drain': {
+      id: '/hooks/entitlement-drain'
+      path: '/hooks/entitlement-drain'
+      fullPath: '/hooks/entitlement-drain'
+      preLoaderRoute: typeof HooksEntitlementDrainRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/expire-reservations': {
+      id: '/hooks/expire-reservations'
+      path: '/hooks/expire-reservations'
+      fullPath: '/hooks/expire-reservations'
+      preLoaderRoute: typeof HooksExpireReservationsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/feedback-forward-retry': {
+      id: '/hooks/feedback-forward-retry'
+      path: '/hooks/feedback-forward-retry'
+      fullPath: '/hooks/feedback-forward-retry'
+      preLoaderRoute: typeof HooksFeedbackForwardRetryRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/fleet-drift': {
+      id: '/hooks/fleet-drift'
+      path: '/hooks/fleet-drift'
+      fullPath: '/hooks/fleet-drift'
+      preLoaderRoute: typeof HooksFleetDriftRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/fleet-migration-drain': {
+      id: '/hooks/fleet-migration-drain'
+      path: '/hooks/fleet-migration-drain'
+      fullPath: '/hooks/fleet-migration-drain'
+      preLoaderRoute: typeof HooksFleetMigrationDrainRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/fleet-migration-sync': {
+      id: '/hooks/fleet-migration-sync'
+      path: '/hooks/fleet-migration-sync'
+      fullPath: '/hooks/fleet-migration-sync'
+      preLoaderRoute: typeof HooksFleetMigrationSyncRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/fleet-secret-forward-reconcile': {
+      id: '/hooks/fleet-secret-forward-reconcile'
+      path: '/hooks/fleet-secret-forward-reconcile'
+      fullPath: '/hooks/fleet-secret-forward-reconcile'
+      preLoaderRoute: typeof HooksFleetSecretForwardReconcileRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/github': {
+      id: '/hooks/github'
+      path: '/hooks/github'
+      fullPath: '/hooks/github'
+      preLoaderRoute: typeof HooksGithubRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/handoff-observability-poll': {
+      id: '/hooks/handoff-observability-poll'
+      path: '/hooks/handoff-observability-poll'
+      fullPath: '/hooks/handoff-observability-poll'
+      preLoaderRoute: typeof HooksHandoffObservabilityPollRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/handoff-parity-refresh': {
+      id: '/hooks/handoff-parity-refresh'
+      path: '/hooks/handoff-parity-refresh'
+      fullPath: '/hooks/handoff-parity-refresh'
+      preLoaderRoute: typeof HooksHandoffParityRefreshRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/held-file-drift': {
+      id: '/hooks/held-file-drift'
+      path: '/hooks/held-file-drift'
+      fullPath: '/hooks/held-file-drift'
+      preLoaderRoute: typeof HooksHeldFileDriftRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/lead-stage-emails': {
+      id: '/hooks/lead-stage-emails'
+      path: '/hooks/lead-stage-emails'
+      fullPath: '/hooks/lead-stage-emails'
+      preLoaderRoute: typeof HooksLeadStageEmailsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/marketing-snapshots': {
+      id: '/hooks/marketing-snapshots'
+      path: '/hooks/marketing-snapshots'
+      fullPath: '/hooks/marketing-snapshots'
+      preLoaderRoute: typeof HooksMarketingSnapshotsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/migration-drift': {
+      id: '/hooks/migration-drift'
+      path: '/hooks/migration-drift'
+      fullPath: '/hooks/migration-drift'
+      preLoaderRoute: typeof HooksMigrationDriftRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/migration-enqueue': {
+      id: '/hooks/migration-enqueue'
+      path: '/hooks/migration-enqueue'
+      fullPath: '/hooks/migration-enqueue'
+      preLoaderRoute: typeof HooksMigrationEnqueueRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/prime-secret-pairs': {
+      id: '/hooks/prime-secret-pairs'
+      path: '/hooks/prime-secret-pairs'
+      fullPath: '/hooks/prime-secret-pairs'
+      preLoaderRoute: typeof HooksPrimeSecretPairsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/reference-data-sync': {
+      id: '/hooks/reference-data-sync'
+      path: '/hooks/reference-data-sync'
+      fullPath: '/hooks/reference-data-sync'
+      preLoaderRoute: typeof HooksReferenceDataSyncRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/run-schedules': {
+      id: '/hooks/run-schedules'
+      path: '/hooks/run-schedules'
+      fullPath: '/hooks/run-schedules'
+      preLoaderRoute: typeof HooksRunSchedulesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/support-remediation-drain': {
+      id: '/hooks/support-remediation-drain'
+      path: '/hooks/support-remediation-drain'
+      fullPath: '/hooks/support-remediation-drain'
+      preLoaderRoute: typeof HooksSupportRemediationDrainRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/token-alerts': {
+      id: '/hooks/token-alerts'
+      path: '/hooks/token-alerts'
+      fullPath: '/hooks/token-alerts'
+      preLoaderRoute: typeof HooksTokenAlertsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/turnstile-reconcile': {
+      id: '/hooks/turnstile-reconcile'
+      path: '/hooks/turnstile-reconcile'
+      fullPath: '/hooks/turnstile-reconcile'
+      preLoaderRoute: typeof HooksTurnstileReconcileRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/vercel': {
+      id: '/hooks/vercel'
+      path: '/hooks/vercel'
+      fullPath: '/hooks/vercel'
+      preLoaderRoute: typeof HooksVercelRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/verification-selftest': {
+      id: '/hooks/verification-selftest'
+      path: '/hooks/verification-selftest'
+      fullPath: '/hooks/verification-selftest'
+      preLoaderRoute: typeof HooksVerificationSelftestRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/voice-automation-drain': {
+      id: '/hooks/voice-automation-drain'
+      path: '/hooks/voice-automation-drain'
+      fullPath: '/hooks/voice-automation-drain'
+      preLoaderRoute: typeof HooksVoiceAutomationDrainRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/voice-call-drain': {
+      id: '/hooks/voice-call-drain'
+      path: '/hooks/voice-call-drain'
+      fullPath: '/hooks/voice-call-drain'
+      preLoaderRoute: typeof HooksVoiceCallDrainRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/voice-outbound-dispatch': {
+      id: '/hooks/voice-outbound-dispatch'
+      path: '/hooks/voice-outbound-dispatch'
+      fullPath: '/hooks/voice-outbound-dispatch'
+      preLoaderRoute: typeof HooksVoiceOutboundDispatchRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/voice-stack-drain': {
+      id: '/hooks/voice-stack-drain'
+      path: '/hooks/voice-stack-drain'
+      fullPath: '/hooks/voice-stack-drain'
+      preLoaderRoute: typeof HooksVoiceStackDrainRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/voice-studio-deploy': {
+      id: '/hooks/voice-studio-deploy'
+      path: '/hooks/voice-studio-deploy'
+      fullPath: '/hooks/voice-studio-deploy'
+      preLoaderRoute: typeof HooksVoiceStudioDeployRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/voice-studio-plan': {
+      id: '/hooks/voice-studio-plan'
+      path: '/hooks/voice-studio-plan'
+      fullPath: '/hooks/voice-studio-plan'
+      preLoaderRoute: typeof HooksVoiceStudioPlanRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/warm-health': {
+      id: '/hooks/warm-health'
+      path: '/hooks/warm-health'
+      fullPath: '/hooks/warm-health'
+      preLoaderRoute: typeof HooksWarmHealthRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/join/$token': {
+      id: '/join/$token'
+      path: '/join/$token'
+      fullPath: '/join/$token'
+      preLoaderRoute: typeof JoinTokenRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/marketing/': {
+      id: '/marketing/'
+      path: '/'
+      fullPath: '/marketing/'
+      preLoaderRoute: typeof MarketingIndexRouteImport
+      parentRoute: typeof MarketingRoute
+    }
+    '/marketing/attribution': {
+      id: '/marketing/attribution'
+      path: '/attribution'
+      fullPath: '/marketing/attribution'
+      preLoaderRoute: typeof MarketingAttributionRouteImport
+      parentRoute: typeof MarketingRoute
+    }
+    '/marketing/briefs': {
+      id: '/marketing/briefs'
+      path: '/briefs'
+      fullPath: '/marketing/briefs'
+      preLoaderRoute: typeof MarketingBriefsRouteImport
+      parentRoute: typeof MarketingRoute
+    }
+    '/marketing/connections': {
+      id: '/marketing/connections'
+      path: '/connections'
+      fullPath: '/marketing/connections'
+      preLoaderRoute: typeof MarketingConnectionsRouteImport
+      parentRoute: typeof MarketingRoute
+    }
+    '/marketing/meta': {
+      id: '/marketing/meta'
+      path: '/meta'
+      fullPath: '/marketing/meta'
+      preLoaderRoute: typeof MarketingMetaRouteImport
+      parentRoute: typeof MarketingRoute
+    }
+    '/marketing/tiktok': {
+      id: '/marketing/tiktok'
+      path: '/tiktok'
+      fullPath: '/marketing/tiktok'
+      preLoaderRoute: typeof MarketingTiktokRouteImport
+      parentRoute: typeof MarketingRoute
+    }
+    '/marketing/youtube': {
+      id: '/marketing/youtube'
+      path: '/youtube'
+      fullPath: '/marketing/youtube'
+      preLoaderRoute: typeof MarketingYoutubeRouteImport
+      parentRoute: typeof MarketingRoute
+    }
+    '/modules/$slug': {
+      id: '/modules/$slug'
+      path: '/$slug'
+      fullPath: '/modules/$slug'
+      preLoaderRoute: typeof ModulesSlugRouteImport
+      parentRoute: typeof ModulesRoute
+    }
+    '/modules/builder': {
+      id: '/modules/builder'
+      path: '/builder'
+      fullPath: '/modules/builder'
+      preLoaderRoute: typeof ModulesBuilderRouteImport
+      parentRoute: typeof ModulesRoute
+    }
+    '/security/': {
+      id: '/security/'
+      path: '/security'
+      fullPath: '/security/'
+      preLoaderRoute: typeof SecurityIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/security/intake': {
+      id: '/security/intake'
+      path: '/security/intake'
+      fullPath: '/security/intake'
+      preLoaderRoute: typeof SecurityIntakeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/security/scans': {
+      id: '/security/scans'
+      path: '/security/scans'
+      fullPath: '/security/scans'
+      preLoaderRoute: typeof SecurityScansRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/settings/': {
+      id: '/settings/'
+      path: '/'
+      fullPath: '/settings/'
+      preLoaderRoute: typeof SettingsIndexRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/billing': {
+      id: '/settings/billing'
+      path: '/billing'
+      fullPath: '/settings/billing'
+      preLoaderRoute: typeof SettingsBillingRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/client-accounts': {
+      id: '/settings/client-accounts'
+      path: '/client-accounts'
+      fullPath: '/settings/client-accounts'
+      preLoaderRoute: typeof SettingsClientAccountsRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/clone-stripe': {
+      id: '/settings/clone-stripe'
+      path: '/clone-stripe'
+      fullPath: '/settings/clone-stripe'
+      preLoaderRoute: typeof SettingsCloneStripeRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/domains': {
+      id: '/settings/domains'
+      path: '/domains'
+      fullPath: '/settings/domains'
+      preLoaderRoute: typeof SettingsDomainsRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/gift-tokens': {
+      id: '/settings/gift-tokens'
+      path: '/gift-tokens'
+      fullPath: '/settings/gift-tokens'
+      preLoaderRoute: typeof SettingsGiftTokensRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/github-access': {
+      id: '/settings/github-access'
+      path: '/github-access'
+      fullPath: '/settings/github-access'
+      preLoaderRoute: typeof SettingsGithubAccessRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/handoff-policies': {
+      id: '/settings/handoff-policies'
+      path: '/handoff-policies'
+      fullPath: '/settings/handoff-policies'
+      preLoaderRoute: typeof SettingsHandoffPoliciesRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/handoff-terms': {
+      id: '/settings/handoff-terms'
+      path: '/handoff-terms'
+      fullPath: '/settings/handoff-terms'
+      preLoaderRoute: typeof SettingsHandoffTermsRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/invites': {
+      id: '/settings/invites'
+      path: '/invites'
+      fullPath: '/settings/invites'
+      preLoaderRoute: typeof SettingsInvitesRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/notifications': {
+      id: '/settings/notifications'
+      path: '/notifications'
+      fullPath: '/settings/notifications'
+      preLoaderRoute: typeof SettingsNotificationsRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/permission-matrix': {
+      id: '/settings/permission-matrix'
+      path: '/permission-matrix'
+      fullPath: '/settings/permission-matrix'
+      preLoaderRoute: typeof SettingsPermissionMatrixRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/provisioning-preview': {
+      id: '/settings/provisioning-preview'
+      path: '/provisioning-preview'
+      fullPath: '/settings/provisioning-preview'
+      preLoaderRoute: typeof SettingsProvisioningPreviewRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/role-audit': {
+      id: '/settings/role-audit'
+      path: '/role-audit'
+      fullPath: '/settings/role-audit'
+      preLoaderRoute: typeof SettingsRoleAuditRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/roles': {
+      id: '/settings/roles'
+      path: '/roles'
+      fullPath: '/settings/roles'
+      preLoaderRoute: typeof SettingsRolesRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/support/tickets': {
+      id: '/support/tickets'
+      path: '/support/tickets'
+      fullPath: '/support/tickets'
+      preLoaderRoute: typeof SupportTicketsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/voice/agents': {
+      id: '/voice/agents'
+      path: '/voice/agents'
+      fullPath: '/voice/agents'
+      preLoaderRoute: typeof VoiceAgentsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/voice/calls': {
+      id: '/voice/calls'
+      path: '/voice/calls'
+      fullPath: '/voice/calls'
+      preLoaderRoute: typeof VoiceCallsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/voice/outbound': {
+      id: '/voice/outbound'
+      path: '/voice/outbound'
+      fullPath: '/voice/outbound'
+      preLoaderRoute: typeof VoiceOutboundRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/voice/phone': {
+      id: '/voice/phone'
+      path: '/voice/phone'
+      fullPath: '/voice/phone'
+      preLoaderRoute: typeof VoicePhoneRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/public/purchases': {
@@ -4162,410 +4113,53 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicPurchasesRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/api/public/voice/webhook': {
-      id: '/api/public/voice/webhook'
-      path: '/api/public/voice/webhook'
-      fullPath: '/api/public/voice/webhook'
-      preLoaderRoute: typeof ApiPublicVoiceWebhookRouteImport
+    '/clients/handoff/$token': {
+      id: '/clients/handoff/$token'
+      path: '/clients/handoff/$token'
+      fullPath: '/clients/handoff/$token'
+      preLoaderRoute: typeof ClientsHandoffTokenRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/api/public/voice-automation/$operation': {
-      id: '/api/public/voice-automation/$operation'
-      path: '/api/public/voice-automation/$operation'
-      fullPath: '/api/public/voice-automation/$operation'
-      preLoaderRoute: typeof ApiPublicVoiceAutomationOperationRouteImport
+    '/clones/$cloneId/secrets': {
+      id: '/clones/$cloneId/secrets'
+      path: '/secrets'
+      fullPath: '/clones/$cloneId/secrets'
+      preLoaderRoute: typeof ClonesCloneIdSecretsRouteImport
+      parentRoute: typeof ClonesCloneIdRoute
+    }
+    '/crm/accounts/': {
+      id: '/crm/accounts/'
+      path: '/crm/accounts'
+      fullPath: '/crm/accounts/'
+      preLoaderRoute: typeof CrmAccountsIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/api/public/verification/$operation': {
-      id: '/api/public/verification/$operation'
-      path: '/api/public/verification/$operation'
-      fullPath: '/api/public/verification/$operation'
-      preLoaderRoute: typeof ApiPublicVerificationOperationRouteImport
+    '/crm/accounts/$accountId': {
+      id: '/crm/accounts/$accountId'
+      path: '/crm/accounts/$accountId'
+      fullPath: '/crm/accounts/$accountId'
+      preLoaderRoute: typeof CrmAccountsAccountIdRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/api/public/usage/report': {
-      id: '/api/public/usage/report'
-      path: '/api/public/usage/report'
-      fullPath: '/api/public/usage/report'
-      preLoaderRoute: typeof ApiPublicUsageReportRouteImport
+    '/email/campaigns/$campaignId': {
+      id: '/email/campaigns/$campaignId'
+      path: '/email/campaigns/$campaignId'
+      fullPath: '/email/campaigns/$campaignId'
+      preLoaderRoute: typeof EmailCampaignsCampaignIdRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/api/public/tokens/reserve': {
-      id: '/api/public/tokens/reserve'
-      path: '/api/public/tokens/reserve'
-      fullPath: '/api/public/tokens/reserve'
-      preLoaderRoute: typeof ApiPublicTokensReserveRouteImport
+    '/voice/studio/': {
+      id: '/voice/studio/'
+      path: '/voice/studio'
+      fullPath: '/voice/studio/'
+      preLoaderRoute: typeof VoiceStudioIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/api/public/tokens/plan-change': {
-      id: '/api/public/tokens/plan-change'
-      path: '/api/public/tokens/plan-change'
-      fullPath: '/api/public/tokens/plan-change'
-      preLoaderRoute: typeof ApiPublicTokensPlanChangeRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/tokens/packs': {
-      id: '/api/public/tokens/packs'
-      path: '/api/public/tokens/packs'
-      fullPath: '/api/public/tokens/packs'
-      preLoaderRoute: typeof ApiPublicTokensPacksRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/tokens/feedback-prompt': {
-      id: '/api/public/tokens/feedback-prompt'
-      path: '/api/public/tokens/feedback-prompt'
-      fullPath: '/api/public/tokens/feedback-prompt'
-      preLoaderRoute: typeof ApiPublicTokensFeedbackPromptRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/tokens/commit': {
-      id: '/api/public/tokens/commit'
-      path: '/api/public/tokens/commit'
-      fullPath: '/api/public/tokens/commit'
-      preLoaderRoute: typeof ApiPublicTokensCommitRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/tokens/cancel': {
-      id: '/api/public/tokens/cancel'
-      path: '/api/public/tokens/cancel'
-      fullPath: '/api/public/tokens/cancel'
-      preLoaderRoute: typeof ApiPublicTokensCancelRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/tokens/balance': {
-      id: '/api/public/tokens/balance'
-      path: '/api/public/tokens/balance'
-      fullPath: '/api/public/tokens/balance'
-      preLoaderRoute: typeof ApiPublicTokensBalanceRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/telephony/voice': {
-      id: '/api/public/telephony/voice'
-      path: '/api/public/telephony/voice'
-      fullPath: '/api/public/telephony/voice'
-      preLoaderRoute: typeof ApiPublicTelephonyVoiceRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/telephony/status': {
-      id: '/api/public/telephony/status'
-      path: '/api/public/telephony/status'
-      fullPath: '/api/public/telephony/status'
-      preLoaderRoute: typeof ApiPublicTelephonyStatusRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/telephony/incoming': {
-      id: '/api/public/telephony/incoming'
-      path: '/api/public/telephony/incoming'
-      fullPath: '/api/public/telephony/incoming'
-      preLoaderRoute: typeof ApiPublicTelephonyIncomingRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/support/tickets': {
-      id: '/api/public/support/tickets'
-      path: '/api/public/support/tickets'
-      fullPath: '/api/public/support/tickets'
-      preLoaderRoute: typeof ApiPublicSupportTicketsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/support/assistant-activity': {
-      id: '/api/public/support/assistant-activity'
-      path: '/api/public/support/assistant-activity'
-      fullPath: '/api/public/support/assistant-activity'
-      preLoaderRoute: typeof ApiPublicSupportAssistantActivityRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/stripe/webhook': {
-      id: '/api/public/stripe/webhook'
-      path: '/api/public/stripe/webhook'
-      fullPath: '/api/public/stripe/webhook'
-      preLoaderRoute: typeof ApiPublicStripeWebhookRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/storefront/wallet': {
-      id: '/api/public/storefront/wallet'
-      path: '/api/public/storefront/wallet'
-      fullPath: '/api/public/storefront/wallet'
-      preLoaderRoute: typeof ApiPublicStorefrontWalletRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/storefront/strategic-review': {
-      id: '/api/public/storefront/strategic-review'
-      path: '/api/public/storefront/strategic-review'
-      fullPath: '/api/public/storefront/strategic-review'
-      preLoaderRoute: typeof ApiPublicStorefrontStrategicReviewRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/storefront/setup': {
-      id: '/api/public/storefront/setup'
-      path: '/api/public/storefront/setup'
-      fullPath: '/api/public/storefront/setup'
-      preLoaderRoute: typeof ApiPublicStorefrontSetupRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/storefront/session': {
-      id: '/api/public/storefront/session'
-      path: '/api/public/storefront/session'
-      fullPath: '/api/public/storefront/session'
-      preLoaderRoute: typeof ApiPublicStorefrontSessionRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/storefront/plan-change': {
-      id: '/api/public/storefront/plan-change'
-      path: '/api/public/storefront/plan-change'
-      fullPath: '/api/public/storefront/plan-change'
-      preLoaderRoute: typeof ApiPublicStorefrontPlanChangeRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/storefront/identity': {
-      id: '/api/public/storefront/identity'
-      path: '/api/public/storefront/identity'
-      fullPath: '/api/public/storefront/identity'
-      preLoaderRoute: typeof ApiPublicStorefrontIdentityRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/storefront/handoff': {
-      id: '/api/public/storefront/handoff'
-      path: '/api/public/storefront/handoff'
-      fullPath: '/api/public/storefront/handoff'
-      preLoaderRoute: typeof ApiPublicStorefrontHandoffRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/storefront/feedback': {
-      id: '/api/public/storefront/feedback'
-      path: '/api/public/storefront/feedback'
-      fullPath: '/api/public/storefront/feedback'
-      preLoaderRoute: typeof ApiPublicStorefrontFeedbackRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/storefront/checkout': {
-      id: '/api/public/storefront/checkout'
-      path: '/api/public/storefront/checkout'
-      fullPath: '/api/public/storefront/checkout'
-      preLoaderRoute: typeof ApiPublicStorefrontCheckoutRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/storefront/catalog': {
-      id: '/api/public/storefront/catalog'
-      path: '/api/public/storefront/catalog'
-      fullPath: '/api/public/storefront/catalog'
-      preLoaderRoute: typeof ApiPublicStorefrontCatalogRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/storefront/access': {
-      id: '/api/public/storefront/access'
-      path: '/api/public/storefront/access'
-      fullPath: '/api/public/storefront/access'
-      preLoaderRoute: typeof ApiPublicStorefrontAccessRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/security/intake': {
-      id: '/api/public/security/intake'
-      path: '/api/public/security/intake'
-      fullPath: '/api/public/security/intake'
-      preLoaderRoute: typeof ApiPublicSecurityIntakeRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/seats/reserve': {
-      id: '/api/public/seats/reserve'
-      path: '/api/public/seats/reserve'
-      fullPath: '/api/public/seats/reserve'
-      preLoaderRoute: typeof ApiPublicSeatsReserveRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/seats/release': {
-      id: '/api/public/seats/release'
-      path: '/api/public/seats/release'
-      fullPath: '/api/public/seats/release'
-      preLoaderRoute: typeof ApiPublicSeatsReleaseRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/seats/list': {
-      id: '/api/public/seats/list'
-      path: '/api/public/seats/list'
-      fullPath: '/api/public/seats/list'
-      preLoaderRoute: typeof ApiPublicSeatsListRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/seats/entitlement': {
-      id: '/api/public/seats/entitlement'
-      path: '/api/public/seats/entitlement'
-      fullPath: '/api/public/seats/entitlement'
-      preLoaderRoute: typeof ApiPublicSeatsEntitlementRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/seats/commit': {
-      id: '/api/public/seats/commit'
-      path: '/api/public/seats/commit'
-      fullPath: '/api/public/seats/commit'
-      preLoaderRoute: typeof ApiPublicSeatsCommitRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/pricing/catalog': {
-      id: '/api/public/pricing/catalog'
-      path: '/api/public/pricing/catalog'
-      fullPath: '/api/public/pricing/catalog'
-      preLoaderRoute: typeof ApiPublicPricingCatalogRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/listings/$operation': {
-      id: '/api/public/listings/$operation'
-      path: '/api/public/listings/$operation'
-      fullPath: '/api/public/listings/$operation'
-      preLoaderRoute: typeof ApiPublicListingsOperationRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/leads/capture': {
-      id: '/api/public/leads/capture'
-      path: '/api/public/leads/capture'
-      fullPath: '/api/public/leads/capture'
-      preLoaderRoute: typeof ApiPublicLeadsCaptureRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/integrations/secrets': {
-      id: '/api/public/integrations/secrets'
-      path: '/api/public/integrations/secrets'
-      fullPath: '/api/public/integrations/secrets'
-      preLoaderRoute: typeof ApiPublicIntegrationsSecretsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/hooks/docusign': {
-      id: '/api/public/hooks/docusign'
-      path: '/api/public/hooks/docusign'
-      fullPath: '/api/public/hooks/docusign'
-      preLoaderRoute: typeof ApiPublicHooksDocusignRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/hooks/codex-security': {
-      id: '/api/public/hooks/codex-security'
-      path: '/api/public/hooks/codex-security'
-      fullPath: '/api/public/hooks/codex-security'
-      preLoaderRoute: typeof ApiPublicHooksCodexSecurityRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/hooks/codex-remediation': {
-      id: '/api/public/hooks/codex-remediation'
-      path: '/api/public/hooks/codex-remediation'
-      fullPath: '/api/public/hooks/codex-remediation'
-      preLoaderRoute: typeof ApiPublicHooksCodexRemediationRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/hooks/calcom': {
-      id: '/api/public/hooks/calcom'
-      path: '/api/public/hooks/calcom'
-      fullPath: '/api/public/hooks/calcom'
-      preLoaderRoute: typeof ApiPublicHooksCalcomRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/handoffs/consent': {
-      id: '/api/public/handoffs/consent'
-      path: '/api/public/handoffs/consent'
-      fullPath: '/api/public/handoffs/consent'
-      preLoaderRoute: typeof ApiPublicHandoffsConsentRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/handoff/beacon': {
-      id: '/api/public/handoff/beacon'
-      path: '/api/public/handoff/beacon'
-      fullPath: '/api/public/handoff/beacon'
-      preLoaderRoute: typeof ApiPublicHandoffBeaconRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/handoff/audit-ingest': {
-      id: '/api/public/handoff/audit-ingest'
-      path: '/api/public/handoff/audit-ingest'
-      fullPath: '/api/public/handoff/audit-ingest'
-      preLoaderRoute: typeof ApiPublicHandoffAuditIngestRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/email/unsubscribe': {
-      id: '/api/public/email/unsubscribe'
-      path: '/api/public/email/unsubscribe'
-      fullPath: '/api/public/email/unsubscribe'
-      preLoaderRoute: typeof ApiPublicEmailUnsubscribeRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/edge/status': {
-      id: '/api/public/edge/status'
-      path: '/api/public/edge/status'
-      fullPath: '/api/public/edge/status'
-      preLoaderRoute: typeof ApiPublicEdgeStatusRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/clones/rotate-key': {
-      id: '/api/public/clones/rotate-key'
-      path: '/api/public/clones/rotate-key'
-      fullPath: '/api/public/clones/rotate-key'
-      preLoaderRoute: typeof ApiPublicClonesRotateKeyRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/clones/gate': {
-      id: '/api/public/clones/gate'
-      path: '/api/public/clones/gate'
-      fullPath: '/api/public/clones/gate'
-      preLoaderRoute: typeof ApiPublicClonesGateRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/clones/announcements': {
-      id: '/api/public/clones/announcements'
-      path: '/api/public/clones/announcements'
-      fullPath: '/api/public/clones/announcements'
-      preLoaderRoute: typeof ApiPublicClonesAnnouncementsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/builders/jwks': {
-      id: '/api/public/builders/jwks'
-      path: '/api/public/builders/jwks'
-      fullPath: '/api/public/builders/jwks'
-      preLoaderRoute: typeof ApiPublicBuildersJwksRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/builders/identity': {
-      id: '/api/public/builders/identity'
-      path: '/api/public/builders/identity'
-      fullPath: '/api/public/builders/identity'
-      preLoaderRoute: typeof ApiPublicBuildersIdentityRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/builders/apply': {
-      id: '/api/public/builders/apply'
-      path: '/api/public/builders/apply'
-      fullPath: '/api/public/builders/apply'
-      preLoaderRoute: typeof ApiPublicBuildersApplyRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/billing/payment-methods': {
-      id: '/api/public/billing/payment-methods'
-      path: '/api/public/billing/payment-methods'
-      fullPath: '/api/public/billing/payment-methods'
-      preLoaderRoute: typeof ApiPublicBillingPaymentMethodsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/billing/invoices': {
-      id: '/api/public/billing/invoices'
-      path: '/api/public/billing/invoices'
-      fullPath: '/api/public/billing/invoices'
-      preLoaderRoute: typeof ApiPublicBillingInvoicesRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/billing/invoice-pdf': {
-      id: '/api/public/billing/invoice-pdf'
-      path: '/api/public/billing/invoice-pdf'
-      fullPath: '/api/public/billing/invoice-pdf'
-      preLoaderRoute: typeof ApiPublicBillingInvoicePdfRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/billing/handoff': {
-      id: '/api/public/billing/handoff'
-      path: '/api/public/billing/handoff'
-      fullPath: '/api/public/billing/handoff'
-      preLoaderRoute: typeof ApiPublicBillingHandoffRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/public/anthropic/jwks': {
-      id: '/api/public/anthropic/jwks'
-      path: '/api/public/anthropic/jwks'
-      fullPath: '/api/public/anthropic/jwks'
-      preLoaderRoute: typeof ApiPublicAnthropicJwksRouteImport
+    '/voice/studio/$projectId': {
+      id: '/voice/studio/$projectId'
+      path: '/voice/studio/$projectId'
+      fullPath: '/voice/studio/$projectId'
+      preLoaderRoute: typeof VoiceStudioProjectIdRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/public/anthropic/identity': {
@@ -4575,25 +4169,424 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicAnthropicIdentityRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/api/public/stripe/webhook/$cloneId': {
-      id: '/api/public/stripe/webhook/$cloneId'
-      path: '/$cloneId'
-      fullPath: '/api/public/stripe/webhook/$cloneId'
-      preLoaderRoute: typeof ApiPublicStripeWebhookCloneIdRouteImport
-      parentRoute: typeof ApiPublicStripeWebhookRoute
-    }
-    '/api/public/seats/devices/release': {
-      id: '/api/public/seats/devices/release'
-      path: '/api/public/seats/devices/release'
-      fullPath: '/api/public/seats/devices/release'
-      preLoaderRoute: typeof ApiPublicSeatsDevicesReleaseRouteImport
+    '/api/public/anthropic/jwks': {
+      id: '/api/public/anthropic/jwks'
+      path: '/api/public/anthropic/jwks'
+      fullPath: '/api/public/anthropic/jwks'
+      preLoaderRoute: typeof ApiPublicAnthropicJwksRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/api/public/seats/devices/register': {
-      id: '/api/public/seats/devices/register'
-      path: '/api/public/seats/devices/register'
-      fullPath: '/api/public/seats/devices/register'
-      preLoaderRoute: typeof ApiPublicSeatsDevicesRegisterRouteImport
+    '/api/public/billing/handoff': {
+      id: '/api/public/billing/handoff'
+      path: '/api/public/billing/handoff'
+      fullPath: '/api/public/billing/handoff'
+      preLoaderRoute: typeof ApiPublicBillingHandoffRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/billing/invoice-pdf': {
+      id: '/api/public/billing/invoice-pdf'
+      path: '/api/public/billing/invoice-pdf'
+      fullPath: '/api/public/billing/invoice-pdf'
+      preLoaderRoute: typeof ApiPublicBillingInvoicePdfRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/billing/invoices': {
+      id: '/api/public/billing/invoices'
+      path: '/api/public/billing/invoices'
+      fullPath: '/api/public/billing/invoices'
+      preLoaderRoute: typeof ApiPublicBillingInvoicesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/billing/payment-methods': {
+      id: '/api/public/billing/payment-methods'
+      path: '/api/public/billing/payment-methods'
+      fullPath: '/api/public/billing/payment-methods'
+      preLoaderRoute: typeof ApiPublicBillingPaymentMethodsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/builders/apply': {
+      id: '/api/public/builders/apply'
+      path: '/api/public/builders/apply'
+      fullPath: '/api/public/builders/apply'
+      preLoaderRoute: typeof ApiPublicBuildersApplyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/builders/identity': {
+      id: '/api/public/builders/identity'
+      path: '/api/public/builders/identity'
+      fullPath: '/api/public/builders/identity'
+      preLoaderRoute: typeof ApiPublicBuildersIdentityRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/builders/jwks': {
+      id: '/api/public/builders/jwks'
+      path: '/api/public/builders/jwks'
+      fullPath: '/api/public/builders/jwks'
+      preLoaderRoute: typeof ApiPublicBuildersJwksRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/clones/announcements': {
+      id: '/api/public/clones/announcements'
+      path: '/api/public/clones/announcements'
+      fullPath: '/api/public/clones/announcements'
+      preLoaderRoute: typeof ApiPublicClonesAnnouncementsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/clones/gate': {
+      id: '/api/public/clones/gate'
+      path: '/api/public/clones/gate'
+      fullPath: '/api/public/clones/gate'
+      preLoaderRoute: typeof ApiPublicClonesGateRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/clones/rotate-key': {
+      id: '/api/public/clones/rotate-key'
+      path: '/api/public/clones/rotate-key'
+      fullPath: '/api/public/clones/rotate-key'
+      preLoaderRoute: typeof ApiPublicClonesRotateKeyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/edge/status': {
+      id: '/api/public/edge/status'
+      path: '/api/public/edge/status'
+      fullPath: '/api/public/edge/status'
+      preLoaderRoute: typeof ApiPublicEdgeStatusRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/email/unsubscribe': {
+      id: '/api/public/email/unsubscribe'
+      path: '/api/public/email/unsubscribe'
+      fullPath: '/api/public/email/unsubscribe'
+      preLoaderRoute: typeof ApiPublicEmailUnsubscribeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/handoff/audit-ingest': {
+      id: '/api/public/handoff/audit-ingest'
+      path: '/api/public/handoff/audit-ingest'
+      fullPath: '/api/public/handoff/audit-ingest'
+      preLoaderRoute: typeof ApiPublicHandoffAuditIngestRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/handoff/beacon': {
+      id: '/api/public/handoff/beacon'
+      path: '/api/public/handoff/beacon'
+      fullPath: '/api/public/handoff/beacon'
+      preLoaderRoute: typeof ApiPublicHandoffBeaconRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/handoffs/consent': {
+      id: '/api/public/handoffs/consent'
+      path: '/api/public/handoffs/consent'
+      fullPath: '/api/public/handoffs/consent'
+      preLoaderRoute: typeof ApiPublicHandoffsConsentRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/hooks/calcom': {
+      id: '/api/public/hooks/calcom'
+      path: '/api/public/hooks/calcom'
+      fullPath: '/api/public/hooks/calcom'
+      preLoaderRoute: typeof ApiPublicHooksCalcomRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/hooks/codex-remediation': {
+      id: '/api/public/hooks/codex-remediation'
+      path: '/api/public/hooks/codex-remediation'
+      fullPath: '/api/public/hooks/codex-remediation'
+      preLoaderRoute: typeof ApiPublicHooksCodexRemediationRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/hooks/codex-security': {
+      id: '/api/public/hooks/codex-security'
+      path: '/api/public/hooks/codex-security'
+      fullPath: '/api/public/hooks/codex-security'
+      preLoaderRoute: typeof ApiPublicHooksCodexSecurityRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/hooks/docusign': {
+      id: '/api/public/hooks/docusign'
+      path: '/api/public/hooks/docusign'
+      fullPath: '/api/public/hooks/docusign'
+      preLoaderRoute: typeof ApiPublicHooksDocusignRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/integrations/secrets': {
+      id: '/api/public/integrations/secrets'
+      path: '/api/public/integrations/secrets'
+      fullPath: '/api/public/integrations/secrets'
+      preLoaderRoute: typeof ApiPublicIntegrationsSecretsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/leads/capture': {
+      id: '/api/public/leads/capture'
+      path: '/api/public/leads/capture'
+      fullPath: '/api/public/leads/capture'
+      preLoaderRoute: typeof ApiPublicLeadsCaptureRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/listings/$operation': {
+      id: '/api/public/listings/$operation'
+      path: '/api/public/listings/$operation'
+      fullPath: '/api/public/listings/$operation'
+      preLoaderRoute: typeof ApiPublicListingsOperationRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/pricing/catalog': {
+      id: '/api/public/pricing/catalog'
+      path: '/api/public/pricing/catalog'
+      fullPath: '/api/public/pricing/catalog'
+      preLoaderRoute: typeof ApiPublicPricingCatalogRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/seats/commit': {
+      id: '/api/public/seats/commit'
+      path: '/api/public/seats/commit'
+      fullPath: '/api/public/seats/commit'
+      preLoaderRoute: typeof ApiPublicSeatsCommitRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/seats/entitlement': {
+      id: '/api/public/seats/entitlement'
+      path: '/api/public/seats/entitlement'
+      fullPath: '/api/public/seats/entitlement'
+      preLoaderRoute: typeof ApiPublicSeatsEntitlementRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/seats/list': {
+      id: '/api/public/seats/list'
+      path: '/api/public/seats/list'
+      fullPath: '/api/public/seats/list'
+      preLoaderRoute: typeof ApiPublicSeatsListRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/seats/release': {
+      id: '/api/public/seats/release'
+      path: '/api/public/seats/release'
+      fullPath: '/api/public/seats/release'
+      preLoaderRoute: typeof ApiPublicSeatsReleaseRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/seats/reserve': {
+      id: '/api/public/seats/reserve'
+      path: '/api/public/seats/reserve'
+      fullPath: '/api/public/seats/reserve'
+      preLoaderRoute: typeof ApiPublicSeatsReserveRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/security/intake': {
+      id: '/api/public/security/intake'
+      path: '/api/public/security/intake'
+      fullPath: '/api/public/security/intake'
+      preLoaderRoute: typeof ApiPublicSecurityIntakeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/storefront/access': {
+      id: '/api/public/storefront/access'
+      path: '/api/public/storefront/access'
+      fullPath: '/api/public/storefront/access'
+      preLoaderRoute: typeof ApiPublicStorefrontAccessRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/storefront/catalog': {
+      id: '/api/public/storefront/catalog'
+      path: '/api/public/storefront/catalog'
+      fullPath: '/api/public/storefront/catalog'
+      preLoaderRoute: typeof ApiPublicStorefrontCatalogRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/storefront/checkout': {
+      id: '/api/public/storefront/checkout'
+      path: '/api/public/storefront/checkout'
+      fullPath: '/api/public/storefront/checkout'
+      preLoaderRoute: typeof ApiPublicStorefrontCheckoutRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/storefront/feedback': {
+      id: '/api/public/storefront/feedback'
+      path: '/api/public/storefront/feedback'
+      fullPath: '/api/public/storefront/feedback'
+      preLoaderRoute: typeof ApiPublicStorefrontFeedbackRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/storefront/handoff': {
+      id: '/api/public/storefront/handoff'
+      path: '/api/public/storefront/handoff'
+      fullPath: '/api/public/storefront/handoff'
+      preLoaderRoute: typeof ApiPublicStorefrontHandoffRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/storefront/identity': {
+      id: '/api/public/storefront/identity'
+      path: '/api/public/storefront/identity'
+      fullPath: '/api/public/storefront/identity'
+      preLoaderRoute: typeof ApiPublicStorefrontIdentityRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/storefront/plan-change': {
+      id: '/api/public/storefront/plan-change'
+      path: '/api/public/storefront/plan-change'
+      fullPath: '/api/public/storefront/plan-change'
+      preLoaderRoute: typeof ApiPublicStorefrontPlanChangeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/storefront/session': {
+      id: '/api/public/storefront/session'
+      path: '/api/public/storefront/session'
+      fullPath: '/api/public/storefront/session'
+      preLoaderRoute: typeof ApiPublicStorefrontSessionRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/storefront/setup': {
+      id: '/api/public/storefront/setup'
+      path: '/api/public/storefront/setup'
+      fullPath: '/api/public/storefront/setup'
+      preLoaderRoute: typeof ApiPublicStorefrontSetupRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/storefront/strategic-review': {
+      id: '/api/public/storefront/strategic-review'
+      path: '/api/public/storefront/strategic-review'
+      fullPath: '/api/public/storefront/strategic-review'
+      preLoaderRoute: typeof ApiPublicStorefrontStrategicReviewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/storefront/wallet': {
+      id: '/api/public/storefront/wallet'
+      path: '/api/public/storefront/wallet'
+      fullPath: '/api/public/storefront/wallet'
+      preLoaderRoute: typeof ApiPublicStorefrontWalletRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/stripe/webhook': {
+      id: '/api/public/stripe/webhook'
+      path: '/api/public/stripe/webhook'
+      fullPath: '/api/public/stripe/webhook'
+      preLoaderRoute: typeof ApiPublicStripeWebhookRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/support/assistant-activity': {
+      id: '/api/public/support/assistant-activity'
+      path: '/api/public/support/assistant-activity'
+      fullPath: '/api/public/support/assistant-activity'
+      preLoaderRoute: typeof ApiPublicSupportAssistantActivityRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/support/tickets': {
+      id: '/api/public/support/tickets'
+      path: '/api/public/support/tickets'
+      fullPath: '/api/public/support/tickets'
+      preLoaderRoute: typeof ApiPublicSupportTicketsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/telephony/incoming': {
+      id: '/api/public/telephony/incoming'
+      path: '/api/public/telephony/incoming'
+      fullPath: '/api/public/telephony/incoming'
+      preLoaderRoute: typeof ApiPublicTelephonyIncomingRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/telephony/status': {
+      id: '/api/public/telephony/status'
+      path: '/api/public/telephony/status'
+      fullPath: '/api/public/telephony/status'
+      preLoaderRoute: typeof ApiPublicTelephonyStatusRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/telephony/voice': {
+      id: '/api/public/telephony/voice'
+      path: '/api/public/telephony/voice'
+      fullPath: '/api/public/telephony/voice'
+      preLoaderRoute: typeof ApiPublicTelephonyVoiceRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/tokens/balance': {
+      id: '/api/public/tokens/balance'
+      path: '/api/public/tokens/balance'
+      fullPath: '/api/public/tokens/balance'
+      preLoaderRoute: typeof ApiPublicTokensBalanceRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/tokens/cancel': {
+      id: '/api/public/tokens/cancel'
+      path: '/api/public/tokens/cancel'
+      fullPath: '/api/public/tokens/cancel'
+      preLoaderRoute: typeof ApiPublicTokensCancelRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/tokens/commit': {
+      id: '/api/public/tokens/commit'
+      path: '/api/public/tokens/commit'
+      fullPath: '/api/public/tokens/commit'
+      preLoaderRoute: typeof ApiPublicTokensCommitRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/tokens/feedback-prompt': {
+      id: '/api/public/tokens/feedback-prompt'
+      path: '/api/public/tokens/feedback-prompt'
+      fullPath: '/api/public/tokens/feedback-prompt'
+      preLoaderRoute: typeof ApiPublicTokensFeedbackPromptRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/tokens/packs': {
+      id: '/api/public/tokens/packs'
+      path: '/api/public/tokens/packs'
+      fullPath: '/api/public/tokens/packs'
+      preLoaderRoute: typeof ApiPublicTokensPacksRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/tokens/plan-change': {
+      id: '/api/public/tokens/plan-change'
+      path: '/api/public/tokens/plan-change'
+      fullPath: '/api/public/tokens/plan-change'
+      preLoaderRoute: typeof ApiPublicTokensPlanChangeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/tokens/reserve': {
+      id: '/api/public/tokens/reserve'
+      path: '/api/public/tokens/reserve'
+      fullPath: '/api/public/tokens/reserve'
+      preLoaderRoute: typeof ApiPublicTokensReserveRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/usage/report': {
+      id: '/api/public/usage/report'
+      path: '/api/public/usage/report'
+      fullPath: '/api/public/usage/report'
+      preLoaderRoute: typeof ApiPublicUsageReportRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/verification/$operation': {
+      id: '/api/public/verification/$operation'
+      path: '/api/public/verification/$operation'
+      fullPath: '/api/public/verification/$operation'
+      preLoaderRoute: typeof ApiPublicVerificationOperationRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/voice-automation/$operation': {
+      id: '/api/public/voice-automation/$operation'
+      path: '/api/public/voice-automation/$operation'
+      fullPath: '/api/public/voice-automation/$operation'
+      preLoaderRoute: typeof ApiPublicVoiceAutomationOperationRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/voice/webhook': {
+      id: '/api/public/voice/webhook'
+      path: '/api/public/voice/webhook'
+      fullPath: '/api/public/voice/webhook'
+      preLoaderRoute: typeof ApiPublicVoiceWebhookRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/clones/gate/checkout': {
+      id: '/api/public/clones/gate/checkout'
+      path: '/checkout'
+      fullPath: '/api/public/clones/gate/checkout'
+      preLoaderRoute: typeof ApiPublicClonesGateCheckoutRouteImport
+      parentRoute: typeof ApiPublicClonesGateRoute
+    }
+    '/api/public/seats/devices/heartbeat': {
+      id: '/api/public/seats/devices/heartbeat'
+      path: '/api/public/seats/devices/heartbeat'
+      fullPath: '/api/public/seats/devices/heartbeat'
+      preLoaderRoute: typeof ApiPublicSeatsDevicesHeartbeatRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/public/seats/devices/list': {
@@ -4603,19 +4596,26 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicSeatsDevicesListRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/api/public/seats/devices/heartbeat': {
-      id: '/api/public/seats/devices/heartbeat'
-      path: '/api/public/seats/devices/heartbeat'
-      fullPath: '/api/public/seats/devices/heartbeat'
-      preLoaderRoute: typeof ApiPublicSeatsDevicesHeartbeatRouteImport
+    '/api/public/seats/devices/register': {
+      id: '/api/public/seats/devices/register'
+      path: '/api/public/seats/devices/register'
+      fullPath: '/api/public/seats/devices/register'
+      preLoaderRoute: typeof ApiPublicSeatsDevicesRegisterRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/api/public/clones/gate/checkout': {
-      id: '/api/public/clones/gate/checkout'
-      path: '/checkout'
-      fullPath: '/api/public/clones/gate/checkout'
-      preLoaderRoute: typeof ApiPublicClonesGateCheckoutRouteImport
-      parentRoute: typeof ApiPublicClonesGateRoute
+    '/api/public/seats/devices/release': {
+      id: '/api/public/seats/devices/release'
+      path: '/api/public/seats/devices/release'
+      fullPath: '/api/public/seats/devices/release'
+      preLoaderRoute: typeof ApiPublicSeatsDevicesReleaseRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/stripe/webhook/$cloneId': {
+      id: '/api/public/stripe/webhook/$cloneId'
+      path: '/$cloneId'
+      fullPath: '/api/public/stripe/webhook/$cloneId'
+      preLoaderRoute: typeof ApiPublicStripeWebhookCloneIdRouteImport
+      parentRoute: typeof ApiPublicStripeWebhookRoute
     }
     '/api/public/voice/t/$tenantKey/webhook': {
       id: '/api/public/voice/t/$tenantKey/webhook'
