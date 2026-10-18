@@ -921,6 +921,21 @@ jobs:
           const ENV_NAME = /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/;
           const HEX_DIGEST = /^(?:[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64}|[0-9a-f]{128})$/;
           const PLACEHOLDER = /^(?:x{6,}|\*{6,}|(?:your|my)[-_]?[a-z_-]*|change[-_]?me\w*|example\w*|dummy\w*|fake\w*|placeholder\w*|sample\w*|redacted\w*)$/i;
+          // Keys made to be shipped to a browser: Stripe publishable, PostHog project,
+          // Mapbox public token.
+          const PUBLISHABLE = /^(?:pk_(?:live|test)_|phc_|pk\.eyJ)/;
+          // What the generic rule matched is named like a credential, not merely like
+          // something with "key", "api", "auth" or "access" in it.
+          const CREDENTIAL_NAME = /secret|token|passw(?:or)?d|pwd|bearer|credential|private|api[_-]?key/i;
+          // Shannon entropy per character: random credentials sit near 4 (hex) to 6
+          // (base64); words, paths and ids well below.
+          function entropy(v) {
+            const n = new Map();
+            for (const c of v) n.set(c, (n.get(c) ?? 0) + 1);
+            let h = 0;
+            for (const k of n.values()) h -= (k / v.length) * Math.log2(k / v.length);
+            return h;
+          }
 
           function gitleaksVerdict(g, file, span, blockText) {
             const rule = g.RuleID || "secret";
@@ -965,8 +980,24 @@ jobs:
               if (value && PLACEHOLDER.test(value)) {
                 return { severity: "low", note: "The matched value looks like a placeholder." };
               }
+              if (value && PUBLISHABLE.test(value)) {
+                return {
+                  severity: "info",
+                  note: "A publishable key (Stripe, PostHog or Mapbox) — public by design. Dismiss it once you have confirmed that.",
+                };
+              }
               if (TEST_PATH.test(file ?? "")) {
                 return { severity: "low", note: "In a test file — usually a fixture. Confirm it is not a live credential." };
+              }
+              // What is left has survived every demotion above. Named like a credential
+              // and random-looking, it is most likely a live one — on this platform's
+              // own history, exactly one such hit: a cron bearer token in a migration.
+              const name = String(span ?? "").slice(0, Math.max(0, String(span ?? "").lastIndexOf(value ?? "\0")));
+              if (value && value.length >= 20 && entropy(value) >= 3.5 && CREDENTIAL_NAME.test(name)) {
+                return {
+                  severity: "high",
+                  note: "Named like a credential and random-looking: treat it as live until you have confirmed otherwise, and rotate it if it ever was.",
+                };
               }
               return { severity: "medium", note: "Matched by the generic rule, which has a high false-positive rate." };
             }

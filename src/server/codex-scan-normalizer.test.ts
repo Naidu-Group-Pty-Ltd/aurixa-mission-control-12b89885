@@ -184,7 +184,10 @@ describe("gitleaks severity", () => {
     `export const assistantId = "${crypto.randomUUID()}";`,
     `export const names = { apiKey: "STRIPE_SECRET_KEY" };`,
     `export const token = "${random}";`,
+    `export const authHeader = "${token()}";`,
+    `export const stripeKey = "${["pk", "live", token()].join("_")}";`,
   ].join("\n");
+  const migration = `DO $$\nDECLARE\n  v_secret text := '${crypto.randomBytes(32).toString("hex")}';\nBEGIN\nEND $$;\n`;
   const fixture = `const apiKey = "${testValue}";\n`;
   const pem = `const HEADER = "-----BEGIN PRIVATE KEY-----";\n`;
   const keyFile = `-----BEGIN PRIVATE KEY-----\n${material}\n-----END PRIVATE KEY-----\n`;
@@ -195,6 +198,7 @@ describe("gitleaks severity", () => {
       "src/client.test.ts": fixture,
       "src/pem.ts": pem,
       "keys/server.pem": keyFile,
+      "supabase/migrations/20260101000000_cron.sql": migration,
     },
     reports: {
       "gitleaks.json": [
@@ -203,6 +207,14 @@ describe("gitleaks severity", () => {
         leak("src/config.ts", config, "generic-api-key", "assistantId"),
         leak("src/config.ts", config, "generic-api-key", "apiKey"),
         leak("src/config.ts", config, "generic-api-key", "token ="),
+        leak("src/config.ts", config, "generic-api-key", "authHeader"),
+        leak("src/config.ts", config, "generic-api-key", "stripeKey"),
+        leak(
+          "supabase/migrations/20260101000000_cron.sql",
+          migration,
+          "generic-api-key",
+          "v_secret",
+        ),
         leak("src/client.test.ts", fixture, "generic-api-key", "apiKey"),
         leak("src/pem.ts", pem, "private-key", "-----BEGIN"),
         leak("keys/server.pem", keyFile, "private-key", "-----BEGIN", 5),
@@ -225,9 +237,15 @@ describe("gitleaks severity", () => {
     expect(sev("src/config.ts", 4)).toBe("info");
   });
 
-  it("files the generic rule as medium, and as low in a test file", () => {
-    expect(sev("src/config.ts", 5)).toBe("medium");
+  it("files a random value named like a credential as high, in code and in SQL", () => {
+    expect(sev("src/config.ts", 5)).toBe("high");
+    expect(sev("supabase/migrations/20260101000000_cron.sql", 3)).toBe("high");
+  });
+
+  it("files the rest of the generic rule as medium, low in a test file, info for publishable keys", () => {
+    expect(sev("src/config.ts", 6)).toBe("medium");
     expect(sev("src/client.test.ts", 1)).toBe("low");
+    expect(sev("src/config.ts", 7)).toBe("info");
   });
 
   it("tells PEM-handling code from key material", () => {

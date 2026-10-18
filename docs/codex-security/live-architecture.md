@@ -16,7 +16,7 @@ version 2 (`WORKFLOW_VERSION: "2"` in both workflow files,
 | A failed scanner download, an unreachable OSV API or a crashed AI pass wrote an empty report — which read as "clean" and resolved every open finding of that scanner | Each scanner step writes `status/<name>.json` from its real exit code. Only a scanner that reported `ok` may resolve a finding by its absence, and only when the scan is complete (every batch arrived, `callback_failures = 0`). |
 | A finding was a new row per scan; triage, regressions and "fix confirmed" all looked at different copies | **One row per (target, fingerprint)**, `target_key` = clone id or `prime`, plus `:pr:<n>` for pull request scans. `codex_finding_observations` records every scan that saw a finding; `codex_finding_events` is its history. Ingest and finalize run in Postgres (`codex_ingest_scan_findings`, `codex_finalize_scan`) under row locks. |
 | Fingerprints included the line number: a line added above a finding resolved it and opened a "new" one | Content-based fingerprint v2 (rule + the code it matched). `legacy_fingerprint` lets Mission Control re-key existing findings in place, keeping their triage. |
-| Every gitleaks hit was `critical` (73 on this repository, all public anon keys, ids, secret names, PEM-handling code or fixtures) | Severity from what the credential is: anon JWT `info`, service_role `critical`, UUIDs / secret *names* / Airtable ids / content hashes `info`, generic rule `medium` (`low` in tests), PEM code with no key material `low`, known providers `critical`. Secrets never resolve by absence — they are resolved by a person as **rotated**. |
+| Every gitleaks hit was `critical` (73 on this repository, all public anon keys, ids, secret names, PEM-handling code or fixtures) | Severity from what the credential is: anon JWT `info`, service_role `critical`, UUIDs / secret *names* / Airtable ids / content hashes / publishable keys (Stripe `pk_`, PostHog `phc_`, Mapbox `pk.eyJ`) `info`, generic rule `high` when named like a credential (secret, token, password, bearer, credential, private, api key) with a long random value, else `medium` (`low` in tests), PEM code with no key material `low`, known providers `critical`. Secrets never resolve by absence — they are resolved by a person as **rotated**. |
 | osv-scanner severities were all `medium` (the CVSS vector was read as a number) | `max_severity`, else the CVSS v3 vector is scored, else the database severity. One finding per alias group. |
 | PR scans reported pre-existing issues in touched files; nothing was posted on the PR | Semgrep runs with `--baseline-commit`, gitleaks scans the PR's commits, osv compares changed manifests with the base. A **"Codex Security" check run** with annotations is posted on the PR (App permission **Checks: read & write**); require it in branch protection to block merges. |
 | `@latest` Codex CLI, unpinned semgrep, unverified binaries, actions by tag | Codex CLI `0.160.1`, semgrep `1.179.0`, gitleaks and osv-scanner verified by SHA-256, every action pinned to a commit. |
@@ -25,6 +25,25 @@ version 2 (`WORKFLOW_VERSION: "2"` in both workflow files,
 | The self-healing queue could merge AI fixes unattended | `prime_config.codex_auto_merge_ceiling` (default `off`). Above the ceiling, two-key approval at the PR head is required even when released from the support queue. |
 | A push to Prime cascaded to the fleet before the post-merge scan was even dispatched; no gate read scan results | Post-merge scan is enqueued first. `prime_config.codex_cascade_gate` (default `off`) holds automatic cascades while Prime has open findings at the configured severity; `cascade_events.hold_reason` keeps the drain's gate reassessment from discharging that hold. |
 | Nothing could dismiss a finding; Prime had no posture card; the cron "save" changed nothing | Findings explorer with triage (reasons recorded, audit-logged), Prime posture card, scan drawer with scanner outcomes and completeness, real `pg_cron` rescheduling (`codex_set_nightly_schedule`). |
+
+## October 2026, second pass
+
+Migrations `20261018100000_codex_notification_kinds.sql` and
+`20261018110000_codex_findings_ownership.sql`, and workflow version 3 in both
+workflow files:
+
+| Fault | Now |
+|---|---|
+| An intake partner could set a finding to any state, with no reason and no history; an unknown status word was dropped silently | Partner status words are mapped onto the states a person may set (`resolveIntakeState`): unknown words get **400**, a finding outside the partner's own prefix **404**, a change the triage rules refuse **409**. Verdicts carry the partner's reason, or one naming the partner. The update applies only from the state just read, and each change is an `intake.status` event in the finding's history. A credential is resolved only by the status `rotated` — a pentest portal's "fixed" says nothing about the key. Ticketing partners update their ticket, never the finding. |
+| `/approvals` did not say why a cascade was held; fix PRs had no review queue | Held cascades show their `hold_reason`. `/security/scans#fix-prs` lists every fix PR waiting on a review, with its evidence and the two-key panel. |
+| Engine health knew a repository's workflow version only from its last scan | It reads both workflow files from every fleet repository (`fleet_workflow_files`, cached, behind the GitHub spend gate), and the fleet table has a Workflow column. |
+| The overview's "cascades in flight" tile counted the wrong thing | It counts cascades carrying merged security fixes: in flight, held, delivered in the last 7 days. |
+| Nothing interrupted anyone: a nightly scan could find a committed service-role key and nobody heard | One notification per finished scan for a new critical, a newly exposed credential, a high-or-critical regression or a fix that did not work (`codex_findings_detected`); one when a scanner, or a repository's scans, fail three times running (`codex_scanner_failing`); a daily digest of overdue findings (`codex_findings_overdue`). Each kind is separately mutable. |
+| Findings had no owner and no age | `assigned_to` / `assigned_at`, set by admins (one at a time or in bulk) and recorded in the finding's history. Response times by severity (`src/lib/codex-finding-sla.ts`): critical 7 days, high 30, medium 90, low 180, info none; the clock runs only while a finding is `open` or `triaging`. The explorer filters by owner and overdue (`/security/scans?overdue=1`), and its drawer lists and links tickets. |
+| A pull request's edits to `.gitleaksignore`, `.gitleaks.toml`, `.semgrepignore` or `osv-scanner.toml` applied to **its own** scan, so a change could exempt itself | Before each scanner runs, the workflow restores the base's copies of those files (`pin_controls_to_base`; a symlink is replaced, never written through). The change's edits to them, to `.github/codex-security/` and to the two workflows are reported (`suppressions.changed`), with the inline suppressions it adds (`suppressions.nosemgrep_added`, `suppressions.gitleaks_allow_added` — inline markers are code, so they do apply to its own scan). The PR check lists them and is **neutral** when nothing else fails. |
+| Semgrep's registry packs changed between nights, so the same code gained or lost findings with nothing to say why | Rules committed under `.github/codex-security/semgrep/` are used when present, read from the trusted commit (the base, for a pull request). Otherwise the registry packs are downloaded to files and hashed first. `result_summary.rulesets.semgrep` records the source and a digest of every rule file, and the scan drawer says whether the rules changed since the previous scan. Findings are also counted per scanner (`result_summary.by_scanner`). |
+| A live token matched only by gitleaks' generic rule was filed `medium` — below the alert line, with a 90-day response time. Checked against this repository's full history, the one such hit was a cron bearer token committed in a migration | A generic match that survives every demotion and is named like a credential, with a long random value, is `high` (it alerts, 30-day response time). Publishable keys drop to `info`. On this repository the change moves exactly that one finding. |
+| A drafted fix could make a finding vanish by silencing the scanner — and then be "confirmed" by the next scan | The remediation workflow refuses a patch that adds an inline suppression (semgrep's or gitleaks') or edits an ignore file or the scan rules. Its CI guard now reads unquoted, rename-free paths: a workflow file git printed quoted (a non-ASCII name) or renamed away used to pass it. |
 
 ## Why nothing was running
 
@@ -79,7 +98,7 @@ dispatch on the repo's default branch and pass the head SHA through as the
 | Scanner | Finds | Severity source | Auto-fix confidence |
 |---|---|---|---|
 | gitleaks (working tree; full history on manual and nightly scans) | committed credentials | what the credential is — see the table above | 0.35 (0.1 for info) |
-| semgrep (`p/security-audit`, `p/secrets`, `p/owasp-top-ten`) | injection, authz, unsafe APIs | rule impact/likelihood, else the rule's level | 0.8 with autofix, else 0.4 |
+| semgrep (`.github/codex-security/semgrep/` when committed, else `p/security-audit`, `p/secrets`, `p/owasp-top-ten`, downloaded and hashed) | injection, authz, unsafe APIs | rule impact/likelihood, else the rule's level | 0.8 with autofix, else 0.4 |
 | osv-scanner | vulnerable dependencies | `max_severity`, else scored CVSS vector, else database severity | 0.9 when a fixed version exists |
 | Codex CLI (optional, read-only sandbox, schema-checked answer) | logic-level flaws rules can't express | model-assigned, clamped to the enum | model confidence, default 0.5 |
 
@@ -88,8 +107,16 @@ scan instead of failing it — and records its own outcome in
 `result_summary.scanners.<name>.status` (`ok` / `failed` / `skipped`, with a
 reason). The scan drawer, the fleet table ("Degraded") and engine health all
 read it. Suppression files (`.gitleaks.toml`, `.gitleaksignore`,
-`.semgrepignore`, `osv-scanner.toml`) and `nosemgrep` comments are honoured
-and reported in `result_summary.suppressions`.
+`.semgrepignore`, `osv-scanner.toml`) and inline suppressions (`nosemgrep`,
+gitleaks' allow comment) are honoured and reported in
+`result_summary.suppressions` — except that a pull request is scanned with
+the base's suppression files, and its edits to them are listed instead.
+
+To pin semgrep's rules, commit them under `.github/codex-security/semgrep/`
+(for example the three packs, fetched once from
+`https://semgrep.dev/c/p/<pack>`). Scans then run exactly those files until
+someone changes them, and a pull request that does is flagged on its check.
+The cost: new registry rules arrive only when the files are refreshed.
 
 ### Fingerprints and cross-run state
 
@@ -185,7 +212,8 @@ engine swap stays auditable.
 | Guard | Behaviour |
 |---|---|
 | Secret-leak scan | gitleaks scans the lines the patch adds. A patch adding a secret is **never pushed**. |
-| CI changes | A patch touching `.github/workflows` is refused. |
+| CI changes | A patch touching `.github/workflows` — including a file git would print quoted, or one renamed away — is refused. |
+| Scanner silencing | A patch that adds an inline suppression (semgrep's or gitleaks'), or edits `.gitleaks.toml`, `.gitleaksignore`, `.semgrepignore`, `osv-scanner.toml` or `.github/codex-security/`, is refused: the finding would vanish from the next scan and the fix be "confirmed" with the vulnerability in place. |
 | Credentials | The OpenAI key exists only in the Codex step. `GITHUB_TOKEN` exists only in the push and PR steps, which never run git in the checkout: the commit is built from `fix.patch` in a fresh repository, applied to the index only, hooks disabled. |
 | Repo's own checks | `typecheck`, `lint`, `test`, `build` — whichever `package.json` defines — run against a copy of the patched tree. Failures are reported, not fatal: a reviewer must be able to see a broken fix rather than have it silently discarded. |
 | Blast radius | Files touched and lines added/removed are measured and shown, so a "smallest possible change" that sprawled across 40 files is visible before approval. |
