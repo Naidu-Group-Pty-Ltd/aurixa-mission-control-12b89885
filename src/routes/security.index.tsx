@@ -25,6 +25,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { listScanJobs, listCloneCodexOverview } from "@/lib/codex-security.functions";
+import { getPrimePosture } from "@/lib/codex-findings.functions";
 import { listRemediations } from "@/lib/codex-remediation.functions";
 
 export const Route = createFileRoute("/security/")({
@@ -72,19 +73,32 @@ function SecurityOverviewPage() {
     queryFn: () => listRemediations({ data: {} }),
     refetchInterval: 30000,
   });
+  const primeQ = useQuery({
+    queryKey: ["codex-prime-posture"],
+    queryFn: () => getPrimePosture(),
+    refetchInterval: 60000,
+    retry: false,
+  });
+  const primeOpen = ((primeQ.data?.posture as any)?.open_findings ?? {}) as Record<string, number>;
 
   const jobs = jobsQ.data?.jobs ?? [];
   const clones = fleetQ.data?.clones ?? [];
   const remediations = remQ.data?.remediations ?? [];
   const anyLoading = jobsQ.isLoading || fleetQ.isLoading || remQ.isLoading;
 
-  // Aggregate severity across fleet + prime finding_id
+  // Prime + fleet. Prime used to be left out of this tile entirely.
   const fleetOpen = clones.reduce(
     (acc, c) => {
       for (const s of sevOrder) acc[s] += c.openFindings?.[s] ?? 0;
       return acc;
     },
-    { critical: 0, high: 0, medium: 0, low: 0, info: 0 } as Record<string, number>,
+    {
+      critical: primeOpen.critical ?? 0,
+      high: primeOpen.high ?? 0,
+      medium: primeOpen.medium ?? 0,
+      low: primeOpen.low ?? 0,
+      info: primeOpen.info ?? 0,
+    } as Record<string, number>,
   );
 
   const inflight = jobs.filter((j: any) =>
@@ -93,8 +107,10 @@ function SecurityOverviewPage() {
   const lastNightly = jobs.find((j: any) => j.kind === "nightly_full");
   const failedRecent = jobs.filter((j: any) => j.status === "failed").length;
 
+  // By status: the workflow reports `pr_state: "draft_open"`, which the old
+  // pr_state list never matched, so this tile always read zero.
   const prsAwaiting = remediations.filter((r: any) =>
-    ["pending_review", "review_requested", "open", "draft"].includes(r.pr_state),
+    ["pr_opened", "pr_updated", "approved", "changes_requested"].includes(r.status),
   );
   const prsMerged24h = remediations.filter(
     (r: any) => r.merged_at && Date.now() - new Date(r.merged_at).getTime() < 86_400_000,
@@ -147,7 +163,13 @@ function SecurityOverviewPage() {
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
           <Tile
             icon={<ShieldAlert className="h-4 w-4" />}
-            label="Open findings (fleet)"
+            label="Open findings (Prime + fleet)"
+            hint={`Prime: ${
+              sevOrder
+                .filter((s) => (primeOpen[s] ?? 0) > 0)
+                .map((s) => `${primeOpen[s]} ${s}`)
+                .join(", ") || "none open"
+            }`}
             to="/security/scans"
           >
             <div className="flex flex-wrap gap-1.5 mt-1">

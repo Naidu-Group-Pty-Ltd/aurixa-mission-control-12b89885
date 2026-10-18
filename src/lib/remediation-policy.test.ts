@@ -4,6 +4,8 @@ import {
   AUTO_MERGE_MAX_FILES,
   AUTO_MERGE_MAX_LINES,
   decideRemediation,
+  parseAutoMergeCeiling,
+  severityWithinAutoMergeCeiling,
 } from "./remediation-policy";
 
 const verifiedSmallPatch = {
@@ -173,5 +175,32 @@ describe("decideRemediation", () => {
   it("never marks manual actions as auto", () => {
     const d = decideRemediation({ actionType: "manual", priority: "P4" });
     expect(d.autoExecute).toBe(false);
+  });
+});
+
+describe("the self-healing auto-merge ceiling", () => {
+  it("is off unless set to a known value", () => {
+    expect(parseAutoMergeCeiling("low")).toBe("low");
+    expect(parseAutoMergeCeiling("critical")).toBe("off");
+    expect(parseAutoMergeCeiling(undefined)).toBe("off");
+  });
+
+  it("lets nothing merge unattended while off", () => {
+    for (const s of ["info", "low", "medium", "high", "critical"]) {
+      expect(severityWithinAutoMergeCeiling(s, "off")).toBe(false);
+    }
+  });
+
+  it("covers the ceiling's severity and everything below it", () => {
+    expect(severityWithinAutoMergeCeiling("medium", "medium")).toBe(true);
+    expect(severityWithinAutoMergeCeiling("low", "medium")).toBe(true);
+    expect(severityWithinAutoMergeCeiling("info", "medium")).toBe(true);
+    expect(severityWithinAutoMergeCeiling("high", "medium")).toBe(false);
+    expect(severityWithinAutoMergeCeiling("low", "info")).toBe(false);
+  });
+
+  it("treats an unknown severity as the most severe", () => {
+    expect(severityWithinAutoMergeCeiling(null, "medium")).toBe(false);
+    expect(severityWithinAutoMergeCeiling("urgent", "medium")).toBe(false);
   });
 });

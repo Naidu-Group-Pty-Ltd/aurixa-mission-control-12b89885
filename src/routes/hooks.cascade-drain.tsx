@@ -227,13 +227,25 @@ async function reclaimStalled() {
  * the same work.
  */
 async function reassessRecordedGates(): Promise<number> {
-  const { data: events, error } = await admin
-    .from("cascade_events")
-    .select("id, trigger, mode, requires_approval, approved_at")
-    .eq("status", "pending")
-    .eq("requires_approval", true)
-    .is("approved_at", null)
-    .is("worker_started_at", null);
+  const gatedQueue = (columns: string) =>
+    admin
+      .from("cascade_events")
+      .select(columns)
+      .eq("status", "pending")
+      .eq("requires_approval", true)
+      .is("approved_at", null)
+      .is("worker_started_at", null);
+  // `hold_reason` (20261018090000) marks a security hold, which no clone
+  // count can discharge. Before that migration there is no such hold, and
+  // asking for the column would fail the read — and with it the drain.
+  let { data: events, error } = await gatedQueue(
+    "id, trigger, mode, requires_approval, approved_at, hold_reason",
+  );
+  if (error && (error.code === "42703" || /column .* does not exist/i.test(error.message))) {
+    ({ data: events, error } = await gatedQueue(
+      "id, trigger, mode, requires_approval, approved_at",
+    ));
+  }
   if (error) {
     throw new Error(`cascade-drain gate: could not read the gated queue: ${error.message}`);
   }
@@ -252,7 +264,7 @@ async function reassessRecordedGates(): Promise<number> {
     );
   }
 
-  const plan = planGateReassessment((events ?? []) as RecordedGate[], count);
+  const plan = planGateReassessment((events ?? []) as unknown as RecordedGate[], count);
   let discharged = 0;
   for (const item of plan.discharge) {
     // Re-checked in the predicate: a concurrent `approveCascade` stamping

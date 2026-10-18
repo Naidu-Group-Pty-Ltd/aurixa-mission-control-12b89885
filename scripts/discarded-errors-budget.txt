@@ -8,8 +8,6 @@ src/lib/backend-provisioning.functions.ts 9
 src/lib/client-supabase-accounts.functions.ts 3
 src/lib/clone-api-keys.functions.ts 1
 src/lib/clone-github-access.functions.ts 2
-src/lib/codex-remediation-reviews.functions.ts 7
-src/lib/codex-remediation.functions.ts 4
 src/lib/crm-deals.functions.ts 7
 src/lib/crm-lifecycle.functions.ts 6
 src/lib/crm-support.functions.ts 2
@@ -18,13 +16,12 @@ src/lib/handoff-terms.functions.ts 2
 src/lib/handoffs.functions.ts 19
 src/lib/push-subscription.ts 1
 src/lib/seats.functions.ts 4
-src/lib/security-intake.functions.ts 5
+src/lib/security-intake.functions.ts 4
 src/lib/support-tickets.functions.ts 9
 src/lib/token-webhooks.functions.ts 2
 src/routes/api.public.clones.rotate-key.ts 1
 src/routes/api.public.handoff.audit-ingest.ts 2
 src/routes/api.public.handoffs.consent.ts 3
-src/routes/api.public.hooks.codex-security.ts 6
 src/routes/api.public.leads.capture.ts 2
 src/routes/api.public.security.intake.ts 3
 src/routes/api.public.stripe.webhook.$cloneId.ts 1
@@ -67,7 +64,6 @@ src/server/clone-api-keys.server.ts 2
 src/server/clone-health.server.ts 0
 src/server/clone-provisioning.server.ts 6
 src/server/cloudflare.functions.ts 2
-src/server/codex-scheduling.server.ts 5
 src/server/drift-policies.server.ts 5
 src/server/drift-refresh.server.ts 3
 src/server/drift-suggestions.functions.ts 2
@@ -92,7 +88,7 @@ src/server/security-intake/adapters.ts 3
 src/server/security-partner-codex.functions.ts 3
 src/server/security-partner-dashboard.functions.ts 2
 src/server/security-partner-portal.functions.ts 2
-src/server/self-healing.server.ts 11
+src/server/self-healing.server.ts 7
 src/server/storefront-access.server.ts 1
 src/server/subdomain-hosting.functions.ts 3
 src/server/support-tickets.server.ts 1

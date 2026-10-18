@@ -1,5 +1,5 @@
-import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { useRef, useState } from "react";
 import type { ReactElement } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
@@ -39,7 +39,25 @@ import {
   listCloneCodexOverview,
   runCloneScanNow,
   setCloneNightly,
+  setNightlySchedule,
+  runFleetScan,
+  rotateScanSigningKey,
 } from "@/lib/codex-security.functions";
+import {
+  CodexFindingsExplorer,
+  type FindingsScope,
+} from "@/components/security/codex-findings-explorer";
+import { PrimePostureCard } from "@/components/security/prime-posture-card";
+import { approvalsAtHead } from "@/lib/remediation-approvals";
+import { degradedScanners } from "@/lib/codex-finding-lifecycle";
+import { reportedWorkflowVersion } from "@/lib/codex-workflow-contract";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Link } from "@tanstack/react-router";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
@@ -56,10 +74,18 @@ import { Textarea } from "@/components/ui/textarea";
 import { ThumbsUp, ThumbsDown, GitMerge, MessageSquareWarning } from "lucide-react";
 
 import { ProtectedRoute } from "@/components/protected-route";
+import { useConfirm } from "@/components/confirm-dialog";
 import { AppShell } from "@/components/app-shell";
 import { PageHeader } from "@/components/page-header";
 
+type ScansSearch = { job?: string };
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export const Route = createFileRoute("/security/scans")({
+  // `?job=<id>` opens that scan — the PR check's "Details" link lands here.
+  validateSearch: (s: Record<string, unknown>): ScansSearch => ({
+    job: typeof s.job === "string" && UUID.test(s.job) ? s.job : undefined,
+  }),
   component: () => (
     <ProtectedRoute>
       <AppShell>
@@ -80,7 +106,13 @@ const sevColor: Record<string, string> = {
 
 function CodexScansPage() {
   const qc = useQueryClient();
-  const [openJob, setOpenJob] = useState<string | null>(null);
+  const search = Route.useSearch();
+  const navigate = useNavigate({ from: "/security/scans" });
+  const openJob = search.job ?? null;
+  const setOpenJob = (job: string | null) =>
+    navigate({ search: (prev: ScansSearch) => ({ ...prev, job: job ?? undefined }) });
+  const [findingsScope, setFindingsScope] = useState<FindingsScope>("all");
+  const findingsRef = useRef<HTMLDivElement>(null);
   const jobsQ = useQuery({
     queryKey: ["codex-scan-jobs"],
     queryFn: () => listScanJobs(),
@@ -125,9 +157,21 @@ function CodexScansPage() {
 
       <EngineHealthPanel />
 
-      <SchedulingPanel />
+      <PrimePostureCard
+        onShowFindings={() => {
+          setFindingsScope("prime");
+          findingsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+        }}
+        onOpenScan={(jobId) => setOpenJob(jobId)}
+      />
 
-      <FleetOverviewPanel />
+      <div ref={findingsRef}>
+        <CodexFindingsExplorer scope={findingsScope} onScopeChange={setFindingsScope} />
+      </div>
+
+      <FleetOverviewPanel onOpenScan={(jobId) => setOpenJob(jobId)} />
+
+      <SchedulingPanel />
 
       <Card>
         <CardHeader>
@@ -226,24 +270,18 @@ function ScanDetail({ jobId }: { jobId: string }) {
         <p className="text-muted-foreground">Loading…</p>
       ) : (
         <>
-          <div className="text-sm space-y-1">
-            <div>
-              <span className="text-muted-foreground">Repo:</span> {d.job.repo_full_name}
-            </div>
-            <div>
-              <span className="text-muted-foreground">Status:</span> {d.job.status}
-            </div>
-            {d.job.last_error && (
-              <div className="text-red-500 text-xs whitespace-pre-wrap">{d.job.last_error}</div>
-            )}
-          </div>
+          <ScanSummary job={d.job} source={(d as any).source} />
           <div>
-            <h3 className="font-semibold mb-2">Findings ({d.findings.length})</h3>
+            <h3 className="font-semibold mb-2">Findings this scan saw ({d.findings.length})</h3>
             {d.findings.length > 0 && <RemediationExplainer />}
             <div className="space-y-2">
               {d.findings.map((f: any) => {
                 const rem = remByFinding[f.id];
-                const canDraft = !rem || ["failed", "closed"].includes(rem.status);
+                // A finding only on a pull request is fixed in that PR, and a
+                // decided one has nothing to fix — the server refuses both.
+                const fixable =
+                  !f.pr_number && !["resolved", "dismissed", "false_positive"].includes(f.state);
+                const canDraft = fixable && (!rem || ["failed", "closed"].includes(rem.status));
                 return (
                   <div key={f.id} className="border p-3 space-y-2">
                     <div className="flex items-center gap-2">
@@ -270,7 +308,15 @@ function ScanDetail({ jobId }: { jobId: string }) {
                         disabled={draft.isPending || !canDraft}
                       >
                         <GitPullRequest className="h-3 w-3 mr-1" />
-                        {rem ? (canDraft ? "Retry Fix PR" : "Fix in flight") : "Draft Fix PR"}
+                        {!fixable
+                          ? f.pr_number
+                            ? "Fix it in its PR"
+                            : f.state.replace("_", " ")
+                          : rem
+                            ? canDraft
+                              ? "Retry Fix PR"
+                              : "Fix in flight"
+                            : "Draft Fix PR"}
                       </Button>
                       {rem && (
                         <Badge variant="outline" className="text-[10px]">
@@ -317,14 +363,159 @@ function ScanDetail({ jobId }: { jobId: string }) {
             <h3 className="font-semibold mb-2">Event log</h3>
             <div className="text-xs font-mono space-y-1 max-h-64 overflow-y-auto">
               {d.events.map((e: any) => (
-                <div key={e.id}>
-                  <span className="text-muted-foreground">{e.created_at.slice(11, 19)}</span>{" "}
+                <div key={e.id} className="break-words">
+                  <span className="text-muted-foreground">
+                    {e.created_at.slice(0, 19).replace("T", " ")}
+                  </span>{" "}
                   {e.event_type}
+                  {eventNote(e) && <span className="text-muted-foreground"> — {eventNote(e)}</span>}
                 </div>
               ))}
             </div>
           </div>
         </>
+      )}
+    </div>
+  );
+}
+
+/** The one detail of an event worth a line in the log. */
+function eventNote(e: any): string {
+  const p = e.payload ?? {};
+  if (p.error) return String(p.error).slice(0, 200);
+  if (p.batch && typeof p.count === "number")
+    return `batch ${p.batch.index + 1}/${p.batch.count}, ${p.count} finding(s)`;
+  if (typeof p.count === "number") return `${p.count}`;
+  if (p.signature === "legacy") return "signed without a timestamp (older workflow)";
+  return "";
+}
+
+const scannerTone: Record<string, string> = {
+  ok: "border-emerald-500/40 text-emerald-500",
+  failed: "border-red-500/40 text-red-500",
+  skipped: "text-muted-foreground",
+};
+
+/**
+ * What a scan actually was: where it ran, against what, which scanners
+ * worked, and whether its results were complete. The drawer used to show a
+ * repository name and a status, so a scan whose scanners had all failed read
+ * exactly like a clean one.
+ */
+function ScanSummary({ job, source }: { job: any; source?: string }) {
+  const s = job.result_summary ?? null;
+  const scanners: Record<string, any> = s?.scanners ?? {};
+  const version = s ? reportedWorkflowVersion(s) : null;
+  const degraded = s ? degradedScanners(s) : [];
+  const suppressed = s?.suppressions ?? null;
+  const ts = (v?: string | null) => (v ? v.slice(0, 19).replace("T", " ") : "—");
+  return (
+    <div className="space-y-2 text-xs">
+      <div className="grid grid-cols-[auto,1fr] gap-x-4 gap-y-1">
+        <span className="text-muted-foreground">Repository</span>
+        <span className="font-mono break-all">{job.repo_full_name}</span>
+        <span className="text-muted-foreground">Kind</span>
+        <span>
+          {job.kind}
+          {s?.scope?.mode ? ` · ${s.scope.mode} scope` : ""}
+          {s?.scope?.files ? ` (${s.scope.files} file${s.scope.files === 1 ? "" : "s"})` : ""}
+        </span>
+        <span className="text-muted-foreground">Status</span>
+        <span>{job.status}</span>
+        <span className="text-muted-foreground">Commit</span>
+        <span className="font-mono break-all">
+          {job.ref ?? "default branch"}
+          {s?.head_sha && s.head_sha !== job.ref ? ` @ ${s.head_sha.slice(0, 12)}` : ""}
+          {s?.base_sha ? ` (compared with ${s.base_sha.slice(0, 12)})` : ""}
+        </span>
+        <span className="text-muted-foreground">Started / completed</span>
+        <span>
+          {ts(job.started_at)} / {ts(job.completed_at)}
+        </span>
+        {job.workflow_run_url && (
+          <>
+            <span className="text-muted-foreground">Run</span>
+            <a
+              href={job.workflow_run_url}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 text-blue-500 hover:underline"
+            >
+              GitHub Actions run <ExternalLink className="h-3 w-3" />
+            </a>
+          </>
+        )}
+        {version != null && (
+          <>
+            <span className="text-muted-foreground">Workflow</span>
+            <span>
+              version {version}
+              {s?.signature_scheme === "legacy" ? " · signed without a timestamp" : ""}
+            </span>
+          </>
+        )}
+      </div>
+      {job.last_error && <div className="text-red-500 whitespace-pre-wrap">{job.last_error}</div>}
+      {s?.incomplete === true && (
+        <div className="border border-amber-500/40 bg-amber-500/5 p-2">
+          Results incomplete: {s.observed ?? 0} of {s.expected ?? "?"} findings arrived
+          {s.callback_failures
+            ? `, and ${s.callback_failures} report batch(es) were not delivered`
+            : ""}
+          . Nothing was resolved by its absence.
+        </div>
+      )}
+      {Object.keys(scanners).length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {Object.entries(scanners).map(([name, r]) => {
+            const status =
+              (version ?? 1) >= 2
+                ? String(r?.status ?? "failed")
+                : r?.ok === false
+                  ? r?.skipped
+                    ? "skipped"
+                    : "failed"
+                  : "reported";
+            return (
+              <Badge
+                key={name}
+                variant="outline"
+                className={`text-[10px] ${scannerTone[status] ?? ""}`}
+                title={r?.reason ?? undefined}
+              >
+                {name}: {status}
+                {typeof r?.count === "number" ? ` (${r.count})` : ""}
+              </Badge>
+            );
+          })}
+        </div>
+      )}
+      {degraded.length > 0 && (
+        <div className="text-amber-500">
+          {degraded.map((d) => `${d.name}: ${d.reason}`).join(" · ")} — a scanner that failed
+          resolves nothing by absence.
+        </div>
+      )}
+      {s && (s.auto_resolved > 0 || s.confirmed_fixes > 0 || s.absent_secrets > 0) && (
+        <div className="text-muted-foreground">
+          {s.auto_resolved > 0 && `${s.auto_resolved} resolved (no longer reported) · `}
+          {s.confirmed_fixes > 0 && `${s.confirmed_fixes} merged fix(es) confirmed · `}
+          {s.absent_secrets > 0 &&
+            `${s.absent_secrets} secret(s) gone from the files — still to rotate`}
+        </div>
+      )}
+      {suppressed && ((suppressed.files ?? []).length > 0 || suppressed.nosemgrep > 0) && (
+        <div className="text-muted-foreground">
+          The repository tells the scanners to ignore:{" "}
+          {(suppressed.files ?? []).map((f: any) => f.path).join(", ") || "—"}
+          {suppressed.nosemgrep > 0 ? `; ${suppressed.nosemgrep} nosemgrep comment(s)` : ""}
+        </div>
+      )}
+      {source === "first_reported" && (
+        <div className="text-muted-foreground">
+          Showing the findings this scan reported first. Migration 20261018090000 records every scan
+          that sees a finding.
+        </div>
       )}
     </div>
   );
@@ -360,21 +551,29 @@ function RemediationExplainer() {
             is given the title, severity, file, line, CWE and the offending code excerpt.
           </li>
           <li>
-            The patch is measured (files touched, lines added/removed) and scanned with gitleaks.
+            The patch is measured (files touched, lines added/removed), refused if it touches CI
+            workflows, and the lines it adds are scanned with gitleaks.
             <strong> A patch that introduces a secret is never pushed.</strong>
           </li>
           <li>
             The repo&apos;s own checks — typecheck, lint, test, build, whichever exist — run against
-            the patched tree. Failures do not block the PR; they are reported on it so you can see a
-            broken fix rather than have it discarded.
+            a copy of the patched tree. Failures do not block the PR; they are reported on it so you
+            can see a broken fix rather than have it discarded.
+          </li>
+          <li>
+            Neither Codex nor those checks ever hold a credential: the OpenAI key exists only in the
+            Codex step, and the push is made from a fresh repository with the token only there.
           </li>
           <li>
             A <strong>draft</strong> pull request is opened. Merging requires two independent admin
-            approvals here; the requester cannot approve their own.
+            approvals <strong>of its current commit</strong> — a push after an approval needs
+            approving again — and the requester cannot approve their own. The merge is pinned to
+            that commit. Only when an admin sets a self-healing auto-merge ceiling (off by default)
+            can a fix at or below it merge through the self-healing queue instead.
           </li>
           <li>
             After merge, a Prime patch cascades to the fleet, and the next full scan confirms the
-            finding is actually gone before the fix is marked verified.
+            finding is actually gone — or reopens it as &ldquo;fix ineffective&rdquo;.
           </li>
         </ol>
       )}
@@ -513,10 +712,12 @@ function RemediationReviewPanel({ remediation }: { remediation: any }) {
   });
 
   const reviews = reviewsQ.data?.reviews ?? [];
-  const approvers = new Set(
-    reviews
-      .filter((r: any) => r.decision === "approve" && r.reviewer_id !== remediation.requested_by)
-      .map((r: any) => r.reviewer_id),
+  // An approval is for the commit it was given on: one given before a push
+  // no longer counts, exactly as the merge itself decides.
+  const { count: approvalCount, stale: staleApprovals } = approvalsAtHead(
+    reviews as any[],
+    remediation.requested_by ?? null,
+    remediation.head_sha ?? null,
   );
   const rejected = reviews.some((r: any) => r.decision === "reject");
   const required = remediation.approvals_required ?? 2;
@@ -524,7 +725,7 @@ function RemediationReviewPanel({ remediation }: { remediation: any }) {
   const alreadyReviewed = reviews.some((r: any) => r.reviewer_id === uid);
   const canMerge =
     !!remediation.pr_number &&
-    approvers.size >= required &&
+    approvalCount >= required &&
     !rejected &&
     !["merged", "rejected"].includes(remediation.status);
 
@@ -533,9 +734,17 @@ function RemediationReviewPanel({ remediation }: { remediation: any }) {
       <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
         <span>
           Approvals:{" "}
-          <b className={approvers.size >= required ? "text-emerald-500" : ""}>{approvers.size}</b>/
+          <b className={approvalCount >= required ? "text-emerald-500" : ""}>{approvalCount}</b>/
           {required}
+          {remediation.head_sha ? (
+            <span className="font-mono"> of {String(remediation.head_sha).slice(0, 7)}</span>
+          ) : null}
         </span>
+        {staleApprovals > 0 && (
+          <span className="text-amber-500" title="Given before the PR's latest commit">
+            {staleApprovals} for an earlier commit — approve again
+          </span>
+        )}
         {rejected && (
           <Badge variant="destructive" className="text-[10px]">
             rejected
@@ -639,7 +848,7 @@ function RemediationReviewPanel({ remediation }: { remediation: any }) {
             ? "Merging…"
             : canMerge
               ? "Merge PR"
-              : `Needs ${Math.max(0, required - approvers.size)} more approval${required - approvers.size === 1 ? "" : "s"}`}
+              : `Needs ${Math.max(0, required - approvalCount)} more approval${required - approvalCount === 1 ? "" : "s"}`}
         </Button>
       </div>
     </div>
@@ -659,10 +868,24 @@ const healthIcon: Record<string, ReactElement> = {
  * operator staring at an empty job table.
  */
 function EngineHealthPanel() {
+  const confirm = useConfirm();
   const healthQ = useQuery({
     queryKey: ["codex-engine-health"],
     queryFn: () => getCodexEngineHealth(),
-    refetchInterval: 60000,
+    // Several checks read GitHub; once every five minutes is plenty for a
+    // panel whose inputs change on deploys, not by the second.
+    refetchInterval: 5 * 60_000,
+  });
+  const rotateFn = useServerFn(rotateScanSigningKey);
+  const rotate = useMutation({
+    mutationFn: () => rotateFn({}),
+    onSuccess: (r: any) => {
+      toast.success(
+        `Signing key rotated. Scans already running keep reporting for ${r.graceHours} hours.`,
+      );
+      healthQ.refetch();
+    },
+    onError: (e: Error) => toast.error(e.message),
   });
 
   const checks = healthQ.data?.checks ?? [];
@@ -713,9 +936,30 @@ function EngineHealthPanel() {
             )}
           </CardDescription>
         </div>
-        <Button size="sm" variant="outline" onClick={() => healthQ.refetch()}>
-          <RefreshCw className="h-4 w-4 mr-1" /> Re-check
-        </Button>
+        <div className="flex gap-2">
+          {summary?.signingKeyRotatable && (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={rotate.isPending}
+              title="New scans and fixes get keys derived from a new master"
+              onClick={async () => {
+                const ok = await confirm({
+                  title: "Rotate the callback signing key?",
+                  description:
+                    "Every scan and fix dispatched from now on signs with keys derived from a new master. Scans already running keep reporting under the old one for its grace window. Do this after every repository runs workflow version 2: older copies printed the old key in their Actions logs.",
+                  confirmText: "Rotate",
+                });
+                if (ok) rotate.mutate();
+              }}
+            >
+              {rotate.isPending ? "Rotating…" : "Rotate signing key"}
+            </Button>
+          )}
+          <Button size="sm" variant="outline" onClick={() => healthQ.refetch()}>
+            <RefreshCw className="h-4 w-4 mr-1" /> Re-check
+          </Button>
+        </div>
       </CardHeader>
       <CardContent className="space-y-2">
         {/* Healthy checks collapse to a single line; problems stay expanded. */}
@@ -750,24 +994,77 @@ function EngineHealthPanel() {
   );
 }
 
+function SettingSelect({
+  label,
+  hint,
+  value,
+  options,
+  onChange,
+  disabled,
+}: {
+  label: string;
+  hint: string;
+  value: string;
+  options: { value: string; label: string }[];
+  onChange: (v: string) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div className="border p-3 space-y-2">
+      <Label className="font-medium">{label}</Label>
+      <Select value={value} onValueChange={onChange} disabled={disabled}>
+        <SelectTrigger className="h-8 text-xs">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {options.map((o) => (
+            <SelectItem key={o.value} value={o.value}>
+              {o.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <p className="text-xs text-muted-foreground">{hint}</p>
+    </div>
+  );
+}
+
 function SchedulingPanel() {
   const qc = useQueryClient();
+  const confirm = useConfirm();
   const cfgQ = useQuery({
     queryKey: ["codex-scheduling-config"],
     queryFn: () => getSchedulingConfig(),
   });
   const updateFn = useServerFn(updateSchedulingConfig);
   const runNowFn = useServerFn(runNightlyNow);
+  const scheduleFn = useServerFn(setNightlySchedule);
   const [dedup, setDedup] = useState<number | null>(null);
   const [cron, setCron] = useState<string | null>(null);
 
   const cfg = cfgQ.data?.config;
+  const migrated = cfgQ.data?.migrated ?? false;
 
   const save = useMutation({
     mutationFn: (patch: any) => updateFn({ data: patch }),
     onSuccess: () => {
-      toast.success("Scheduling updated");
+      toast.success("Settings updated");
       qc.invalidateQueries({ queryKey: ["codex-scheduling-config"] });
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const reschedule = useMutation({
+    mutationFn: (expr: string) => scheduleFn({ data: { cron: expr } }),
+    onSuccess: (r: any) => {
+      if (r?.applied) toast.success(`Nightly scans now run at “${r.schedule}” (UTC)`);
+      else
+        toast.warning(
+          `Saved “${r?.schedule}”, but pg_cron was not changed: ${r?.reason ?? "unknown"}`,
+        );
+      setCron(null);
+      qc.invalidateQueries({ queryKey: ["codex-scheduling-config"] });
+      qc.invalidateQueries({ queryKey: ["codex-engine-health"] });
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -789,9 +1086,10 @@ function SchedulingPanel() {
     <Card>
       <CardHeader className="flex flex-row items-start justify-between">
         <div>
-          <CardTitle>Perpetual scheduling</CardTitle>
+          <CardTitle>Scheduling and policy</CardTitle>
           <CardDescription>
-            Nightly full scans, PR-driven scans, and post-merge revalidation.
+            When scans run, what a pull request&apos;s check enforces, and what may merge or cascade
+            without a person.
           </CardDescription>
         </div>
         <Button
@@ -821,7 +1119,7 @@ function SchedulingPanel() {
           <div>
             <Label className="font-medium">PR-open scans</Label>
             <p className="text-xs text-muted-foreground">
-              Scan every opened / updated PR head SHA.
+              Scan what every opened or updated pull request adds.
             </p>
           </div>
           <Switch
@@ -833,7 +1131,7 @@ function SchedulingPanel() {
           <div>
             <Label className="font-medium">Post-merge revalidate</Label>
             <p className="text-xs text-muted-foreground">
-              Re-scan Prime after each merge to catch fix regressions.
+              Re-scan Prime after each merge to confirm fixes and catch regressions.
             </p>
           </div>
           <Switch
@@ -864,6 +1162,95 @@ function SchedulingPanel() {
             Suppress duplicate scans for the same target+kind within this window.
           </p>
         </div>
+
+        {!migrated && (
+          <p className="md:col-span-2 border border-amber-500/40 bg-amber-500/5 p-2 text-xs">
+            The settings below arrive with migration 20261018090000_codex_findings_canonical. Until
+            it is applied they show their defaults and cannot be changed.
+          </p>
+        )}
+
+        <SettingSelect
+          label="Codex reasoning pass"
+          hint="Which scheduled scans also run the AI review. Manual scans always do. It spends OpenAI credit on every scan it runs on."
+          value={cfg.codex_deep_scan_scope ?? "prime"}
+          disabled={!migrated}
+          onChange={(v) => save.mutate({ codex_deep_scan_scope: v })}
+          options={[
+            { value: "off", label: "Off (manual scans only)" },
+            { value: "prime", label: "Prime only" },
+            { value: "fleet", label: "Prime and every clone" },
+          ]}
+        />
+        <div className="border p-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <Label className="font-medium">“Codex Security” PR check</Label>
+            <Switch
+              checked={cfg.codex_pr_check_enabled !== false}
+              disabled={!migrated}
+              onCheckedChange={(v) => save.mutate({ codex_pr_check_enabled: v })}
+            />
+          </div>
+          <Select
+            value={cfg.codex_pr_check_fail_on ?? "high"}
+            disabled={!migrated || cfg.codex_pr_check_enabled === false}
+            onValueChange={(v) => save.mutate({ codex_pr_check_fail_on: v })}
+          >
+            <SelectTrigger className="h-8 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="critical">Fails on critical findings</SelectItem>
+              <SelectItem value="high">Fails on high or worse</SelectItem>
+              <SelectItem value="medium">Fails on medium or worse</SelectItem>
+              <SelectItem value="low">Fails on low or worse</SelectItem>
+              <SelectItem value="never">Reports only, never fails</SelectItem>
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            Posted on the pull request with an annotation per finding. It blocks merging only once
+            branch protection requires it, and needs the GitHub App&apos;s “Checks: read &amp;
+            write” permission.
+          </p>
+        </div>
+        <SettingSelect
+          label="Self-healing auto-merge ceiling"
+          hint="The worst severity whose Codex fix may merge with no person, through the self-healing queue. Anything above it needs two admin approvals of its current commit — even when released from the support queue."
+          value={cfg.codex_auto_merge_ceiling ?? "off"}
+          disabled={!migrated}
+          onChange={async (v) => {
+            if (v !== "off") {
+              const ok = await confirm({
+                title: `Let ${v}-severity fixes merge unattended?`,
+                description:
+                  "An AI-written patch at or below this severity can then merge to its repository's default branch with nobody reviewing it, as long as its checks pass. On Prime, that patch then cascades to every clone.",
+                confirmText: "Allow",
+                destructive: true,
+              });
+              if (!ok) return;
+            }
+            save.mutate({ codex_auto_merge_ceiling: v });
+          }}
+          options={[
+            { value: "off", label: "Off — every fix needs two approvals" },
+            { value: "info", label: "Info only" },
+            { value: "low", label: "Low and info" },
+            { value: "medium", label: "Medium, low and info" },
+          ]}
+        />
+        <SettingSelect
+          label="Cascade security gate"
+          hint="Hold automatic fleet cascades for approval while Prime has open findings at this severity. Triage Prime's first scans before turning it on — a gate tripped by noise teaches people to approve blindly."
+          value={cfg.codex_cascade_gate ?? "off"}
+          disabled={!migrated}
+          onChange={(v) => save.mutate({ codex_cascade_gate: v })}
+          options={[
+            { value: "off", label: "Off" },
+            { value: "critical", label: "Hold while Prime has open criticals" },
+            { value: "high", label: "Hold while Prime has open high or critical" },
+          ]}
+        />
+
         <div className="border p-3 space-y-2 md:col-span-2">
           <Label className="font-medium">Nightly cron schedule (UTC)</Label>
           <div className="flex gap-2">
@@ -876,15 +1263,14 @@ function SchedulingPanel() {
             <Button
               size="sm"
               variant="secondary"
-              disabled={cron === null || cron === cfg.codex_nightly_cron}
-              onClick={() => save.mutate({ codex_nightly_cron: cron })}
+              disabled={cron === null || cron === cfg.codex_nightly_cron || reschedule.isPending}
+              onClick={() => cron && reschedule.mutate(cron)}
             >
-              Save
+              {reschedule.isPending ? "Saving…" : "Reschedule"}
             </Button>
           </div>
           <p className="text-xs text-muted-foreground">
-            Recorded for reference — the active schedule is set in pg_cron. Update the cron job SQL
-            to change fire time.
+            Five fields, minute hour day month weekday. Saving reschedules the pg_cron job itself.
           </p>
         </div>
       </CardContent>
@@ -900,7 +1286,43 @@ const sevBadge: Record<string, string> = {
   info: "bg-slate-500 text-white",
 };
 
-function FleetOverviewPanel() {
+/**
+ * One word for where a clone stands. "Clean" used to mean only "no open
+ * findings" — including for a clone never scanned, or one whose last scan
+ * failed or ran with its scanners broken.
+ */
+function fleetStatus(
+  last: any,
+  open: Record<string, number>,
+): { label: string; tone: string; detail?: string } {
+  if (!last) return { label: "Never scanned", tone: "text-muted-foreground" };
+  if (last.status === "queued") return { label: "Queued", tone: "text-blue-500" };
+  if (last.status === "running") return { label: "Scanning", tone: "text-blue-500" };
+  if (last.status === "failed" || last.status === "canceled") {
+    return {
+      label: "Last scan failed",
+      tone: "text-red-500",
+      detail: last.last_error ?? undefined,
+    };
+  }
+  const summary = last.result_summary ?? null;
+  const degraded = summary ? degradedScanners(summary) : [];
+  if (summary?.incomplete === true || degraded.length > 0) {
+    return {
+      label: "Degraded",
+      tone: "text-amber-500",
+      detail: degraded.length
+        ? degraded.map((d) => `${d.name}: ${d.reason}`).join(" · ")
+        : "results incomplete",
+    };
+  }
+  const anyOpen = ["critical", "high", "medium", "low"].some((k) => (open[k] ?? 0) > 0);
+  return anyOpen
+    ? { label: "Findings open", tone: "" }
+    : { label: "Clean", tone: "text-emerald-500" };
+}
+
+function FleetOverviewPanel({ onOpenScan }: { onOpenScan: (jobId: string) => void }) {
   const qc = useQueryClient();
   const fleetQ = useQuery({
     queryKey: ["codex-fleet-overview"],
@@ -908,6 +1330,7 @@ function FleetOverviewPanel() {
     refetchInterval: 30000,
   });
   const runFn = useServerFn(runCloneScanNow);
+  const fleetFn = useServerFn(runFleetScan);
   const nightlyFn = useServerFn(setCloneNightly);
 
   const runOne = useMutation({
@@ -921,24 +1344,19 @@ function FleetOverviewPanel() {
     onError: (e: Error) => toast.error(e.message),
   });
 
+  // Server-side: the old loop ran in this tab and stopped wherever it was
+  // closed.
   const scanAll = useMutation({
-    mutationFn: async () => {
-      const rows = fleetQ.data?.clones ?? [];
-      let queued = 0;
-      let skipped = 0;
-      for (const c of rows) {
-        try {
-          const r: any = await runFn({ data: { cloneId: c.id } });
-          if (r?.skipped) skipped++;
-          else queued++;
-        } catch {
-          skipped++;
-        }
+    mutationFn: () => fleetFn({}),
+    onSuccess: (r: any) => {
+      const skipped = r.skipped?.length ?? 0;
+      if (skipped) {
+        toast.warning(
+          `Fleet scan: ${r.queued} queued, ${skipped} skipped (${r.skipped[0].target}: ${r.skipped[0].reason}${skipped > 1 ? " …" : ""})`,
+        );
+      } else {
+        toast.success(`Fleet scan: ${r.queued} queued`);
       }
-      return { queued, skipped };
-    },
-    onSuccess: (r) => {
-      toast.success(`Fleet scan: ${r.queued} queued, ${r.skipped} skipped`);
       qc.invalidateQueries({ queryKey: ["codex-fleet-overview"] });
       qc.invalidateQueries({ queryKey: ["codex-scan-jobs"] });
     },
@@ -978,6 +1396,7 @@ function FleetOverviewPanel() {
           <TableHeader>
             <TableRow>
               <TableHead>Clone</TableHead>
+              <TableHead>Status</TableHead>
               <TableHead>Last scan</TableHead>
               <TableHead>Open findings</TableHead>
               <TableHead>Nightly</TableHead>
@@ -988,6 +1407,7 @@ function FleetOverviewPanel() {
             {rows.map((c: any) => {
               const last = c.lastScan;
               const of = c.openFindings ?? {};
+              const status = fleetStatus(last, of);
               return (
                 <TableRow key={c.id}>
                   <TableCell>
@@ -1003,19 +1423,32 @@ function FleetOverviewPanel() {
                     </div>
                   </TableCell>
                   <TableCell className="text-xs">
-                    {last ? (
-                      <div className="space-y-1">
-                        <Badge variant={last.status === "failed" ? "destructive" : "outline"}>
-                          {last.status}
-                        </Badge>
-                        <div className="text-muted-foreground">
-                          {(last.completed_at ?? last.started_at ?? last.created_at)
-                            ?.slice(0, 19)
-                            .replace("T", " ")}
-                        </div>
+                    <span className={`font-medium ${status.tone}`} title={status.detail}>
+                      {status.label}
+                    </span>
+                    {status.detail && (
+                      <div
+                        className="max-w-[220px] truncate text-muted-foreground"
+                        title={status.detail}
+                      >
+                        {status.detail}
                       </div>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-xs">
+                    {last ? (
+                      <button
+                        type="button"
+                        className="text-left text-muted-foreground hover:underline"
+                        onClick={() => onOpenScan(last.id)}
+                      >
+                        {(last.completed_at ?? last.started_at ?? last.created_at)
+                          ?.slice(0, 16)
+                          .replace("T", " ")}
+                        <div>{last.kind}</div>
+                      </button>
                     ) : (
-                      <span className="text-muted-foreground">Never</span>
+                      <span className="text-muted-foreground">—</span>
                     )}
                   </TableCell>
                   <TableCell>
@@ -1028,7 +1461,7 @@ function FleetOverviewPanel() {
                         ) : null,
                       )}
                       {["critical", "high", "medium", "low"].every((s) => !(of[s] > 0)) && (
-                        <span className="text-xs text-muted-foreground">Clean</span>
+                        <span className="text-xs text-muted-foreground">None open</span>
                       )}
                     </div>
                   </TableCell>
@@ -1053,7 +1486,7 @@ function FleetOverviewPanel() {
             })}
             {!fleetQ.isLoading && rows.length === 0 && (
               <TableRow>
-                <TableCell colSpan={5} className="text-center text-muted-foreground py-8">
+                <TableCell colSpan={6} className="text-center text-muted-foreground py-8">
                   No clones yet.
                 </TableCell>
               </TableRow>

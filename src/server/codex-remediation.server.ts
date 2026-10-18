@@ -10,7 +10,12 @@
 // `--sandbox workspace-write`. It edits real files in a checkout of
 // `base_ref`; the workflow then verifies the patched tree against the
 // repo's own checks, commits, and opens a DRAFT pull request. Mission
-// Control never writes code itself and never merges without human review.
+// Control never writes code itself. Merging follows the review policy: two
+// independent approvals for the PR's current commit, unless the finding sits
+// at or below the auto-merge ceiling an admin set (off by default).
+//
+// Callbacks are authenticated by codex-remediation-callback.server.ts with a
+// key derived for each remediation; the master secret never leaves here.
 
 import { getAppOctokit } from "@/server/github-app.server";
 import { withRetry, isTransientHttpError } from "@/lib/with-retry";
@@ -165,27 +170,6 @@ function describeRemediationDispatchError(
 }
 
 /**
- * Verify the HMAC signature sent by the codex-remediation workflow when
- * it reports PR state back to Mission Control. Same shape as the Codex
- * webhook: `sha256=<hex>` (or bare hex) over the raw body using the
- * `CODEX_REMEDIATION_WEBHOOK_SECRET`.
- */
-export async function verifyRemediationSignature(
-  rawBody: string,
-  signatureHeader: string | null,
-  extraSecrets: (string | null | undefined)[] = [],
-): Promise<boolean> {
-  // Delegates to the shared constant-time verifier, but with the
-  // remediation key set only — the scan webhook's secret must not be able
-  // to forge remediation callbacks.
-  const { verifyHmacSignature } = await import("@/server/codex-security-client.server");
-  return verifyHmacSignature(rawBody, signatureHeader, [
-    process.env.CODEX_REMEDIATION_WEBHOOK_SECRET,
-    ...extraSecrets,
-  ]);
-}
-
-/**
  * Take a draft PR out of draft state.
  *
  * Remediation PRs are opened as drafts on purpose, but GitHub refuses to
@@ -223,21 +207,112 @@ export async function markPullRequestReady(input: {
   return { wasDraft: true };
 }
 
+export type RemediationPullRequest = {
+  number: number;
+  state: string;
+  merged: boolean;
+  draft: boolean;
+  headRef: string;
+  headSha: string;
+  headRepoFullName: string;
+  baseRef: string;
+};
+
+/** The PR as GitHub has it now — never as a callback described it. */
+export async function fetchRemediationPullRequest(input: {
+  owner: string;
+  repo: string;
+  prNumber: number;
+  installationId?: string | null;
+}): Promise<RemediationPullRequest> {
+  const octokit = getAppOctokit(input.installationId ?? undefined);
+  const { data } = await octokit.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
+    owner: input.owner,
+    repo: input.repo,
+    pull_number: input.prNumber,
+  });
+  const pr = data as {
+    number: number;
+    state: string;
+    merged?: boolean;
+    draft?: boolean;
+    head: { ref: string; sha: string; repo?: { full_name?: string } | null };
+    base: { ref: string };
+  };
+  return {
+    number: pr.number,
+    state: pr.state,
+    merged: !!pr.merged,
+    draft: !!pr.draft,
+    headRef: pr.head.ref,
+    headSha: pr.head.sha,
+    headRepoFullName: pr.head.repo?.full_name ?? "",
+    baseRef: pr.base.ref,
+  };
+}
+
+/**
+ * Why this PR must not be merged as this remediation, or null when it may.
+ *
+ * The PR number arrives from a workflow callback. Before anything merges,
+ * the PR has to be this remediation's own branch, opened from the same
+ * repository (never a fork), still open, and against the base the fix was
+ * written for. A forged number that points at some other open PR stops here.
+ */
+export function remediationPrMismatch(
+  pr: RemediationPullRequest,
+  expected: { owner: string; repo: string; branchName: string | null; baseRef?: string | null },
+): string | null {
+  if (pr.state !== "open") return `PR #${pr.number} is ${pr.merged ? "already merged" : pr.state}`;
+  if (!expected.branchName)
+    return "The remediation has no recorded branch to compare the PR against";
+  if (pr.headRef !== expected.branchName) {
+    return `PR #${pr.number} is from branch "${pr.headRef}", not this remediation's "${expected.branchName}"`;
+  }
+  if (pr.headRepoFullName.toLowerCase() !== `${expected.owner}/${expected.repo}`.toLowerCase()) {
+    return `PR #${pr.number} comes from ${pr.headRepoFullName || "an unknown repository"}, not ${expected.owner}/${expected.repo}`;
+  }
+  const base = expected.baseRef ?? "";
+  if (base && !/^[0-9a-f]{40}$/i.test(base) && pr.baseRef !== base) {
+    return `PR #${pr.number} targets "${pr.baseRef}", not "${base}"`;
+  }
+  return null;
+}
+
 /**
  * Merge a Codex remediation PR via the GitHub App installation. Uses a
  * squash-merge by default so the branch history stays clean. Returns the
  * merge commit SHA on success.
+ *
+ * The PR is re-read and checked against the remediation first, and the merge
+ * is pinned to the head commit that was checked (and, when given, to the
+ * commit the approvals name): GitHub refuses the merge if the branch moved in
+ * between, so nothing pushed after an approval can ride along with it.
  */
 export async function mergeRemediationPRViaGitHub(input: {
   owner: string;
   repo: string;
   prNumber: number;
   installationId?: string | null;
+  branchName: string | null;
+  baseRef?: string | null;
+  /** The head commit the counted approvals were given for. */
+  expectedHeadSha?: string | null;
   commitTitle?: string;
   commitMessage?: string;
   method?: "squash" | "merge" | "rebase";
-}): Promise<{ sha: string; merged: boolean; wasDraft: boolean }> {
+}): Promise<{ sha: string; merged: boolean; wasDraft: boolean; headSha: string }> {
   const octokit = getAppOctokit(input.installationId ?? undefined);
+
+  const pr = await fetchRemediationPullRequest(input);
+  const mismatch = remediationPrMismatch(pr, input);
+  if (mismatch) throw new Error(`Refusing to merge: ${mismatch}`);
+  if (input.expectedHeadSha && pr.headSha !== input.expectedHeadSha) {
+    throw new Error(
+      `Refusing to merge: PR #${pr.number} has new commits since it was approved ` +
+        `(approved ${input.expectedHeadSha.slice(0, 7)}, now ${pr.headSha.slice(0, 7)}).`,
+    );
+  }
 
   // Clear the draft flag first — see markPullRequestReady.
   const { wasDraft } = await markPullRequestReady({
@@ -254,11 +329,9 @@ export async function mergeRemediationPRViaGitHub(input: {
     merge_method: input.method || "squash",
     commit_title: input.commitTitle,
     commit_message: input.commitMessage,
+    sha: pr.headSha,
   });
 
-  return {
-    sha: (res.data as any).sha,
-    merged: (res.data as any).merged,
-    wasDraft,
-  };
+  const merged = res.data as { sha: string; merged: boolean };
+  return { sha: merged.sha, merged: merged.merged, wasDraft, headSha: pr.headSha };
 }

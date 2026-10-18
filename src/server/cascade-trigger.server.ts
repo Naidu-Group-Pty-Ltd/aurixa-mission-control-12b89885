@@ -5,6 +5,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import { assessBlastRadius, type CascadeOrigin } from "./cascade-approvals.server";
 import { FOLD_MAX_ATTEMPTS } from "./cascade/eventFold.pure";
+import { parseCascadeSecurityGate, securityGateDecision } from "@/lib/cascade-security-gate";
 
 type CascadeMode = Database["public"]["Enums"]["cascade_mode"];
 type CascadeTrigger = Database["public"]["Enums"]["cascade_trigger"];
@@ -50,6 +51,85 @@ function isUniqueViolation(error: { code?: string; message?: string } | null): b
   return error.code === "23505" || /duplicate key value/i.test(error.message ?? "");
 }
 
+function isMissingColumn(error: { code?: string; message?: string } | null): boolean {
+  return (
+    !!error && (error.code === "42703" || /column .* does not exist/i.test(error.message ?? ""))
+  );
+}
+
+/**
+ * Whether Prime's open security findings hold automatic cascades
+ * (`prime_config.codex_cascade_gate`). Fails OPEN on a read error: a database
+ * fault must not freeze the whole fleet, and the fault is logged.
+ */
+export async function evaluateCascadeSecurityGate(
+  supabase: SupabaseLike,
+): Promise<{ hold: boolean; reason: string | null }> {
+  const { data: cfg, error: cfgErr } = await supabase
+    .from("prime_config")
+    .select("*")
+    .limit(1)
+    .maybeSingle();
+  if (cfgErr || !cfg) return { hold: false, reason: null };
+  const gate = parseCascadeSecurityGate((cfg as Record<string, unknown>).codex_cascade_gate);
+  if (gate === "off") return { hold: false, reason: null };
+
+  const countOpen = async (severity: "critical" | "high") => {
+    const { count, error } = await supabase
+      .from("codex_findings")
+      .select("id", { count: "exact", head: true })
+      .is("clone_id", null)
+      .is("pr_number", null)
+      .eq("state", "open")
+      .eq("severity", severity);
+    if (error) {
+      console.error(
+        `[cascade-trigger] security gate could not count ${severity} findings:`,
+        error.message,
+      );
+      return null;
+    }
+    return count ?? 0;
+  };
+  const critical = await countOpen("critical");
+  const high = gate === "high" ? await countOpen("high") : 0;
+  if (critical == null || high == null) return { hold: false, reason: null };
+  return securityGateDecision(gate, { critical, high });
+}
+
+/**
+ * Hold every pending, unclaimed, unheld commit cascade.
+ *
+ * A commit cascade delivers Prime's head as it stands when the pass RUNS, so
+ * holding only the newest event would let any older pending one carry the
+ * same content out unheld. Approving any one of them releases it.
+ */
+export async function holdPendingCommitCascades(
+  supabase: SupabaseLike,
+  reason: string,
+): Promise<number> {
+  const { data, error } = await supabase
+    .from("cascade_events")
+    .update({ requires_approval: true, hold_reason: reason })
+    .eq("status", "pending")
+    .eq("trigger", "commit")
+    .eq("requires_approval", false)
+    .is("approved_at", null)
+    .is("worker_started_at", null)
+    .select("id");
+  if (error) {
+    // Without `hold_reason` the drain would discharge the hold on its next
+    // tick, so holding without it would be theatre — say so instead.
+    if (isMissingColumn(error)) {
+      console.error("[cascade-trigger] cannot hold cascades before migration 20261018090000.");
+    } else {
+      console.error("[cascade-trigger] could not hold pending cascades:", error.message);
+    }
+    return 0;
+  }
+  return data?.length ?? 0;
+}
+
 export async function createCascadeForAllClones(args: {
   supabase: SupabaseLike;
   mode: CascadeMode;
@@ -58,6 +138,16 @@ export async function createCascadeForAllClones(args: {
   sourceSha: string | null;
   initiatedBy: string | null;
   summary?: string | null;
+  /**
+   * Hold this cascade for a person's approval whatever its blast radius —
+   * e.g. it carries an unattended self-healing merge.
+   */
+  holdReason?: string | null;
+  /**
+   * Skip the Prime security gate. Only for a reviewed security fix, which
+   * must reach the fleet precisely because Prime has open findings.
+   */
+  skipSecurityGate?: boolean;
 }): Promise<{
   eventId: string | null;
   cloneCount: number;
@@ -73,6 +163,18 @@ export async function createCascadeForAllClones(args: {
   foldedIntoPending?: boolean;
 }> {
   const { supabase, mode, trigger, sourceBranch, sourceSha, initiatedBy, summary } = args;
+
+  // Automatic commit cascades wait on Prime's security posture when the gate
+  // is on; an explicit hold reason waits regardless. Decided before the fold:
+  // a held push must never be stood down into an unheld carrier.
+  const securityHold =
+    trigger === "commit" && !initiatedBy && !args.skipSecurityGate
+      ? await evaluateCascadeSecurityGate(supabase)
+      : { hold: false, reason: null };
+  const holdReason =
+    [args.holdReason ?? null, securityHold.hold ? securityHold.reason : null]
+      .filter(Boolean)
+      .join(" · ") || null;
 
   // Automatic triggers are deduplicated by prime SHA. Manual ones are not: an
   // operator re-running the same SHA is how you retry a cascade after fixing an
@@ -124,7 +226,9 @@ export async function createCascadeForAllClones(args: {
       .order("created_at", { ascending: true })
       .limit(10);
     if (!pendingErr) {
-      const carrier = (pendingRows ?? []).find(
+      // A held push never folds into an unheld carrier: the carrier would
+      // deliver this push's tree with nobody asked.
+      const carrier = (holdReason ? [] : (pendingRows ?? [])).find(
         (e) =>
           e.mode === mode &&
           e.requires_approval === false &&
@@ -158,21 +262,39 @@ export async function createCascadeForAllClones(args: {
   // fleet-size count binds only what a person started.
   const origin: CascadeOrigin = trigger === "commit" ? "automatic" : "operator";
   const blast = assessBlastRadius(mode, clones.length, origin);
+  const requiresApproval = blast.requiresApproval || !!holdReason;
+  const approvalReason = [blast.requiresApproval ? blast.reason : null, holdReason]
+    .filter(Boolean)
+    .join(" · ");
 
-  const { data: event, error: eventErr } = await supabase
+  const eventRow = {
+    mode,
+    trigger,
+    source_branch: sourceBranch,
+    source_sha: sourceSha,
+    initiated_by: initiatedBy,
+    summary: summary ?? null,
+    status: "pending" as const,
+    requires_approval: requiresApproval,
+    ...(holdReason ? { hold_reason: holdReason } : {}),
+  };
+  let { data: event, error: eventErr } = await supabase
     .from("cascade_events")
-    .insert({
-      mode,
-      trigger,
-      source_branch: sourceBranch,
-      source_sha: sourceSha,
-      initiated_by: initiatedBy,
-      summary: summary ?? null,
-      status: "pending",
-      requires_approval: blast.requiresApproval,
-    })
+    .insert(eventRow)
     .select()
     .single();
+  if (eventErr && holdReason && isMissingColumn(eventErr)) {
+    // Unmigrated: the event is still gated, though the drain may re-derive it.
+    const { hold_reason: _omit, ...legacyRow } = eventRow as typeof eventRow & {
+      hold_reason?: string;
+    };
+    void _omit;
+    ({ data: event, error: eventErr } = await supabase
+      .from("cascade_events")
+      .insert(legacyRow)
+      .select()
+      .single());
+  }
   if (eventErr || !event) {
     // The other delivery won the race. That is the intended outcome, not a
     // failure -- report the event it created rather than a duplicate error.
@@ -190,7 +312,7 @@ export async function createCascadeForAllClones(args: {
     return {
       eventId: null,
       cloneCount: 0,
-      requiresApproval: blast.requiresApproval,
+      requiresApproval,
       error: eventErr?.message ?? "Event insert failed",
     };
   }
@@ -205,17 +327,21 @@ export async function createCascadeForAllClones(args: {
     return {
       eventId: event.id,
       cloneCount: 0,
-      requiresApproval: blast.requiresApproval,
+      requiresApproval,
       error: resErr.message,
     };
   }
 
-  if (blast.requiresApproval) {
+  // Older pending commit events deliver the same head when they run; a hold
+  // on this one alone would be routed around.
+  if (holdReason) await holdPendingCommitCascades(supabase, holdReason);
+
+  if (requiresApproval) {
     await supabase.from("notifications").insert({
       kind: "cascade_awaiting_approval",
       severity: "warning",
       title: `Approval needed · ${trigger} ${mode.replace("_", " ")} cascade`,
-      body: blast.reason ?? "High-blast-radius cascade — awaiting second-operator approval.",
+      body: approvalReason || "High-blast-radius cascade — awaiting second-operator approval.",
       cascade_event_id: event.id,
       url: `/cascades/${event.id}`,
       metadata: { mode, trigger, clone_count: clones.length },
@@ -225,9 +351,9 @@ export async function createCascadeForAllClones(args: {
       entity_type: "cascade_event",
       entity_id: event.id,
       actor_user_id: initiatedBy,
-      metadata: { mode, trigger, clone_count: clones.length, reason: blast.reason },
+      metadata: { mode, trigger, clone_count: clones.length, reason: approvalReason || null },
     });
   }
 
-  return { eventId: event.id, cloneCount: clones.length, requiresApproval: blast.requiresApproval };
+  return { eventId: event.id, cloneCount: clones.length, requiresApproval };
 }

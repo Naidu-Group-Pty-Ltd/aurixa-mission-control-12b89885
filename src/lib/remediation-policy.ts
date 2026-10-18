@@ -134,3 +134,43 @@ export function decideRemediation(input: RemediationPolicyInput): RemediationPol
   // function it replaces.
   return auto(["redeploy of prime-reviewed function bundles"]);
 }
+
+// ── Unattended merges of Codex remediation PRs ───────────────────────────
+
+/**
+ * The highest finding severity whose Codex fix may merge with no person in
+ * the loop (`prime_config.codex_auto_merge_ceiling`). `off` — the default —
+ * means every Codex remediation merges through the two-key review on
+ * /security/scans, whichever path releases it.
+ *
+ * Measured before this existed: the self-healing drain squash-merged any
+ * verified Codex PR for a medium, low or info finding every two minutes,
+ * while the scans page told reviewers that merging needed two approvals.
+ */
+export type AutoMergeCeiling = "off" | "info" | "low" | "medium";
+
+export const AUTO_MERGE_CEILINGS: readonly AutoMergeCeiling[] = ["off", "info", "low", "medium"];
+
+const SEVERITY_RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+const CEILING_RANK: Record<Exclude<AutoMergeCeiling, "off">, number> = {
+  medium: 2,
+  low: 3,
+  info: 4,
+};
+
+export function parseAutoMergeCeiling(value: unknown): AutoMergeCeiling {
+  return AUTO_MERGE_CEILINGS.includes(value as AutoMergeCeiling)
+    ? (value as AutoMergeCeiling)
+    : "off";
+}
+
+/** Whether a fix for a finding of `severity` may merge unattended. */
+export function severityWithinAutoMergeCeiling(
+  severity: string | null | undefined,
+  ceiling: AutoMergeCeiling,
+): boolean {
+  if (ceiling === "off") return false;
+  // An unknown severity is treated as the most severe: never unattended.
+  const rank = SEVERITY_RANK[severity ?? ""] ?? 0;
+  return rank >= CEILING_RANK[ceiling];
+}

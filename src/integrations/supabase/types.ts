@@ -880,6 +880,7 @@ export type Database = {
           attempts: number
           completed_at: string | null
           created_at: string
+          hold_reason: string | null
           id: string
           initiated_by: string | null
           mode: Database["public"]["Enums"]["cascade_mode"]
@@ -902,6 +903,7 @@ export type Database = {
           attempts?: number
           completed_at?: string | null
           created_at?: string
+          hold_reason?: string | null
           id?: string
           initiated_by?: string | null
           mode: Database["public"]["Enums"]["cascade_mode"]
@@ -924,6 +926,7 @@ export type Database = {
           attempts?: number
           completed_at?: string | null
           created_at?: string
+          hold_reason?: string | null
           id?: string
           initiated_by?: string | null
           mode?: Database["public"]["Enums"]["cascade_mode"]
@@ -4997,8 +5000,117 @@ export type Database = {
         }
         Relationships: []
       }
+      codex_callback_receipts: {
+        Row: {
+          digest: string
+          kind: string
+          received_at: string
+          subject_id: string | null
+        }
+        Insert: {
+          digest: string
+          kind: string
+          received_at?: string
+          subject_id?: string | null
+        }
+        Update: {
+          digest?: string
+          kind?: string
+          received_at?: string
+          subject_id?: string | null
+        }
+        Relationships: []
+      }
+      codex_finding_events: {
+        Row: {
+          actor: string | null
+          created_at: string
+          event_type: string
+          finding_id: string
+          from_state: string | null
+          id: string
+          job_id: string | null
+          payload: Json
+          reason: string | null
+          to_state: string | null
+        }
+        Insert: {
+          actor?: string | null
+          created_at?: string
+          event_type: string
+          finding_id: string
+          from_state?: string | null
+          id?: string
+          job_id?: string | null
+          payload?: Json
+          reason?: string | null
+          to_state?: string | null
+        }
+        Update: {
+          actor?: string | null
+          created_at?: string
+          event_type?: string
+          finding_id?: string
+          from_state?: string | null
+          id?: string
+          job_id?: string | null
+          payload?: Json
+          reason?: string | null
+          to_state?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "codex_finding_events_finding_id_fkey"
+            columns: ["finding_id"]
+            isOneToOne: false
+            referencedRelation: "codex_findings"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "codex_finding_events_job_id_fkey"
+            columns: ["job_id"]
+            isOneToOne: false
+            referencedRelation: "codex_scan_jobs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      codex_finding_observations: {
+        Row: {
+          finding_id: string
+          job_id: string
+          observed_at: string
+        }
+        Insert: {
+          finding_id: string
+          job_id: string
+          observed_at?: string
+        }
+        Update: {
+          finding_id?: string
+          job_id?: string
+          observed_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "codex_finding_observations_finding_id_fkey"
+            columns: ["finding_id"]
+            isOneToOne: false
+            referencedRelation: "codex_findings"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "codex_finding_observations_job_id_fkey"
+            columns: ["job_id"]
+            isOneToOne: false
+            referencedRelation: "codex_scan_jobs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       codex_findings: {
         Row: {
+          absent_since: string | null
           affected_file: string | null
           affected_line: number | null
           auto_fix_confidence: number | null
@@ -5013,10 +5125,15 @@ export type Database = {
           first_seen_at: string
           id: string
           last_seen_at: string
+          last_seen_job_id: string | null
+          missed_scans: number
+          pr_number: number | null
           raw: Json
           remediation_pr_state: string | null
           remediation_pr_url: string | null
+          resolution: string | null
           resolved_at: string | null
+          resolved_by_job_id: string | null
           rule_id: string | null
           scan_job_id: string | null
           scanner: string | null
@@ -5024,10 +5141,15 @@ export type Database = {
           snippet: string | null
           source_slug: string | null
           state: Database["public"]["Enums"]["codex_finding_state"]
+          target_key: string | null
           title: string
+          triage_reason: string | null
+          triaged_at: string | null
+          triaged_by: string | null
           updated_at: string
         }
         Insert: {
+          absent_since?: string | null
           affected_file?: string | null
           affected_line?: number | null
           auto_fix_confidence?: number | null
@@ -5042,10 +5164,15 @@ export type Database = {
           first_seen_at?: string
           id?: string
           last_seen_at?: string
+          last_seen_job_id?: string | null
+          missed_scans?: number
+          pr_number?: number | null
           raw?: Json
           remediation_pr_state?: string | null
           remediation_pr_url?: string | null
+          resolution?: string | null
           resolved_at?: string | null
+          resolved_by_job_id?: string | null
           rule_id?: string | null
           scan_job_id?: string | null
           scanner?: string | null
@@ -5053,10 +5180,15 @@ export type Database = {
           snippet?: string | null
           source_slug?: string | null
           state?: Database["public"]["Enums"]["codex_finding_state"]
+          target_key?: string | null
           title: string
+          triage_reason?: string | null
+          triaged_at?: string | null
+          triaged_by?: string | null
           updated_at?: string
         }
         Update: {
+          absent_since?: string | null
           affected_file?: string | null
           affected_line?: number | null
           auto_fix_confidence?: number | null
@@ -5071,10 +5203,15 @@ export type Database = {
           first_seen_at?: string
           id?: string
           last_seen_at?: string
+          last_seen_job_id?: string | null
+          missed_scans?: number
+          pr_number?: number | null
           raw?: Json
           remediation_pr_state?: string | null
           remediation_pr_url?: string | null
+          resolution?: string | null
           resolved_at?: string | null
+          resolved_by_job_id?: string | null
           rule_id?: string | null
           scan_job_id?: string | null
           scanner?: string | null
@@ -5082,7 +5219,11 @@ export type Database = {
           snippet?: string | null
           source_slug?: string | null
           state?: Database["public"]["Enums"]["codex_finding_state"]
+          target_key?: string | null
           title?: string
+          triage_reason?: string | null
+          triaged_at?: string | null
+          triaged_by?: string | null
           updated_at?: string
         }
         Relationships: [
@@ -5101,6 +5242,20 @@ export type Database = {
             referencedColumns: ["clone_id"]
           },
           {
+            foreignKeyName: "codex_findings_last_seen_job_id_fkey"
+            columns: ["last_seen_job_id"]
+            isOneToOne: false
+            referencedRelation: "codex_scan_jobs"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "codex_findings_resolved_by_job_id_fkey"
+            columns: ["resolved_by_job_id"]
+            isOneToOne: false
+            referencedRelation: "codex_scan_jobs"
+            referencedColumns: ["id"]
+          },
+          {
             foreignKeyName: "codex_findings_scan_job_id_fkey"
             columns: ["scan_job_id"]
             isOneToOne: false
@@ -5114,6 +5269,7 @@ export type Database = {
           comment: string | null
           created_at: string
           decision: string
+          head_sha: string | null
           id: string
           remediation_id: string
           reviewer_id: string
@@ -5122,6 +5278,7 @@ export type Database = {
           comment?: string | null
           created_at?: string
           decision: string
+          head_sha?: string | null
           id?: string
           remediation_id: string
           reviewer_id: string
@@ -5130,6 +5287,7 @@ export type Database = {
           comment?: string | null
           created_at?: string
           decision?: string
+          head_sha?: string | null
           id?: string
           remediation_id?: string
           reviewer_id?: string
@@ -5160,6 +5318,9 @@ export type Database = {
           finding_id: string
           fix_confirmed_at: string | null
           fix_confirmed_by_job_id: string | null
+          fix_ineffective_at: string | null
+          fix_ineffective_job_id: string | null
+          head_sha: string | null
           id: string
           last_error: string | null
           last_event: Json
@@ -5168,6 +5329,7 @@ export type Database = {
           merge_commit_sha: string | null
           merged_at: string | null
           merged_by: string | null
+          merged_via: string | null
           model: string | null
           pr_number: number | null
           pr_state: string | null
@@ -5200,6 +5362,9 @@ export type Database = {
           finding_id: string
           fix_confirmed_at?: string | null
           fix_confirmed_by_job_id?: string | null
+          fix_ineffective_at?: string | null
+          fix_ineffective_job_id?: string | null
+          head_sha?: string | null
           id?: string
           last_error?: string | null
           last_event?: Json
@@ -5208,6 +5373,7 @@ export type Database = {
           merge_commit_sha?: string | null
           merged_at?: string | null
           merged_by?: string | null
+          merged_via?: string | null
           model?: string | null
           pr_number?: number | null
           pr_state?: string | null
@@ -5240,6 +5406,9 @@ export type Database = {
           finding_id?: string
           fix_confirmed_at?: string | null
           fix_confirmed_by_job_id?: string | null
+          fix_ineffective_at?: string | null
+          fix_ineffective_job_id?: string | null
+          head_sha?: string | null
           id?: string
           last_error?: string | null
           last_event?: Json
@@ -5248,6 +5417,7 @@ export type Database = {
           merge_commit_sha?: string | null
           merged_at?: string | null
           merged_by?: string | null
+          merged_via?: string | null
           model?: string | null
           pr_number?: number | null
           pr_state?: string | null
@@ -5297,6 +5467,13 @@ export type Database = {
           {
             foreignKeyName: "codex_remediations_fix_confirmed_by_job_id_fkey"
             columns: ["fix_confirmed_by_job_id"]
+            isOneToOne: false
+            referencedRelation: "codex_scan_jobs"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "codex_remediations_fix_ineffective_job_id_fkey"
+            columns: ["fix_ineffective_job_id"]
             isOneToOne: false
             referencedRelation: "codex_scan_jobs"
             referencedColumns: ["id"]
@@ -10902,9 +11079,14 @@ export type Database = {
           cascade_follows_lineage: boolean
           clone_gate_default_hours: number
           clone_gate_enabled: boolean
+          codex_auto_merge_ceiling: string
+          codex_cascade_gate: string
+          codex_deep_scan_scope: string
           codex_nightly_cron: string
           codex_nightly_enabled: boolean
           codex_post_merge_revalidate: boolean
+          codex_pr_check_enabled: boolean
+          codex_pr_check_fail_on: string
           codex_pr_scan_enabled: boolean
           codex_scan_dedup_hours: number
           convergence_slo_minutes: number
@@ -10926,9 +11108,14 @@ export type Database = {
           cascade_follows_lineage?: boolean
           clone_gate_default_hours?: number
           clone_gate_enabled?: boolean
+          codex_auto_merge_ceiling?: string
+          codex_cascade_gate?: string
+          codex_deep_scan_scope?: string
           codex_nightly_cron?: string
           codex_nightly_enabled?: boolean
           codex_post_merge_revalidate?: boolean
+          codex_pr_check_enabled?: boolean
+          codex_pr_check_fail_on?: string
           codex_pr_scan_enabled?: boolean
           codex_scan_dedup_hours?: number
           convergence_slo_minutes?: number
@@ -10950,9 +11137,14 @@ export type Database = {
           cascade_follows_lineage?: boolean
           clone_gate_default_hours?: number
           clone_gate_enabled?: boolean
+          codex_auto_merge_ceiling?: string
+          codex_cascade_gate?: string
+          codex_deep_scan_scope?: string
           codex_nightly_cron?: string
           codex_nightly_enabled?: boolean
           codex_post_merge_revalidate?: boolean
+          codex_pr_check_enabled?: boolean
+          codex_pr_check_fail_on?: string
           codex_pr_scan_enabled?: boolean
           codex_scan_dedup_hours?: number
           convergence_slo_minutes?: number
@@ -12266,11 +12458,13 @@ export type Database = {
           active: boolean
           created_at: string
           created_by: string | null
+          hmac_rotated_at: string | null
           hmac_secret: string | null
           id: string
           kind: string
           metadata: Json
           name: string
+          previous_hmac_secret: string | null
           slug: string
           updated_at: string
         }
@@ -12278,11 +12472,13 @@ export type Database = {
           active?: boolean
           created_at?: string
           created_by?: string | null
+          hmac_rotated_at?: string | null
           hmac_secret?: string | null
           id?: string
           kind: string
           metadata?: Json
           name: string
+          previous_hmac_secret?: string | null
           slug: string
           updated_at?: string
         }
@@ -12290,11 +12486,13 @@ export type Database = {
           active?: boolean
           created_at?: string
           created_by?: string | null
+          hmac_rotated_at?: string | null
           hmac_secret?: string | null
           id?: string
           kind?: string
           metadata?: Json
           name?: string
+          previous_hmac_secret?: string | null
           slug?: string
           updated_at?: string
         }
@@ -15785,6 +15983,10 @@ export type Database = {
         Args: { _period_start: string; _tenant_id: string }
         Returns: Json
       }
+      codex_finalize_scan: {
+        Args: { p_job_id: string; p_summary: Json }
+        Returns: Json
+      }
       codex_fleet_overview: {
         Args: never
         Returns: {
@@ -15800,6 +16002,12 @@ export type Database = {
           sync_status: string
         }[]
       }
+      codex_ingest_scan_findings: {
+        Args: { p_findings: Json; p_job_id: string }
+        Returns: Json
+      }
+      codex_prime_overview: { Args: never; Returns: Json }
+      codex_set_nightly_schedule: { Args: { p_cron: string }; Returns: Json }
       commit_seat: { Args: { _seat_id: string }; Returns: Json }
       commit_tokens: {
         Args: { _actual_tokens: number; _job_id: string; _result_meta?: Json }

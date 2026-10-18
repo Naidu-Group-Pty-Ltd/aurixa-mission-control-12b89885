@@ -3,7 +3,7 @@ import { cn } from "@/lib/utils";
 
 /**
  * Small severity indicator rendered next to the "Security Overview" nav item.
- * - Red pill with count when any critical findings are open (fleet-wide).
+ * - Red pill with count when any critical findings are open (Prime + fleet).
  * - Amber pill with count when only high findings are open.
  * - Nothing when the fleet is clean.
  */

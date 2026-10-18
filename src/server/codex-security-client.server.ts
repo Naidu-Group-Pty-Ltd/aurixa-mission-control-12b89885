@@ -18,6 +18,7 @@
 // Callers only ever see `dispatchCodexScan`, so swapping engines is config.
 
 import { getAppOctokit } from "@/server/github-app.server";
+import { declaredWorkflowVersion } from "@/lib/codex-workflow-contract";
 import { withRetry, isTransientHttpError } from "@/lib/with-retry";
 
 export type ScanEngine = "github_actions" | "http";
@@ -200,8 +201,10 @@ function describeDispatchError(
 }
 
 /**
- * Best-effort check that the target repo actually carries the scan workflow.
- * Used by the engine health panel so "nothing is running" is diagnosable
+ * Best-effort check that the target repo actually carries a Codex workflow —
+ * the scan workflow unless another file is named — and which
+ * `WORKFLOW_VERSION` its copy declares. Used by the engine health panel so
+ * "nothing is running" and "running an outdated workflow" are diagnosable
  * without reading Actions logs.
  */
 export async function checkScanWorkflowPresent(input: {
@@ -209,23 +212,31 @@ export async function checkScanWorkflowPresent(input: {
   repo: string;
   ref?: string | null;
   installationId?: string | null;
-}): Promise<{ present: boolean; detail: string }> {
-  const workflowFile = scanWorkflowFile();
+  workflowFile?: string;
+}): Promise<{ present: boolean; detail: string; version: number | null }> {
+  const workflowFile = input.workflowFile ?? scanWorkflowFile();
   try {
     const octokit = getAppOctokit(input.installationId ?? undefined);
-    await octokit.request("GET /repos/{owner}/{repo}/contents/{path}", {
+    const res = await octokit.request("GET /repos/{owner}/{repo}/contents/{path}", {
       owner: input.owner,
       repo: input.repo,
       path: `.github/workflows/${workflowFile}`,
       ...(input.ref ? { ref: input.ref } : {}),
     });
-    return { present: true, detail: `.github/workflows/${workflowFile} found` };
+    const content = (res.data as { content?: string; encoding?: string }).content;
+    const text =
+      typeof content === "string"
+        ? Buffer.from(content.replace(/\n/g, ""), "base64").toString("utf8")
+        : "";
+    const version = text ? declaredWorkflowVersion(text) : null;
+    return { present: true, detail: `.github/workflows/${workflowFile} found`, version };
   } catch (err) {
     const status = (err as { status?: number })?.status;
     if (status === 404) {
       return {
         present: false,
         detail: `.github/workflows/${workflowFile} is missing from ${input.owner}/${input.repo}`,
+        version: null,
       };
     }
     return {
@@ -234,6 +245,7 @@ export async function checkScanWorkflowPresent(input: {
         err instanceof Error
           ? `Could not verify workflow file: ${err.message}`
           : "Could not verify workflow file",
+      version: null,
     };
   }
 }

@@ -189,7 +189,9 @@ export function CloneCodexScansCard({ cloneId }: { cloneId: string }) {
                     </TableCell>
                     <TableCell className="text-sm">{f.title}</TableCell>
                     <TableCell className="font-mono text-xs truncate max-w-xs">
-                      {f.file_path ?? "—"}
+                      {f.affected_file
+                        ? `${f.affected_file}${f.affected_line ? `:${f.affected_line}` : ""}`
+                        : "—"}
                     </TableCell>
                   </TableRow>
                 ))}
