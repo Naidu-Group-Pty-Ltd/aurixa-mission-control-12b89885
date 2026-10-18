@@ -9,7 +9,11 @@
  *   2. the patch is verified, secret-free and within the size bounds;
  *   3. the repository's CI — started by this lane, since a PR opened with the
  *      workflow's token starts none — has passed on that commit
- *      (fixCiGate.pure.ts decides; fixCiGate.pure.test.ts tests it);
+ *      (fixCiGate.pure.ts decides; fixCiGate.pure.test.ts tests it). For a
+ *      fix an admin released as well: Prime's default branch requires these
+ *      checks and Mission Control's App is not on the bypass list
+ *      (primeBranchProtection.pure.ts), so GitHub refuses the merge without
+ *      them either way;
  *   4. only then the merge, pinned to that commit.
  *
  * Waiting for the CI costs no attempt: the gate bounds the wait itself.
@@ -26,7 +30,11 @@ const lane = healing.slice(
   healing.indexOf("async function executePrMerge"),
   healing.indexOf("async function executeSqlMigration"),
 );
-const unattended = lane.slice(lane.indexOf("if (!approvedByHuman) {"));
+/** The checks only an unattended merge passes: from their `if` to the CI gate that follows them. */
+const unattended = lane.slice(
+  lane.indexOf("if (!approvedByHuman) {"),
+  lane.indexOf("const mergeHead ="),
+);
 const at = (needle: string) => {
   const i = lane.indexOf(needle);
   expect(i, needle).toBeGreaterThan(-1);
@@ -50,21 +58,28 @@ describe("the fix merge lane", () => {
     expect(ci).toBeLessThan(merge);
   });
 
-  it("applies the CI gate to the unattended path", () => {
-    expect(unattended).toContain("fixCiSpec(rem.verification)");
-    expect(unattended).toContain("decideFixCi({");
+  it("applies the CI gate whoever released the fix", () => {
+    // After the unattended-only checks close, not inside them.
+    expect(unattended).toContain("decideFixMerge({");
+    expect(unattended.trimEnd().endsWith("}")).toBe(true);
+    expect(unattended).not.toContain("decideFixCi({");
+    expect(at("decideFixCi({")).toBeGreaterThan(at("const mergeHead ="));
+    expect(lane).toContain("fixCiSpec(rem.verification)");
   });
 
-  it("reads the CI on the verified commit and starts it on the fix's own branch", () => {
-    expect(lane).toContain("const head = verifiedHead ?? pr.headSha;");
+  it("reads the CI on the commit about to merge and starts it on the fix's own branch", () => {
+    // The verified commit when unattended; the PR's head as it is when an
+    // admin released it.
+    expect(lane).toContain(
+      "const mergeHead = approvedByHuman ? pr.headSha : (verifiedHead ?? pr.headSha);",
+    );
+    expect(lane).toContain("const head = mergeHead;");
     expect(lane).toMatch(/listFixCiRuns\(\{ owner, repo, headSha: head, installationId \}\)/);
     expect(lane).toMatch(/dispatchFixCi\(\{[^}]*ref: pr\.headRef/);
   });
 
-  it("merges pinned to the commit that was checked", () => {
-    expect(lane).toContain(
-      "expectedHeadSha: approvedByHuman ? null : (verifiedHead ?? pr.headSha)",
-    );
+  it("merges pinned to the commit that was checked, released by a person or not", () => {
+    expect(lane).toContain("expectedHeadSha: mergeHead,");
   });
 
   it("closes a fix whose CI refused, and deletes the branch only at the checked commit", () => {
@@ -83,7 +98,8 @@ describe("the fix merge lane", () => {
       healing.indexOf("async function waitForFixCi"),
       healing.indexOf("async function executePrMerge"),
     );
-    expect(wait).toContain('status: "planned"');
+    // A fix an admin released stays released while it waits.
+    expect(wait).toContain('status: run.status === "approved" ? "approved" : "planned"');
     expect(wait).toContain("attempts: run.attempts ?? 0");
     expect(wait).toContain("next_attempt_at:");
   });

@@ -275,6 +275,43 @@ export const getCodexEngineHealth = createServerFn({ method: "GET" })
       });
     }
 
+    // ── Prime's default branch (prime-branch-protection.server.ts) ────────
+    // Read-only here: the nightly run applies it, and "Protect main now" does
+    // so on demand. Fixes merge with nobody reading them, and this ruleset is
+    // what holds every merge to CI.
+    if (
+      prime?.github_owner &&
+      prime?.github_repo &&
+      process.env.GITHUB_APP_ID &&
+      process.env.GITHUB_APP_PRIVATE_KEY
+    ) {
+      const { ensurePrimeBranchProtection } =
+        await import("@/server/prime-branch-protection.server");
+      // Cached only while it is in order. A problem is read fresh each time,
+      // so the panel shows the result of “Protect main now” at once.
+      const key = `protection:${primeRepo}`;
+      const hit = githubCache.get(key);
+      const fresh = !!hit && Date.now() - hit.at < GITHUB_CACHE_MS;
+      const protection = fresh
+        ? (hit!.value as Awaited<ReturnType<typeof ensurePrimeBranchProtection>>)
+        : await ensurePrimeBranchProtection({ apply: false });
+      if (!fresh) {
+        if (protection.ok) githubCache.set(key, { at: Date.now(), value: protection });
+        else githubCache.delete(key);
+      }
+      const pending = protection.status === "would_create" || protection.status === "would_update";
+      checks.push({
+        key: "branch_protection",
+        label: `Protection on ${prime.default_branch || "main"}`,
+        status: protection.ok ? "ok" : pending ? "warn" : "fail",
+        detail: protection.detail,
+        fix: protection.ok
+          ? undefined
+          : (protection.fix ??
+            (pending ? "Press “Protect main now”, or wait for tonight's run." : undefined)),
+      });
+    }
+
     // ── Recent activity ──────────────────────────────────────────────────
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     const [recentRes, lastCompletedRes, stalledRes] = await Promise.all([
@@ -485,6 +522,10 @@ export const getCodexEngineHealth = createServerFn({ method: "GET" })
       signingKeyMode: masters.mode,
       signingKeyRotatable: masters.mode === "intake_source",
       signingKeyInGrace: masters.previous.length > 0,
+      // Shown as a button when the protection is missing or has drifted.
+      branchProtectionApplicable: checks.some(
+        (c) => c.key === "branch_protection" && c.status !== "ok",
+      ),
     };
 
     return { checks, summary };

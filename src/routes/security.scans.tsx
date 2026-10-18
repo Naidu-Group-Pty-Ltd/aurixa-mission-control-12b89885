@@ -45,6 +45,7 @@ import {
   runNightlyNow,
   setNightlySchedule,
   rotateScanSigningKey,
+  protectPrimeMainNow,
 } from "@/lib/codex-security.functions";
 import {
   CodexFindingsExplorer,
@@ -956,6 +957,17 @@ function EngineHealthPanel() {
     onError: (e: Error) => toast.error(e.message),
   });
 
+  const protectFn = useServerFn(protectPrimeMainNow);
+  const protect = useMutation({
+    mutationFn: () => protectFn({}),
+    onSuccess: (r) => {
+      if (r.ok) toast.success(r.detail);
+      else toast.error(r.fix ? `${r.detail} ${r.fix}` : r.detail);
+      healthQ.refetch();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
   const checks = healthQ.data?.checks ?? [];
   const summary = healthQ.data?.summary;
   const problems = checks.filter((c: any) => c.status !== "ok");
@@ -1005,6 +1017,25 @@ function EngineHealthPanel() {
           </CardDescription>
         </div>
         <div className="flex gap-2">
+          {summary?.branchProtectionApplicable && (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={protect.isPending}
+              title="Create or repair the ruleset that protects Prime's default branch"
+              onClick={async () => {
+                const ok = await confirm({
+                  title: "Protect Prime's main branch now?",
+                  description:
+                    "Mission Control's GitHub App creates or repairs the ruleset “Mission Control: protect the default branch”: changes reach main only through pull requests whose two CI jobs passed. Lovable and repository admins can still push directly. Auto-merge is switched on for the repository so the digest refresh can land itself. Tonight's run does the same if you leave it.",
+                  confirmText: "Protect main",
+                });
+                if (ok) protect.mutate();
+              }}
+            >
+              {protect.isPending ? "Protecting…" : "Protect main now"}
+            </Button>
+          )}
           {summary?.signingKeyRotatable && (
             <Button
               size="sm"

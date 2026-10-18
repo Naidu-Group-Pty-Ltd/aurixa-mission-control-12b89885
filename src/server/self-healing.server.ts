@@ -630,7 +630,9 @@ async function declineFix(
  * Hand a merge run back to wait for the fix's CI. Attempt-neutral, like
  * `waitForClaim`: a CI that is still running is not a failed attempt, and the
  * wait is bounded by the gate itself (`FIX_CI_WAIT_MS`), not by the run's
- * attempt budget. `result` carries what the wait has done so far.
+ * attempt budget. `result` carries what the wait has done so far. A fix an
+ * admin released stays released: handing it back as `planned` would bring it
+ * round again as an unattended merge, under checks the admin had overruled.
  */
 async function waitForFixCi(
   run: any,
@@ -640,7 +642,7 @@ async function waitForFixCi(
   const prior =
     run.result && typeof run.result === "object" && !Array.isArray(run.result) ? run.result : {};
   await markRun(run.id, {
-    status: "planned",
+    status: run.status === "approved" ? "approved" : "planned",
     attempts: run.attempts ?? 0,
     next_attempt_at: new Date(Date.now() + MONITOR_RETRY_MINUTES * 60_000).toISOString(),
     last_error: `waiting: ${why}`.slice(0, 2000),
@@ -750,43 +752,50 @@ async function executePrMerge(run: any, approvedByHuman: boolean): Promise<{ sta
       linesChanged: rem.files_changed == null ? null : linesChanged,
     });
     if (!decision.merge) return declineFix(run, rem, target, decision.reasons, verifiedHead);
+  }
 
-    // The repository's own CI, on the commit that was verified. The PR was
-    // opened with the workflow's token, which starts no workflow, so this
-    // lane starts the CI the workflow named and comes back until it is done.
-    const ci = fixCiSpec(rem.verification);
-    if (ci?.workflow) {
-      const { listFixCiRuns, dispatchFixCi } = await import("@/server/codex-remediation.server");
-      const head = verifiedHead ?? pr.headSha;
-      const prior = (run.result ?? {}) as { ci_dispatched_at?: unknown };
-      const runs = ci.dispatchable
-        ? await listFixCiRuns({ owner, repo, headSha: head, installationId })
-        : [];
-      const verdict = decideFixCi({
-        spec: ci,
-        runs,
-        dispatched: typeof prior.ci_dispatched_at === "string",
-        firstLookAt: Date.parse(run.started_at ?? run.created_at ?? "") || Date.now(),
-        now: Date.now(),
+  // The repository's own CI, on the commit about to merge: the one that was
+  // verified, or — for a fix an admin released — the PR's head as it is now.
+  // The PR was opened with the workflow's token, which starts no workflow, so
+  // this lane starts the CI the workflow named and comes back until it is done.
+  //
+  // For a release by a person too. Prime's default branch requires these
+  // checks (primeBranchProtection.pure.ts) and Mission Control's App is not on
+  // the ruleset's bypass list, so GitHub refuses a merge without them whoever
+  // released it; asking first turns that refusal into a wait.
+  const mergeHead = approvedByHuman ? pr.headSha : (verifiedHead ?? pr.headSha);
+  const ci = fixCiSpec(rem.verification);
+  if (ci?.workflow) {
+    const { listFixCiRuns, dispatchFixCi } = await import("@/server/codex-remediation.server");
+    const head = mergeHead;
+    const prior = (run.result ?? {}) as { ci_dispatched_at?: unknown };
+    const runs = ci.dispatchable
+      ? await listFixCiRuns({ owner, repo, headSha: head, installationId })
+      : [];
+    const verdict = decideFixCi({
+      spec: ci,
+      runs,
+      dispatched: typeof prior.ci_dispatched_at === "string",
+      firstLookAt: Date.parse(run.started_at ?? run.created_at ?? "") || Date.now(),
+      now: Date.now(),
+    });
+    if (verdict.kind === "refuse") return declineFix(run, rem, target, [verdict.why], head);
+    if (verdict.kind === "dispatch") {
+      const sent = await dispatchFixCi({
+        owner,
+        repo,
+        workflow: ci.workflow,
+        ref: pr.headRef,
+        installationId,
       });
-      if (verdict.kind === "refuse") return declineFix(run, rem, target, [verdict.why], head);
-      if (verdict.kind === "dispatch") {
-        const sent = await dispatchFixCi({
-          owner,
-          repo,
-          workflow: ci.workflow,
-          ref: pr.headRef,
-          installationId,
-        });
-        if (!sent.ok) return declineFix(run, rem, target, [sent.error], head);
-        return waitForFixCi(run, verdict.why, {
-          ci_workflow: ci.workflow,
-          ci_dispatched_at: new Date().toISOString(),
-          ci_head_sha: head,
-        });
-      }
-      if (verdict.kind === "wait") return waitForFixCi(run, verdict.why);
+      if (!sent.ok) return declineFix(run, rem, target, [sent.error], head);
+      return waitForFixCi(run, verdict.why, {
+        ci_workflow: ci.workflow,
+        ci_dispatched_at: new Date().toISOString(),
+        ci_head_sha: head,
+      });
     }
+    if (verdict.kind === "wait") return waitForFixCi(run, verdict.why);
   }
 
   const engineLabel = isFixEngine(rem.engine) ? FIX_ENGINE_LABEL[rem.engine] : "Codex";
@@ -799,7 +808,9 @@ async function executePrMerge(run: any, approvedByHuman: boolean): Promise<{ sta
       installationId,
       branchName: rem.branch_name,
       baseRef: rem.base_ref,
-      expectedHeadSha: approvedByHuman ? null : (verifiedHead ?? pr.headSha),
+      // Pinned for a release by a person as well: the head CI passed on is
+      // the head that merges, never one pushed after it.
+      expectedHeadSha: mergeHead,
       commitTitle: `Self-healing: security fix PR #${rem.pr_number} (${engineLabel})`,
       commitMessage: approvedByHuman
         ? "Released by an admin through the Mission Control self-healing queue."
@@ -809,10 +820,11 @@ async function executePrMerge(run: any, approvedByHuman: boolean): Promise<{ sta
     });
   } catch (err) {
     // GitHub's refusals are answers, not outages: a conflict with a fix that
-    // merged first (405), a head that moved (409), or a required status check
-    // — which never runs on a PR the workflow's own token opened. Retrying
-    // cannot change them, so the fix is closed and retried on a later night
-    // against the updated branch. Anything else is retried on the run's budget.
+    // merged first (405), a head that moved (409), or a rule on the default
+    // branch the merge does not meet — a required check GitHub still counts as
+    // missing or failing. Retrying cannot change them, so the fix is closed and
+    // retried on a later night against the updated branch. Anything else is
+    // retried on the run's budget.
     const status = (err as { status?: number })?.status;
     if (status === 405 || status === 409 || status === 422) {
       const detail =

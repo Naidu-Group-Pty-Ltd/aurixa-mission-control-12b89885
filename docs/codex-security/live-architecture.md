@@ -68,6 +68,17 @@ scans, post-merge scans and clone scans described in the passes above.
 | Merged fixes were held from the cascade until a post-merge scan | They cascade like any commit and pass the security gate (`SELF_HEALING_MERGE_TITLE`). |
 | The scan and remediation master secrets were synced into repositories' Actions secrets | They never leave Mission Control; the Prime sync deletes the old copies. `ANTHROPIC_API_KEY` is synced alongside `OPENAI_API_KEY`. |
 
+## October 2026, fourth pass: `main` protected, dependencies cleared
+
+| Before | Now |
+|---|---|
+| Prime's `main` had no branch protection and no ruleset: any token with `contents: write` — the fix workflow's, the migration workflow's — could push straight to it | Mission Control keeps a ruleset on Prime's default branch, **“Mission Control: protect the default branch”** (`src/server/primeBranchProtection.pure.ts`, applied by `prime-branch-protection.server.ts` through Mission Control's App): no deletion, no force push, changes only through a pull request, and both CI jobs — **“Typecheck · Lint · Build”** and **“Lovable install (bun.lockb)”**, reported by GitHub Actions — required. The nightly run creates it, and puts back anything removed from it; engine health shows it (“Protection on main”) and **Protect main now** applies it at once. |
+| — | Who may go past it: **Lovable's App** (it pushes to `main` directly; its App id is looked up from its bot account, 159125892, never from a name), **repository admins** and **organisation owners**. Mission Control's own App is deliberately **not** on the list: its fix merges are unattended, and GitHub refusing one whose checks did not pass is the gate on them Mission Control's code cannot get wrong. |
+| — | It never protects `main` without Lovable on the list, never requires a check `ci.yml` has no job for, never rewrites a bypass list it was not shown, and never switches back on a ruleset a person switched off. A person may make it stricter; the nightly pass keeps that. |
+| A fix an admin released merged without the repository's CI | It waits for the CI too, pinned to the head it ran on — GitHub would refuse it otherwise — and stays released while it waits. |
+| `apply-migrations.yml` pushed the refreshed digest manifest to `main` with its own write token | It asks Mission Control (`propose_digests`), which opens the manifest on Prime as a pull request from `mission-control/applied-digests`, armed to merge itself once CI passes. The job is read-only now. The repository's “Allow auto-merge” is switched on for this. |
+| The migration workflow recognised Lovable's migrations by the full address `159125892+gpt-engineer-app[bot]@…`, though the same account also commits as `lovable-dev[bot]` | It matches the account id alone, as its comment always said it did. A Lovable migration under the newer name would otherwise have run again. |
+
 ## Why nothing was running
 
 | # | Fault | Effect |
@@ -256,7 +267,7 @@ records the `model` that did most of the writing.
 | Scanner silencing | An added inline suppression, or an edit to `.gitleaks.toml`, `.gitleaksignore`, `.semgrepignore`, `osv-scanner.toml` or `.github/codex-security/`, is refused. |
 | Credentials | Each API key exists only in its agent's step; `GITHUB_TOKEN` only in the push and PR steps, which never run git in the checkout. The job's temporary directory is closed to other users. |
 | Checks | install (`npm ci` when a lockfile exists), typecheck, lint, test, build — whichever `package.json` defines — on the base plus the patch, as `fixcheck`, whose leftover processes are killed. A fix that fails is not pushed. |
-| Repository CI | Dispatched by Mission Control on the fix branch; the fix merges only once it passed on the verified commit. |
+| Repository CI | Dispatched by Mission Control on the fix branch; the fix merges only once it passed on the verified commit. GitHub enforces the same two checks on `main` (the ruleset above), and Mission Control's App cannot bypass them. |
 | Size | At most 10 files and 400 lines, lockfiles not counted (`decideFixMerge`). |
 | Pinning | The merge is pinned to the commit the checks and CI ran on; a push to the branch closes the fix. |
 | Retries | A declined fix is closed, its branch deleted, the finding reopened. Automatic attempts that did not merge count: two in 30 days, then the finding waits for a person. |
@@ -273,7 +284,7 @@ records the `model` that did most of the writing.
 | A guard refuses the patch | `workflow.failed` naming what it touched; nothing pushed. |
 | The checks fail | `workflow.failed` naming the failed checks, with their output; nothing pushed. |
 | CI fails, or does not finish within 3 hours, on the fix | The PR is closed with the reason, its branch deleted, the finding reopened. |
-| GitHub refuses the merge (conflict with an earlier fix, branch protection) | As above; the finding is tried again on a later night against the new `main`. |
+| GitHub refuses the merge (conflict with an earlier fix, a rule on `main` the merge does not meet) | As above; the finding is tried again on a later night against the new `main`. |
 | Workflow dies at any point | Remediation `failed`, the finding returned to `open`. |
 
 ### Following one
@@ -289,7 +300,7 @@ failed fixes notify operators (`remediation_failed`); merged ones
 
 | Name | Required | Notes |
 |---|---|---|
-| `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_APP_INSTALLATION_ID` | yes | Installation needs **Actions: read & write**, **Secrets: read & write**, and **Checks: read & write** for PR checks. |
+| `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_APP_INSTALLATION_ID` | yes | Installation needs **Actions: read & write**, **Secrets: read & write**, **Contents** and **Pull requests: read & write**, **Checks: read & write** for PR checks, and **Administration: read & write** to keep `main` protected (rulesets, “Allow auto-merge”). |
 | `CRON_SECRET` | yes | Mirror into Postgres: `ALTER DATABASE postgres SET app.settings.cron_secret = '…';` |
 | `PUBLIC_APP_URL` (or `APP_PUBLIC_URL`) | recommended | Origin the scanner posts results back to. |
 | `CODEX_SECURITY_WEBHOOK_SECRET` | optional | The scan **master**: per-job keys are derived from it, it never leaves Mission Control. Falls back to the auto-generated secret on the built-in `codex` row of `security_intake_sources`, which "Rotate signing key" on engine health replaces (the previous value keeps working for 24 hours). |
@@ -319,10 +330,12 @@ CI the merge lane runs on each fix, default `ci.yml`).
    the **Actions secret sync for Prime** in Settings. Run the fleet sync once
    to remove the Codex secrets from the clones.
 4. Make sure Prime's `ci.yml` keeps its `workflow_dispatch` trigger (engine
-   health's "CI that fixes must pass" check), and that branch protection lets
-   the App merge once those checks pass — a required check that never runs on
-   a fix PR (for example the retired "Codex Security" PR check) makes GitHub
-   refuse every merge.
+   health's "CI that fixes must pass" check). Give the App **Administration:
+   read & write** and press **Protect main now** (or wait for the night): the
+   ruleset requires exactly `ci.yml`'s two jobs, which the merge lane runs on
+   every fix. Any other required check you add must also run on a fix PR — one
+   that never runs (for example the retired "Codex Security" PR check) makes
+   GitHub refuse every merge.
 5. **Rotate both master secrets** (engine health): earlier versions synced
    them into repositories' Actions secrets.
 6. Open **/security/scans**, read the **Engine health** card, and click

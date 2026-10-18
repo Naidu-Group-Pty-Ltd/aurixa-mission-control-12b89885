@@ -3,6 +3,9 @@
 // window so overlapping cron runs (or manual re-runs) don't stack duplicates.
 // Clones are not scanned (src/lib/codex-scan-policy.ts); the fixes the scan
 // leads to are dispatched by the sweep once it completes (codex-autofix.server.ts).
+// It also puts back the ruleset that protects Prime's default branch, if a
+// person deleted it or it lost a rule (prime-branch-protection.server.ts): the
+// fixes merge unattended, and that ruleset is what holds them to CI.
 //
 // IT SPENDS THE APP INSTALLATION, AND FOR A YEAR IT NEVER SAID SO.
 //
@@ -28,6 +31,8 @@ import { readGitHubRemaining } from "@/server/githubAllowance.server";
 import { beginGithubLane } from "@/server/githubUsageMeter";
 import { runNightlyScans, sweepStalledScans } from "@/server/codex-scheduling.server";
 import { notifyOverdueFindings } from "@/server/codex-finding-sla.server";
+import { ensurePrimeBranchProtection } from "@/server/prime-branch-protection.server";
+import { writeAuditLog } from "@/server/audit.server";
 
 export const Route = createFileRoute("/hooks/codex-nightly")({
   server: {
@@ -82,9 +87,38 @@ export const Route = createFileRoute("/hooks/codex-nightly")({
             return null;
           });
           const result = await runNightlyScans();
-          return new Response(JSON.stringify({ success: true, ...result, swept, overdue }), {
-            headers: { "Content-Type": "application/json" },
-          });
+          // Prime's default branch, put back the way it should be: a ruleset a
+          // person deleted is back by morning (prime-branch-protection.server.ts).
+          // Its own outcome, never the scan's — a missing App permission is
+          // reported on engine health, not as a failed night.
+          const protection = await ensurePrimeBranchProtection({ apply: true }).catch((err) => ({
+            ok: false,
+            status: "error" as const,
+            detail: err instanceof Error ? err.message : String(err),
+          }));
+          if (
+            protection.status === "created" ||
+            protection.status === "updated" ||
+            ("autoMerge" in protection && protection.autoMerge === "turned_on")
+          ) {
+            await writeAuditLog({
+              action:
+                protection.status === "created" || protection.status === "updated"
+                  ? `prime.branch_protection.${protection.status}`
+                  : "prime.branch_protection.auto_merge_allowed",
+              entityType: "github_ruleset",
+              entityId: "repo" in protection ? (protection.repo ?? null) : null,
+              metadata: protection as Record<string, unknown>,
+            });
+          } else if (!protection.ok) {
+            console.warn(
+              `codex-nightly: main is not protected (${protection.status}): ${protection.detail}`,
+            );
+          }
+          return new Response(
+            JSON.stringify({ success: true, ...result, swept, overdue, protection }),
+            { headers: { "Content-Type": "application/json" } },
+          );
         } catch (err) {
           const msg = err instanceof Error ? err.message : "nightly_failed";
           console.error("codex-nightly failed:", msg);

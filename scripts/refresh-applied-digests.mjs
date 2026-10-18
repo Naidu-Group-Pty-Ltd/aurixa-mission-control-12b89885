@@ -23,6 +23,20 @@
 // drifting from the live table unnoticed.
 import { readFileSync, writeFileSync } from "node:fs";
 
+// The renderer Mission Control uses too, so a refresh from here and one it
+// proposes on Prime write the file the same way. A `.ts` module imported
+// directly: Node ≥22.18 strips the types.
+let renderManifest;
+try {
+  ({ renderManifest } = await import("../src/server/appliedDigestManifest.pure.ts"));
+} catch (e) {
+  console.error(
+    `::error title=Node too old::This script imports a .ts module directly, which needs ` +
+      `Node ≥22.18 (type stripping on by default). Running ${process.version}: ${e.message}`,
+  );
+  process.exit(1);
+}
+
 const MANIFEST = "scripts/applied-migration-digests.txt";
 const CHECK = process.argv.includes("--check");
 
@@ -93,20 +107,7 @@ if (live.length === 0) {
   );
 }
 
-const HEADER = readFileSync(MANIFEST, "utf8")
-  .split("\n")
-  .filter((l) => l.startsWith("#") || l.trim() === "")
-  .join("\n")
-  .replace(/\n+$/, "\n");
-
-const rendered =
-  HEADER +
-  live
-    .slice()
-    .sort((a, b) => a.version.localeCompare(b.version))
-    .map((d) => `${d.version}  ${d.sha256}  ${d.name}`)
-    .join("\n") +
-  "\n";
+const rendered = renderManifest(readFileSync(MANIFEST, "utf8"), live);
 
 if (!CHECK) {
   writeFileSync(MANIFEST, rendered);

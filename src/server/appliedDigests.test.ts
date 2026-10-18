@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
-import { execFile, spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -98,14 +98,6 @@ type Step = {
   run?: string;
   env?: Record<string, string>;
 };
-
-/** Git, synchronously — setup and inspection only, never while a stub must answer. */
-const spawnSyncGit = (cwd: string, args: readonly string[]) =>
-  spawnSync("git", args as string[], {
-    cwd,
-    encoding: "utf8",
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
-  });
 
 /** A Mission Control stand-in. Closed after the file's tests finish. */
 const allServers: Server[] = [];
@@ -393,7 +385,7 @@ describe("the two halves are wired where their credentials allow", () => {
 });
 
 /*
-  THE RUN THAT MAKES THE MANIFEST STALE IS THE RUN THAT REFRESHES IT.
+  THE RUN THAT MAKES THE MANIFEST STALE IS THE RUN THAT ASKS FOR IT TO BE REFRESHED.
 
   A migration's digest exists only once it has RUN, so the manifest is
   necessarily short by whatever a push just applied. That gap used to stay open
@@ -401,203 +393,208 @@ describe("the two halves are wired where their credentials allow", () => {
   remembered" is the failure mode every other part of this pipeline exists to
   remove.
 
-  The apply job closes it in the same run: the apply has settled, and that job
-  is the one place holding the credential to read the new digests.
+  The job used to close it by pushing to `main` itself. `main` is protected
+  now and no workflow token may push there, so the job asks Mission Control,
+  which proposes the file through its own App as a pull request that merges
+  itself once CI passes. The job keeps `contents: read`.
 
-  The step's shell body is lifted from the YAML and EXECUTED below against a
-  real git repository with a real local remote and a stub Mission Control. One
-  line is substituted — the `ORIGIN=` URL, which hardcodes github.com — and
-  nothing else; the logic under test (regenerate, compare, commit, push, reset,
-  retry) runs verbatim.
+  The script is EXECUTED below against a stub Mission Control, every answer it
+  can get, and must leave the run green on every one.
 */
-describe("the apply job refreshes and commits the manifest", () => {
+describe("the apply job asks Mission Control to propose the manifest", () => {
   const applyYaml = readFileSync(".github/workflows/apply-migrations.yml", "utf8");
-  const steps = (
-    loadYaml(applyYaml) as {
-      jobs: { apply: { permissions?: Record<string, string>; steps: Step[] } };
-    }
-  ).jobs.apply;
-  const step = steps.steps.find((s) => (s.name ?? "").startsWith("Refresh the digest"));
+  const doc = loadYaml(applyYaml) as {
+    permissions?: Record<string, string>;
+    jobs: { apply: { permissions?: Record<string, string>; steps: Step[] } };
+  };
+  const job = doc.jobs.apply;
+  const step = job.steps.find((s) => (s.name ?? "").startsWith("Refresh the digest"));
+  const PROPOSE = resolve(".github/scripts/propose-applied-digests.mjs");
 
   it("exists, and runs after the migrations have actually settled", () => {
-    expect(step).toBeDefined();
-    const order = steps.steps.map((s) => s.name ?? s.uses ?? "");
-    expect(order.indexOf("Refresh the digest manifest and commit it")).toBeGreaterThan(
+    expect(step?.run?.trim()).toBe("node .github/scripts/propose-applied-digests.mjs");
+    const order = job.steps.map((s) => s.name ?? s.uses ?? "");
+    expect(order.indexOf("Refresh the digest manifest")).toBeGreaterThan(
       order.indexOf("Enqueue and wait"),
     );
   });
 
-  it("takes the write permission on the job, not the workflow", () => {
-    // Scoped to the one job that needs it. The workflow-level default stays
-    // read, so nothing else this file might grow inherits repository write.
-    expect(steps.permissions).toEqual({ contents: "write" });
-    expect(loadYaml(applyYaml)).toMatchObject({ permissions: { contents: "read" } });
+  it("holds no write token: not on the job, not on the workflow, and pushes nothing", () => {
+    // The job that holds CRON_SECRET used to hold `contents: write` too, to
+    // push the manifest to `main`. Protection on `main` refuses that push now,
+    // and the write token was never what this job was for.
+    expect(job.permissions).toBeUndefined();
+    expect(doc.permissions).toEqual({ contents: "read" });
+    const runs = job.steps.map((s) => s.run ?? "").join("\n");
+    expect(runs).not.toMatch(/\bgit push\b/);
+    expect(applyYaml).not.toMatch(/\$\{\{\s*github\.token\s*\}\}/);
+    expect(applyYaml).not.toMatch(/secrets\.GITHUB_TOKEN/);
   });
 
-  it("never persists the push credential into the checkout", () => {
-    // The same job submits SQL. Building the authenticated URL in-step keeps a
-    // repository token out of `.git/config` for every other step.
-    const checkout = steps.steps.find((s) => (s.uses ?? "").startsWith("actions/checkout"));
+  it("never persists a credential into the checkout", () => {
+    // The same job submits SQL; no repository token belongs in `.git/config`.
+    const checkout = job.steps.find((s) => (s.uses ?? "").startsWith("actions/checkout"));
     expect((checkout as unknown as { with: Record<string, unknown> }).with).toMatchObject({
       "persist-credentials": false,
     });
   });
 
-  /** The step body, with only the hardcoded github.com origin redirected. */
-  const stepBody = (remote: string) =>
-    (step?.run ?? "").replace(/^\s*ORIGIN=.*$/m, `          ORIGIN=${JSON.stringify(remote)}`);
-
-  /** A repo with a bare remote and a manifest, as the job would find it. */
-  const repoWithRemote = (manifest: string) => {
-    const root = mkdtempSync(join(tmpdir(), "refresh-"));
-    const bare = join(root, "remote.git");
-    const work = join(root, "work");
-    const git = (cwd: string, ...args: string[]) => spawnSyncGit(cwd, args);
-    mkdirSync(bare, { recursive: true });
-    git(bare, "init", "--bare", "-q", "-b", "main");
-    mkdirSync(work, { recursive: true });
-    git(work, "init", "-q", "-b", "main");
-    git(work, "config", "user.email", "fixture@example.invalid");
-    git(work, "config", "user.name", "fixture");
-    mkdirSync(join(work, "scripts"), { recursive: true });
-    writeFileSync(join(work, "scripts", "applied-migration-digests.txt"), manifest);
-    // The step runs the real script from the repo root it is standing in, so
-    // the fixture carries a copy. Committed in the seed, so it survives the
-    // `reset --hard` the retry path performs.
-    writeFileSync(
-      join(work, "scripts", "refresh-applied-digests.mjs"),
-      readFileSync(ONLINE, "utf8"),
-    );
-    git(work, "add", "-A");
-    git(work, "commit", "-q", "-m", "seed");
-    git(work, "push", "-q", bare, "main");
-    return { root, bare, work };
+  const propose = async (answer: { status: number; json: unknown } | null, env = {}) => {
+    let asked: unknown = null;
+    const url = answer
+      ? await stubServer((body) => {
+          asked = body;
+          return answer;
+        })
+      : "http://127.0.0.1:9";
+    const dir = mkdtempSync(join(tmpdir(), "propose-"));
+    const r = await run(PROPOSE, dir, { MISSION_CONTROL_URL: url, CRON_SECRET: "x", ...env });
+    return { ...r, asked };
   };
 
-  const remoteManifest = (bare: string) =>
-    spawnSyncGit(bare, ["show", "main:scripts/applied-migration-digests.txt"]).stdout ?? "";
-
-  const runStep = (work: string, bare: string, url: string, env: Record<string, string> = {}) =>
-    new Promise<{ status: number; out: string }>((res) => {
-      execFile(
-        "bash",
-        ["-c", stepBody(bare)],
-        {
-          cwd: work,
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            GH_TOKEN: "unused-for-a-local-remote",
-            GITHUB_REPOSITORY: "fixture/repo",
-            GITHUB_REF_NAME: "main",
-            MANIFEST: "scripts/applied-migration-digests.txt",
-            MISSION_CONTROL_URL: url,
-            CRON_SECRET: "x",
-            ...env,
-          },
+  it("asks for a proposal, and reports one armed to merge itself", async () => {
+    const r = await propose({
+      status: 200,
+      json: {
+        success: true,
+        proposal: {
+          state: "proposed",
+          number: 412,
+          url: "https://github.com/o/r/pull/412",
+          armed: true,
+          detail: "PR #412 carries 61 settled migrations and merges itself once CI passes.",
         },
-        (err, stdout, stderr) => {
-          const status =
-            err && typeof (err as { code?: unknown }).code === "number"
-              ? (err as { code: number }).code
-              : err
-                ? 1
-                : 0;
-          res({ status, out: (stdout ?? "") + (stderr ?? "") });
-        },
-      );
+      },
     });
+    expect(r.asked).toEqual({ action: "propose_digests" });
+    expect(r.status).toBe(0);
+    expect(r.out).toContain("::notice title=Digest manifest proposed::PR #412");
+    expect(r.out).toContain("https://github.com/o/r/pull/412");
+  });
 
-  it("commits and pushes the new digests when the manifest is behind", async () => {
+  it("says so when the manifest already agrees", async () => {
+    const r = await propose({
+      status: 200,
+      json: { success: true, proposal: { state: "current", detail: "already lists all 61" } },
+    });
+    expect(r.status).toBe(0);
+    expect(r.out).toContain("Manifest already agrees with the queue");
+    expect(r.out).not.toContain("::warning");
+  });
+
+  it("warns, green, when the proposal waits for a person", async () => {
+    const r = await propose({
+      status: 200,
+      json: {
+        success: true,
+        proposal: {
+          state: "proposed",
+          number: 9,
+          url: "https://github.com/o/r/pull/9",
+          armed: false,
+          detail: "Auto-merge could not be armed",
+        },
+      },
+    });
+    expect(r.status).toBe(0);
+    expect(r.out).toContain("::warning title=Digest manifest waits for a merge::");
+  });
+
+  it.each([
+    [
+      "a failed proposal",
+      { status: 200, json: { success: false, proposal: { state: "failed", detail: "boom" } } },
+      /Manifest not refreshed::boom/,
+    ],
+    [
+      "a deployment older than the action",
+      { status: 400, json: { success: false, error: "no migrations submitted" } },
+      /does not propose the manifest yet \(HTTP 400/,
+    ],
+    ["a server error", { status: 500, json: { error: "down" } }, /HTTP 500/],
+  ])("warns and leaves the run green on %s", async (_what, answer, said) => {
+    // The migrations applied before this ran. Bookkeeping must not undo that.
+    const r = await propose(answer);
+    expect(r.status).toBe(0);
+    expect(r.out).toMatch(said);
+    expect(r.out).toContain("migrations:digests");
+  });
+
+  it("warns and leaves the run green when Mission Control cannot be reached", async () => {
+    const r = await propose(null);
+    expect(r.status).toBe(0);
+    expect(r.out).toContain(
+      "::warning title=Manifest not refreshed::Could not reach Mission Control",
+    );
+  });
+
+  it("asks nothing without its URL and credential", async () => {
+    const r = await propose(
+      { status: 200, json: { success: true, proposal: { state: "current", detail: "x" } } },
+      { CRON_SECRET: "" },
+    );
+    expect(r.status).toBe(0);
+    expect(r.asked).toBeNull();
+    expect(r.out).toContain("CRON_SECRET is empty");
+  });
+
+  it("cannot be made to forge a workflow command through what it reports", async () => {
+    // GitHub reads a workflow command per line; a newline in a detail would
+    // start a command of the detail's choosing.
+    const r = await propose({
+      status: 200,
+      json: {
+        success: false,
+        proposal: { state: "failed", detail: "x\n::add-mask::y\r\n::error::z" },
+      },
+    });
+    expect(r.status).toBe(0);
+    expect(r.out).not.toMatch(/^::add-mask::/m);
+    expect(r.out).not.toMatch(/^::error::/m);
+    expect(r.out).toContain("x%0A::add-mask::y%0D%0A::error::z");
+  });
+});
+
+/*
+  ONE RENDERER FOR BOTH WRITERS.
+
+  `npm run migrations:digests` writes the manifest here; Mission Control
+  proposes it on Prime. Both render through `appliedDigestManifest.pure.ts`, so
+  a refresh from either never differs from the other in anything but the
+  digests — which is what keeps every proposal a diff of entries, not of
+  formatting.
+*/
+describe("the manifest renderer", () => {
+  it("keeps the header, sorts by version, and writes two-space columns", async () => {
+    const { renderManifest } = await import("./appliedDigestManifest.pure");
+    const existing = "# generated\n# do not edit\n20260101000000  aaa  old.sql\n";
+    const out = renderManifest(existing, [
+      { version: "20260102000000", sha256: "bbb", name: "b.sql" },
+      { version: "20260101000000", sha256: "ccc", name: "a.sql" },
+    ]);
+    expect(out).toBe(
+      "# generated\n# do not edit\n20260101000000  ccc  a.sql\n20260102000000  bbb  b.sql\n",
+    );
+  });
+
+  it("is what the local script writes", async () => {
+    const { renderManifest } = await import("./appliedDigestManifest.pure");
     const live = [
-      { version: "20260101000000", name: NAME, sha256: sha(BODY), status: "applied" },
       {
         version: "20260102000000",
         name: "20260102000000_b.sql",
         sha256: sha("b"),
         status: "applied",
       },
+      { version: "20260101000000", name: NAME, sha256: sha(BODY), status: "applied" },
     ];
     const url = await stubServer(() => ({ status: 200, json: { success: true, digests: live } }));
-    const { bare, work } = repoWithRemote(`# generated\n20260101000000  ${sha(BODY)}  ${NAME}\n`);
-
-    const r = await runStep(work, bare, url);
+    const before = `# generated\n20260101000000  ${sha(BODY)}  ${NAME}\n`;
+    const dir = tree({ files: {}, manifest: before });
+    const r = await run(ONLINE, dir, { MISSION_CONTROL_URL: url, CRON_SECRET: "x" });
     expect(r.status).toBe(0);
-    expect(r.out).toContain("Manifest refreshed and committed");
-    // The REMOTE is what matters — a local commit nobody pushed closes nothing.
-    expect(remoteManifest(bare)).toContain("20260102000000");
-    expect(remoteManifest(bare)).toContain("# generated");
-  });
-
-  it("commits nothing when the manifest already agrees", async () => {
-    const url = await stubServer(() => ({
-      status: 200,
-      json: {
-        success: true,
-        digests: [{ version: "20260101000000", name: NAME, sha256: sha(BODY), status: "applied" }],
-      },
-    }));
-    const { bare, work } = repoWithRemote(`# generated\n20260101000000  ${sha(BODY)}  ${NAME}\n`);
-    const before = spawnSyncGit(bare, ["rev-parse", "main"]).stdout?.trim();
-
-    const r = await runStep(work, bare, url);
-    expect(r.status).toBe(0);
-    // The step's OWN wording, not git's. The first version of this assertion
-    // read `toContain("nothing to commit")` and passed against a mutation that
-    // removed the guard entirely — because that is what `git commit` prints on
-    // an empty index, and stderr is captured here too. A guard asserted through
-    // somebody else's error message is not asserted.
-    expect(r.out).toContain("Manifest already agrees with the queue");
-    expect(r.out).not.toContain("Manifest refreshed and committed");
-    expect(spawnSyncGit(bare, ["rev-parse", "main"]).stdout?.trim()).toBe(before);
-  });
-
-  it("warns and leaves the run green when the digests cannot be read", async () => {
-    // The migrations are applied by the time this is reached. A bookkeeping
-    // step that could undo that is worse than a stale file.
-    const url = await stubServer(() => ({ status: 500, json: { error: "boom" } }));
-    const { bare, work } = repoWithRemote("# generated\n");
-    const r = await runStep(work, bare, url);
-    expect(r.status).toBe(0);
-    expect(r.out).toContain("::warning title=Manifest not refreshed");
-  });
-
-  it("loses a race, resets to the new tip, and still lands the manifest", async () => {
-    const url = await stubServer(() => ({
-      status: 200,
-      json: {
-        success: true,
-        digests: [
-          { version: "20260101000000", name: NAME, sha256: sha(BODY), status: "applied" },
-          {
-            version: "20260102000000",
-            name: "20260102000000_b.sql",
-            sha256: sha("b"),
-            status: "applied",
-          },
-        ],
-      },
-    }));
-    const { root, bare, work } = repoWithRemote(
-      `# generated\n20260101000000  ${sha(BODY)}  ${NAME}\n`,
+    expect(readFileSync(join(dir, "scripts", "applied-migration-digests.txt"), "utf8")).toBe(
+      renderManifest(before, live),
     );
-
-    // Somebody else pushes while this run was working.
-    const other = join(root, "other");
-    spawnSyncGit(root, ["clone", "-q", bare, other]);
-    spawnSyncGit(other, ["config", "user.email", "other@example.invalid"]);
-    spawnSyncGit(other, ["config", "user.name", "other"]);
-    writeFileSync(join(other, "unrelated.txt"), "landed first\n");
-    spawnSyncGit(other, ["add", "-A"]);
-    spawnSyncGit(other, ["commit", "-q", "-m", "unrelated"]);
-    spawnSyncGit(other, ["push", "-q", "origin", "main"]);
-
-    const r = await runStep(work, bare, url);
-    expect(r.status).toBe(0);
-    expect(r.out).toContain("Push rejected on attempt 1");
-    expect(r.out).toContain("Manifest refreshed and committed");
-    // Both survive: the other commit kept, the manifest added on top.
-    expect(remoteManifest(bare)).toContain("20260102000000");
-    expect(spawnSyncGit(bare, ["show", "main:unrelated.txt"]).stdout).toContain("landed first");
   });
 });

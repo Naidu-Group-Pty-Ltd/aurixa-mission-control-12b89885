@@ -151,6 +151,30 @@ export const rotateScanSigningKey = createServerFn({ method: "POST" })
     return { ok: true, rotatedAt: result.rotatedAt, graceHours: ROTATION_GRACE_HOURS };
   });
 
+/**
+ * Apply the ruleset that protects Prime's default branch now, rather than at
+ * tonight's run. Admin only, and recorded: it changes the repository's
+ * settings through Mission Control's App.
+ */
+export const protectPrimeMainNow = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    const { supabase, userId } = context;
+    const { data: isAdmin } = await supabase.rpc("is_admin", { _user_id: userId });
+    if (!isAdmin) throw new Error("Forbidden: admin only");
+    const { ensurePrimeBranchProtection } = await import("@/server/prime-branch-protection.server");
+    const result = await ensurePrimeBranchProtection({ apply: true });
+    const { writeAuditLog } = await import("@/server/audit.server");
+    await writeAuditLog({
+      action: `prime.branch_protection.${result.status}`,
+      entityType: "github_ruleset",
+      entityId: result.repo ?? null,
+      actorUserId: userId,
+      metadata: result as unknown as Record<string, unknown>,
+    });
+    return result;
+  });
+
 export const runNightlyNow = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .handler(async ({ context }) => {
