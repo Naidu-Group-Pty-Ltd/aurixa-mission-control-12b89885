@@ -139,6 +139,14 @@ jobs:
           probe "the job's temporary directory" "ls '$RUNNER_TEMP'" || fails=1
           probe "the runner's home" "ls '$HOME'" || fails=1
           probe "a step's environment" "cat /proc/$$/environ" || fails=1
+          NODE_BIN="$(dirname "$(command -v node)")"
+          probe "the tool cache's node directory (write)" "touch '$NODE_BIN/planted'" || fails=1
+          probe "the node binary (write)" "test -w '$NODE_BIN/node'" || fails=1
+          probe "the global CLIs (write)" "test -w '$(readlink -f "$(command -v claude)")'" || fails=1
+          IFS=: read -ra PATH_DIRS <<< "$PATH"
+          for d in "${PATH_DIRS[@]}"; do
+            [ -d "$d" ] && { probe "PATH directory $d (write)" "touch '$d/planted'" || fails=1; }
+          done
           sudo -u fixcheck -H env -i PATH="$PATH" bash -c 'node --version && npm --version' || fails=1
           test "$OK" = "true" || { echo "verification did not pass"; fails=1; }
           exit "$fails"
