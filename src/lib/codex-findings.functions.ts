@@ -15,6 +15,7 @@ import type { TablesUpdate } from "@/integrations/supabase/types";
 import { asJson, asRow } from "@/lib/json-cast";
 import { TRIAGE_STATES, validateTriage } from "@/lib/codex-finding-lifecycle";
 import type { FindingState } from "@/lib/codex-finding-state";
+import { SLA_OPEN_STATES, overdueCutoffs } from "@/lib/codex-finding-sla";
 
 const SEVERITIES = ["critical", "high", "medium", "low", "info"] as const;
 const STATES = [
@@ -32,6 +33,11 @@ const BASE_COLUMNS =
   "id, title, severity, state, scanner, rule_id, cwe, cvss, affected_file, affected_line, clone_id, first_seen_at, last_seen_at, resolved_at, remediation_pr_url, remediation_pr_state, source_slug, scan_job_id, triaged_at";
 const LIFECYCLE_COLUMNS =
   "target_key, pr_number, missed_scans, absent_since, resolution, triage_reason, triaged_by, last_seen_job_id";
+// 20261018110000
+const OWNERSHIP_COLUMNS = "assigned_to, assigned_at";
+
+/** Roles that can own a finding: the people who can act on one. */
+const ASSIGNABLE_ROLES = ["super_admin", "high_king", "admin", "operator"] as const;
 
 function isMissingColumn(error: { code?: string; message?: string } | null): boolean {
   return (
@@ -84,6 +90,10 @@ const ListFindingsInput = z.object({
   severities: z.array(z.enum(SEVERITIES)).max(SEVERITIES.length).optional(),
   scanner: z.string().max(60).optional(),
   search: z.string().max(200).optional(),
+  /** `me`: assigned to the caller; `unassigned`: nobody owns it yet. */
+  assignment: z.enum(["any", "me", "unassigned"]).default("any"),
+  /** Only findings past their severity's response time (codex-finding-sla.ts). */
+  overdue: z.boolean().default(false),
   limit: z.number().int().min(1).max(200).default(50),
   offset: z.number().int().min(0).max(100_000).default(0),
 });
@@ -92,9 +102,9 @@ export const listFindings = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth])
   .inputValidator((d) => ListFindingsInput.parse(d ?? {}))
   .handler(async ({ data, context }) => {
-    const { supabase } = context;
+    const { supabase, userId } = context;
 
-    const run = async (columns: string, lifecycle: boolean) => {
+    const run = async (columns: string, lifecycle: boolean, ownership: boolean) => {
       let q = supabase.from("codex_findings").select(columns, { count: "exact" });
       if (data.scope === "prime") q = q.is("clone_id", null);
       else if (data.scope === "fleet") q = q.not("clone_id", "is", null);
@@ -103,7 +113,19 @@ export const listFindings = createServerFn({ method: "GET" })
         q = q.eq("clone_id", data.cloneId);
       }
       if (lifecycle && !data.includePullRequests) q = q.is("pr_number", null);
-      q = q.in("state", data.states?.length ? data.states : ["open", "triaging"]);
+      if (ownership && data.assignment === "me") q = q.eq("assigned_to", userId);
+      else if (ownership && data.assignment === "unassigned") q = q.is("assigned_to", null);
+      if (data.overdue) {
+        // Overdue only while nobody has decided; one cutoff per severity.
+        q = q.in("state", [...SLA_OPEN_STATES]);
+        q = q.or(
+          overdueCutoffs()
+            .map((c) => `and(severity.eq.${c.severity},first_seen_at.lt.${c.before})`)
+            .join(","),
+        );
+      } else {
+        q = q.in("state", data.states?.length ? data.states : ["open", "triaging"]);
+      }
       if (data.severities?.length) q = q.in("severity", data.severities);
       if (data.scanner) q = q.eq("scanner", data.scanner);
       const term = data.search ? searchTerm(data.search) : "";
@@ -117,11 +139,17 @@ export const listFindings = createServerFn({ method: "GET" })
     };
 
     let lifecycle = true;
-    let res = await run(`${BASE_COLUMNS}, ${LIFECYCLE_COLUMNS}`, true);
+    let ownership = true;
+    let res = await run(`${BASE_COLUMNS}, ${LIFECYCLE_COLUMNS}, ${OWNERSHIP_COLUMNS}`, true, true);
+    if (res.error && isMissingColumn(res.error)) {
+      // Before 20261018110000: nobody owns a finding.
+      ownership = false;
+      res = await run(`${BASE_COLUMNS}, ${LIFECYCLE_COLUMNS}`, true, false);
+    }
     if (res.error && isMissingColumn(res.error)) {
       // Before 20261018090000: no PR targets, no triage columns.
       lifecycle = false;
-      res = await run(BASE_COLUMNS, false);
+      res = await run(BASE_COLUMNS, false, false);
     }
     if (res.error) throw new Error(res.error.message);
 
@@ -132,19 +160,44 @@ export const listFindings = createServerFn({ method: "GET" })
       const { data: cs } = await supabase.from("clones").select("id, name").in("id", cloneIds);
       for (const c of cs ?? []) clones[c.id] = c.name;
     }
-    const names = await displayNames(
-      supabase,
-      rows.map((r) => r.triaged_by),
-    );
+    const names = await displayNames(supabase, [
+      ...rows.map((r) => r.triaged_by),
+      ...rows.map((r) => r.assigned_to),
+    ]);
+    // Linked tickets, so a finding already tracked elsewhere says so.
+    const tickets: Record<
+      string,
+      Array<{ provider: string; status: string; url: string | null }>
+    > = {};
+    if (rows.length) {
+      const { data: ts } = await supabase
+        .from("security_external_tickets")
+        .select("codex_finding_id, provider, status, url")
+        .in(
+          "codex_finding_id",
+          rows.map((r) => r.id),
+        );
+      for (const t of ts ?? []) {
+        if (!t.codex_finding_id) continue;
+        (tickets[t.codex_finding_id] ??= []).push({
+          provider: t.provider,
+          status: t.status,
+          url: t.url,
+        });
+      }
+    }
 
     return {
       findings: rows.map((r) => ({
         ...r,
         clone_name: r.clone_id ? (clones[r.clone_id] ?? null) : null,
         triaged_by_name: r.triaged_by ? (names[r.triaged_by] ?? null) : null,
+        assigned_to_name: r.assigned_to ? (names[r.assigned_to] ?? null) : null,
+        tickets: tickets[r.id] ?? [],
       })),
       total: res.count ?? rows.length,
       lifecycle,
+      ownership,
     };
   });
 
@@ -161,7 +214,7 @@ export const getFindingDetail = createServerFn({ method: "GET" })
     if (error) throw new Error(error.message);
     if (!finding) throw new Error("Finding not found");
 
-    const [eventsRes, obsRes, remRes] = await Promise.all([
+    const [eventsRes, obsRes, remRes, ticketsRes] = await Promise.all([
       supabase
         .from("codex_finding_events")
         .select("id, event_type, from_state, to_state, reason, actor, job_id, payload, created_at")
@@ -182,6 +235,11 @@ export const getFindingDetail = createServerFn({ method: "GET" })
         .eq("finding_id", data.findingId)
         .order("created_at", { ascending: false })
         .limit(10),
+      supabase
+        .from("security_external_tickets")
+        .select("id, provider, external_id, status, url, source_slug, created_at")
+        .eq("codex_finding_id", data.findingId)
+        .order("created_at", { ascending: false }),
     ]);
     // The history tables arrive with 20261018090000; before it there is
     // simply no history to show.
@@ -189,6 +247,7 @@ export const getFindingDetail = createServerFn({ method: "GET" })
       throw new Error(eventsRes.error.message);
     if (obsRes.error && !isMissingRelation(obsRes.error)) throw new Error(obsRes.error.message);
     if (remRes.error) throw new Error(remRes.error.message);
+    if (ticketsRes.error) throw new Error(ticketsRes.error.message);
 
     const observations = (obsRes.data ?? []) as { job_id: string; observed_at: string }[];
     const jobs: Record<string, any> = {};
@@ -208,6 +267,7 @@ export const getFindingDetail = createServerFn({ method: "GET" })
     const names = await displayNames(supabase, [
       ...events.map((e) => e.actor),
       (finding as any).triaged_by,
+      (finding as any).assigned_to,
     ]);
 
     let cloneName: string | null = null;
@@ -225,8 +285,12 @@ export const getFindingDetail = createServerFn({ method: "GET" })
       events: events.map((e) => ({ ...e, actor_name: e.actor ? (names[e.actor] ?? null) : null })),
       observations: observations.map((o) => ({ ...o, job: jobs[o.job_id] ?? null })),
       remediations: remRes.data ?? [],
+      tickets: ticketsRes.data ?? [],
       triagedByName: (finding as any).triaged_by
         ? (names[(finding as any).triaged_by] ?? null)
+        : null,
+      assignedToName: (finding as any).assigned_to
+        ? (names[(finding as any).assigned_to] ?? null)
         : null,
     };
   });
@@ -406,4 +470,105 @@ export const getPrimePosture = createServerFn({ method: "GET" })
       },
       source: "legacy" as const,
     };
+  });
+
+/** The people a finding can be assigned to. */
+export const listAssignableUsers = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    const { supabase, userId } = context;
+    const { data: isOperator } = await supabase.rpc("is_operator", { _user_id: userId });
+    const { data: isAdmin } = await supabase.rpc("is_admin", { _user_id: userId });
+    if (!isOperator && !isAdmin) throw new Error("Forbidden: operator or admin only");
+    // Service role after the gate: other people's roles are not readable
+    // through RLS, and only ids and display names leave this function.
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { data: roles, error } = await supabaseAdmin
+      .from("user_roles")
+      .select("user_id")
+      .in("role", [...ASSIGNABLE_ROLES]);
+    if (error) throw new Error(error.message);
+    const ids = [...new Set((roles ?? []).map((r) => r.user_id))];
+    const names = await displayNames(supabaseAdmin, ids);
+    return {
+      users: ids
+        .map((id) => ({ id, name: names[id] ?? null }))
+        .sort((a, b) => (a.name ?? "~").localeCompare(b.name ?? "~")),
+    };
+  });
+
+const AssignInput = z.object({
+  findingIds: z.array(z.string().uuid()).min(1).max(200),
+  /** null clears the owner. */
+  assigneeId: z.string().uuid().nullable(),
+});
+
+/**
+ * Give findings an owner (or take it away). Recorded on each finding's
+ * history and in the audit log, like any other triage decision.
+ */
+export const assignFindings = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d) => AssignInput.parse(d))
+  .handler(async ({ data, context }) => {
+    const { supabase, userId } = context;
+    await requireAdmin(supabase, userId);
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    if (data.assigneeId) {
+      const { data: role, error } = await supabaseAdmin
+        .from("user_roles")
+        .select("user_id")
+        .eq("user_id", data.assigneeId)
+        .in("role", [...ASSIGNABLE_ROLES])
+        .limit(1);
+      if (error) throw new Error(error.message);
+      if (!role?.length) {
+        throw new Error("That person cannot own findings: they have no admin or operator role");
+      }
+    }
+    const ids = [...new Set(data.findingIds)];
+    const { data: before, error: readErr } = await supabase
+      .from("codex_findings")
+      .select("id, assigned_to")
+      .in("id", ids);
+    if (readErr) {
+      if (isMissingColumn(readErr)) {
+        throw new Error(
+          "Assignment needs migration 20261018110000_codex_findings_ownership — apply it, then try again.",
+        );
+      }
+      throw new Error(readErr.message);
+    }
+    const { data: updated, error } = await supabase
+      .from("codex_findings")
+      .update({
+        assigned_to: data.assigneeId,
+        assigned_at: data.assigneeId ? new Date().toISOString() : null,
+      })
+      .in("id", ids)
+      .select("id");
+    if (error) throw new Error(error.message);
+
+    const previous = new Map((before ?? []).map((b) => [b.id, b.assigned_to]));
+    if (updated?.length) {
+      const { error: evErr } = await supabaseAdmin.from("codex_finding_events").insert(
+        updated.map((u) => ({
+          finding_id: u.id,
+          event_type: data.assigneeId ? "assigned" : "unassigned",
+          actor: userId,
+          payload: asJson({ from: previous.get(u.id) ?? null, to: data.assigneeId }),
+        })),
+      );
+      if (evErr && !isMissingRelation(evErr)) {
+        console.warn("[codex-findings] assignment history not recorded:", evErr.message);
+      }
+    }
+    const { writeAuditLog } = await import("@/server/audit.server");
+    await writeAuditLog({
+      action: data.assigneeId ? "codex_finding.assigned" : "codex_finding.unassigned",
+      entityType: "codex_finding",
+      actorUserId: userId,
+      metadata: { finding_ids: ids, assignee: data.assigneeId },
+    });
+    return { updated: updated?.length ?? 0 };
   });

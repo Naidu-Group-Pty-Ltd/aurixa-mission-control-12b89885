@@ -8,6 +8,8 @@
 //
 // Pure: inputs in, the check's conclusion and text out.
 
+import type { SuppressionChanges } from "@/lib/codex-scan-provenance";
+
 export type Severity = "critical" | "high" | "medium" | "low" | "info";
 export type FailOn = Severity | "never";
 
@@ -61,6 +63,8 @@ export function buildPrCheckReport(input: {
   failOn: FailOn;
   degraded: Array<{ name: string; reason: string }>;
   incomplete: boolean;
+  /** The PR's edits to what the scanners ignore, and inline suppressions it adds. */
+  suppressionChanges?: SuppressionChanges | null;
   scanUrl?: string | null;
   runUrl?: string | null;
 }): PrCheckReport {
@@ -70,6 +74,7 @@ export function buildPrCheckReport(input: {
   const counts: Record<Severity, number> = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
   for (const f of findings) counts[f.severity] += 1;
 
+  const controls = input.suppressionChanges ?? null;
   let conclusion: PrCheckReport["conclusion"];
   let title: string;
   if (blocking.length > 0) {
@@ -81,6 +86,12 @@ export function buildPrCheckReport(input: {
     title = input.incomplete
       ? "Scan results incomplete — not every batch arrived"
       : `${input.degraded.length} scanner${input.degraded.length === 1 ? "" : "s"} did not run`;
+  } else if (controls) {
+    // Not a failure — teams do change what is ignored — but not a plain pass
+    // either: the change governs every scan after this PR merges, and an
+    // inline suppression silences its scanner on this PR's own scan.
+    conclusion = "neutral";
+    title = "Changes what the security scanners ignore — needs a reviewer's look";
   } else {
     conclusion = "success";
     title =
@@ -107,6 +118,34 @@ export function buildPrCheckReport(input: {
   }
   if (input.incomplete) {
     lines.push("", "**Some result batches never arrived**, so findings may be missing.");
+  }
+  if (controls) {
+    lines.push("", "### Changes to what the scanners ignore", "");
+    if (controls.changed.length) {
+      lines.push(
+        "This PR was scanned with the base branch's copies of these files; its edits apply to every scan after it merges.",
+        "",
+      );
+      for (const c of controls.changed.slice(0, 20)) {
+        lines.push(`- ${c.change} \`${c.path.replace(/[`\r\n]/g, "")}\``);
+      }
+      if (controls.changed.length > 20) lines.push(`- …and ${controls.changed.length - 20} more`);
+    }
+    const inline = [
+      controls.semgrepIgnoresAdded
+        ? `${controls.semgrepIgnoresAdded} line${controls.semgrepIgnoresAdded === 1 ? "" : "s"} semgrep will skip (\`nosemgrep\`)`
+        : null,
+      controls.gitleaksAllowsAdded
+        ? `${controls.gitleaksAllowsAdded} line${controls.gitleaksAllowsAdded === 1 ? "" : "s"} gitleaks will skip (its allow comment)`
+        : null,
+    ].filter(Boolean);
+    if (inline.length) {
+      if (controls.changed.length) lines.push("");
+      lines.push(
+        `Adds inline suppressions: ${inline.join(" and ")}. ` +
+          "They are part of the code, so they hide findings from this scan too — what they silence is not listed here.",
+      );
+    }
   }
   if (findings.length) {
     lines.push("", "### Findings in this change", "");

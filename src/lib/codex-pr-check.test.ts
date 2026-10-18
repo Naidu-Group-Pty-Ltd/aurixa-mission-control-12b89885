@@ -106,4 +106,40 @@ describe("buildPrCheckReport", () => {
     );
     expect(r.summary).toContain("[Scan run log](https://github.com/a/b/actions/runs/1)");
   });
+
+  it("asks for a reviewer's look when a change edits what the scanners ignore", () => {
+    const r = buildPrCheckReport({
+      findings: [],
+      failOn: "high",
+      degraded: [],
+      incomplete: false,
+      suppressionChanges: {
+        changed: [
+          { path: ".gitleaksignore", change: "modified" },
+          { path: "evil`](x)\n.semgrepignore", change: "added" },
+        ],
+        semgrepIgnoresAdded: 2,
+        gitleaksAllowsAdded: 1,
+      },
+    });
+    expect(r.conclusion).toBe("neutral");
+    expect(r.title).toMatch(/Changes what the security scanners ignore/);
+    expect(r.summary).toContain("- modified `.gitleaksignore`");
+    // A file name cannot break out of its code span.
+    expect(r.summary).toContain("- added `evil](x).semgrepignore`");
+    expect(r.summary).toContain("2 lines semgrep will skip");
+    expect(r.summary).toContain("1 line gitleaks will skip");
+  });
+
+  it("still fails on findings when a change also edits what is ignored", () => {
+    const r = buildPrCheckReport({
+      findings: [finding({ severity: "critical" })],
+      failOn: "high",
+      degraded: [],
+      incomplete: false,
+      suppressionChanges: { changed: [], semgrepIgnoresAdded: 1, gitleaksAllowsAdded: 0 },
+    });
+    expect(r.conclusion).toBe("failure");
+    expect(r.summary).toContain("Changes to what the scanners ignore");
+  });
 });

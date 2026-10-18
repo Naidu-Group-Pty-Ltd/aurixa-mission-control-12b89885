@@ -5113,6 +5113,8 @@ export type Database = {
           absent_since: string | null
           affected_file: string | null
           affected_line: number | null
+          assigned_at: string | null
+          assigned_to: string | null
           auto_fix_confidence: number | null
           clone_id: string | null
           codex_finding_id: string
@@ -5152,6 +5154,8 @@ export type Database = {
           absent_since?: string | null
           affected_file?: string | null
           affected_line?: number | null
+          assigned_at?: string | null
+          assigned_to?: string | null
           auto_fix_confidence?: number | null
           clone_id?: string | null
           codex_finding_id: string
@@ -5191,6 +5195,8 @@ export type Database = {
           absent_since?: string | null
           affected_file?: string | null
           affected_line?: number | null
+          assigned_at?: string | null
+          assigned_to?: string | null
           auto_fix_confidence?: number | null
           clone_id?: string | null
           codex_finding_id?: string
@@ -16565,6 +16571,9 @@ export type Database = {
         | "calendar_booking_failed"
         | "crm_appointment_changed"
         | "agreement_attention"
+        | "codex_findings_detected"
+        | "codex_scanner_failing"
+        | "codex_findings_overdue"
       notification_severity: "info" | "success" | "warning" | "error"
       overage_policy: "block" | "topup_only" | "pay_as_you_go"
       provisioning_method: "fork" | "template" | "clone"
@@ -17065,6 +17074,9 @@ export const Constants = {
         "calendar_booking_failed",
         "crm_appointment_changed",
         "agreement_attention",
+        "codex_findings_detected",
+        "codex_scanner_failing",
+        "codex_findings_overdue",
       ],
       notification_severity: ["info", "success", "warning", "error"],
       overage_policy: ["block", "topup_only", "pay_as_you_go"],

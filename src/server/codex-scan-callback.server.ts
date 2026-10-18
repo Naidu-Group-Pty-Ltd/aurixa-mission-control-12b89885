@@ -29,6 +29,7 @@ import {
 } from "@/server/codex-callback-keys.server";
 import { legacyFinalizeScan, legacyIngestFindings } from "@/server/codex-legacy-ingest.server";
 import { completePrCheckForJob } from "@/server/codex-pr-checks.server";
+import { alertOnScanCompleted, alertOnScanFailed } from "@/server/codex-scan-alerts.server";
 
 /** Reject absurd bodies before spending CPU on HMAC and JSON parsing. */
 export const MAX_BODY_BYTES = 4 * 1024 * 1024;
@@ -341,6 +342,7 @@ async function processScanEvent(
           await recordEvent(job.id, "cascades_held", { count: held, reason: gate.reason });
       }
     }
+    await alertOnScanCompleted(job);
     return {
       status: 200,
       body: { ok: true, ingested: incoming.length, ...ingest, summary: finalSummary },
@@ -360,6 +362,7 @@ async function processScanEvent(
         outcome: { kind: "failed", reason, runUrl: payload.workflow_run_url ?? null },
       });
     }
+    await alertOnScanFailed({ ...job, last_error: reason });
   }
 
   return { status: 200, body: { ok: true, ingested: incoming.length, ...ingest } };

@@ -13,7 +13,11 @@ name: Codex Security Remediation
 #
 # WHAT HAPPENS TO THAT FIX BEFORE A HUMAN SEES IT
 #   1. Blast radius is measured (files touched, lines added/removed). A patch
-#      that touches CI workflows is refused outright.
+#      that touches CI workflows is refused outright, and so is one that
+#      silences a scanner instead of fixing the code: an added inline
+#      suppression (semgrep's or gitleaks'), or an edit to an ignore file or
+#      to the scan rules. The finding would vanish from the next scan and
+#      the fix be "confirmed" with the vulnerability still in place.
 #   2. gitleaks scans the lines the patch ADDS. A fix that introduces a
 #      secret is NEVER pushed — that is the one hard stop in this workflow.
 #      (Scanning the whole patched tree, as before, refused every fix in a
@@ -84,7 +88,7 @@ jobs:
       CALLBACK_URL:   ${{ inputs.callback_url }}
       # Bump with any change to what the workflow reports. Mission Control
       # reads it from every callback (src/lib/codex-workflow-contract.ts).
-      WORKFLOW_VERSION: "2"
+      WORKFLOW_VERSION: "3"
       GITLEAKS_VERSION: "8.28.0"
       GITLEAKS_SHA256: "a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb"
       CODEX_CLI_VERSION: "0.160.1"
@@ -355,6 +359,9 @@ jobs:
           - Do not reformat unrelated code, bump unrelated dependencies, or
             rename things beyond what the fix requires.
           - Do not touch .github/workflows, git configuration or hooks.
+          - Do not edit .gitleaks.toml, .gitleaksignore, .semgrepignore,
+            osv-scanner.toml or .github/codex-security: a fix that does is
+            refused.
           - NEVER write a credential, token, or key into the repository. If
             the finding IS a committed secret, remove it and read it from an
             environment variable or secret store instead; the credential must
@@ -438,11 +445,38 @@ jobs:
           echo "removed=$REMOVED" >> "$GITHUB_OUTPUT"
           "${DIFF[@]}" --stat > "$RUNNER_TEMP/diffstat.txt"
           echo "Patch touches $FILES file(s): +$ADDED / -$REMOVED"
-          if grep -Eq '^\.github/workflows/' "$RUNNER_TEMP/changed-files.txt"; then
+          # For the guards: every path, unquoted (git quotes unusual names,
+          # which no anchored pattern would match) and with renames split
+          # into their delete and add (a rename shows only its new name).
+          "${DIFF[@]}" --no-renames --name-only -z | tr '\0' '\n' > "$RUNNER_TEMP/changed-paths.txt"
+          if grep -Eq '^\.github/workflows/' "$RUNNER_TEMP/changed-paths.txt"; then
             echo "workflows=true" >> "$GITHUB_OUTPUT"
             echo "::error::The patch modifies CI workflows — refusing it."
           else
             echo "workflows=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # A "fix" that silences the scanner: the finding would disappear
+          # from the next scan and the remediation be confirmed with the
+          # vulnerability still there. Inline markers are what the scanners
+          # match (semgrep: a space then "nosem", any case; gitleaks: its
+          # allow comment) — spelled in pieces so this file is not one.
+          MARKERS=' no''sem|gitleaks'':allow'
+          IGNORE_FILES='(^|/)(\.gitleaks\.toml|\.gitleaksignore|\.semgrepignore|osv-scanner\.toml)$|^\.github/codex-security/'
+          ADDED_MARKERS=$(grep -E '^\+' "$RUNNER_TEMP/fix.patch" | grep -Ev '^\+\+\+ ' | grep -ciE "$MARKERS" || true)
+          REMOVED_MARKERS=$(grep -E '^-' "$RUNNER_TEMP/fix.patch" | grep -Ev '^--- ' | grep -ciE "$MARKERS" || true)
+          SILENCED=""
+          if grep -Eq "$IGNORE_FILES" "$RUNNER_TEMP/changed-paths.txt"; then
+            SILENCED="it edits a scanner's ignore file or rules"
+          elif [ "${ADDED_MARKERS:-0}" -gt "${REMOVED_MARKERS:-0}" ]; then
+            SILENCED="it adds an inline scanner suppression comment"
+          fi
+          if [ -n "$SILENCED" ]; then
+            echo "silences=true" >> "$GITHUB_OUTPUT"
+            echo "silenced_reason=$SILENCED" >> "$GITHUB_OUTPUT"
+            echo "::error::The patch silences a scanner ($SILENCED) — refusing it."
+          else
+            echo "silences=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Abort on a workflow change
@@ -452,10 +486,26 @@ jobs:
           node "$HELPER_DIR/notify.mjs" '{"event":"workflow.failed","error":"Refused to push: the drafted fix modifies files under .github/workflows. A security fix must not change CI; fix it by hand."}' || true
           exit 1
 
+      - name: Abort on a silenced scanner
+        if: steps.codex.outputs.changed == 'true' && steps.radius.outputs.workflows == 'false' && steps.radius.outputs.silences == 'true'
+        env:
+          SILENCED: ${{ steps.radius.outputs.silenced_reason }}
+        run: |
+          set -euo pipefail
+          ARG=$(node -e '
+            process.stdout.write(JSON.stringify({
+              event: "workflow.failed",
+              error: "Refused to push: the drafted fix silences the scanner instead of fixing the code (" +
+                     process.env.SILENCED + "). Fix it by hand, or dismiss the finding with a reason.",
+            }));
+          ')
+          node "$HELPER_DIR/notify.mjs" "$ARG" || true
+          exit 1
+
       # ── Hard stop: never push a patch that introduces a secret ─────────
       - name: Secret-leak guard
         id: secrets
-        if: steps.codex.outputs.changed == 'true' && steps.radius.outputs.workflows == 'false'
+        if: steps.codex.outputs.changed == 'true' && steps.radius.outputs.workflows == 'false' && steps.radius.outputs.silences == 'false'
         run: |
           set -euo pipefail
           curl -sSfL --retry 3 -o "$RUNNER_TEMP/gitleaks.tgz" \
@@ -741,7 +791,7 @@ jobs:
       # Skipped when a guard already reported a specific failure, so its
       # precise reason is not overwritten by this generic one.
       - name: Notify failure
-        if: (failure() || cancelled()) && steps.secrets.outputs.clean != 'false' && steps.radius.outputs.workflows != 'true'
+        if: (failure() || cancelled()) && steps.secrets.outputs.clean != 'false' && steps.radius.outputs.workflows != 'true' && steps.radius.outputs.silences != 'true'
         env:
           JOB_STATUS: ${{ job.status }}
         run: |

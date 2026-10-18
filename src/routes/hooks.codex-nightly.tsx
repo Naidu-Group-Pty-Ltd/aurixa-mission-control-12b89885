@@ -27,6 +27,7 @@ import { decideSpend } from "@/server/cascade/githubBudget.pure";
 import { readGitHubRemaining } from "@/server/githubAllowance.server";
 import { beginGithubLane } from "@/server/githubUsageMeter";
 import { runNightlyScans, sweepStalledScans } from "@/server/codex-scheduling.server";
+import { notifyOverdueFindings } from "@/server/codex-finding-sla.server";
 
 export const Route = createFileRoute("/hooks/codex-nightly")({
   server: {
@@ -40,6 +41,14 @@ export const Route = createFileRoute("/hooks/codex-nightly")({
         // had run last in the isolate — which is the misattribution
         // `githubUsageMeter` flushes on a lane change to prevent.
         beginGithubLane("codex-nightly");
+
+        // The daily overdue digest reads only the database, so it is not part
+        // of the GitHub budget decision below: a night the scans stand down is
+        // still a day the findings aged.
+        const overdue = await notifyOverdueFindings().catch((err) => {
+          console.error("codex-nightly overdue digest failed:", err);
+          return null;
+        });
 
         /*
           A SCAN, AND THE WHOLE HANDLER IS ONE DECISION.
@@ -60,7 +69,7 @@ export const Route = createFileRoute("/hooks/codex-nightly")({
         */
         const spend = decideSpend({ role: "scan", remaining: await readGitHubRemaining() });
         if (!spend.proceed) {
-          return new Response(JSON.stringify({ success: true, skipped: spend.why }), {
+          return new Response(JSON.stringify({ success: true, skipped: spend.why, overdue }), {
             headers: { "Content-Type": "application/json" },
           });
         }
@@ -73,7 +82,7 @@ export const Route = createFileRoute("/hooks/codex-nightly")({
             return null;
           });
           const result = await runNightlyScans();
-          return new Response(JSON.stringify({ success: true, ...result, swept }), {
+          return new Response(JSON.stringify({ success: true, ...result, swept, overdue }), {
             headers: { "Content-Type": "application/json" },
           });
         } catch (err) {

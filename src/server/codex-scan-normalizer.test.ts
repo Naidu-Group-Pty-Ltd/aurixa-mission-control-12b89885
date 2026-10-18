@@ -37,6 +37,28 @@ let n = 0;
 type Files = Record<string, string>;
 type Reports = Record<string, unknown>;
 
+const GIT_ENV = {
+  GIT_AUTHOR_NAME: "t",
+  GIT_AUTHOR_EMAIL: "t@example.invalid",
+  GIT_COMMITTER_NAME: "t",
+  GIT_COMMITTER_EMAIL: "t@example.invalid",
+  GIT_CONFIG_NOSYSTEM: "1",
+  GIT_CONFIG_GLOBAL: "/dev/null",
+};
+const runGit = (cwd: string, args: string[]) =>
+  execFileSync("git", ["-c", "commit.gpgsign=false", ...args], {
+    cwd,
+    env: { PATH: process.env.PATH ?? "", ...GIT_ENV },
+    encoding: "utf8",
+  }).trim();
+
+function writeFiles(ws: string, files: Files) {
+  for (const [rel, content] of Object.entries(files)) {
+    mkdirSync(path.dirname(path.join(ws, rel)), { recursive: true });
+    writeFileSync(path.join(ws, rel), content);
+  }
+}
+
 /** Lay out a workspace and a report directory, run the normalizer, return its output. */
 function normalize(opts: {
   files?: Files;
@@ -44,16 +66,36 @@ function normalize(opts: {
   statuses?: Record<string, { status: string; reason?: string; mode?: string }>;
   env?: Record<string, string>;
   scope?: string[];
+  /** Commit `files` to a git repository, as a checkout would have them. */
+  committed?: boolean;
+  /** A pull request: `base` committed, then `files` (and `deleted`) committed on top. */
+  pr?: { base: Files; deleted?: string[] };
 }) {
   const dir = path.join(ROOT, `run-${++n}`);
   const ws = path.join(dir, "ws");
   const reports = path.join(dir, "reports");
   mkdirSync(path.join(reports, "status"), { recursive: true });
-  for (const [rel, content] of Object.entries(opts.files ?? {})) {
-    mkdirSync(path.dirname(path.join(ws, rel)), { recursive: true });
-    writeFileSync(path.join(ws, rel), content);
-  }
   mkdirSync(ws, { recursive: true });
+  let prEnv: Record<string, string> = {};
+  if (opts.pr) {
+    runGit(ws, ["init", "-q", "-b", "main", "."]);
+    writeFiles(ws, opts.pr.base);
+    runGit(ws, ["add", "-A"]);
+    runGit(ws, ["commit", "-q", "-m", "base"]);
+    const base = runGit(ws, ["rev-parse", "HEAD"]);
+    writeFiles(ws, opts.files ?? {});
+    for (const rel of opts.pr.deleted ?? []) rmSync(path.join(ws, rel));
+    runGit(ws, ["add", "-A"]);
+    runGit(ws, ["commit", "-q", "-m", "change"]);
+    prEnv = { SCOPE_MODE: "diff", BASE_SHA: base };
+  } else {
+    writeFiles(ws, opts.files ?? {});
+    if (opts.committed) {
+      runGit(ws, ["init", "-q", "-b", "main", "."]);
+      runGit(ws, ["add", "-A"]);
+      runGit(ws, ["commit", "-q", "-m", "tree"]);
+    }
+  }
   for (const [name, content] of Object.entries(opts.reports ?? {})) {
     writeFileSync(
       path.join(reports, name),
@@ -71,7 +113,14 @@ function normalize(opts: {
   }
   if (opts.scope) writeFileSync(path.join(reports, "scope.txt"), opts.scope.join("\n"));
   execFileSync(process.execPath, [SCRIPT], {
-    env: { PATH: process.env.PATH ?? "", REPORT_DIR: reports, GITHUB_WORKSPACE: ws, ...opts.env },
+    env: {
+      PATH: process.env.PATH ?? "",
+      REPORT_DIR: reports,
+      GITHUB_WORKSPACE: ws,
+      ...GIT_ENV,
+      ...prEnv,
+      ...opts.env,
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
   return { ws, ...JSON.parse(readFileSync(path.join(reports, "normalized.json"), "utf8")) } as {
@@ -82,6 +131,10 @@ function normalize(opts: {
 }
 
 const b64url = (v: string | Buffer) => Buffer.from(v).toString("base64url");
+// The scanners' inline suppression markers, built like the credentials: a
+// literal one here would count as a suppression in every scan of this repo.
+const SEMGREP_IGNORE = ["// no", "semgrep"].join("");
+const GITLEAKS_ALLOW = ["// gitleaks", "allow"].join(":");
 const jwt = (role: string) =>
   [
     b64url('{"alg":"HS256","typ":"JWT"}'),
@@ -429,5 +482,113 @@ describe("scanner outcomes", () => {
   it("summarises what it sends", () => {
     const out = normalize({ reports: { "gitleaks.json": [] } });
     expect(out.summary).toMatchObject({ total: 0, fingerprint_version: 2, critical: 0 });
+  });
+});
+
+describe("what the scan ran and what it was told to ignore", () => {
+  it("counts findings per scanner", () => {
+    const text = 'const apiKey = "' + token() + '";\n';
+    const out = normalize({
+      files: { "src/a.ts": text },
+      reports: {
+        "gitleaks.json": [leak("src/a.ts", text, "generic-api-key", "apiKey")],
+        "semgrep.json": {
+          results: [
+            {
+              check_id: "javascript.lang.security.audit.eval",
+              path: "src/a.ts",
+              start: { line: 1, col: 1 },
+              end: { line: 1, col: 10 },
+              extra: { severity: "ERROR", message: "eval", metadata: {} },
+            },
+          ],
+          errors: [],
+        },
+      },
+    });
+    expect(Object.keys(out.summary.by_scanner).sort()).toEqual(["gitleaks", "semgrep"]);
+    const total = (c: Record<string, number>) => Object.values(c).reduce((a, b) => a + b, 0);
+    expect(total(out.summary.by_scanner.gitleaks)).toBe(1);
+    expect(total(out.summary.by_scanner.semgrep)).toBe(1);
+  });
+
+  it("passes through which semgrep rules ran", () => {
+    const rules = {
+      source: "registry",
+      digest: "0123456789abcdef",
+      files: [{ name: "p.yml", sha256: "aa" }],
+    };
+    expect(normalize({ reports: { "semgrep-rules.json": rules } }).summary.rulesets).toEqual({
+      semgrep: rules,
+    });
+    expect(normalize({}).summary.rulesets).toBeNull();
+  });
+
+  it("lists the ignore files in force on a full scan, and no changes", () => {
+    const out = normalize({
+      committed: true,
+      files: { ".gitleaksignore": "x\n", "src/a.ts": `${SEMGREP_IGNORE}\n${GITLEAKS_ALLOW}\n` },
+    });
+    expect(out.summary.suppressions.files).toEqual([
+      { path: ".gitleaksignore", sha256: sha("x\n").slice(0, 16) },
+    ]);
+    expect(out.summary.suppressions).toMatchObject({ nosemgrep: 1, gitleaks_allow: 1 });
+    expect(out.summary.suppressions).not.toHaveProperty("changed");
+  });
+
+  it("reports a pull request's edits to what the scanners ignore, and judges it by the base's", () => {
+    const out = normalize({
+      pr: {
+        base: {
+          ".gitleaksignore": "base-entry\n",
+          "config/.semgrepignore": "fixtures/\n",
+          "src/a.ts": `const a = 1; ${SEMGREP_IGNORE}\n`,
+          ".github/workflows/codex-security-scan.yml": "name: scan\n",
+        },
+        deleted: ["config/.semgrepignore"],
+      },
+      files: {
+        ".gitleaksignore": "base-entry\nsrc/a.ts:generic-api-key:2\n",
+        ".semgrepignore": "src/\n",
+        "src/a.ts": [
+          `const a = 1; ${SEMGREP_IGNORE}`,
+          `const b = 2; ${SEMGREP_IGNORE.toUpperCase()}`,
+          `const c = 3; ${GITLEAKS_ALLOW}`,
+          "",
+        ].join("\n"),
+        ".github/workflows/codex-security-scan.yml": "name: scan\non: push\n",
+      },
+    });
+    const s = out.summary.suppressions;
+    expect(s.changed).toEqual(
+      expect.arrayContaining([
+        { path: ".gitleaksignore", change: "modified" },
+        { path: ".semgrepignore", change: "added" },
+        { path: "config/.semgrepignore", change: "removed" },
+        { path: ".github/workflows/codex-security-scan.yml", change: "modified" },
+      ]),
+    );
+    expect(s.changed).toHaveLength(4);
+    expect(s.nosemgrep_added).toBe(1);
+    expect(s.gitleaks_allow_added).toBe(1);
+    // In force for this scan: the base's ignore files, hashed as the base has them.
+    expect(s.files.map((f: { path: string }) => f.path).sort()).toEqual([
+      ".gitleaksignore",
+      "config/.semgrepignore",
+    ]);
+    const gl = s.files.find((f: { path: string }) => f.path === ".gitleaksignore");
+    expect(gl.sha256).toBe(sha("base-entry\n").slice(0, 16));
+  });
+
+  it("reports nothing changed for a pull request that leaves the controls alone", () => {
+    const out = normalize({
+      pr: { base: { ".gitleaksignore": "x\n", "src/a.ts": "a\n" } },
+      files: { "src/a.ts": "b\n" },
+    });
+    expect(out.summary.suppressions).toMatchObject({
+      changed: [],
+      nosemgrep_added: 0,
+      gitleaks_allow_added: 0,
+    });
   });
 });

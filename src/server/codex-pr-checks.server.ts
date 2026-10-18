@@ -17,6 +17,7 @@ import {
   type PrCheckReport,
 } from "@/lib/codex-pr-check";
 import { degradedScanners } from "@/lib/codex-finding-lifecycle";
+import { readSuppressionChanges } from "@/lib/codex-scan-provenance";
 import { asJson } from "@/lib/json-cast";
 
 export type CheckRunTarget = {
@@ -188,6 +189,7 @@ export async function completePrCheckForJob(input: {
         failOn: await prCheckFailOn(),
         degraded: degradedScanners(result),
         incomplete: result.incomplete === true,
+        suppressionChanges: readSuppressionChanges(result),
         scanUrl: scanDetailsUrl(input.job.id),
         runUrl: input.outcome.runUrl ?? null,
       });

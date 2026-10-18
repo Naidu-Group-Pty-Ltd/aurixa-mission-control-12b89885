@@ -1111,4 +1111,17 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "rpc", fn: "codex_set_nightly_schedule" },
     ],
   },
+  {
+    migration: "20261018100000_codex_notification_kinds.sql",
+    version: "20261018100000",
+    assertions: [{ kind: "enum", type: "notification_kind" }],
+  },
+  {
+    migration: "20261018110000_codex_findings_ownership.sql",
+    version: "20261018110000",
+    assertions: [
+      { kind: "column", table: "codex_findings", column: "assigned_to" },
+      { kind: "column", table: "codex_findings", column: "assigned_at" },
+    ],
+  },
 ];

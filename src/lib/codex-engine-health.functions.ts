@@ -30,6 +30,85 @@ async function cachedGitHub<T>(key: string, load: () => Promise<T>): Promise<T> 
 
 const CODEX_CRON_JOBS = ["codex-security-nightly", "codex-security-sweep"] as const;
 
+export type WorkflowFileState = { present: boolean; version: number | null; detail: string };
+export type CloneWorkflowVersions = {
+  cloneId: string;
+  name: string;
+  repo: string;
+  scan: WorkflowFileState;
+  remediation: WorkflowFileState;
+  current: boolean;
+};
+
+/**
+ * Which Codex workflow each clone's default branch carries, read from GitHub
+ * rather than inferred from scans: a clone that has never scanned — or whose
+ * scans all fail before reporting — is exactly the one whose file is wrong.
+ * Cached (see cachedGitHub) and refused below the App's scan budget floor.
+ */
+async function loadFleetWorkflowVersions(): Promise<
+  { ok: true; clones: CloneWorkflowVersions[] } | { ok: false; reason: string }
+> {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const { data: clones, error } = await supabaseAdmin
+    .from("clones")
+    .select("id, name, github_owner, github_repo, default_branch, github_app_installation_id")
+    .order("name", { ascending: true });
+  if (error) return { ok: false, reason: error.message };
+  const rows = (clones ?? []).filter((c) => c.github_owner && c.github_repo);
+  if (rows.length === 0) return { ok: true, clones: [] };
+
+  const cacheKey = `fleet-workflows:${rows.map((c) => `${c.github_owner}/${c.github_repo}@${c.default_branch ?? ""}`).join(",")}`;
+  const hit = githubCache.get(cacheKey);
+  if (hit && Date.now() - hit.at < GITHUB_CACHE_MS) {
+    return { ok: true, clones: hit.value as CloneWorkflowVersions[] };
+  }
+
+  const { decideSpend } = await import("@/server/cascade/githubBudget.pure");
+  const { readGitHubRemaining } = await import("@/server/githubAllowance.server");
+  const spend = decideSpend({ role: "scan", remaining: await readGitHubRemaining() });
+  if (!spend.proceed) return { ok: false, reason: spend.why };
+
+  const { checkScanWorkflowPresent } = await import("@/server/codex-security-client.server");
+  const { mapWithConcurrency } = await import("@/lib/concurrency");
+  const read = (c: (typeof rows)[number], workflowFile?: string) =>
+    checkScanWorkflowPresent({
+      owner: c.github_owner as string,
+      repo: c.github_repo as string,
+      ref: c.default_branch || undefined,
+      installationId: c.github_app_installation_id ?? null,
+      ...(workflowFile ? { workflowFile } : {}),
+    }).catch((err) => ({ present: false, version: null, detail: (err as Error).message }));
+  const result = await mapWithConcurrency(rows, 4, async (c) => {
+    const [scan, remediation] = await Promise.all([read(c), read(c, "codex-remediation.yml")]);
+    return {
+      cloneId: c.id,
+      name: c.name ?? c.id,
+      repo: `${c.github_owner}/${c.github_repo}`,
+      scan,
+      remediation,
+      current:
+        scan.present &&
+        (scan.version ?? 1) >= CODEX_SCAN_WORKFLOW_VERSION &&
+        remediation.present &&
+        (remediation.version ?? 1) >= CODEX_REMEDIATION_WORKFLOW_VERSION,
+    } satisfies CloneWorkflowVersions;
+  });
+  githubCache.set(cacheKey, { at: Date.now(), value: result });
+  return { ok: true, clones: result };
+}
+
+/** The fleet's workflow files, for the fleet table's per-clone column. */
+export const getFleetWorkflowVersions = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }: { context: any }) => {
+    const { supabase, userId } = context;
+    const { data: isOperator } = await supabase.rpc("is_operator", { _user_id: userId });
+    const { data: isAdmin } = await supabase.rpc("is_admin", { _user_id: userId });
+    if (!isOperator && !isAdmin) throw new Error("Forbidden: operator or admin only");
+    return loadFleetWorkflowVersions();
+  });
+
 export type HealthCheck = {
   key: string;
   label: string;
@@ -292,6 +371,42 @@ export const getCodexEngineHealth = createServerFn({ method: "GET" })
           ? undefined
           : "The sweeper (/hooks/codex-sweep, every 10 minutes) retries or retires these. Check that the pg_cron job exists and CRON_SECRET matches.",
     });
+
+    // ── What the fleet's repositories carry, read from GitHub ────────────
+    if (engine === "github_actions") {
+      const fleet = await loadFleetWorkflowVersions();
+      if (!fleet.ok) {
+        checks.push({
+          key: "fleet_workflow_files",
+          label: "Workflow files across the fleet",
+          status: "warn",
+          detail: `Not checked: ${fleet.reason}`,
+        });
+      } else if (fleet.clones.length > 0) {
+        const behind = fleet.clones.filter((c) => !c.current);
+        checks.push({
+          key: "fleet_workflow_files",
+          label: "Workflow files across the fleet",
+          status: behind.length === 0 ? "ok" : "warn",
+          detail:
+            behind.length === 0
+              ? `All ${fleet.clones.length} clones carry scan and fix workflows at the current version`
+              : `${behind.length} of ${fleet.clones.length} clones carry a missing or older workflow: ` +
+                behind
+                  .slice(0, 5)
+                  .map(
+                    (c) =>
+                      `${c.name} (scan ${c.scan.present ? `v${c.scan.version ?? 1}` : "missing"}, fix ${c.remediation.present ? `v${c.remediation.version ?? 1}` : "missing"})`,
+                  )
+                  .join(", ") +
+                (behind.length > 5 ? ` and ${behind.length - 5} more` : ""),
+          fix:
+            behind.length === 0
+              ? undefined
+              : "Update Prime's copies and let the cascade deliver them; a clone excluded from cascades needs the files committed directly.",
+        });
+      }
+    }
 
     // ── What the fleet is actually running, and how well ─────────────────
     const fortnight = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();

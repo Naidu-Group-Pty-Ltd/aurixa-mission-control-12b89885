@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { z } from "zod";
+import type { Json } from "@/integrations/supabase/types";
 
 // The nightly cron expression is NOT here: it is changed through
 // setNightlySchedule, which reschedules the pg_cron job too. Saving it as a
@@ -329,7 +330,35 @@ export const getScanDetail = createServerFn({ method: "GET" })
       const order: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
       findings.sort((a, b) => (order[a.severity] ?? 9) - (order[b.severity] ?? 9));
     }
-    return { job: job.data, findings, events: events.data ?? [], source };
+
+    // The semgrep rules the previous scan of the same repository ran, so the
+    // drawer can say whether a change in findings came from the code or from
+    // the rules (registry packs move between nights).
+    let previousRules: { jobId: string; completedAt: string | null; semgrep: Json } | null = null;
+    if (job.data?.created_at) {
+      let prev = supabase
+        .from("codex_scan_jobs")
+        .select("id, completed_at, semgrep_rules:result_summary->rulesets->semgrep")
+        .eq("status", "completed")
+        .eq("target_kind", job.data.target_kind)
+        .neq("id", job.data.id)
+        .lt("created_at", job.data.created_at)
+        .not("result_summary->rulesets->semgrep->>digest", "is", null)
+        .order("created_at", { ascending: false })
+        .limit(1);
+      prev = job.data.clone_id ? prev.eq("clone_id", job.data.clone_id) : prev.is("clone_id", null);
+      const { data: p, error: prevErr } = await prev.maybeSingle();
+      if (prevErr)
+        console.warn("[codex-security] previous scan rules unavailable:", prevErr.message);
+      else if (p) {
+        previousRules = {
+          jobId: p.id,
+          completedAt: p.completed_at,
+          semgrep: p.semgrep_rules ?? null,
+        };
+      }
+    }
+    return { job: job.data, findings, events: events.data ?? [], source, previousRules };
   });
 
 // -------- Phase 5: fleet views + per-clone controls --------

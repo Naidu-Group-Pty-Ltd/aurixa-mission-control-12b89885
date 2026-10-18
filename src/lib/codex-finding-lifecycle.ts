@@ -261,6 +261,78 @@ export function validateTriage(
   return { ok: true, resolution };
 }
 
+// ── State changes from intake partners ───────────────────────────────────
+
+/**
+ * The words partner systems (pentest portals, ticketing tools) use for a
+ * finding's status, mapped onto the states a person may set. Anything else
+ * is refused rather than ignored: an unknown word used to be dropped
+ * silently, so the partner believed a finding closed that was still open.
+ */
+const INTAKE_STATE_SYNONYMS: Record<string, TriageState> = {
+  open: "open",
+  new: "open",
+  reopen: "open",
+  reopened: "open",
+  triaging: "triaging",
+  triage: "triaging",
+  acknowledged: "triaging",
+  investigating: "triaging",
+  in_progress: "triaging",
+  resolved: "resolved",
+  fixed: "resolved",
+  remediated: "resolved",
+  closed: "resolved",
+  done: "resolved",
+  rotated: "resolved",
+  dismissed: "dismissed",
+  accepted: "dismissed",
+  accepted_risk: "dismissed",
+  risk_accepted: "dismissed",
+  wont_fix: "dismissed",
+  wontfix: "dismissed",
+  false_positive: "false_positive",
+  not_an_issue: "false_positive",
+  invalid: "false_positive",
+};
+
+const intakeKey = (raw: string) =>
+  raw
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+
+/** A partner's status word as a state a person may set, or null if it is not one. */
+export function resolveIntakeState(raw: string): TriageState | null {
+  return INTAKE_STATE_SYNONYMS[intakeKey(raw)] ?? null;
+}
+
+/**
+ * How a partner's "resolved" is recorded. Only the word `rotated` says a
+ * committed credential was rotated — "fixed" or "closed" from a pentest portal
+ * says nothing about the key, so for a credential it is refused by the triage
+ * rules (which accept nothing but `rotated` for one) rather than recorded as a
+ * rotation nobody claimed.
+ */
+export function intakeResolution(raw: string): ResolutionReason {
+  return intakeKey(raw) === "rotated" ? "rotated" : "manual";
+}
+
+/**
+ * The reason recorded for a partner's verdict. Partners rarely send one, and a
+ * verdict needs one: when they do not, the record at least says who decided.
+ */
+export function intakeReason(
+  sourceName: string,
+  state: TriageState,
+  reason?: string | null,
+): string {
+  const given = (reason ?? "").trim();
+  return given.length >= 3
+    ? given
+    : `Marked ${state.replace("_", " ")} by ${sourceName} through the intake API.`;
+}
+
 /** Plain-language meaning of each state, for tooltips and the explainer. */
 export const STATE_MEANING: Record<FindingState, string> = {
   open: "Reported and not yet decided on.",

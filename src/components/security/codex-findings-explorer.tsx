@@ -8,7 +8,16 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import { toast } from "sonner";
-import { ExternalLink, Filter, History, Search, ShieldQuestion } from "lucide-react";
+import {
+  Clock,
+  ExternalLink,
+  Filter,
+  History,
+  Search,
+  ShieldQuestion,
+  Ticket,
+  UserRound,
+} from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -42,11 +51,15 @@ import {
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  assignFindings,
   bulkTriageFindings,
   getFindingDetail,
+  listAssignableUsers,
   listFindings,
   triageFinding,
 } from "@/lib/codex-findings.functions";
+import { linkExternalTicket } from "@/lib/security-intake.functions";
+import { FINDING_SLA_DAYS, slaStatus } from "@/lib/codex-finding-sla";
 import { SECRET_SCANNERS, STATE_MEANING, type TriageState } from "@/lib/codex-finding-lifecycle";
 import { formatDistanceToNow } from "@/lib/format";
 
@@ -94,12 +107,64 @@ const PAGE = 50;
 
 export type FindingsScope = "all" | "prime" | "fleet";
 
+/** Response times in words, for the explorer's description. */
+const SLA_LINE = (["critical", "high", "medium", "low"] as const)
+  .map((s) => `${s} ${FINDING_SLA_DAYS[s]} days`)
+  .join(", ");
+
+/** Who may own findings, for the assign controls. */
+function useAssignableUsers() {
+  return useQuery({
+    queryKey: ["codex-assignable-users"],
+    queryFn: () => listAssignableUsers(),
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+}
+
+function AssignSelect({
+  value,
+  onChange,
+  disabled,
+  placeholder = "Assign to…",
+}: {
+  value: string | null;
+  onChange: (assigneeId: string | null) => void;
+  disabled?: boolean;
+  placeholder?: string;
+}) {
+  const usersQ = useAssignableUsers();
+  const users: Array<{ id: string; name: string | null }> = usersQ.data?.users ?? [];
+  return (
+    <Select
+      value={value ?? "__none"}
+      disabled={disabled || usersQ.isLoading}
+      onValueChange={(v) => onChange(v === "__none" ? null : v)}
+    >
+      <SelectTrigger className="h-7 w-[180px] text-xs">
+        <SelectValue placeholder={placeholder} />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value="__none">Nobody</SelectItem>
+        {users.map((u) => (
+          <SelectItem key={u.id} value={u.id}>
+            {u.name ?? u.id.slice(0, 8)}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
+
 export function CodexFindingsExplorer({
   scope,
   onScopeChange,
+  initialOverdue = false,
 }: {
   scope: FindingsScope;
   onScopeChange: (s: FindingsScope) => void;
+  /** Start with the overdue filter on — the daily digest links here. */
+  initialOverdue?: boolean;
 }) {
   const qc = useQueryClient();
   const [preset, setPreset] = useState("active");
@@ -112,11 +177,15 @@ export function CodexFindingsExplorer({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [openFinding, setOpenFinding] = useState<string | null>(null);
   const [bulkAction, setBulkAction] = useState<TriageState | null>(null);
+  const [assignment, setAssignment] = useState<"any" | "me" | "unassigned">("any");
+  const [overdue, setOverdue] = useState(initialOverdue);
 
   const filters = useMemo(
     () => ({
       scope,
       includePullRequests: includePrs,
+      assignment,
+      overdue,
       states: STATE_PRESETS[preset].states as any,
       severities: severity === "any" ? undefined : ([severity] as any),
       scanner: scanner === "any" ? undefined : scanner,
@@ -124,7 +193,7 @@ export function CodexFindingsExplorer({
       limit: PAGE,
       offset: page * PAGE,
     }),
-    [scope, includePrs, preset, severity, scanner, appliedSearch, page],
+    [scope, includePrs, assignment, overdue, preset, severity, scanner, appliedSearch, page],
   );
 
   const listQ = useQuery({
@@ -133,6 +202,17 @@ export function CodexFindingsExplorer({
     refetchInterval: 30_000,
   });
   const bulkFn = useServerFn(bulkTriageFindings);
+  const assignFn = useServerFn(assignFindings);
+  const bulkAssign = useMutation({
+    mutationFn: (assigneeId: string | null) =>
+      assignFn({ data: { findingIds: [...selected], assigneeId } }),
+    onSuccess: (r: any) => {
+      toast.success(`${r.updated} finding${r.updated === 1 ? "" : "s"} reassigned`);
+      setSelected(new Set());
+      qc.invalidateQueries({ queryKey: ["codex-findings"] });
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
   const bulk = useMutation({
     mutationFn: (input: { state: TriageState; reason?: string }) =>
       bulkFn({ data: { findingIds: [...selected], state: input.state, reason: input.reason } }),
@@ -171,6 +251,7 @@ export function CodexFindingsExplorer({
         <CardDescription>
           One record per issue per repository, across every scan. Decide on a finding here — a
           dismissal or false positive needs a reason, and both stay on the finding&apos;s history.
+          Response times: {SLA_LINE}.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -290,6 +371,35 @@ export function CodexFindingsExplorer({
             />
             Include open pull requests
           </label>
+          <div className="space-y-1">
+            <Label className="text-xs">Owner</Label>
+            <Select
+              value={assignment}
+              onValueChange={(v) => {
+                setAssignment(v as "any" | "me" | "unassigned");
+                resetPage();
+              }}
+            >
+              <SelectTrigger className="h-8 w-[130px] text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="any">Anyone</SelectItem>
+                <SelectItem value="me">Mine</SelectItem>
+                <SelectItem value="unassigned">Unassigned</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <label className="flex items-center gap-2 text-xs">
+            <Switch
+              checked={overdue}
+              onCheckedChange={(v) => {
+                setOverdue(v);
+                resetPage();
+              }}
+            />
+            Overdue only
+          </label>
         </div>
 
         {selected.size > 0 && (
@@ -308,6 +418,11 @@ export function CodexFindingsExplorer({
                 {a.label}
               </Button>
             ))}
+            <AssignSelect
+              value={null}
+              disabled={bulkAssign.isPending}
+              onChange={(id) => bulkAssign.mutate(id)}
+            />
             <Button
               size="sm"
               variant="ghost"
@@ -339,7 +454,8 @@ export function CodexFindingsExplorer({
               <TableHead>Finding</TableHead>
               <TableHead>Where</TableHead>
               <TableHead>State</TableHead>
-              <TableHead>Last seen</TableHead>
+              <TableHead>Age</TableHead>
+              <TableHead>Owner</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -389,14 +505,33 @@ export function CodexFindingsExplorer({
                     </div>
                   )}
                 </TableCell>
-                <TableCell className="text-xs text-muted-foreground">
-                  {formatDistanceToNow(f.last_seen_at)}
+                <TableCell className="text-xs">
+                  <AgeCell finding={f} />
+                </TableCell>
+                <TableCell className="text-xs">
+                  {f.assigned_to ? (
+                    <span className="inline-flex items-center gap-1">
+                      <UserRound className="h-3 w-3" />
+                      {f.assigned_to_name ?? "someone"}
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  )}
+                  {f.tickets?.length > 0 && (
+                    <div
+                      className="mt-0.5 inline-flex items-center gap-1 text-muted-foreground"
+                      title={f.tickets.map((t: any) => `${t.provider}: ${t.status}`).join(", ")}
+                    >
+                      <Ticket className="h-3 w-3" />
+                      {f.tickets.length}
+                    </div>
+                  )}
                 </TableCell>
               </TableRow>
             ))}
             {!listQ.isLoading && rows.length === 0 && (
               <TableRow>
-                <TableCell colSpan={5} className="py-8 text-center text-muted-foreground">
+                <TableCell colSpan={6} className="py-8 text-center text-muted-foreground">
                   Nothing matches these filters.
                 </TableCell>
               </TableRow>
@@ -448,6 +583,128 @@ export function CodexFindingsExplorer({
         </SheetContent>
       </Sheet>
     </Card>
+  );
+}
+
+/**
+ * Where this finding is tracked outside Mission Control. A ticket's status is
+ * shown, never applied: a ticket closed is not a finding fixed.
+ */
+function TicketsSection({ findingId, tickets }: { findingId: string; tickets: any[] }) {
+  const qc = useQueryClient();
+  const linkFn = useServerFn(linkExternalTicket);
+  const [provider, setProvider] = useState("");
+  const [externalId, setExternalId] = useState("");
+  const [url, setUrl] = useState("");
+  const link = useMutation({
+    mutationFn: () =>
+      linkFn({
+        data: {
+          findingId,
+          sourceSlug: "manual",
+          provider: provider.trim(),
+          externalId: externalId.trim(),
+          url: url.trim() || undefined,
+        },
+      }),
+    onSuccess: () => {
+      toast.success("Ticket linked");
+      setProvider("");
+      setExternalId("");
+      setUrl("");
+      qc.invalidateQueries({ queryKey: ["codex-finding-detail", findingId] });
+      qc.invalidateQueries({ queryKey: ["codex-findings"] });
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const urlOk = !url.trim() || /^https?:\/\//i.test(url.trim());
+  return (
+    <div>
+      <h3 className="mb-1 flex items-center gap-1 text-sm font-semibold">
+        <Ticket className="h-3 w-3" /> Tickets
+      </h3>
+      {tickets.length > 0 ? (
+        <div className="mb-2 space-y-1 text-xs">
+          {tickets.map((t) => (
+            <div key={t.id} className="flex flex-wrap items-center gap-2">
+              <Badge variant="outline" className="text-[10px]">
+                {t.provider}
+              </Badge>
+              {t.url ? (
+                <a
+                  href={t.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 text-blue-500 hover:underline"
+                >
+                  {t.external_id} <ExternalLink className="h-3 w-3" />
+                </a>
+              ) : (
+                <span className="font-mono">{t.external_id}</span>
+              )}
+              <span className="text-muted-foreground">{t.status}</span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="mb-2 text-xs text-muted-foreground">Not tracked anywhere else.</p>
+      )}
+      <form
+        className="flex flex-wrap items-end gap-1"
+        onSubmit={(e) => {
+          e.preventDefault();
+          link.mutate();
+        }}
+      >
+        <Input
+          value={provider}
+          onChange={(e) => setProvider(e.target.value)}
+          placeholder="jira, linear…"
+          className="h-7 w-[100px] text-xs"
+        />
+        <Input
+          value={externalId}
+          onChange={(e) => setExternalId(e.target.value)}
+          placeholder="ticket id"
+          className="h-7 w-[110px] text-xs"
+        />
+        <Input
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          placeholder="https://… (optional)"
+          className="h-7 w-[200px] text-xs"
+        />
+        <Button
+          type="submit"
+          size="sm"
+          variant="outline"
+          className="h-7 text-xs"
+          disabled={!provider.trim() || !externalId.trim() || !urlOk || link.isPending}
+        >
+          Link ticket
+        </Button>
+      </form>
+    </div>
+  );
+}
+
+/** How long a finding has been open, against its severity's response time. */
+function AgeCell({ finding }: { finding: any }) {
+  const sla = slaStatus(finding);
+  return (
+    <span
+      className={sla.overdue ? "font-medium text-red-500" : "text-muted-foreground"}
+      title={
+        sla.dueInDays == null
+          ? `first seen ${formatDistanceToNow(finding.first_seen_at)}; no response time while ${finding.state.replace("_", " ")}`
+          : sla.overdue
+            ? `past its ${FINDING_SLA_DAYS[finding.severity as keyof typeof FINDING_SLA_DAYS]}-day response time`
+            : `due in ${sla.dueInDays} day${sla.dueInDays === 1 ? "" : "s"}`
+      }
+    >
+      <Clock className="mr-0.5 inline h-3 w-3" />
+      {sla.ageDays}d{sla.overdue ? " · overdue" : ""}
+    </span>
   );
 }
 
@@ -524,11 +781,23 @@ function FindingDetail({ findingId }: { findingId: string }) {
     },
     onError: (e: Error) => toast.error(e.message),
   });
+  const assignFn = useServerFn(assignFindings);
+  const assign = useMutation({
+    mutationFn: (assigneeId: string | null) =>
+      assignFn({ data: { findingIds: [findingId], assigneeId } }),
+    onSuccess: () => {
+      toast.success("Owner updated");
+      qc.invalidateQueries({ queryKey: ["codex-finding-detail", findingId] });
+      qc.invalidateQueries({ queryKey: ["codex-findings"] });
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
 
   const d: any = q.data;
   if (!d) return <p className="text-muted-foreground">Loading…</p>;
   const f = d.finding;
   const isSecret = SECRET_SCANNERS.has(f.scanner);
+  const sla = slaStatus(f);
 
   return (
     <div className="space-y-4">
@@ -575,6 +844,26 @@ function FindingDetail({ findingId }: { findingId: string }) {
         <span className="text-muted-foreground">First / last seen</span>
         <span>
           {formatDistanceToNow(f.first_seen_at)} / {formatDistanceToNow(f.last_seen_at)}
+        </span>
+        <span className="text-muted-foreground">Response time</span>
+        <span className={sla.overdue ? "text-red-500" : undefined}>
+          {sla.dueInDays == null
+            ? "none — not waiting on a decision"
+            : sla.overdue
+              ? `overdue by ${-sla.dueInDays} day${sla.dueInDays === -1 ? "" : "s"}`
+              : `due in ${sla.dueInDays} day${sla.dueInDays === 1 ? "" : "s"}`}
+        </span>
+        <span className="text-muted-foreground">Owner</span>
+        <span>
+          {"assigned_to" in f ? (
+            <AssignSelect
+              value={f.assigned_to ?? null}
+              disabled={assign.isPending}
+              onChange={(id) => assign.mutate(id)}
+            />
+          ) : (
+            <span className="text-muted-foreground">needs migration 20261018110000</span>
+          )}
         </span>
         {f.missed_scans > 0 && (
           <>
@@ -624,6 +913,8 @@ function FindingDetail({ findingId }: { findingId: string }) {
           </Button>
         ))}
       </div>
+
+      <TicketsSection findingId={findingId} tickets={d.tickets ?? []} />
 
       {d.remediations.length > 0 && (
         <div>

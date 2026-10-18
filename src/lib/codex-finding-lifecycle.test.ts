@@ -6,6 +6,9 @@ import {
   isScanComplete,
   onAbsent,
   onReported,
+  intakeReason,
+  intakeResolution,
+  resolveIntakeState,
   targetKeyFor,
   validateTriage,
 } from "./codex-finding-lifecycle";
@@ -216,5 +219,60 @@ describe("validateTriage", () => {
 
   it("refuses a no-op", () => {
     expect(validateTriage({ from: "triaging", to: "triaging" }).ok).toBe(false);
+  });
+});
+
+describe("intake status words", () => {
+  it("maps the words partners use onto states a person may set", () => {
+    expect(resolveIntakeState("Fixed")).toBe("resolved");
+    expect(resolveIntakeState(" in progress ")).toBe("triaging");
+    expect(resolveIntakeState("in-progress")).toBe("triaging");
+    expect(resolveIntakeState("Accepted Risk")).toBe("dismissed");
+    expect(resolveIntakeState("wont_fix")).toBe("dismissed");
+    expect(resolveIntakeState("not an issue")).toBe("false_positive");
+    expect(resolveIntakeState("reopened")).toBe("open");
+    expect(resolveIntakeState("rotated")).toBe("resolved");
+  });
+
+  it("refuses words it does not know, and states only scans may set", () => {
+    expect(resolveIntakeState("maybe")).toBeNull();
+    expect(resolveIntakeState("")).toBeNull();
+    expect(resolveIntakeState("fix_merged")).toBeNull();
+    expect(resolveIntakeState("pr_open")).toBeNull();
+  });
+
+  it("records rotation only when the partner says so", () => {
+    expect(intakeResolution("Rotated")).toBe("rotated");
+    expect(intakeResolution("fixed")).toBe("manual");
+    expect(intakeResolution("closed")).toBe("manual");
+  });
+
+  it("keeps a reason the partner gave and names the partner when it gave none", () => {
+    expect(intakeReason("Acme Pentest", "dismissed", "Behind the VPN; accepted by J.")).toBe(
+      "Behind the VPN; accepted by J.",
+    );
+    expect(intakeReason("Acme Pentest", "false_positive", " ")).toBe(
+      "Marked false positive by Acme Pentest through the intake API.",
+    );
+  });
+
+  it("lets a partner close a credential only as rotated", () => {
+    const base = {
+      from: "open" as const,
+      to: "resolved" as const,
+      reason: "via intake",
+      scanner: "gitleaks",
+    };
+    expect(validateTriage({ ...base, resolution: intakeResolution("fixed") }).ok).toBe(false);
+    expect(validateTriage({ ...base, resolution: intakeResolution("rotated") })).toEqual({
+      ok: true,
+      resolution: "rotated",
+    });
+    expect(
+      validateTriage({ ...base, scanner: "semgrep", resolution: intakeResolution("fixed") }),
+    ).toEqual({
+      ok: true,
+      resolution: "manual",
+    });
   });
 });

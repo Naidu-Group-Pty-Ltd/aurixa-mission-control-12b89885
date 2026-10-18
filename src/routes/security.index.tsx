@@ -26,7 +26,11 @@ import {
 } from "@/components/ui/table";
 import { listScanJobs, listCloneCodexOverview } from "@/lib/codex-security.functions";
 import { getPrimePosture } from "@/lib/codex-findings.functions";
-import { listRemediations } from "@/lib/codex-remediation.functions";
+import {
+  AWAITING_REVIEW_STATUSES,
+  getSecurityCascadeSummary,
+  listRemediations,
+} from "@/lib/codex-remediation.functions";
 
 export const Route = createFileRoute("/security/")({
   component: () => (
@@ -80,6 +84,11 @@ function SecurityOverviewPage() {
     retry: false,
   });
   const primeOpen = ((primeQ.data?.posture as any)?.open_findings ?? {}) as Record<string, number>;
+  const cascadesQ = useQuery({
+    queryKey: ["codex-security-cascades"],
+    queryFn: () => getSecurityCascadeSummary(),
+    refetchInterval: 60000,
+  });
 
   const jobs = jobsQ.data?.jobs ?? [];
   const clones = fleetQ.data?.clones ?? [];
@@ -110,15 +119,14 @@ function SecurityOverviewPage() {
   // By status: the workflow reports `pr_state: "draft_open"`, which the old
   // pr_state list never matched, so this tile always read zero.
   const prsAwaiting = remediations.filter((r: any) =>
-    ["pr_opened", "pr_updated", "approved", "changes_requested"].includes(r.status),
+    (AWAITING_REVIEW_STATUSES as readonly string[]).includes(r.status),
   );
   const prsMerged24h = remediations.filter(
     (r: any) => r.merged_at && Date.now() - new Date(r.merged_at).getTime() < 86_400_000,
   );
 
-  const cascadesInFlight = remediations.filter(
-    (r: any) => r.cascade_event_id && !r.merged_at,
-  ).length;
+  const cascadesInFlight = cascadesQ.data?.inFlight ?? 0;
+  const cascadesHeld = cascadesQ.data?.held ?? 0;
 
   const clonesWithCritical = clones
     .filter((c) => (c.openFindings?.critical ?? 0) + (c.openFindings?.high ?? 0) > 0)
@@ -198,7 +206,7 @@ function SecurityOverviewPage() {
           <Tile
             icon={<GitPullRequest className="h-4 w-4" />}
             label="Remediation PRs"
-            to="/approvals"
+            to="/security/scans"
             hint={`${prsMerged24h.length} merged in last 24h`}
           >
             <div className="text-3xl font-semibold tabular-nums">{prsAwaiting.length}</div>
@@ -208,10 +216,13 @@ function SecurityOverviewPage() {
             icon={<Waves className="h-4 w-4" />}
             label="Fleet cascades"
             to="/cascades"
-            hint={`${clones.length} clones covered`}
+            hint={`${cascadesQ.data?.delivered7d ?? 0} delivered in 7 days · ${clones.length} clones`}
           >
             <div className="text-3xl font-semibold tabular-nums">{cascadesInFlight}</div>
-            <div className="text-xs text-muted-foreground">security patches in flight</div>
+            <div className="text-xs text-muted-foreground">
+              security patches in flight
+              {cascadesHeld > 0 ? ` · ${cascadesHeld} held for approval` : ""}
+            </div>
           </Tile>
         </div>
       )}

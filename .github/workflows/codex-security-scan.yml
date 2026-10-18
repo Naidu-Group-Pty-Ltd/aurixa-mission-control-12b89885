@@ -69,7 +69,7 @@ jobs:
       CALLBACK_URL: ${{ inputs.callback_url }}
       # Bump with any change to what the workflow reports. Mission Control
       # reads it from every callback (src/lib/codex-workflow-contract.ts).
-      WORKFLOW_VERSION: "2"
+      WORKFLOW_VERSION: "3"
       GITLEAKS_VERSION: "8.28.0"
       GITLEAKS_SHA256: "a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb"
       OSV_VERSION: "1.9.2"
@@ -132,6 +132,19 @@ jobs:
             printf '%s\n' "$1" > "$REPORT_DIR/failure-reason.txt"
             echo "::error::$1"
             exit 1
+          }
+          # In a pull request scan, the files that tell the scanners what to
+          # ignore (.gitleaks.toml, .gitleaksignore, .semgrepignore,
+          # osv-scanner.toml) are the base's: a change must not be able to
+          # exempt itself. Its edits apply from the first scan after it
+          # merges, and are reported so the PR check can show a reviewer.
+          # Each scanner step calls this, because semgrep's baseline pass
+          # may restore the tree; restoring is idempotent, replaces a
+          # symlink rather than writing through it, and removes an ignore
+          # file the change added.
+          pin_controls_to_base() {
+            [ "${SCOPE_MODE:-}" = "diff" ] && [ -s "$REPORT_DIR/pinned-controls.z" ] || return 0
+            xargs -0 -r git restore --source="$BASE_SHA" --worktree -- < "$REPORT_DIR/pinned-controls.z"
           }
           LIB
 
@@ -282,6 +295,11 @@ jobs:
             BASE_SHA=$(git merge-base "$BASE" HEAD || true)
             [ -n "$BASE_SHA" ] || fail_scan "No common history between '${DIFF_BASE}' and the scanned commit."
             git diff --name-only --diff-filter=ACMR "$BASE_SHA" HEAD > "$SCOPE_FILE"
+            # The ignore files this change edits, for pin_controls_to_base.
+            git diff --name-only -z --no-renames "$BASE_SHA" HEAD -- \
+              ':(glob)**/.gitleaks.toml' ':(glob)**/.gitleaksignore' \
+              ':(glob)**/.semgrepignore' ':(glob)**/osv-scanner.toml' \
+              > "$REPORT_DIR/pinned-controls.z"
           fi
 
           # Explicit paths win over the diff when both are supplied.
@@ -335,6 +353,10 @@ jobs:
           fi
           tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP" gitleaks && chmod +x "$RUNNER_TEMP/gitleaks"
           GL="$RUNNER_TEMP/gitleaks"
+          if ! pin_controls_to_base; then
+            write_status gitleaks failed "could not restore the base branch's ignore files, so this change could have exempted itself"
+            exit 0
+          fi
           COMMON=(--report-format json --redact --exit-code 0 --no-banner --max-target-megabytes 5)
 
           if [ "$SCOPE_MODE" = "diff" ]; then
@@ -370,6 +392,14 @@ jobs:
           fi
 
       # ── Scanner: SAST (semgrep) ────────────────────────────────────────
+      # Rules, in order of preference:
+      #   1. .github/codex-security/semgrep/ in the repository — pinned by
+      #      being committed. Read from the TRUSTED commit: the base, for a
+      #      pull request, so a change cannot weaken the rules it is judged by.
+      #   2. The registry packs, downloaded to files first so what ran is
+      #      hashed and recorded (rule changes are not code changes).
+      #   3. The registry packs fetched by semgrep itself, if the download
+      #      fails — recorded as such.
       - name: semgrep — static analysis
         continue-on-error: true
         env:
@@ -384,8 +414,65 @@ jobs:
             exit 0
           fi
           SG="$VENV/bin/semgrep"
-          ARGS=(scan --json --metrics=off --timeout 90 --max-target-bytes 2000000 --quiet
-                --config p/security-audit --config p/secrets --config p/owasp-top-ten)
+          # A tree with local edits makes semgrep's baseline pass use a
+          # separate worktree for the base, leaving these in place.
+          if ! pin_controls_to_base; then
+            write_status semgrep failed "could not restore the base branch's ignore files, so this change could have exempted itself"
+            exit 0
+          fi
+
+          RULES="$RUNNER_TEMP/semgrep-rules"
+          mkdir -p "$RULES"
+          VENDORED=".github/codex-security/semgrep"
+          TRUSTED_REF="${BASE_SHA:-$HEAD_SHA}"
+          CONFIGS=()
+          SOURCE=registry
+          if git cat-file -e "${TRUSTED_REF}:${VENDORED}" 2>/dev/null; then
+            SOURCE=vendored
+            git archive "$TRUSTED_REF" "$VENDORED" | tar -x -C "$RULES"
+            CONFIGS+=(--config "$RULES/$VENDORED")
+          else
+            for pack in security-audit secrets owasp-top-ten; do
+              if curl -sSfL --retry 3 --max-time 60 -o "$RULES/$pack.yml" "https://semgrep.dev/c/p/$pack" \
+                 && grep -q "rules" "$RULES/$pack.yml"; then
+                CONFIGS+=(--config "$RULES/$pack.yml")
+              else
+                rm -f "$RULES/$pack.yml"
+                CONFIGS+=(--config "p/$pack")
+                SOURCE=registry-unrecorded
+              fi
+            done
+          fi
+          # What ran, for the summary: the source and a hash of every rule file.
+          node -e '
+            const fs = require("fs");
+            const crypto = require("crypto");
+            const path = require("path");
+            const [source, ref, root] = process.argv.slice(1);
+            const files = [];
+            const walk = (d) => {
+              for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+                const p = path.join(d, e.name);
+                if (e.isDirectory()) walk(p);
+                else if (/\.(ya?ml|json)$/.test(e.name)) {
+                  files.push({
+                    name: path.relative(root, p),
+                    sha256: crypto.createHash("sha256").update(fs.readFileSync(p)).digest("hex").slice(0, 16),
+                  });
+                }
+              }
+            };
+            walk(root);
+            files.sort((a, b) => a.name.localeCompare(b.name));
+            const digest = crypto.createHash("sha256").update(files.map((f) => f.name + ":" + f.sha256).join("\n")).digest("hex").slice(0, 16);
+            fs.writeFileSync(
+              process.env.REPORT_DIR + "/semgrep-rules.json",
+              JSON.stringify({ source, ...(source === "vendored" ? { ref } : {}), digest, files: files.slice(0, 200) }),
+            );
+          ' "$SOURCE" "$TRUSTED_REF" "$RULES"
+          echo "semgrep rules: $SOURCE"
+
+          ARGS=(scan --json --metrics=off --timeout 90 --max-target-bytes 2000000 --quiet "${CONFIGS[@]}")
           code=0
           case "$SCOPE_MODE" in
             diff)
@@ -420,8 +507,9 @@ jobs:
               "$SG" "${ARGS[@]}" --output "$REPORT_DIR/semgrep.json" . || code=$?
               ;;
           esac
-          # Baseline mode checks the base out and back; make sure the tree
-          # the later scanners read is the one under scan.
+          # Baseline mode may check the base out and back; make sure the tree
+          # the later scanners read is the one under scan (they re-pin the
+          # base's ignore files themselves).
           if [ "$(git rev-parse HEAD)" != "$HEAD_SHA" ] || [ -n "$(git status --porcelain --untracked-files=no)" ]; then
             git checkout --quiet --force "$HEAD_SHA"
           fi
@@ -454,6 +542,10 @@ jobs:
             exit 0
           fi
           chmod +x "$OSV"
+          if ! pin_controls_to_base; then
+            write_status osv-scanner failed "could not restore the base branch's ignore files, so this change could have exempted itself"
+            exit 0
+          fi
 
           LOCKFILES='(^|/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lock|requirements[^/]*\.txt|Pipfile\.lock|poetry\.lock|uv\.lock|pdm\.lock|Gemfile\.lock|go\.mod|Cargo\.lock|composer\.lock|pom\.xml|gradle\.lockfile|buildscript-gradle\.lockfile|mix\.lock|pubspec\.lock|packages\.lock\.json|conan\.lock|renv\.lock)$'
 
@@ -1253,32 +1345,110 @@ jobs:
           // suppression added or changed by anyone with write access is visible.
           function git(args) {
             try {
-              return execFileSync("git", args, { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+              return execFileSync("git", args, {
+                cwd: repoRoot,
+                encoding: "utf8",
+                stdio: ["ignore", "pipe", "ignore"],
+                maxBuffer: 64 * 1024 * 1024,
+              });
             } catch (err) {
               return typeof err?.stdout === "string" ? err.stdout : "";
             }
           }
-          const suppressionFiles = git([
-            "ls-files",
-            "--",
-            ":(glob)**/.gitleaks.toml",
-            ":(glob)**/.gitleaksignore",
-            ":(glob)**/.semgrepignore",
-            ":(glob)**/osv-scanner.toml",
-          ])
-            .split("\n")
-            .filter(Boolean)
+          const baseSha = process.env.BASE_SHA || "";
+          const prScan = scopeMode === "diff" && Boolean(baseSha);
+          const IGNORE_FILE = /(^|\/)(\.gitleaks\.toml|\.gitleaksignore|\.semgrepignore|osv-scanner\.toml)$/;
+          // The ignore files in force for this scan. A pull request is scanned with
+          // the base's copies (the workflow restores them before any scanner runs),
+          // so for one they are read from the base commit.
+          const suppressionFiles = (
+            prScan
+              ? git(["ls-tree", "-r", "--name-only", baseSha]).split("\n").filter((p) => IGNORE_FILE.test(p))
+              : git([
+                  "ls-files",
+                  "--",
+                  ":(glob)**/.gitleaks.toml",
+                  ":(glob)**/.gitleaksignore",
+                  ":(glob)**/.semgrepignore",
+                  ":(glob)**/osv-scanner.toml",
+                ]).split("\n").filter((p) => IGNORE_FILE.test(p))
+          )
             .slice(0, 50)
-            .map((p) => ({ path: p, sha256: sha256(fileText(p) ?? "").slice(0, 16) }));
-          const nosemgrep = git(["grep", "-I", "-c", "-E", "nosemgrep|nosem\\b", "--", "."])
-            .split("\n")
-            .filter(Boolean)
-            .reduce((sum, l) => sum + (Number(l.slice(l.lastIndexOf(":") + 1)) || 0), 0);
+            .map((p) => ({
+              path: p,
+              sha256: sha256((prScan ? git(["show", `${baseSha}:${p}`]) : fileText(p)) ?? "").slice(0, 16),
+            }));
+          // Inline suppressions live in the code itself, so a change's own scan
+          // honours them: counted, and for a pull request, how many it adds. The
+          // markers are what the scanners match — semgrep skips any line with a space
+          // and then "nosem" (any case), gitleaks any line with its allow marker —
+          // built from pieces so this file does not count as one.
+          const SEMGREP_MARKER = [" no", "sem"].join("");
+          const GITLEAKS_ALLOW = ["gitleaks", "allow"].join(":");
+          const countGrep = (out) =>
+            out
+              .split("\n")
+              .filter(Boolean)
+              .reduce((sum, l) => sum + (Number(l.slice(l.lastIndexOf(":") + 1)) || 0), 0);
+          const semgrepIgnores = countGrep(git(["grep", "-I", "-c", "-i", "-F", SEMGREP_MARKER, "--", "."]));
+          const gitleaksAllow = countGrep(git(["grep", "-I", "-c", "-F", GITLEAKS_ALLOW, "--", "."]));
+
+          // A pull request that edits what the scanners ignore — or the rules and the
+          // workflow that judge it — is judged by the base's copies, but its edit
+          // takes effect for every scan after it merges. Reported so the PR check can
+          // say so and a reviewer can look.
+          let changedControls = null;
+          let semgrepIgnoresAdded = null;
+          let gitleaksAllowAdded = null;
+          if (prScan) {
+            changedControls = git([
+              "diff",
+              "--name-status",
+              "--no-renames",
+              baseSha,
+              "HEAD",
+              "--",
+              ":(glob)**/.gitleaks.toml",
+              ":(glob)**/.gitleaksignore",
+              ":(glob)**/.semgrepignore",
+              ":(glob)**/osv-scanner.toml",
+              ".github/codex-security",
+              ".github/workflows/codex-security-scan.yml",
+              ".github/workflows/codex-remediation.yml",
+            ])
+              .split("\n")
+              .filter(Boolean)
+              .slice(0, 50)
+              .map((l) => {
+                const [code, ...rest] = l.split("\t");
+                return {
+                  path: rest.join("\t"),
+                  change: code === "A" ? "added" : code === "D" ? "removed" : "modified",
+                };
+              });
+            semgrepIgnoresAdded = Math.max(
+              0,
+              semgrepIgnores - countGrep(git(["grep", "-I", "-c", "-i", "-F", SEMGREP_MARKER, baseSha, "--", "."])),
+            );
+            gitleaksAllowAdded = Math.max(
+              0,
+              gitleaksAllow - countGrep(git(["grep", "-I", "-c", "-F", GITLEAKS_ALLOW, baseSha, "--", "."])),
+            );
+          }
+
+          // Which semgrep rules ran (written by the semgrep step): the same code can
+          // pass one night and fail the next because the registry's rules moved.
+          const semgrepRules = readJson("semgrep-rules.json");
 
           const order = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
           findings.sort((a, b) => order[a.severity] - order[b.severity]);
           const counts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
-          for (const f of findings) counts[f.severity] += 1;
+          const byScanner = {};
+          for (const f of findings) {
+            counts[f.severity] += 1;
+            byScanner[f.scanner] ??= { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+            byScanner[f.scanner][f.severity] += 1;
+          }
 
           const headSha = git(["rev-parse", "HEAD"]).trim() || null;
           fs.writeFileSync(
@@ -1290,8 +1460,21 @@ jobs:
                 total: findings.length,
                 scanners,
                 fingerprint_version: 2,
+                by_scanner: byScanner,
                 scope: { mode: scopeMode, files: scope.size },
-                suppressions: { files: suppressionFiles, nosemgrep },
+                suppressions: {
+                  files: suppressionFiles,
+                  "nosemgrep": semgrepIgnores,
+                  gitleaks_allow: gitleaksAllow,
+                  ...(changedControls
+                    ? {
+                        changed: changedControls,
+                        "nosemgrep_added": semgrepIgnoresAdded,
+                        gitleaks_allow_added: gitleaksAllowAdded,
+                      }
+                    : {}),
+                },
+                rulesets: semgrepRules ? { semgrep: semgrepRules } : null,
                 head_sha: headSha,
                 base_sha: process.env.BASE_SHA || null,
               },
@@ -1306,7 +1489,18 @@ jobs:
               " | " +
               Object.entries(scanners)
                 .map(([k, v]) => `${k}:${v.status}`)
-                .join(" "),
+                .join(" ") +
+              "\n" +
+              Object.entries(byScanner)
+                .map(
+                  ([k, c]) =>
+                    `  ${k}: ` +
+                    Object.entries(c)
+                      .filter(([, v]) => v > 0)
+                      .map(([sev, v]) => `${sev}=${v}`)
+                      .join(" "),
+                )
+                .join("\n"),
           );
           NORMALIZE
           node "$HELPER_DIR/normalize.mjs"

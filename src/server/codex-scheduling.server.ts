@@ -37,6 +37,7 @@ import {
   scanDetailsUrl,
   startScanCheckRun,
 } from "@/server/codex-pr-checks.server";
+import { alertOnScanFailed } from "@/server/codex-scan-alerts.server";
 
 export { resolveDispatchTarget, type DispatchTarget } from "@/server/codex-dispatch-target.server";
 
@@ -549,6 +550,7 @@ async function failHungJob(job: SweepJob, reason: string, eventType: string, pay
       outcome: { kind: "failed", reason, runUrl: job.workflow_run_url },
     });
   }
+  await alertOnScanFailed({ ...job, last_error: reason });
   return true;
 }
 
@@ -611,6 +613,10 @@ export async function sweepStalledScans(options?: {
         continue;
       }
       await recordEvent(job.id, "sweep_failed", { reason: "dispatch_attempts_exhausted" });
+      await alertOnScanFailed({
+        ...job,
+        last_error: job.last_error || "dispatch_attempts_exhausted",
+      });
       failed.push({ jobId: job.id, reason: "dispatch_attempts_exhausted" });
       continue;
     }

@@ -9,10 +9,19 @@
 //   - reports each scanner's real outcome as `status`, so a scanner that
 //     failed can never resolve findings by its absence;
 //   - fingerprints by content, not line number.
+// Version 3 is the first that:
+//   - scans a pull request with the base's ignore files (.gitleaks.toml,
+//     .gitleaksignore, .semgrepignore, osv-scanner.toml), so a change cannot
+//     exempt itself, and reports the change's edits to them and the inline
+//     suppressions it adds;
+//   - records which semgrep rules ran (vendored or downloaded, hashed) and
+//     counts findings per scanner;
+//   - refuses a drafted fix that silences a scanner instead of fixing the
+//     code, and catches CI changes git would have quoted or shown as renames.
 // The contract test keeps these constants equal to the YAML.
 
-export const CODEX_SCAN_WORKFLOW_VERSION = 2;
-export const CODEX_REMEDIATION_WORKFLOW_VERSION = 2;
+export const CODEX_SCAN_WORKFLOW_VERSION = 3;
+export const CODEX_REMEDIATION_WORKFLOW_VERSION = 3;
 
 /** The version a scan reported, or 1 for workflows that predate versioning. */
 export function reportedWorkflowVersion(summary: unknown): number {
