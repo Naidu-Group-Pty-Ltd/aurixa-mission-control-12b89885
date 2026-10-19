@@ -55,7 +55,9 @@ concurrency:
 
 jobs:
   scan:
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: that label moves to Ubuntu 26 from 19 Oct 2026,
+    # and this job was verified on 24.04. Move it deliberately, with a test run.
+    runs-on: ubuntu-24.04
     # Mission Control times a started scan out after 75 minutes; finishing
     # (or failing) well inside that keeps its record and the run in step.
     timeout-minutes: 60

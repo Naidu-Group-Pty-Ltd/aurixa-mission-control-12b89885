@@ -106,7 +106,9 @@ concurrency:
 
 jobs:
   draft-fix:
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: that label moves to Ubuntu 26 from 19 Oct 2026,
+    # and this job was verified on 24.04. Move it deliberately, with a test run.
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
       REMEDIATION_ID: ${{ inputs.remediation_id }}

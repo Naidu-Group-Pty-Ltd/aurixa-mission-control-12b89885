@@ -68,7 +68,9 @@ concurrency:
 
 jobs:
   resolve:
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: that label moves to Ubuntu 26 from 19 Oct 2026,
+    # and this job was verified on 24.04. Move it deliberately, with a test run.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -1,5 +1,6 @@
 // Every action every workflow runs: pinned to a commit, the same commit in
-// every file, and a release that runs on Node 24.
+// every file, and a release that runs on Node 24 — on a runner image pinned
+// the same way.
 //
 // GitHub warned on every run that the old pins (checkout v4.3.1, setup-node
 // v4.4.0, upload-artifact v4.6.2) target Node 20, which the runners are
@@ -22,7 +23,20 @@ const NODE24_PINS: Record<string, { sha: string; version: string }> = {
 };
 
 type Step = { uses?: string; with?: Record<string, unknown>; env?: Record<string, unknown> };
-type Job = { permissions?: unknown; steps?: Step[]; env?: Record<string, unknown> };
+type Job = {
+  "runs-on"?: unknown;
+  permissions?: unknown;
+  steps?: Step[];
+  env?: Record<string, unknown>;
+};
+
+/**
+ * The runner image every job was verified on. `ubuntu-latest` moves to
+ * Ubuntu 26 from 19 Oct 2026; the fix workflow alone depends on `sudo`,
+ * `useradd`, `setfacl` and the tool cache's layout, so the image moves when a
+ * person moves it, after a test run — not when GitHub relabels it.
+ */
+const RUNNER = "ubuntu-24.04";
 
 const DIR = join(process.cwd(), ".github", "workflows");
 const workflows = readdirSync(DIR)
@@ -58,6 +72,14 @@ describe("the actions the workflows run", () => {
       }
     },
   );
+
+  it("run on the image they were verified on, never a moving label", () => {
+    for (const w of workflows) {
+      for (const [name, job] of Object.entries(w.doc.jobs)) {
+        expect(job["runs-on"], `${w.file} ${name}`).toBe(RUNNER);
+      }
+    }
+  });
 
   it("never fetch a dependency cache into a job that holds a secret", () => {
     // setup-node v5 and later can turn caching on by themselves. A cache is
