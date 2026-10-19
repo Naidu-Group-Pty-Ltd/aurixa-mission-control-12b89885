@@ -18,14 +18,14 @@ the fourth clone is `npc-crm-independent-6505dc`. Supabase projects: Prime
 Independent `qvuwrvwzjyigptmnijyb`, NPC Test `umrtusxohxjxzodxorim`, Preflight
 Property Group `egrmsulhtmqnmhvuccxr`.
 
-## Where things stand (13:00 UTC, 19 Oct 2026)
+## Where things stand (13:10 UTC, 19 Oct 2026)
 
 | Piece | Where | State |
 |---|---|---|
-| Prime: `listings-cache` sheds the unread bulk columns and reads the deployment's own table | PR #3341, branch `claude/serene-gates-b7f5pi`, head `96b6a574` | Ready for review. CI 9081 running (the first CI run on this branch to get past startup). Carries the pin and Deno commits below. |
-| Prime: every action pinned to a commit, Deno from its release | PR #3342 (draft), branch `claude/serene-gates-b7f5pi-pin-actions`, head `83e72936` | CI 9080 running; its `security` job passed the new Deno step and every Deno check. Supabase CLI replacement validated locally, being committed next. |
-| Mission Control: forwarded configuration follows Mission Control's value | PR #345, branch `claude/serene-gates-b7f5pi`, head `be2f94cd` | Green, `mergeable_state: clean`, deliberately **not merged** until Prime's fix reaches the clones (§ Order). |
-| Clone `npc-client-dashboard`: cascade `prime@6bd6e86` | PR #379, branch `aurixa/cascade-70132e8-mvb39lqx`, head `5b6cf760` | Two hand commits pushed on top of the engine's (`3922a634` pins + Deno, `5b6cf760` the held App.tsx reconcile). CI 1306 running: `security`, `render-container`, `supply-chain` green; the three `verify` shards and `template-geometry` still running. |
+| Prime: `listings-cache` sheds the unread bulk columns and reads the deployment's own table | PR #3341, branch `claude/serene-gates-b7f5pi`, head `efeead42` | Ready for review. CI 9082 running on this head. Carries the pin, Deno and Supabase CLI commits below, and its body says so; merge #3342 first. |
+| Prime: every action pinned to a commit, Deno and the Supabase CLI from their own releases | PR #3342 (draft), branch `claude/serene-gates-b7f5pi-pin-actions`, head `f2eef880` | CI 9083 running. CI 9080, on the Deno commit, had its `security` job pass the new Deno step and every Deno check before the Supabase CLI push superseded it. |
+| Mission Control: forwarded configuration follows Mission Control's value | PR #345, branch `claude/serene-gates-b7f5pi`, head `773f7932` (code unchanged since `be2f94cd`; this document on top) | Green, `mergeable_state: clean`, deliberately **not merged** until Prime's fix reaches the clones (§ Order). |
+| Clone `npc-client-dashboard`: cascade `prime@6bd6e86` | PR #379, branch `aurixa/cascade-70132e8-mvb39lqx`, head `06d2d096` | Three hand commits on top of the engine's (`3922a634` pins + Deno, `5b6cf760` the held App.tsx reconcile, `06d2d096` the Supabase CLI step in nine workflows, byte-identical to Prime). CI 1307 running. CI 1306, on `5b6cf760`, had `security` (with the regenerated inventory check), `render-container` and `supply-chain` green before the push superseded it. |
 | Clone `npc-crm-independent`: stuck cascade rows | Mission Control `cascade_results` | Not yet re-examined this round (task #45 second half). |
 | Organisation Actions policy | Enterprise / organisation settings | Two rules in force since ~11:00 UTC: SHA pins required, and only GitHub-owned actions admitted. Both measured by effect (§ F6). Needs the owner for the two publishers not replaced. |
 
@@ -190,25 +190,28 @@ Prime, branch `claude/serene-gates-b7f5pi-pin-actions` (PR #3342):
   `CI_SCOPE.md`).
 - `83e72936` CI installs Deno from its own release, not through a third-party
   action.
-- (next) The Supabase CLI from its own release in nine workflows.
+- `f2eef880` The Supabase CLI is installed from its own release, in the nine
+  workflows that used `setup-cli` (cherry-picked from `efeead42` below).
 
 Prime, branch `claude/serene-gates-b7f5pi` (PR #3341): `3bfefd08` the
-listings-cache fix, then the same commits cherry-picked (`35e49428`,
-`96b6a574`, …).
+listings-cache fix, then the same three changes (`35e49428` pins,
+`96b6a574` Deno, `efeead42` Supabase CLI).
 
 Mission Control, branch `claude/serene-gates-b7f5pi` (PR #345): `be2f94cd`
-Forwarded Airtable settings follow Mission Control's value; this document.
+Forwarded Airtable settings follow Mission Control's value; `773f7932` and
+later, this document.
 
 Clone `npc-client-dashboard`, branch `aurixa/cascade-70132e8-mvb39lqx`
 (PR #379): `3922a634` pins + Deno (no `prime@` token), `5b6cf760` the reconcile
-(names `prime@6bd6e86` once).
+(names `prime@6bd6e86` once), `06d2d096` the Supabase CLI step in the nine
+workflows plus `CI_SCOPE.md`, copied byte for byte from Prime `efeead42` (no
+`prime@` token).
 
 ## Owed, in order
 
-1. **Prime #3342 → `main`.** When CI 9080 (or its successor on the Supabase
-   CLI commit) is green: mark the PR ready once (`gh pr ready 3342` or
-   `update_pull_request` with `draft: false`), let the full gate run, merge
-   with a merge commit. `pdf-extraction-v3-gates` will be red; it is red on
+1. **Prime #3342 → `main`.** When CI 9083 (on `f2eef880`) is green: mark the
+   PR ready once (`gh pr ready 3342` or `update_pull_request` with
+   `draft: false`), let the full gate run, merge with a merge commit. `pdf-extraction-v3-gates` will be red; it is red on
    `main` (§ F7). After the merge, `deploy-supabase-functions` runs on `main`
    because its own file changed: read it on the Actions page — it is the first
    production run of the Supabase CLI step.
