@@ -1,4 +1,4 @@
-// What protects Prime's default branch: the ruleset Mission Control asks for,
+// What protects Mission Control's own default branch: the ruleset it asks for,
 // what it puts back when the one GitHub holds has drifted, what it keeps that
 // a person added, and what it refuses to touch.
 import { readFileSync } from "node:fs";
@@ -6,19 +6,19 @@ import { load as loadYaml } from "js-yaml";
 import { describe, expect, it } from "vitest";
 import {
   GITHUB_ACTIONS_APP_ID,
-  PRIME_REQUIRED_CHECKS,
-  PRIME_RULESET_NAME,
+  REQUIRED_CHECKS,
+  RULESET_NAME,
   appSlugFromBotLogin,
   decideProtection,
-  desiredPrimeRuleset,
+  desiredRuleset,
   mergedRuleset,
   missingRequiredChecks,
   rulesetShortfall,
   type Ruleset,
-} from "./primeBranchProtection.pure";
+} from "./missionControlBranchProtection.pure";
 
 const LOVABLE = 4242;
-const desired = desiredPrimeRuleset({ lovableAppId: LOVABLE, ownerIsOrganization: true });
+const desired = desiredRuleset({ lovableAppId: LOVABLE, ownerIsOrganization: true });
 const clone = (r: Ruleset): Ruleset => JSON.parse(JSON.stringify(r));
 const held = (change?: (r: Ruleset) => void): Ruleset => {
   const r = { ...clone(desired), id: 7 };
@@ -29,7 +29,7 @@ const held = (change?: (r: Ruleset) => void): Ruleset => {
 describe("the ruleset Mission Control asks for", () => {
   it("allows pull requests only, with both CI jobs from GitHub Actions required", () => {
     expect(desired).toMatchObject({
-      name: PRIME_RULESET_NAME,
+      name: RULESET_NAME,
       target: "branch",
       enforcement: "active",
       conditions: { ref_name: { include: ["~DEFAULT_BRANCH"], exclude: [] } },
@@ -45,7 +45,7 @@ describe("the ruleset Mission Control asks for", () => {
     expect(pr?.parameters?.required_approving_review_count).toBe(0);
     const checks = desired.rules?.find((r) => r.type === "required_status_checks");
     expect(checks?.parameters?.required_status_checks).toEqual(
-      PRIME_REQUIRED_CHECKS.map((context) => ({ context, integration_id: GITHUB_ACTIONS_APP_ID })),
+      REQUIRED_CHECKS.map((context) => ({ context, integration_id: GITHUB_ACTIONS_APP_ID })),
     );
     expect(checks?.parameters?.strict_required_status_checks_policy).toBe(false);
   });
@@ -62,7 +62,7 @@ describe("the ruleset Mission Control asks for", () => {
   });
 
   it("leaves organisation owners off for a repository a person owns", () => {
-    const personal = desiredPrimeRuleset({ lovableAppId: LOVABLE, ownerIsOrganization: false });
+    const personal = desiredRuleset({ lovableAppId: LOVABLE, ownerIsOrganization: false });
     expect(personal.bypass_actors?.map((a) => a.actor_type)).toEqual([
       "RepositoryRole",
       "Integration",
@@ -119,7 +119,7 @@ describe("deciding what to do with the ruleset GitHub holds", () => {
       "a check accepted from any app",
       (r: Ruleset) => {
         const p = r.rules![3].parameters!;
-        p.required_status_checks = PRIME_REQUIRED_CHECKS.map((context) => ({ context }));
+        p.required_status_checks = REQUIRED_CHECKS.map((context) => ({ context }));
       },
       /from an app other than GitHub Actions/,
     ],
@@ -207,9 +207,9 @@ describe("the checks it requires are jobs ci.yml has", () => {
 
   it("names exactly the jobs in .github/workflows/ci.yml", () => {
     // A required check nothing reports holds every pull request open. Renaming
-    // a job in ci.yml without updating PRIME_REQUIRED_CHECKS fails here first.
+    // a job in ci.yml without updating REQUIRED_CHECKS fails here first.
     const names = Object.values(doc.jobs).map((j) => j.name);
-    for (const check of PRIME_REQUIRED_CHECKS) expect(names).toContain(check);
+    for (const check of REQUIRED_CHECKS) expect(names).toContain(check);
     expect(missingRequiredChecks(ci)).toEqual([]);
   });
 

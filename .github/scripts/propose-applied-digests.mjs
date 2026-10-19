@@ -6,6 +6,7 @@
  * lands except a pull request whose CI passed, and no workflow token is on the
  * bypass list — so this asks Mission Control instead, which renders the same
  * file from the same queue and opens it as a pull request through its own App,
+ * on this repository (it says which, and Mission Control refuses any other),
  * armed to merge itself once CI passes
  * (src/server/applied-digests-proposal.server.ts).
  *
@@ -45,7 +46,10 @@ try {
   res = await fetch(`${BASE}/hooks/migration-enqueue`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${SECRET}` },
-    body: JSON.stringify({ action: "propose_digests" }),
+    body: JSON.stringify({
+      action: "propose_digests",
+      repository: process.env.GITHUB_REPOSITORY || undefined,
+    }),
   });
 } catch (e) {
   warn(

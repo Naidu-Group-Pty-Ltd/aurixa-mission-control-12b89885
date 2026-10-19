@@ -3,9 +3,10 @@
 // window so overlapping cron runs (or manual re-runs) don't stack duplicates.
 // Clones are not scanned (src/lib/codex-scan-policy.ts); the fixes the scan
 // leads to are dispatched by the sweep once it completes (codex-autofix.server.ts).
-// It also puts back the ruleset that protects Prime's default branch, if a
-// person deleted it or it lost a rule (prime-branch-protection.server.ts): the
-// fixes merge unattended, and that ruleset is what holds them to CI.
+// It also puts back the ruleset that protects Mission Control's own default
+// branch, if a person deleted it or it lost a rule
+// (mission-control-branch-protection.server.ts) — Mission Control's repository,
+// never Prime's.
 //
 // IT SPENDS THE APP INSTALLATION, AND FOR A YEAR IT NEVER SAID SO.
 //
@@ -31,7 +32,9 @@ import { readGitHubRemaining } from "@/server/githubAllowance.server";
 import { beginGithubLane } from "@/server/githubUsageMeter";
 import { runNightlyScans, sweepStalledScans } from "@/server/codex-scheduling.server";
 import { notifyOverdueFindings } from "@/server/codex-finding-sla.server";
-import { ensurePrimeBranchProtection } from "@/server/prime-branch-protection.server";
+import { ensureMissionControlBranchProtection } from "@/server/mission-control-branch-protection.server";
+import { retractStrayDigestProposal } from "@/server/applied-digests-proposal.server";
+import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { writeAuditLog } from "@/server/audit.server";
 
 export const Route = createFileRoute("/hooks/codex-nightly")({
@@ -87,15 +90,32 @@ export const Route = createFileRoute("/hooks/codex-nightly")({
             return null;
           });
           const result = await runNightlyScans();
-          // Prime's default branch, put back the way it should be: a ruleset a
-          // person deleted is back by morning (prime-branch-protection.server.ts).
-          // Its own outcome, never the scan's — a missing App permission is
-          // reported on engine health, not as a failed night.
-          const protection = await ensurePrimeBranchProtection({ apply: true }).catch((err) => ({
-            ok: false,
-            status: "error" as const,
-            detail: err instanceof Error ? err.message : String(err),
-          }));
+          // Mission Control's own default branch, put back the way it should
+          // be: a ruleset a person deleted is back by morning
+          // (mission-control-branch-protection.server.ts). Its own outcome,
+          // never the scan's — a missing App permission is reported on engine
+          // health, not as a failed night.
+          const protection = await ensureMissionControlBranchProtection({ apply: true }).catch(
+            (err) => ({
+              ok: false,
+              status: "error" as const,
+              detail: err instanceof Error ? err.message : String(err),
+            }),
+          );
+          // What the misdirected first digest refresh opened on Prime, taken
+          // back (applied-digests-proposal.server.ts). A no-op once it is gone.
+          const retracted = await retractStrayDigestProposal(supabaseAdmin).catch((err) => {
+            console.warn("codex-nightly: stray digest proposal not retracted:", err);
+            return null;
+          });
+          if (retracted && (retracted.closed.length > 0 || retracted.branchDeleted)) {
+            await writeAuditLog({
+              action: "prime.stray_digest_proposal.retracted",
+              entityType: "github_repository",
+              entityId: retracted.repo,
+              metadata: retracted as unknown as Record<string, unknown>,
+            });
+          }
           if (
             protection.status === "created" ||
             protection.status === "updated" ||
@@ -104,8 +124,8 @@ export const Route = createFileRoute("/hooks/codex-nightly")({
             await writeAuditLog({
               action:
                 protection.status === "created" || protection.status === "updated"
-                  ? `prime.branch_protection.${protection.status}`
-                  : "prime.branch_protection.auto_merge_allowed",
+                  ? `mission_control.branch_protection.${protection.status}`
+                  : "mission_control.branch_protection.auto_merge_allowed",
               entityType: "github_ruleset",
               entityId: "repo" in protection ? (protection.repo ?? null) : null,
               metadata: protection as Record<string, unknown>,
@@ -116,7 +136,7 @@ export const Route = createFileRoute("/hooks/codex-nightly")({
             );
           }
           return new Response(
-            JSON.stringify({ success: true, ...result, swept, overdue, protection }),
+            JSON.stringify({ success: true, ...result, swept, overdue, protection, retracted }),
             { headers: { "Content-Type": "application/json" } },
           );
         } catch (err) {

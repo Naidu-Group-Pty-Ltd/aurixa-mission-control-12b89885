@@ -448,7 +448,12 @@ describe("the apply job asks Mission Control to propose the manifest", () => {
         })
       : "http://127.0.0.1:9";
     const dir = mkdtempSync(join(tmpdir(), "propose-"));
-    const r = await run(PROPOSE, dir, { MISSION_CONTROL_URL: url, CRON_SECRET: "x", ...env });
+    const r = await run(PROPOSE, dir, {
+      MISSION_CONTROL_URL: url,
+      CRON_SECRET: "x",
+      GITHUB_REPOSITORY: "acme/control",
+      ...env,
+    });
     return { ...r, asked };
   };
 
@@ -466,7 +471,9 @@ describe("the apply job asks Mission Control to propose the manifest", () => {
         },
       },
     });
-    expect(r.asked).toEqual({ action: "propose_digests" });
+    // It names the repository it runs in, so Mission Control can refuse a
+    // refresh asked for from anywhere but its own.
+    expect(r.asked).toEqual({ action: "propose_digests", repository: "acme/control" });
     expect(r.status).toBe(0);
     expect(r.out).toContain("::notice title=Digest manifest proposed::PR #412");
     expect(r.out).toContain("https://github.com/o/r/pull/412");

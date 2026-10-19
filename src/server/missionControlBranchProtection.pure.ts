@@ -1,30 +1,34 @@
 /**
- * What protects Prime's default branch, and how Mission Control tells whether
- * the ruleset GitHub holds still says it.
+ * What protects Mission Control's own default branch, and how Mission Control
+ * tells whether the ruleset GitHub holds still says it.
+ *
+ * Mission Control's repository, not Prime's (`missionControlRepo.pure.ts`):
+ * the checks required below are this repository's `ci.yml` jobs, and the
+ * pushes measured below are this repository's history.
  *
  * ## Why it exists
  *
  * Until 18 Oct 2026 `main` had no protection at all: no branch protection, no
  * ruleset. Any token with `contents: write` could push straight to it — the
- * fix workflow's and the migration workflow's included — and fixes now merge
- * with no person reading them. The ruleset makes GitHub refuse anything that
- * is not a pull request whose two CI jobs passed, whoever asks.
+ * migration workflow pushed its digest manifest that way, 47 times — and a
+ * change to the control plane reached every scheduled job the moment it
+ * landed. The ruleset makes GitHub refuse anything that is not a pull request
+ * whose two CI jobs passed, whoever asks.
  *
  * ## Who may go past it, and why each one
  *
- * - **Lovable's App.** Most of Prime is written in Lovable, and Lovable pushes
- *   to `main` directly: 66 of the first-parent commits in the 90 days to
- *   18 Oct 2026, none through a pull request. Left off the list, Lovable stops
- *   publishing. Its App id is looked up at run time from the bot account its
- *   commits carry (`LOVABLE_BOT_USER_ID`), never typed in here.
+ * - **Lovable's App.** Much of Mission Control is written in Lovable, and
+ *   Lovable pushes to `main` directly: 66 of the first-parent commits in the
+ *   90 days to 18 Oct 2026, none through a pull request. Left off the list,
+ *   Lovable stops publishing. Its App id is looked up at run time from the bot
+ *   account its commits carry (`LOVABLE_BOT_USER_ID`), never typed in here.
  * - **Repository admins and organisation owners.** People who can edit the
  *   ruleset itself; refusing them protects nothing and stops a person fixing
  *   `main` by hand when it matters most.
  *
- * Mission Control's own App is deliberately NOT on the list. Its fix merges
- * are unattended by policy, and GitHub refusing a merge whose checks did not
- * pass is the one gate on them that Mission Control's own code cannot get
- * wrong. Everything it lands on `main` goes through a pull request already.
+ * Mission Control's own App is deliberately NOT on the list. What it lands
+ * here — the digest manifest — arrives as a pull request armed with
+ * auto-merge, so GitHub holds it to CI like anybody's change.
  *
  * ## Mission Control adds; it never takes away
  *
@@ -35,7 +39,7 @@
  * that is a decision, not drift.
  */
 
-export const PRIME_RULESET_NAME = "Mission Control: protect the default branch";
+export const RULESET_NAME = "Mission Control: protect the default branch";
 
 /** GitHub Actions' App id: the required checks are the ones its runs report. */
 export const GITHUB_ACTIONS_APP_ID = 15368;
@@ -47,10 +51,7 @@ export const GITHUB_ACTIONS_APP_ID = 15368;
  * workflow no longer has: a required check nothing reports holds every pull
  * request open forever.
  */
-export const PRIME_REQUIRED_CHECKS = [
-  "Typecheck · Lint · Build",
-  "Lovable install (bun.lockb)",
-] as const;
+export const REQUIRED_CHECKS = ["Typecheck · Lint · Build", "Lovable install (bun.lockb)"] as const;
 
 /**
  * Lovable's bot account. The same id has committed as both
@@ -86,12 +87,12 @@ export type Ruleset = {
 
 type StatusCheck = { context: string; integration_id?: number | null };
 
-export function desiredPrimeRuleset(input: {
+export function desiredRuleset(input: {
   lovableAppId: number;
   ownerIsOrganization: boolean;
 }): Ruleset {
   return {
-    name: PRIME_RULESET_NAME,
+    name: RULESET_NAME,
     target: "branch",
     enforcement: "active",
     conditions: { ref_name: { include: ["~DEFAULT_BRANCH"], exclude: [] } },
@@ -116,7 +117,7 @@ export function desiredPrimeRuleset(input: {
           // Not strict: a branch need not be rebased onto every Lovable push
           // first, or no fix would ever stay mergeable for long.
           strict_required_status_checks_policy: false,
-          required_status_checks: PRIME_REQUIRED_CHECKS.map((context) => ({
+          required_status_checks: REQUIRED_CHECKS.map((context) => ({
             context,
             integration_id: GITHUB_ACTIONS_APP_ID,
           })),
@@ -293,7 +294,7 @@ export function decideProtection(
  */
 export function missingRequiredChecks(
   ciYaml: string,
-  required: readonly string[] = PRIME_REQUIRED_CHECKS,
+  required: readonly string[] = REQUIRED_CHECKS,
 ): string[] {
   const names = new Set<string>();
   for (const m of ciYaml.matchAll(/^\s+name:\s*(.+?)\s*$/gm)) {

@@ -45,7 +45,7 @@ import {
   runNightlyNow,
   setNightlySchedule,
   rotateScanSigningKey,
-  protectPrimeMainNow,
+  protectMissionControlMainNow,
 } from "@/lib/codex-security.functions";
 import {
   CodexFindingsExplorer,
@@ -957,7 +957,7 @@ function EngineHealthPanel() {
     onError: (e: Error) => toast.error(e.message),
   });
 
-  const protectFn = useServerFn(protectPrimeMainNow);
+  const protectFn = useServerFn(protectMissionControlMainNow);
   const protect = useMutation({
     mutationFn: () => protectFn({}),
     onSuccess: (r) => {
@@ -1022,12 +1022,12 @@ function EngineHealthPanel() {
               size="sm"
               variant="outline"
               disabled={protect.isPending}
-              title="Create or repair the ruleset that protects Prime's default branch"
+              title="Create or repair the ruleset that protects Mission Control's own default branch"
               onClick={async () => {
                 const ok = await confirm({
-                  title: "Protect Prime's main branch now?",
+                  title: "Protect Mission Control's main branch now?",
                   description:
-                    "Mission Control's GitHub App creates or repairs the ruleset “Mission Control: protect the default branch”: changes reach main only through pull requests whose two CI jobs passed. Lovable and repository admins can still push directly. Auto-merge is switched on for the repository so the digest refresh can land itself. Tonight's run does the same if you leave it.",
+                    "Mission Control's GitHub App creates or repairs the ruleset “Mission Control: protect the default branch” on Mission Control's own repository — not Prime's: changes reach main only through pull requests whose two CI jobs passed. Lovable and repository admins can still push directly. Auto-merge is switched on for that repository so the digest refresh can land itself. Tonight's run does the same if you leave it.",
                   confirmText: "Protect main",
                 });
                 if (ok) protect.mutate();

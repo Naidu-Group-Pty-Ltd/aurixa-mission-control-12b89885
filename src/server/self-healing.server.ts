@@ -759,10 +759,9 @@ async function executePrMerge(run: any, approvedByHuman: boolean): Promise<{ sta
   // The PR was opened with the workflow's token, which starts no workflow, so
   // this lane starts the CI the workflow named and comes back until it is done.
   //
-  // For a release by a person too. Prime's default branch requires these
-  // checks (primeBranchProtection.pure.ts) and Mission Control's App is not on
-  // the ruleset's bypass list, so GitHub refuses a merge without them whoever
-  // released it; asking first turns that refusal into a wait.
+  // For a release by a person too: a merge whose CI has not run is a merge
+  // nobody checked, whoever released it, and wherever the repository requires
+  // its checks GitHub refuses it anyway; asking first turns that into a wait.
   const mergeHead = approvedByHuman ? pr.headSha : (verifiedHead ?? pr.headSha);
   const ci = fixCiSpec(rem.verification);
   if (ci?.workflow) {

@@ -10,10 +10,8 @@
  *   3. the repository's CI — started by this lane, since a PR opened with the
  *      workflow's token starts none — has passed on that commit
  *      (fixCiGate.pure.ts decides; fixCiGate.pure.test.ts tests it). For a
- *      fix an admin released as well: Prime's default branch requires these
- *      checks and Mission Control's App is not on the bypass list
- *      (primeBranchProtection.pure.ts), so GitHub refuses the merge without
- *      them either way;
+ *      fix an admin released as well: a merge whose CI never ran is a merge
+ *      nobody checked, whoever released it;
  *   4. only then the merge, pinned to that commit.
  *
  * Waiting for the CI costs no attempt: the gate bounds the wait itself.
