@@ -137,10 +137,13 @@ import {
 import { declaredFunctionSourcesOwed } from "./cascade/declaredFunctionSources.pure";
 import {
   carriesHumanWork,
+  completeRefreshPlan,
+  decideRefreshTextMerge,
   lastStatement,
   planRefreshOverHumanWork,
   PRESERVING_MERGE_PREFIX,
   type BranchCommit,
+  type RefreshTextMerge,
 } from "./cascade/refreshOverHumanWork.pure";
 import {
   CONFIG_TOML_PATH,
@@ -6102,34 +6105,77 @@ export async function processClone(args: {
           read(existingTreeSha),
           read(newTree.sha),
         ]);
-        const plan = planRefreshOverHumanWork({
+        let plan = planRefreshOverHumanWork({
           commits,
           statement: statementListing,
           head: headListing,
           next: nextListing,
         });
+        // A path both sides changed differently is merged three ways before
+        // anything is written, and the first doubt defers the whole refresh:
+        // the remaining candidates are not read, because their answer could
+        // not change the outcome.
+        let mergedThreeWays = 0;
+        if (plan.kind === "merge" && plan.textMerges.length > 0) {
+          const settled: { verdict: RefreshTextMerge; stored: string | null }[] = [];
+          for (const candidate of plan.textMerges) {
+            const [base, ours, theirs] = await Promise.all([
+              readMergedVariant(octokit, cloneRef, candidate.base),
+              readMergedVariant(octokit, cloneRef, candidate.ours),
+              readMergedVariant(octokit, cloneRef, candidate.theirs),
+            ]);
+            const verdict = decideRefreshTextMerge(candidate, { base, ours, theirs });
+            const stored =
+              verdict.act === "write"
+                ? await storeMergedVariant(octokit, cloneRef, verdict.text)
+                : null;
+            settled.push({ verdict, stored });
+            if (verdict.act === "hold" || stored === null) break;
+          }
+          plan = completeRefreshPlan(plan, settled);
+          mergedThreeWays = settled.filter((x) => x.verdict.act === "write").length;
+        }
         if (plan.kind === "defer") return deferred(plan.why);
         if (plan.kind === "merge") {
           try {
-            const { data: mergedTree } = await octokit.git.createTree({
-              owner: cloneRef.owner,
-              repo: cloneRef.repo,
-              base_tree: newTree.sha,
-              tree: plan.overlay.map((o) => ({
-                path: o.path,
-                mode: o.mode as "100644" | "100755" | "040000" | "160000" | "120000",
-                type: "blob" as const,
-                sha: o.sha,
-              })),
-            });
+            // Where the new statement already carries every hand-changed path
+            // as the human left it, there is nothing to overlay and the merge
+            // commit's tree IS the new statement's.
+            const mergedTreeSha =
+              plan.overlay.length === 0
+                ? newTree.sha
+                : (
+                    await octokit.git.createTree({
+                      owner: cloneRef.owner,
+                      repo: cloneRef.repo,
+                      base_tree: newTree.sha,
+                      tree: plan.overlay.map((o) => ({
+                        path: o.path,
+                        mode: o.mode as "100644" | "100755" | "040000" | "160000" | "120000",
+                        type: "blob" as const,
+                        sha: o.sha,
+                      })),
+                    })
+                  ).data.sha;
+            const how =
+              plan.agreed.length > 0 || mergedThreeWays > 0
+                ? ` (${[
+                    plan.agreed.length > 0
+                      ? `${plan.agreed.length} already carried by it exactly as changed here`
+                      : "",
+                    mergedThreeWays > 0 ? `${mergedThreeWays} merged three ways` : "",
+                  ]
+                    .filter(Boolean)
+                    .join(", ")})`
+                : "";
             const { data: merge } = await octokit.git.createCommit({
               owner: cloneRef.owner,
               repo: cloneRef.repo,
               message:
                 `${PRESERVING_MERGE_PREFIX} (${sourceLabel}@${shortSha(sourceSha)})\n\n` +
                 `Keeps ${plan.preserved.length} path(s) this proposal's own commits changed, on top of ` +
-                `the refreshed statement. See refreshOverHumanWork.pure.ts in Mission Control.`,
-              tree: mergedTree.sha,
+                `the refreshed statement${how}. See refreshOverHumanWork.pure.ts in Mission Control.`,
+              tree: mergedTreeSha,
               parents: [existing.headSha, newCommit.sha],
             });
             refreshHead = merge.sha;

@@ -1462,10 +1462,33 @@ which is why every reconcile went to a second pull request instead.
   branch's last statement. Each changed path is kept on top of the new
   statement, in a merge commit (the branch head and the new statement are its
   parents).
-- **Deferred:** if the new statement changed a path the human also changed,
-  the proposal is left exactly as it is. The same happens when the human
-  commits include a merge of another branch, or when a listing is truncated.
-  The proposal lands as it stands, and the next pass proposes the rest.
+- **Agreement:** a path the new statement also changed, to exactly the
+  human's entry (same blob and mode, or both deleted), is not a conflict. The
+  new statement already carries the human's version, so nothing is overlaid.
+- **Merged:** a path both changed differently is three-way merged — the
+  branch's last statement as base, the head as ours, the new statement as
+  theirs — with the same `threeWayMerge` held line variants use, and
+  overlaid only when the merge is clean. At most `MAX_REFRESH_TEXT_MERGES`
+  (8) such paths, text modes only.
+- **Deferred:** a deletion against an edit, two different additions, a mode
+  either side changed, a text that could not be read, a conflicting hunk or
+  a merge that could not be stored leaves the proposal exactly as it is. The
+  same happens when the human commits include a merge of another branch, or
+  when a listing is truncated. The proposal lands as it stands, and the next
+  pass proposes the rest.
+- **Why agreement had to be named.** Until 19 Oct 2026 every path both sides
+  changed was a conflict, whatever either changed it to. That made the house
+  rule (fix it at prime, and let the cascade carry it) deadlock on the
+  proposals it was meant to free. npc-client-dashboard #379 carried hand
+  commits pinning every workflow, written byte for byte from prime's own pull
+  request so the clone could run CI under the organisation's new Actions
+  policy. When prime merged that pull request, the refresh deferred on "29
+  path(s) the proposal's own commits also changed". All 29 were workflows the
+  new statement carried with exactly the hand commits' bytes. The proposal
+  could not go green without prime's next change (the fixed
+  `pdf-extraction-v3-gates` scanner), and that change could not reach it.
+  The next prime change to a pinned workflow (`--with-deps`) is the merged
+  case: on the real three versions the merge is clean and gives prime's text.
 - The engine's preserving merge does not start with `ENGINE_COMMIT_PREFIX`.
   So `isEngineOnlyBranch` still reads such a branch as carrying human work,
   and the conflict repair still refuses to regenerate it.
