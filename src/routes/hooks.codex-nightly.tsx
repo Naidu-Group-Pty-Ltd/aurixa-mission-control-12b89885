@@ -3,6 +3,9 @@
 // window so overlapping cron runs (or manual re-runs) don't stack duplicates.
 // Clones are not scanned (src/lib/codex-scan-policy.ts); the fixes the scan
 // leads to are dispatched by the sweep once it completes (codex-autofix.server.ts).
+// Before the scan it writes Mission Control's current Codex keys into Prime's
+// repository and takes any Codex secret out of the clones'
+// (codex-repo-secrets.server.ts).
 // It also puts back the ruleset that protects Mission Control's own default
 // branch, if a person deleted it or it lost a rule
 // (mission-control-branch-protection.server.ts) — Mission Control's repository,
@@ -34,6 +37,7 @@ import { runNightlyScans, sweepStalledScans } from "@/server/codex-scheduling.se
 import { notifyOverdueFindings } from "@/server/codex-finding-sla.server";
 import { ensureMissionControlBranchProtection } from "@/server/mission-control-branch-protection.server";
 import { retractStrayDigestProposal } from "@/server/applied-digests-proposal.server";
+import { reconcileCodexRepoSecrets } from "@/server/codex-repo-secrets.server";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { writeAuditLog } from "@/server/audit.server";
 
@@ -89,6 +93,18 @@ export const Route = createFileRoute("/hooks/codex-nightly")({
             console.error("codex-nightly sweep failed:", err);
             return null;
           });
+          // The keys tonight's scan and fixes read, in Prime's repository and
+          // in no clone's (codex-repo-secrets.server.ts) — before the scan, so
+          // a key rotated in Mission Control is the one the scan runs with.
+          // Its own outcome, never the scan's: a sync that fails leaves the
+          // keys Prime already holds, and the night goes on.
+          const secrets = await reconcileCodexRepoSecrets({
+            triggerSource: "nightly",
+            recordClean: false,
+          }).catch((err) => {
+            console.error("codex-nightly secret sync failed:", err);
+            return null;
+          });
           const result = await runNightlyScans();
           // Mission Control's own default branch, put back the way it should
           // be: a ruleset a person deleted is back by morning
@@ -136,7 +152,15 @@ export const Route = createFileRoute("/hooks/codex-nightly")({
             );
           }
           return new Response(
-            JSON.stringify({ success: true, ...result, swept, overdue, protection, retracted }),
+            JSON.stringify({
+              success: true,
+              ...result,
+              swept,
+              overdue,
+              secrets,
+              protection,
+              retracted,
+            }),
             { headers: { "Content-Type": "application/json" } },
           );
         } catch (err) {

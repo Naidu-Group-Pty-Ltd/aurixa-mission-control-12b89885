@@ -317,6 +317,24 @@ dispatched with a key derived for it alone, and the Prime sync deletes any
 copy of a master an earlier version left in Prime's Actions secrets. Clones
 hold no Codex secrets; the clone and fleet syncs remove them.
 
+Mission Control keeps both halves true by itself
+(`src/server/codex-repo-secrets.server.ts`, one implementation behind every
+door):
+
+- **The nightly run**, before Prime's scan, writes the current keys into
+  Prime's repository, so a key rotated in Mission Control is the one the next
+  scan and its fixes use. It also deletes any Codex secret from every clone's
+  repository. Each clone is listed first and only what it holds is deleted;
+  history rows are written for Prime, and for a clone only when something was
+  removed or failed.
+- **Clone provisioning** checks the repository it has just created and records
+  that it holds none. A fresh fork or template copy carries no secrets;
+  provisioning used to write them all, masters included.
+- **`POST /hooks/codex-repo-secrets`** (Bearer `CRON_SECRET`) runs the same
+  pass now, recording every target it checks.
+- **The Settings buttons** ("Sync to Prime repo", "Remove Codex secrets…") run
+  the same code under the administrator's name.
+
 Repository variables on Prime (all optional): `CLAUDE_FIX_MODEL`,
 `CLAUDE_FIX_EFFORT`, `CLAUDE_FIX_MAX_BUDGET_USD`, and `FIX_CI_WORKFLOW` (the
 CI the merge lane runs on each fix, default `ci.yml`).
@@ -329,8 +347,9 @@ CI the merge lane runs on each fix, default `ci.yml`).
    `.github/workflows/codex-remediation.yml` to Prime's `main`. Engine health
    reads both and reports their versions.
 3. Set `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` in Mission Control, then run
-   the **Actions secret sync for Prime** in Settings. Run the fleet sync once
-   to remove the Codex secrets from the clones.
+   the **Actions secret sync for Prime** in Settings, or
+   `POST /hooks/codex-repo-secrets` (below), which also removes the Codex
+   secrets from the clones. The nightly run repeats both before every scan.
 4. Make sure Prime's `ci.yml` keeps its `workflow_dispatch` trigger (engine
    health's "CI that fixes must pass" check). Give the App **Administration:
    read & write** and press **Protect main now** (or wait for the night): the
@@ -353,6 +372,10 @@ curl -X POST https://<mission-control>/hooks/codex-nightly \
 
 # sweeper (also starts the night's fixes once the scan has completed)
 curl -X POST https://<mission-control>/hooks/codex-sweep \
+  -H "Authorization: Bearer $CRON_SECRET"
+
+# keys into Prime's repository, and Codex secrets out of every clone's
+curl -X POST https://<mission-control>/hooks/codex-repo-secrets \
   -H "Authorization: Bearer $CRON_SECRET"
 ```
 
