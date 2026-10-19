@@ -1,11 +1,18 @@
 # Handoff, continued — the gate passes, and the refresh that could not carry it
 
-**Written 19 Oct 2026, from 15:30 UTC, by the session that continued
+**Written 19 Oct 2026, from 15:30 UTC, and updated at 16:10 UTC, by the session
+that continued
 [`HANDOFF_2026-10-19_AIRTABLE_CASCADE_AND_CI_GATES.md`](./HANDOFF_2026-10-19_AIRTABLE_CASCADE_AND_CI_GATES.md)
 (14:05 UTC, on Mission Control #345's branch).** Read that one for the access
 list, F1–F14 and the commands it gives; read this one for where things stand
 now. It replaces that document's §1 (state) and §2 (plan). Its §3–§7 still
 hold, with the three corrections in §3 below.
+
+> **Read F19 first.** A client's confidential Borrowing Capacity Snapshot was
+> committed at the root of Prime on 6 Aug 2026 and has been carried to every
+> clone since. Prime #3343 removes it from Prime's tip. Removing it from the
+> history, and deciding whether the exposure needs any notice, are the
+> owner's decisions.
 
 This session's GitHub identity is `lavan96`. Its branches are
 `claude/sweet-tesla-pdemno` in Prime and in Mission Control (MC). Every state
@@ -18,19 +25,19 @@ below is the owner's to approve, or to make.
 
 ---
 
-## 1. State at hand-over (15:35 UTC, 19 Oct 2026)
+## 1. State at hand-over (15:35 UTC, 19 Oct 2026; rows marked † re-read at 16:05)
 
 | Piece | Where | State |
 |---|---|---|
 | Prime: actions pinned, Deno and the Supabase CLI from their releases | npc-property-dashbord#3342 | **Merged** 14:39:50 UTC as `66290065` (merge commit, `--match-head` `f2eef880`). On `main`: CI 9085 green; Deploy Supabase functions 1124 green, but it deployed nothing (§3, F17); PDF Import Release Gate 4438 green. Deploy the PDF-import sidecar (run 3) and Deploy the render container (run 5) `startup_failure`: they name `google-github-actions/*`, the owner's allow-list item. |
 | Prime: `listings-cache` memory fix | npc-property-dashbord#3341, head `efeead42` | Open, unchanged. Green on its own CI 9082. `mergeable_state: unstable` only for the old `static-and-fast`. Its three pin commits are cherry-picks of #3342's, so they merge as no-ops. **Merging it redeploys every Edge Function** (it changes `supabase/functions/_shared/listingsCache.pure.ts`, and a `_shared/` change deploys all), which is also the CLI step's first production run. |
-| Prime: the `pdf-extraction-v3-gates` fix (the handoff's step 3) | npc-property-dashbord#3343, branch `claude/sweet-tesla-pdemno`, head `60495442` | **`static-and-fast` passed** — run 39275041962, job 118137024278, 15:06–15:08 UTC, the first green run of that check since it was created. On the runner Playwright installed Chromium v1248 `--with-deps`, the detector found it, the pure suites ran 50 tests and the e2e passed 2, giving `releaseReady: true` with 7 required checks: 0 failed, 0 skipped, 0 unavailable. The fast lane was green; the PR was marked ready at 15:23 and the full gate (CI run 39277428548) is running. |
-| MC: a refresh over hand commits proceeds where both sides agree or merge cleanly | aurixa-mission-control-12b89885#346, branch `claude/sweet-tesla-pdemno` | Draft. **New since 14:05, and now a prerequisite for #379** (§3, F15). Tests 448 files / 9,061 passed locally; MC CI running. Needs a Lovable publish after merge. |
+| † Prime: the `pdf-extraction-v3-gates` fix (the handoff's step 3) | npc-property-dashbord#3343, branch `claude/sweet-tesla-pdemno`, head **`9563070a`** (4 commits) | **`static-and-fast` passed on `60495442`** — run 39275041962, job 118137024278, 15:06–15:08 UTC, the first green run of that check since it was created. On the runner Playwright installed Chromium v1248 `--with-deps`, the detector found it, the pure suites ran 50 tests and the e2e passed 2, giving `releaseReady: true` with 7 required checks: 0 failed, 0 skipped, 0 unavailable. **Then Codex's review (15:26) found the first cut too narrow (P1) and too lenient on expired signatures (P2), and applying its rule found F19.** Both accepted: `e86bec0a` removes `report.pdf` and `final.png`, and `9563070a` bans media anywhere but named asset directories and makes every complete signature a finding. Both threads were answered and resolved. Locally on `9563070a`: release-gate specs 53 passed, CI's Template Builder step 345 files and 4,394 tests passed, the static and fast gates PASS, and the tracked scan reads 0. CI on `9563070a` was queued at 16:05 behind a runner backlog (see the MC #346 row). |
+| † MC: a refresh over hand commits proceeds where both sides agree or merge cleanly | aurixa-mission-control-12b89885#346, branch `claude/sweet-tesla-pdemno` | Draft. **New since 14:05, and now a prerequisite for #379** (§3, F15). Tests 448 files / 9,061 passed locally. MC CI run 39278874959 on `971e773e`: every step passed by 15:36:55 (typecheck, lint, test, build). At 16:05 GitHub still showed the job as in progress — the same lag Prime's runs showed then. Needs a Lovable publish after merge. |
 | MC: forwarded configuration follows MC's value | aurixa-mission-control-12b89885#345 | Unchanged; held on purpose until #3341 is on all four clones (F4). |
-| Clone `npc-client-dashboard` cascade | npc-client-dashboard#379, head `06d2d096` | Unchanged and still held on `static-and-fast` (run 62, 13:03 UTC). The 15:00 pass deferred its refresh (F15); the 15:03 pass found the statement for prime `66290065` equal to its head ("carries this exact tree"). |
+| † Clone `npc-client-dashboard` cascade | npc-client-dashboard#379, head `06d2d096` | Unchanged and still held on `static-and-fast` (run 62, 13:03 UTC). The 15:00 pass deferred its refresh (F15); the 15:03 pass found the statement for prime `66290065` equal to its head ("carries this exact tree"). Every pass since has deferred the same way, the latest at 15:59:00 (events `0aa71083`, `58333aed`, `d9fd07ee`, `0b329741`). Its tree holds both F19 files. |
 | Clone `npc-crm-independent`: pins | npc-crm-independent-6505dc#123, head `86a9fa5b` | Unchanged. Every check green except `static-and-fast` (the V2 scanner, not required). It is not a cascade PR, so MC's drain does not hold it; it merges when a person merges it. |
-| Clone `npc-crm-independent`: cascade | npc-crm-independent-6505dc#121, head `25acc6eb` | Unchanged since 17 Oct. Its last run failed `verify` and `security` on F10's held files, and never ran `static-and-fast`. The engine is still working it: four `pushing` rows (events `0aa71083`, `58333aed`, `d9fd07ee`, `0b329741`) restarted 15:15–15:19, with no `pr_url` yet. |
-| `clones` | MC database | CD `cascading` (596 behind); CRM `cascading` (928); NPC Test `cascading` (635); Preflight `behind` (635). The two children wait on lineage for #379. |
+| † Clone `npc-crm-independent`: cascade | npc-crm-independent-6505dc#121, head `25acc6eb` | Unchanged since 17 Oct. Its last run failed `verify` and `security` on F10's held files, and never ran `static-and-fast`. The engine is still working it: four `pushing` rows (events `0aa71083`, `58333aed`, `d9fd07ee`, `0b329741`), each at `attempts` 3, last touched 15:50–15:59, with no `pr_url` yet. Its tree holds both F19 files, and the cascade cannot remove them there (Step E). |
+| † `clones` | MC database | Unchanged: CD `cascading` (596 behind); CRM `cascading` (928); NPC Test `cascading` (635); Preflight `behind` (635). The two children wait on lineage for #379 ("Parent NPC Client Dashboard carries prime@881e7e0; this pass delivers prime@6629006"). |
 | `clone_backend_secrets.AIRTABLE_TABLE_NAME` | all four clones | `inherited`, last set in September; `AIRTABLE_TOKEN` and `AIRTABLE_BASE_ID` `withheld`. Unchanged until #345 is published. |
 
 ---
@@ -63,16 +70,21 @@ carries this clone's own commits; its refresh was deferred`.
 
 ```sh
 gh api -X PUT repos/Naidu-Group-Pty-Ltd/npc-property-dashbord/pulls/3343/merge \
-  -f merge_method=merge -f sha=60495442052bb57f7e38def6ce7d1ce426402b2f   # or the head its full gate passed on
+  -f merge_method=merge -f sha=9563070ae38f3d809b4b6530b3a06141f93de109   # or the head its full gate passed on
 gh api -X PUT repos/Naidu-Group-Pty-Ltd/npc-property-dashbord/pulls/3341/merge \
   -f merge_method=merge -f sha=efeead420b6046ae8585d4a5822253473d78dcb9
 ```
 
-Use merge commits, never squash (Prime's steward convention). With #346 live the order does not
-matter. If #346 is published first, the refresh after #3341 moves #379 onto
-prime's pins with no merge at all. The refresh after #3343 asks for exactly
-one three-way merge (`pdf-extraction-v3-gates.yml`), which is clean on the real
-files. If #3343 lands first the same holds.
+Use merge commits, never squash (Prime's steward convention). Merge #3343
+whole: its commit `e86bec0a` (the F19 removal) is a separate commit so the
+history reads plainly, but `9563070a`'s scanner fails without it.
+
+With #346 live the order does not matter. If #346 is published first, the
+refresh after #3341 moves #379 onto prime's pins with no merge at all. The
+refresh after #3343 asks for exactly one three-way merge
+(`pdf-extraction-v3-gates.yml`), which is clean on the real files; the review
+commits added no path the hand commits touched. If #3343 lands first the same
+holds.
 
 If either lands BEFORE #346 is published, its refresh of #379 defers again
 (F15). The engine retries only on a later pass, so once #346 is live, press
@@ -90,9 +102,17 @@ the new spec), its first chance to pass there.
 
 Nothing to do by hand once B and C are done. The engine refreshes #379 with a
 preserving merge, `static-and-fast` runs on the refreshed head with the V3
-scanner (measured clean on that tree, §3 F16), and the drain lands it
-(`merge_method: "merge"`). Preflight Property Group and NPC Test follow by
-lineage. Watch:
+scanner, and the drain lands it (`merge_method: "merge"`). The same refresh
+should delete `report.pdf` and `final.png` from the clone.
+`deletionPropagation.pure.ts` delivers a deletion where the clone's copy is
+byte-identical to a version Prime held at that path, and the clone's blobs
+(`2672038f…`, `f67340e2…`) are Prime's. Neither file is imported and two is far
+under the 25-deletion cap. Measured under the final rule, #379's head reads
+exactly those two findings and nothing else (§3 F16), so the refreshed head
+scans clean. Confirm the deletion in the refresh's diff: if the probe comes
+back `unsettled`, the file is kept and `static-and-fast` holds the PR on it.
+Preflight Property Group and NPC Test follow by lineage; confirm the deletion
+on their pull requests too. Watch:
 
 ```sql
 select c.name, r.status, r.pr_url, r.updated_at, left(r.diff_summary, 200)
@@ -102,10 +122,29 @@ order by r.updated_at desc nulls last limit 20;
 
 ### Step E — the CRM-independent line
 
-Unchanged from the handoff's step 5. Merge #123 (`--match-head-commit
+As the handoff's step 5, with two additions. Merge #123 (`--match-head-commit
 86a9fa5b86bca6995e6ed6bc7d9bb3b4bebc6db6`). Then wait until the engine has
 finished re-pushing #121 (the four `pushing` rows above complete). Only then
 make F10's held-file reconcile on its branch, naming `prime@<sha>` exactly once.
+
+1. **Delete `report.pdf` and `final.png` in the same reconcile.** The line is
+   `sync_scope: modules`. It receives the files of its 135 installed modules
+   plus the repository invariants, and a root file is neither, so no cascade
+   will ever delete them there. The scanner still arrives, because `scripts/**`
+   is an invariant. Once it does, `static-and-fast` on #121 reads exactly those
+   two findings — measured on `25acc6eb` under the final rule, and nothing
+   else — and MC's drain holds the PR on them until a person deletes the
+   files. That is the correct verdict. A deletion is the clone's own change,
+   not a held file, so it needs no `prime@` token.
+2. **Watch the fast tier there.** `pdf-extraction-v3-gates.yml` is a judging
+   workflow, so on a module-scoped clone it is held, and the line keeps its
+   own copy. That copy runs `npx playwright install chromium` without
+   `--with-deps`. Prime's `resolveChromium` (in `scripts/**`) will find that
+   browser, and the e2e's import fix arrives with `platform-core`, which names
+   `qrCodeEncoder.ts`. If the browser then fails to launch for want of system
+   libraries, port `--with-deps` into the line's copy by hand: the cascade
+   will never carry it. This is unmeasured; on Prime the flag went in before
+   any run could show whether it was needed.
 
 ### Step F — MC #345, only after #3341 is on all four clones
 
@@ -123,7 +162,7 @@ As the handoff's steps 7–8.
 
 ---
 
-## 3. Findings since 14:05 (F15–F18)
+## 3. Findings since 14:05 (F15–F19)
 
 ### F15. The refresh deadlocked on the hand commits' own bytes
 
@@ -159,22 +198,29 @@ Prime's new scanner byte for byte (never naming a `prime@` token on files that
 are not held). That is a write to a clone's cascade branch, and it is the
 owner's call. #346 removes the class rather than the instance.
 
-### F16. The V3 scanner is clean on every tree the cascade will run it on
+### F16. The V3 scanner on every tree the cascade will run it on
 
 On a cascade PR `static-and-fast` scans the CLONE's tree, so Prime's tree
-being clean was not enough to promise the hold lifts. The V3 rules, run
-locally on every tree that matters, gave 0 findings and 0 notes on each:
+being clean was not enough to promise the hold lifts. Every tree that matters
+was measured locally, twice: with the first cut of the rules (`60495442`) and
+with the final rule after the review (`9563070a`, F19).
 
-| Tree | Files |
-|---|---|
-| Prime `main` + #3343 | 11,713 |
-| npc-client-dashboard #379 head `06d2d096` | 11,820 |
-| npc-crm-independent `main` `6322c63` | 10,839 |
-| npc-crm-independent #121 head `25acc6eb` | 11,275 |
-| NPC Test `main` `099f60d` | 11,331 |
-| Preflight `main` `83fcf05` | 11,289 |
+| Tree | Files | First cut | Final rule |
+|---|---|---|---|
+| Prime `main` `66290065` | 11,712 | 0 | 2 |
+| Prime #3343 head `9563070a` | 11,712 | — | **0** |
+| npc-client-dashboard #379 head `06d2d096` | 11,820 | 0 | 2 |
+| npc-crm-independent `main` `6322c63` | 10,839 | 0 | 2 |
+| npc-crm-independent #121 head `25acc6eb` | 11,275 | 0 | 2 |
+| NPC Test `main` `099f60d` | 11,331 | 0 | 2 |
+| Preflight `main` `83fcf05` | 11,289 | 0 | 2 |
 
-gitleaks 8.28.0, run as Prime's CI runs it, finds nothing in the new spec.
+The two findings are the same two files on every tree: `report.pdf` and
+`final.png`, with the same blobs. Nothing else on any tree is a finding. So the
+hold lifts wherever the cascade carries both #3343's rule and its deletion:
+the mirror line by the cascade's own deletion rule (Step D), and the CRM line
+only by hand (Step E). gitleaks 8.28.0, run as Prime's CI runs it, finds
+nothing in the diff.
 
 ### F17. Three corrections to the 14:05 document
 
@@ -194,8 +240,56 @@ gitleaks 8.28.0, run as Prime's CI runs it, finds nothing in the new spec.
 ### F18. The CRM line's red `static-and-fast` on #123 is the same V2 scanner
 
 It is not required on that repository and #123 is not a cascade PR, so it does
-not hold anything. It goes green when the V3 scanner reaches the line. #121
-never ran that check: its blockers are F10's.
+not hold anything. It goes green when the V3 scanner reaches the line and the
+two F19 files are removed there by hand (Step E). #121 never ran that check:
+its blockers are F10's.
+
+### F19. A client's confidential report has been in every repository since 6 Aug
+
+- **What.** `report.pdf` at the root of Prime is a nine-page Borrowing
+  Capacity Snapshot for a named client, marked "PRIVATE AND CONFIDENTIAL",
+  setting out that client's financial position. It was uploaded through
+  GitHub's web interface at 16:38 UTC on 6 Aug 2026 as `report (2).pdf`
+  (`1653a651`, "Add files via upload") and renamed a minute later
+  (`f606c480`). `final.png` beside it arrived in a Lovable commit on 1 Aug
+  (`71f9f164`). It is a 320×260 render of integration logos: no personal
+  data, but not a product asset either. Nothing references either file.
+- **Where.** The same two blobs (`2672038f…`, `f67340e2…`) sit on the default
+  branch of all five repositories — Prime, npc-client-dashboard,
+  npc-crm-independent, NPC Test and Preflight Property Group — and on both open
+  cascade heads (#379, #121). Each clone is a separate deployment. Whether any
+  clone repository has members outside NPC is something the owner knows and
+  this session does not.
+- **How it was missed.** V2 reported both, among 1,949 findings that nobody
+  could act on. The first cut of V3 banned media only inside the PDF
+  programme's own directories, so it lost them outright, and every tree read
+  0. Codex's review of #3343 (P1) objected that the narrowing assumed where a
+  private file could land. Applying the reviewer's repository-wide rule found
+  these two.
+- **What is done.** `e86bec0a` removes both from Prime's tip. The scanner now
+  fails on any media outside named asset directories. The mirror line loses
+  the files when the cascade carries #3343 (Step D). The CRM line needs a
+  hand deletion (Step E).
+- **What is not done, and is the owner's.**
+  - **History.** Every repository's history still holds the file, under both
+    names, and so does every fork, clone and pull-request ref that fetched
+    it. Removing it means rewriting each default branch's history from
+    `1653a651` onward. That is a force-push, which every open branch and
+    checkout then has to re-base onto, and MC's `last_synced_sha` for every
+    clone would name commits that no longer exist. It also means asking
+    GitHub Support to purge cached views and pull-request refs. This session
+    has done none of that.
+  - **Notice.** Whether the exposure is an eligible data breach under the
+    Privacy Act's Notifiable Data Breaches scheme (whether it is likely to
+    result in serious harm), and whether the client should be told, is for
+    the owner and their adviser. This document draws no conclusion.
+  - **Was it served?** Not measured: this session's network policy refuses the
+    deployments' hosts. A production build copies only `public/`, so a
+    published site should not serve a root file. A Vite development preview
+    can serve files from the project root. To check, run
+    `curl -sI https://<host>/report.pdf` against each published site and each
+    preview. A `text/html` answer is the single-page-app fallback. An
+    `application/pdf` answer means the file is being served.
 
 ---
 
@@ -209,8 +303,16 @@ never ran that check: its blockers are F10's.
   - `60495442` — the V3 scanner. `artifactScanRules.mjs` holds the rules, with
     a storage-signature parser that counts a URL only when it carries its
     scheme's complete parameter set. `artifact-scan.mjs` is the CLI.
-    `artifactScan.spec.ts` (19 tests) pins the rules and that the CLI is
-    wired to them. §13, §14, §17 and §19 of the gate's document are updated.
+    `artifactScan.spec.ts` pins the rules and that the CLI is wired to them.
+    §13, §14, §17 and §19 of the gate's document are updated.
+  - `e86bec0a` — removes `report.pdf` and `final.png` (F19).
+  - `9563070a` — the review: media, fonts and models are banned anywhere but
+    the directories `PRODUCT_ASSET_PATHS` names, each with its reason, and
+    every complete signature is a finding whatever its expiry. The notes
+    channel is gone. The spec has 22 tests, and §13 and §17 record the
+    change and how the first cut lost the two files.
+  - Both Codex threads were answered, naming the commit, and resolved. The PR
+    description was rewritten to match the branch.
 
   It builds on the parked `claude/serene-gates-b7f5pi-pdf-v3-gate`
   (`0982436b`, `fc5af9ed`).
@@ -226,7 +328,11 @@ never ran that check: its blockers are F10's.
 
 1. Approve, or make, the merges in §2: MC #346, Prime #3343 and #3341, CRM
    #123, and later MC #345. Then publish MC after #346 and again after #345.
-2. Everything in §6 of the 14:05 document still stands:
+2. F19's three decisions: whether to purge the confidential report from the
+   history of all five repositories; whether the exposure needs any notice
+   (the client, the regulator); and the one-line `curl -sI` check of whether
+   any deployment or preview ever served the file.
+3. Everything in §6 of the 14:05 document still stands:
    - the Actions allow-list for `google-github-actions/*` and `superfly/*`;
    - a workspace-scoped Anthropic key for MC's autofix;
    - the rotations;
@@ -247,3 +353,11 @@ never ran that check: its blockers are F10's.
   accepted on a change that touches no function.
 - **Read the column names before the query** (still true). Two of the 14:05
   document's queries named columns that do not exist.
+- **A gate made to pass by looking in fewer places protects less than it
+  claims.** A check that cannot pass on a clean tree protects nothing, but
+  the remedy is to judge better, not to look less. Narrowing the media rule
+  to the programme's directories turned a confidential client report from a
+  buried finding into no finding at all.
+- **A reviewer's objection about scope is a measurement waiting to be run.**
+  "This could let a private export through" was answered by running the
+  wider rule over six trees, and it found one.
