@@ -78,6 +78,7 @@ scans, post-merge scans and clone scans described in the passes above.
 | A fix an admin released merged without the repository's CI | It waits for the CI too, pinned to the head it ran on — GitHub would refuse it otherwise — and stays released while it waits. |
 | `apply-migrations.yml` pushed the refreshed digest manifest to `main` with its own write token | It asks Mission Control (`propose_digests`), which opens the manifest on Prime as a pull request from `mission-control/applied-digests`, armed to merge itself once CI passes. The job is read-only now. The repository's “Allow auto-merge” is switched on for this. |
 | The migration workflow recognised Lovable's migrations by the full address `159125892+gpt-engineer-app[bot]@…`, though the same account also commits as `lovable-dev[bot]` | It matches the account id alone, as its comment always said it did. A Lovable migration under the newer name would otherwise have run again. |
+| `npm audit` reported 9 highs: the nitro beta chain (nitro, env-runner, miniflare, sharp, undici, wrangler, `@cloudflare/vite-plugin`, Lovable's preset) and `node-forge`, which has no fix | **Zero.** nitro 3.0.260903-beta and `@cloudflare/vite-plugin` 1.64 carry fixed miniflare, sharp and undici; `node-forge` is gone — the App key's PKCS#1 → PKCS#8 wrap is plain code (`src/lib/rsa-key-pem.ts`), tested against Node's output and by signing an App JWT inside workerd. Details: `docs/AUDIT-2026-08.md`. |
 
 ## Why nothing was running
 

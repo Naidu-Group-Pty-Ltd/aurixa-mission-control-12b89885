@@ -81,27 +81,8 @@ export const checkGithubAppPreflight = createServerFn({ method: "POST" })
     let jwt: string;
     try {
       const { createAppAuth } = await import("@octokit/auth-app");
-      const forge = (await import("node-forge")).default;
-      const normalize = (pem: string) => {
-        let p = pem.replace(/\\n/g, "\n").trim();
-        if (!p.includes("\n")) {
-          const m = p.match(/-----BEGIN ([A-Z0-9 ]+?)-----([\s\S]+?)-----END \1-----/);
-          if (m) {
-            const label = m[1].trim();
-            const body = m[2].replace(/\s+/g, "");
-            const wrapped = body.match(/.{1,64}/g)?.join("\n") ?? body;
-            p = `-----BEGIN ${label}-----\n${wrapped}\n-----END ${label}-----`;
-          }
-        }
-        if (p.includes("-----BEGIN PRIVATE KEY-----")) return p;
-        if (p.includes("-----BEGIN RSA PRIVATE KEY-----")) {
-          const key = forge.pki.privateKeyFromPem(p);
-          const asn1 = forge.pki.privateKeyToAsn1(key);
-          const wrapped = forge.pki.wrapRsaPrivateKey(asn1);
-          return forge.pki.privateKeyInfoToPem(wrapped).trim();
-        }
-        return p;
-      };
+      const { ensurePkcs8Pem } = await import("@/lib/rsa-key-pem");
+      const normalize = (pem: string) => ensurePkcs8Pem(pem).trim();
 
       const auth = createAppAuth({ appId: appId!, privateKey: normalize(privateKeyRaw!) });
       const appAuth = await auth({ type: "app" });
