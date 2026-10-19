@@ -300,7 +300,8 @@ jobs:
       #
       # It no longer commits anything itself. It pushed to `main` with this
       # job's token until `main` was protected; now Mission Control renders the
-      # same file from the same queue and opens it on Prime as a pull request
+      # same file from the same queue and opens it on this repository (never
+      # on Prime's, which `prime_config` names) as a pull request
       # through its own App, armed to merge itself once CI passes
       # (src/server/applied-digests-proposal.server.ts). This job stays
       # read-only.

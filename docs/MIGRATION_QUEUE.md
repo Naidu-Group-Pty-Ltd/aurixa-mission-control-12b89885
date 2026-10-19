@@ -433,7 +433,8 @@ list. So the last step posts `{"action": "propose_digests"}` to
 `/hooks/migration-enqueue` (`.github/scripts/propose-applied-digests.mjs`), and
 Mission Control renders the same file from the same queue
 (`appliedDigestManifest.pure.ts`, the renderer `npm run migrations:digests` uses
-too) and opens it on Prime as a pull request through its own App, from the
+too) and opens it on Mission Control's own repository — never Prime's — as a
+pull request through its own App, from the
 branch `mission-control/applied-digests`, armed with auto-merge
 (`applied-digests-proposal.server.ts`). GitHub merges it when CI passes. The job
 is `contents: read` throughout — the job that holds `CRON_SECRET` no longer

@@ -152,21 +152,22 @@ export const rotateScanSigningKey = createServerFn({ method: "POST" })
   });
 
 /**
- * Apply the ruleset that protects Prime's default branch now, rather than at
- * tonight's run. Admin only, and recorded: it changes the repository's
- * settings through Mission Control's App.
+ * Apply the ruleset that protects Mission Control's own default branch now,
+ * rather than at tonight's run. Admin only, and recorded: it changes the
+ * repository's settings through Mission Control's App.
  */
-export const protectPrimeMainNow = createServerFn({ method: "POST" })
+export const protectMissionControlMainNow = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .handler(async ({ context }) => {
     const { supabase, userId } = context;
     const { data: isAdmin } = await supabase.rpc("is_admin", { _user_id: userId });
     if (!isAdmin) throw new Error("Forbidden: admin only");
-    const { ensurePrimeBranchProtection } = await import("@/server/prime-branch-protection.server");
-    const result = await ensurePrimeBranchProtection({ apply: true });
+    const { ensureMissionControlBranchProtection } =
+      await import("@/server/mission-control-branch-protection.server");
+    const result = await ensureMissionControlBranchProtection({ apply: true });
     const { writeAuditLog } = await import("@/server/audit.server");
     await writeAuditLog({
-      action: `prime.branch_protection.${result.status}`,
+      action: `mission_control.branch_protection.${result.status}`,
       entityType: "github_ruleset",
       entityId: result.repo ?? null,
       actorUserId: userId,

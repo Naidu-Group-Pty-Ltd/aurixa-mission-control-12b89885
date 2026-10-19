@@ -1,7 +1,8 @@
-// Keeping Prime's default branch protected through Mission Control's App, run
-// against a fake GitHub: what it asks for, what it writes, and every way it
-// refuses — no Lovable App, a renamed CI job, no permission.
-import { beforeEach, describe, expect, it, vi } from "vitest";
+// Keeping Mission Control's own default branch protected through its App, run
+// against a fake GitHub: which repository it acts on (never Prime's), what it
+// asks for, what it writes, and every way it refuses — no Lovable App, a
+// renamed CI job, no permission.
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 type Call = { route: string; params: Record<string, unknown> };
 
@@ -88,12 +89,17 @@ vi.mock("@/server/github-app.server", () => {
   };
 });
 
-import { ensurePrimeBranchProtection } from "./prime-branch-protection.server";
-import { PRIME_RULESET_NAME, desiredPrimeRuleset } from "./primeBranchProtection.pure";
+import { ensureMissionControlBranchProtection } from "./mission-control-branch-protection.server";
+import { RULESET_NAME, desiredRuleset } from "./missionControlBranchProtection.pure";
 
 const writes = () => h.calls.filter((c) => /^(POST|PUT|PATCH) /.test(c.route)).map((c) => c.route);
 
+afterAll(() => {
+  delete process.env.MISSION_CONTROL_GITHUB_REPO;
+});
+
 beforeEach(() => {
+  process.env.MISSION_CONTROL_GITHUB_REPO = "acme/control";
   h.calls = [];
   h.rulesets = [];
   h.ci =
@@ -104,9 +110,9 @@ beforeEach(() => {
   h.permissions = null;
 });
 
-describe("ensurePrimeBranchProtection", () => {
+describe("ensureMissionControlBranchProtection", () => {
   it("creates the ruleset with Lovable's App, found from its bot account", async () => {
-    const r = await ensurePrimeBranchProtection({ apply: true });
+    const r = await ensureMissionControlBranchProtection({ apply: true });
     expect(r).toMatchObject({ ok: true, status: "created", rulesetId: 55 });
     expect(r.lovableApp).toEqual({ id: 777, slug: "lovable-dev" });
     // The account id, then the App named by that account's login.
@@ -116,8 +122,8 @@ describe("ensurePrimeBranchProtection", () => {
     const create = h.calls.find((c) => c.route === "POST /repos/{owner}/{repo}/rulesets");
     expect(create?.params).toMatchObject({
       owner: "acme",
-      repo: "prime",
-      name: PRIME_RULESET_NAME,
+      repo: "control",
+      name: RULESET_NAME,
     });
     expect(create?.params.bypass_actors).toContainEqual({
       actor_id: 777,
@@ -131,26 +137,39 @@ describe("ensurePrimeBranchProtection", () => {
     expect(r.autoMerge).toBe("turned_on");
   });
 
+  it("acts on Mission Control's repository, never on Prime's", async () => {
+    await ensureMissionControlBranchProtection({ apply: true });
+    const touched = h.calls.filter((c) => typeof c.params.repo === "string");
+    expect(touched.length).toBeGreaterThan(0);
+    for (const c of touched) expect(`${c.params.owner}/${c.params.repo}`).toBe("acme/control");
+  });
+
+  it("refuses outright when the repository it is told to protect is Prime's", async () => {
+    process.env.MISSION_CONTROL_GITHUB_REPO = "acme/prime";
+    const r = await ensureMissionControlBranchProtection({ apply: true });
+    expect(r).toMatchObject({ ok: false, status: "blocked", repo: "acme/prime" });
+    expect(r.detail).toMatch(/never put on Prime/);
+    expect(h.calls).toEqual([]);
+  });
+
   it("only reports what it would do when asked to look", async () => {
-    const r = await ensurePrimeBranchProtection({ apply: false });
+    const r = await ensureMissionControlBranchProtection({ apply: false });
     expect(r).toMatchObject({ ok: false, status: "would_create" });
     expect(r.detail).toMatch(/no protection/);
     expect(writes()).toEqual([]);
   });
 
   it("is quiet when the ruleset says everything", async () => {
-    h.rulesets = [
-      { ...desiredPrimeRuleset({ lovableAppId: 777, ownerIsOrganization: true }), id: 9 },
-    ];
+    h.rulesets = [{ ...desiredRuleset({ lovableAppId: 777, ownerIsOrganization: true }), id: 9 }];
     h.autoMerge = true;
-    const r = await ensurePrimeBranchProtection({ apply: true });
+    const r = await ensureMissionControlBranchProtection({ apply: true });
     expect(r).toMatchObject({ ok: true, status: "protected", rulesetId: 9 });
     expect(writes()).toEqual([]);
   });
 
   it("refuses to protect main without Lovable on the list", async () => {
     h.botLogin = null;
-    const r = await ensurePrimeBranchProtection({ apply: true });
+    const r = await ensureMissionControlBranchProtection({ apply: true });
     expect(r).toMatchObject({ ok: false, status: "blocked" });
     expect(r.detail).toMatch(/stop Lovable publishing/);
     expect(writes()).toEqual([]);
@@ -158,14 +177,14 @@ describe("ensurePrimeBranchProtection", () => {
 
   it("refuses a bot account that is not an App's", async () => {
     h.botLogin = "somebody";
-    const r = await ensurePrimeBranchProtection({ apply: true });
+    const r = await ensureMissionControlBranchProtection({ apply: true });
     expect(r.status).toBe("blocked");
     expect(h.calls.some((c) => c.route === "GET /apps/{app_slug}")).toBe(false);
   });
 
   it("refuses to require a check ci.yml no longer has", async () => {
     h.ci = "jobs:\n  verify:\n    name: Typecheck · Lint · Build\n";
-    const r = await ensurePrimeBranchProtection({ apply: true });
+    const r = await ensureMissionControlBranchProtection({ apply: true });
     expect(r).toMatchObject({ ok: false, status: "blocked" });
     expect(r.detail).toMatch(/no job named “Lovable install \(bun\.lockb\)”/);
     expect(writes()).toEqual([]);
@@ -173,7 +192,7 @@ describe("ensurePrimeBranchProtection", () => {
 
   it("says which permission it lacks when GitHub refuses the write", async () => {
     h.writeStatus = 403;
-    const r = await ensurePrimeBranchProtection({ apply: true });
+    const r = await ensureMissionControlBranchProtection({ apply: true });
     expect(r).toMatchObject({ ok: false, status: "needs_permission" });
     expect(r.fix).toMatch(/Administration: Read and write/);
   });
@@ -181,7 +200,7 @@ describe("ensurePrimeBranchProtection", () => {
   it("names the missing permission before trying, read from the token it holds", async () => {
     h.permissions = { contents: "write", pull_requests: "write", administration: "read" };
     for (const apply of [false, true]) {
-      const r = await ensurePrimeBranchProtection({ apply });
+      const r = await ensureMissionControlBranchProtection({ apply });
       expect(r).toMatchObject({ ok: false, status: "needs_permission" });
       expect(r.detail).toMatch(/Administration: read/);
       expect(r.fix).toMatch(/Administration: Read and write/);
@@ -191,29 +210,29 @@ describe("ensurePrimeBranchProtection", () => {
 
   it("goes ahead when the token may administer the repository", async () => {
     h.permissions = { administration: "write" };
-    const r = await ensurePrimeBranchProtection({ apply: true });
+    const r = await ensureMissionControlBranchProtection({ apply: true });
     expect(r).toMatchObject({ ok: true, status: "created" });
   });
 
   it("leaves a ruleset a person switched off", async () => {
     h.rulesets = [
       {
-        ...desiredPrimeRuleset({ lovableAppId: 777, ownerIsOrganization: true }),
+        ...desiredRuleset({ lovableAppId: 777, ownerIsOrganization: true }),
         id: 9,
         enforcement: "disabled",
       },
     ];
-    const r = await ensurePrimeBranchProtection({ apply: true });
+    const r = await ensureMissionControlBranchProtection({ apply: true });
     expect(r).toMatchObject({ ok: false, status: "switched_off" });
     expect(writes()).toEqual([]);
   });
 
   it("puts back what drifted, through an update of the same ruleset", async () => {
-    const held = desiredPrimeRuleset({ lovableAppId: 777, ownerIsOrganization: true });
+    const held = desiredRuleset({ lovableAppId: 777, ownerIsOrganization: true });
     held.rules = held.rules?.filter((r) => r.type !== "pull_request");
     h.rulesets = [{ ...held, id: 9 }];
     h.autoMerge = true;
-    const r = await ensurePrimeBranchProtection({ apply: true });
+    const r = await ensureMissionControlBranchProtection({ apply: true });
     expect(r).toMatchObject({ ok: true, status: "updated", rulesetId: 9 });
     expect(r.shortfall).toEqual(["it lacks the pull request rule"]);
     const put = h.calls.find((c) => c.route === "PUT /repos/{owner}/{repo}/rulesets/{ruleset_id}");

@@ -35,7 +35,8 @@ import type { MigrationSubmission } from "@/server/migrationQueue.pure";
 // Six actions on one route rather than six routes, so the "what is
 // scheduled" story stays one line: enqueue submits, status polls a caller's own
 // versions, queue reports the whole queue, digests reports what ran,
-// propose_digests puts that on Prime as a pull request, resolve ends a halt.
+// propose_digests puts that on Mission Control's own repository as a pull
+// request, resolve ends a halt.
 // None is on a timer, because there is nothing to do until a merge happens.
 //
 // `queue` and `resolve` are the two halves of the September incident. A halted
@@ -53,7 +54,9 @@ import type { MigrationSubmission } from "@/server/migrationQueue.pure";
 // `propose_digests` is what the apply workflow calls once its migrations have
 // settled. It used to commit the manifest and push it to `main` itself; `main`
 // is protected now and no workflow token may push there, so Mission Control
-// proposes it through its App (`applied-digests-proposal.server.ts`). A
+// proposes it through its App (`applied-digests-proposal.server.ts`), on its
+// own repository and never on Prime's; the caller names the repository it
+// runs in, and a refresh asked for from any other is refused. A
 // failure is a 200 with `state: "failed"`, never a 5xx: the migrations have
 // applied by then, and bookkeeping that could turn that run red would be worse
 // than a stale file.
@@ -61,7 +64,7 @@ type EnqueueBody = { action?: "enqueue"; migrations?: MigrationSubmission[]; enq
 type StatusBody = { action: "status"; versions?: string[] };
 type DigestsBody = { action: "digests" };
 type QueueBody = { action: "queue" };
-type ProposeDigestsBody = { action: "propose_digests" };
+type ProposeDigestsBody = { action: "propose_digests"; repository?: string };
 type ResolveBody = { action: "resolve"; version?: string; resolution?: string; reason?: string };
 
 type Body = EnqueueBody | StatusBody | DigestsBody | QueueBody | ResolveBody | ProposeDigestsBody;
@@ -142,7 +145,9 @@ export const Route = createFileRoute("/hooks/migration-enqueue")({
             }
             const { proposeAppliedDigests } =
               await import("@/server/applied-digests-proposal.server");
-            const proposal = await proposeAppliedDigests(supabaseAdmin).catch((e: unknown) => ({
+            const proposal = await proposeAppliedDigests(supabaseAdmin, {
+              requestedBy: typeof body.repository === "string" ? body.repository : null,
+            }).catch((e: unknown) => ({
               state: "failed" as const,
               detail: e instanceof Error ? e.message : String(e),
             }));

@@ -1,8 +1,13 @@
 /**
- * Keep Prime's default branch protected, through Mission Control's own App.
+ * Keep Mission Control's own default branch protected, through its App.
  *
- * `primeBranchProtection.pure.ts` says what the protection is and decides
- * what to change; this reads GitHub, hands it over, and writes the answer.
+ * Mission Control's repository (`missionControlRepo.pure.ts`) — never Prime's,
+ * which `prime_config` names: the required checks are this repository's
+ * `ci.yml` jobs. It refuses outright if the two ever resolve to one repository.
+ *
+ * `missionControlBranchProtection.pure.ts` says what the protection is and
+ * decides what to change; this reads GitHub, hands it over, and writes the
+ * answer.
  *
  * ## When it runs
  *
@@ -32,14 +37,15 @@ import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { getAppOctokit } from "@/server/github-app.server";
 import {
   LOVABLE_BOT_USER_ID,
-  PRIME_REQUIRED_CHECKS,
-  PRIME_RULESET_NAME,
+  REQUIRED_CHECKS,
+  RULESET_NAME,
   appSlugFromBotLogin,
   decideProtection,
-  desiredPrimeRuleset,
+  desiredRuleset,
   missingRequiredChecks,
   type Ruleset,
-} from "@/server/primeBranchProtection.pure";
+} from "@/server/missionControlBranchProtection.pure";
+import { isPrimeRepo, missionControlRepo } from "@/server/missionControlRepo.pure";
 
 export type ProtectionReport = {
   /** Whether `main` is protected as it should be once this returns. */
@@ -135,7 +141,7 @@ async function readOurRuleset(
     per_page: 100,
   });
   const summary = (list as Array<{ id: number; name: string; source_type?: string }>).find(
-    (r) => r.name === PRIME_RULESET_NAME && (r.source_type ?? "Repository") === "Repository",
+    (r) => r.name === RULESET_NAME && (r.source_type ?? "Repository") === "Repository",
   );
   if (!summary) return null;
   const { data } = await octokit.request("GET /repos/{owner}/{repo}/rulesets/{ruleset_id}", {
@@ -155,36 +161,41 @@ const writable = (r: Ruleset) => ({
   bypass_actors: r.bypass_actors ?? [],
 });
 
-export async function ensurePrimeBranchProtection(opts: {
+export async function ensureMissionControlBranchProtection(opts: {
   apply: boolean;
 }): Promise<ProtectionReport> {
+  const target = missionControlRepo();
   const { data: prime } = await supabaseAdmin
     .from("prime_config")
-    .select("github_owner, github_repo, default_branch, github_app_installation_id")
+    .select("github_owner, github_repo")
     .limit(1)
     .maybeSingle();
-  if (!prime?.github_owner || !prime?.github_repo) {
+  if (isPrimeRepo(target, prime)) {
     return {
       ok: false,
       status: "blocked",
-      detail: "prime_config has no GitHub repository, so there is no branch to protect",
-      fix: "Set github_owner / github_repo in prime_config.",
+      repo: target.fullName,
+      detail:
+        `${target.fullName} is Prime's repository as well as the one named for Mission Control. ` +
+        `This ruleset requires Mission Control's own CI and is never put on Prime.`,
+      fix: "Set MISSION_CONTROL_GITHUB_REPO to Mission Control's repository (owner/repo).",
     };
   }
-  const owner = prime.github_owner;
-  const repo = prime.github_repo;
+  const { owner, repo } = target;
   const where = { owner, repo };
-  const repoName = `${owner}/${repo}`;
-  const octokit = getAppOctokit(prime.github_app_installation_id ?? undefined);
+  const repoName = target.fullName;
+  // The App's default installation, which is the organisation's: Mission
+  // Control's repository has no row of its own to name another.
+  const octokit = getAppOctokit();
 
   try {
     const { data: repoData } = await octokit.repos.get(where);
-    const branch = prime.default_branch || repoData.default_branch || "main";
+    const branch = repoData.default_branch || "main";
     const rulesetsUrl = `https://github.com/${repoName}/settings/rules`;
     const autoMergeSetting = (repoData as { allow_auto_merge?: boolean }).allow_auto_merge;
 
     const ci = await readCiWorkflow(octokit, { ...where, ref: branch });
-    const missing = ci === null ? [...PRIME_REQUIRED_CHECKS] : missingRequiredChecks(ci);
+    const missing = ci === null ? [...REQUIRED_CHECKS] : missingRequiredChecks(ci);
     if (missing.length > 0) {
       return {
         ok: false,
@@ -193,7 +204,7 @@ export async function ensurePrimeBranchProtection(opts: {
         detail:
           `.github/workflows/${ci === null ? "ci.yml is missing" : "ci.yml has no job named " + missing.map((m) => `“${m}”`).join(" or ")} ` +
           `on ${branch}. A required check nothing reports holds every pull request open, so ${branch} is not protected until it does.`,
-        fix: `Restore the job${missing.length === 1 ? "" : "s"} in ci.yml, or update PRIME_REQUIRED_CHECKS in src/server/primeBranchProtection.pure.ts to the new name.`,
+        fix: `Restore the job${missing.length === 1 ? "" : "s"} in ci.yml, or update REQUIRED_CHECKS in src/server/missionControlBranchProtection.pure.ts to the new name.`,
       };
     }
 
@@ -211,7 +222,7 @@ export async function ensurePrimeBranchProtection(opts: {
       };
     }
 
-    const desired = desiredPrimeRuleset({
+    const desired = desiredRuleset({
       lovableAppId: lovableApp.id,
       ownerIsOrganization: repoData.owner?.type === "Organization",
     });
@@ -256,7 +267,7 @@ export async function ensurePrimeBranchProtection(opts: {
           detail:
             (decision.kind === "create"
               ? `${branch} has no protection: any token that can write to the repository can push to it. `
-              : `“${PRIME_RULESET_NAME}” has drifted: ${decision.shortfall.join("; ")}. `) +
+              : `“${RULESET_NAME}” has drifted: ${decision.shortfall.join("; ")}. `) +
             `Mission Control's App holds Administration: ${administration}, and changing a ruleset needs write.`,
           fix: PERMISSION_FIX,
         };
@@ -270,8 +281,8 @@ export async function ensurePrimeBranchProtection(opts: {
           shortfall,
           detail:
             decision.kind === "create"
-              ? `${branch} has no protection: any token that can write to the repository can push to it. The nightly run creates “${PRIME_RULESET_NAME}”.`
-              : `“${PRIME_RULESET_NAME}” has drifted: ${decision.shortfall.join("; ")}. The nightly run puts it back.`,
+              ? `${branch} has no protection: any token that can write to the repository can push to it. The nightly run creates “${RULESET_NAME}”.`
+              : `“${RULESET_NAME}” has drifted: ${decision.shortfall.join("; ")}. The nightly run puts it back.`,
           autoMerge: autoMergeSetting === undefined ? "unknown" : autoMergeSetting ? "on" : "off",
         };
       }
@@ -341,8 +352,8 @@ export async function ensurePrimeBranchProtection(opts: {
       shortfall,
       autoMerge,
       detail:
-        `${verb}: “${PRIME_RULESET_NAME}” on ${branch} — pull requests only, ` +
-        `${PRIME_REQUIRED_CHECKS.map((c) => `“${c}”`).join(" and ")} required; ` +
+        `${verb}: “${RULESET_NAME}” on ${branch} — pull requests only, ` +
+        `${REQUIRED_CHECKS.map((c) => `“${c}”`).join(" and ")} required; ` +
         `Lovable (${lovableApp.slug}) and admins may push directly` +
         (autoMerge === "off"
           ? ". Auto-merge is off, so the digest refresh waits for a person"
