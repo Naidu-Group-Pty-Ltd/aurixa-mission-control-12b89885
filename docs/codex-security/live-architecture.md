@@ -68,7 +68,7 @@ scans, post-merge scans and clone scans described in the passes above.
 | Merged fixes were held from the cascade until a post-merge scan | They cascade like any commit and pass the security gate (`SELF_HEALING_MERGE_TITLE`). |
 | The scan and remediation master secrets were synced into repositories' Actions secrets | They never leave Mission Control; the Prime sync deletes the old copies. `ANTHROPIC_API_KEY` is synced alongside `OPENAI_API_KEY`. |
 
-## October 2026, fourth pass: `main` protected, dependencies cleared
+## October 2026, fourth pass: `main` protected, dependencies cleared, Node 24
 
 | Before | Now |
 |---|---|
@@ -78,6 +78,7 @@ scans, post-merge scans and clone scans described in the passes above.
 | A fix an admin released merged without the repository's CI | It waits for the CI too, pinned to the head it ran on — GitHub would refuse it otherwise — and stays released while it waits. |
 | `apply-migrations.yml` pushed the refreshed digest manifest to `main` with its own write token | It asks Mission Control (`propose_digests`), which opens the manifest on Prime as a pull request from `mission-control/applied-digests`, armed to merge itself once CI passes. The job is read-only now. The repository's “Allow auto-merge” is switched on for this. |
 | The migration workflow recognised Lovable's migrations by the full address `159125892+gpt-engineer-app[bot]@…`, though the same account also commits as `lovable-dev[bot]` | It matches the account id alone, as its comment always said it did. A Lovable migration under the newer name would otherwise have run again. |
+| Every run warned that its actions target Node 20: checkout v4.3.1 and setup-node v4.4.0 pinned in the codex workflows, unpinned `@v4` tags in `ci.yml`, `@v6`/`@v7` tags in the migration workflows, upload-artifact v4.6.2 in the scan | Every workflow pins the same Node 24 commits — checkout **v7.0.1**, setup-node **v7.1.0**, upload-artifact **v7.0.2** — each checked by its own `action.yml` (`runs.using: node24`) and held by `workflowActionPins.contract.test.ts`, which refuses a pin nobody recorded. Jobs that hold a secret switch setup-node's automatic dependency cache off; `ci.yml` runs with a read-only token and no credential in its checkout. |
 | `npm audit` reported 9 highs: the nitro beta chain (nitro, env-runner, miniflare, sharp, undici, wrangler, `@cloudflare/vite-plugin`, Lovable's preset) and `node-forge`, which has no fix | **Zero.** nitro 3.0.260903-beta and `@cloudflare/vite-plugin` 1.64 carry fixed miniflare, sharp and undici; `node-forge` is gone — the App key's PKCS#1 → PKCS#8 wrap is plain code (`src/lib/rsa-key-pem.ts`), tested against Node's output and by signing an App JWT inside workerd. Details: `docs/AUDIT-2026-08.md`. |
 
 ## Why nothing was running

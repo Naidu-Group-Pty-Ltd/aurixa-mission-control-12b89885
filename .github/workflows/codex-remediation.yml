@@ -371,7 +371,7 @@ jobs:
           fi
           [ "$code" = "0" ] || echo "::warning::workflow.started was not delivered"
 
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.base_ref }}
           fetch-depth: 1
@@ -380,9 +380,13 @@ jobs:
           # its own step, from its own repository.
           persist-credentials: false
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
+          # No dependency cache: one restored from another run is a way into a
+          # job that holds the fix engines' keys, and nothing here is slow
+          # enough to need it.
+          package-manager-cache: false
 
       # The base as checked out, kept before any agent runs: the checks run on
       # it plus the patch (exactly what is committed), the patch is staged in
