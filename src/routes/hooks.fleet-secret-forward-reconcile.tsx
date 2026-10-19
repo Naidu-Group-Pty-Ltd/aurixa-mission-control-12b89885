@@ -15,9 +15,13 @@ import { verifyCronAuth } from "@/server/cron-auth.server";
 // refused unless the backend is `ready` and costs vendor calls and minutes
 // against a live tenant — to deliver a handful of environment variables.
 //
-// It settles: the ledger is the filter, so once a clone holds fleet policy
-// every pass is two reads and no Management API calls. A `failed` row is
-// deliberately NOT filtered out — that is the state a retry is for.
+// It settles: the ledger is the filter for credentials, so once a clone holds
+// them a pass makes no Management API call for them. A setting that follows
+// Mission Control's value (`FLEET_CONFIGURATION`, the Airtable table names)
+// costs one digest read a clone and is written only where it differs, which
+// is how a table Mission Control moves to reaches every clone within a pass.
+// A `failed` row is deliberately NOT filtered out — that is the state a retry
+// is for.
 //
 // It can only ever write to a clone. The ref comes from
 // `resolveCloneSecretTarget`, which refuses the prime's project, refuses

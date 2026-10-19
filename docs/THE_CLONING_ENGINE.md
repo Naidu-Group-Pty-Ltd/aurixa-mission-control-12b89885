@@ -1311,6 +1311,26 @@ Configuration that merely accompanies a brokered credential still forwards.
 a credential and `listings-cache` needs it locally for its own cache key — a
 clone without it answers `no_table_configured` and syncs nothing.
 
+**And it follows Mission Control's value, where a credential is delivered
+once.** The ledger records THAT a name was delivered, not WHAT. On 15 Oct 2026
+the listings moved to the rebuilt Airtable base and Mission Control's
+`AIRTABLE_TABLE_NAME` moved with them, while all four clones' rows read
+`inherited` from September. So no sweep sent the new value: every clone asked
+the broker for the retired table, was refused `table_not_allowed` every fifteen
+minutes, and showed a marketplace frozen at 8 Sep. The fleet sweep now sends
+the names in `FLEET_CONFIGURATION` (the four Airtable configuration names) again
+wherever the clone's row is `inherited` and Mission Control holds a value. The
+write compares digests first, so a clone that holds the value is sent nothing,
+and a changed value lands within one pass. Two rules bite.
+
+- **Only the forward's own delivery is replaced.** A value `set` on a clone by
+  a person, or `minted` for it, is the clone's, and no sweep touches it.
+- **A credential is never in the set.** A key written onto every tenant at once
+  breaks every tenant at once when it is wrong. On 19 Oct Mission Control's
+  `ANTHROPIC_API_KEY` was organisation-scoped, which the Messages API refuses
+  without a workspace header, and following it would have put it on every
+  clone. Replacing a credential across the fleet stays a deliberate act.
+
 **The Listings broker is read-only by construction, and stays that way.** Adding
 a write operation would hand a tenant the ability to rewrite the table every
 other tenant reads, which is the leak the arrangement exists to close. The two

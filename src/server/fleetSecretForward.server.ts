@@ -188,6 +188,12 @@ export async function pushFleetSecretForwards(
     settled: new Set(
       (ledger.data ?? []).filter((r) => SETTLED.has(r.status ?? "")).map((r) => r.name),
     ),
+    // Delivered by the forward, so a setting among them follows Mission
+    // Control's value (`FLEET_CONFIGURATION`). Never `set` or `minted`: those
+    // are the clone's own, and no pass replaces them.
+    inherited: new Set(
+      (ledger.data ?? []).filter((r) => r.status === "inherited").map((r) => r.name),
+    ),
     // Not on THIS clone's project, whether because a person took it off or
     // because the clone federates and holds nothing. Not `settled` — the
     // project does not hold the value and the ledger must not claim it does —
@@ -340,9 +346,11 @@ export type FleetReconcileResult = {
 /**
  * Bring every clone up to current fleet policy.
  *
- * The ledger is the filter, so a settled fleet costs two reads a pass and no
- * Management API calls. A `failed` row is deliberately not filtered out — that
- * is the state a retry is for.
+ * The ledger is the filter for credentials, so a settled credential costs no
+ * Management API call. A setting that follows Mission Control's value
+ * (`FLEET_CONFIGURATION`) costs one digest read a clone, and a write only where
+ * the value differs. A `failed` row is deliberately not filtered out — that is
+ * the state a retry is for.
  *
  * Every clone with a provisioned backend is considered, whatever its status.
  * A backend mid-migration still has a project and can still take an

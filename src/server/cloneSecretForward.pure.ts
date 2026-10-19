@@ -255,12 +255,56 @@ export function planCloneForwards(input: {
  * sweep: the ledger is the filter so it settles, an absent value is never
  * written, and the class refusals are the SAME function rather than a second
  * copy that agrees today.
+ *
+ * ## A setting follows Mission Control; a credential is delivered once
+ *
+ * The ledger as a filter had a second blind spot: it records THAT a name was
+ * delivered, not WHAT was delivered. On 15 Oct 2026 Mission Control's listings
+ * moved to the rebuilt Airtable base and its `AIRTABLE_TABLE_NAME` changed with
+ * them; all four clones' rows read `inherited` from September, so no pass ever
+ * sent the new value, and every clone asked the broker for the retired table
+ * and was refused (`table_not_allowed`) every fifteen minutes, its marketplace
+ * frozen at 8 Sep.
+ *
+ * So the names in `FLEET_CONFIGURATION` are sent again on every pass where the
+ * clone's row is `inherited` and Mission Control holds a value. The write
+ * compares digests first (`secretWriteDiff.pure.ts`), so a clone that already
+ * holds the value is sent nothing and keeps its set time, and a changed value
+ * arrives within one pass.
+ *
+ * Credentials are deliberately not in the set. A key written onto every tenant
+ * at once breaks every tenant at once when it is wrong: on 19 Oct 2026 the
+ * Anthropic key Mission Control held was organisation-scoped, which the
+ * Messages API refuses without a workspace header, and following it would have
+ * put that key on every clone whatever each held. Replacing a credential across
+ * the fleet stays a deliberate act.
  */
+
+/**
+ * Fleet names whose VALUE follows Mission Control's, not only their presence.
+ *
+ * Configuration only — what a clone reads to find Mission Control's data, never
+ * what authenticates it. `AIRTABLE_TOKEN` and `AIRTABLE_BASE_ID` are `brokered`
+ * and never reach a clone at all; these four are what a clone needs to ask the
+ * broker for the right table.
+ */
+export const FLEET_CONFIGURATION: ReadonlySet<string> = new Set([
+  "AIRTABLE_TABLE_NAME",
+  "AIRTABLE_TABLE_ALLOWLIST",
+  "AIRTABLE_TABLE_ALIASES",
+  "AIRTABLE_IMAGE_LIBRARY_FIELD",
+]);
 
 /** What a fleet pass does with one fleet-policy name on one clone. */
 export type FleetForwardOutcome =
   /** Marked inheritable, held here, not yet on this clone — will be written. */
   | { readonly act: "forward"; readonly name: string }
+  /**
+   * Delivered by the forward, and a setting whose value follows Mission
+   * Control's (`FLEET_CONFIGURATION`): sent again, and written only where the
+   * clone holds a different value.
+   */
+  | { readonly act: "refresh"; readonly name: string }
   /** Fleet policy declines this name. Never written. */
   | { readonly act: "not_inherited"; readonly name: string; readonly why: string }
   /** Refused on class, or on the clone's CRM line, ahead of every other question. */
@@ -294,6 +338,12 @@ export type FleetForwardFacts = {
    * the same rule the per-clone sweep follows.
    */
   readonly settledOnClone: boolean;
+  /**
+   * Whether the ledger records it as delivered BY THE FORWARD (`inherited`),
+   * rather than set on this clone by a person (`set`) or minted for it. Only a
+   * forwarded value is the forward's to replace.
+   */
+  readonly inheritedOnClone?: boolean;
   /**
    * Whether this clone's ledger records the name as deliberately withheld.
    *
@@ -351,6 +401,11 @@ export function decideFleetForward(facts: FleetForwardFacts): FleetForwardOutcom
   }
 
   if (facts.settledOnClone) {
+    // Still the ledger before the environment: with no value here, a setting
+    // the clone holds stays `already_set` rather than reading as missing.
+    if (facts.inheritedOnClone && facts.presentInEnv && FLEET_CONFIGURATION.has(facts.name)) {
+      return { act: "refresh", name: facts.name };
+    }
     return {
       act: "already_set",
       name: facts.name,
@@ -381,12 +436,15 @@ export function planFleetForwards(input: {
   readonly envHas: (name: string) => boolean;
   /** The names this clone's ledger records as delivered. */
   readonly settled: ReadonlySet<string>;
+  /** Of those, the ones the forward itself delivered (`inherited`). */
+  readonly inherited?: ReadonlySet<string>;
   /** The names this clone's ledger records as deliberately withheld. */
   readonly withheld?: ReadonlySet<string>;
   /** The clone's recorded CRM line — see `ForwardFacts.crmMode`. */
   readonly crmMode?: string | null;
 }): FleetForwardOutcome[] {
   const withheld = input.withheld ?? new Set<string>();
+  const inherited = input.inherited ?? new Set<string>();
   return [...input.fleet.keys()].sort().map((name) =>
     decideFleetForward({
       name,
@@ -394,15 +452,20 @@ export function planFleetForwards(input: {
       inherit: input.fleet.get(name) === true,
       presentInEnv: input.envHas(name),
       settledOnClone: input.settled.has(name),
+      inheritedOnClone: inherited.has(name),
       withheldOnClone: withheld.has(name),
       crmMode: input.crmMode,
     }),
   );
 }
 
-/** The names a fleet pass will actually write, in a stable order. */
+/**
+ * The names a fleet pass will send, in a stable order: the ones a clone is
+ * missing, and the settings it holds that follow Mission Control's value (the
+ * write leaves out any the clone already holds, value for value).
+ */
 export function fleetNamesToWrite(outcomes: readonly FleetForwardOutcome[]): string[] {
-  return outcomes.filter((o) => o.act === "forward").map((o) => o.name);
+  return outcomes.filter((o) => o.act === "forward" || o.act === "refresh").map((o) => o.name);
 }
 
 /**
