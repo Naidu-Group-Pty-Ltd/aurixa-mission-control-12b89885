@@ -1,5 +1,12 @@
 # Airtable intake to the clones, the cascade and the Actions policy — handover, 19 Oct 2026
 
+> **Continued in [`HANDOFF_2026-10-19_AIRTABLE_CASCADE_AND_CI_GATES.md`](./HANDOFF_2026-10-19_AIRTABLE_CASCADE_AND_CI_GATES.md)**
+> (14:05 UTC): the state at hand-over, the execution plan for the remaining
+> scope in order, findings F11–F14 (why `pdf-extraction-v3-gates /
+> static-and-fast` has never passed and holds the cascades, and its fix), and
+> the parked branch that carries the first half of that fix. Read that one
+> first; this document keeps the detailed findings F1–F10.
+
 The owner's ask on 19 Oct 2026 was first "the Airtable Property Intake Master
 isn't cascading into the clones — start with that", then, once the Airtable
 credentials had been changed to the new base, "run the cascade appropriately",
