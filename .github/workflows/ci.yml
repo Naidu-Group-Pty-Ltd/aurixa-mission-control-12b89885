@@ -10,6 +10,12 @@ on:
   # fakes an event rather than asking for the checks. This asks for them.
   workflow_dispatch:
 
+# Read-only. CI runs the code of every pull request, and nothing it does needs
+# to write: with no `permissions:` block the token takes the repository's
+# default, which can include `contents: write`.
+permissions:
+  contents: read
+
 # Cancel superseded runs on the same ref to save CI minutes.
 concurrency:
   group: ci-${{ github.ref }}
@@ -18,11 +24,16 @@ concurrency:
 jobs:
   verify:
     name: Typecheck · Lint · Build
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: that label moves to Ubuntu 26 from 19 Oct 2026,
+    # and this job was verified on 24.04. Move it deliberately, with a test run.
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing here pushes; no token belongs in the checkout.
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
           cache: npm
@@ -197,11 +208,16 @@ jobs:
   # rather than through a setup action, so this adds no third-party action.
   lovable-install:
     name: Lovable install (bun.lockb)
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: that label moves to Ubuntu 26 from 19 Oct 2026,
+    # and this job was verified on 24.04. Move it deliberately, with a test run.
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing here pushes; no token belongs in the checkout.
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
 

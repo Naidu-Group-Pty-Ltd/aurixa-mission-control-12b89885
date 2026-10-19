@@ -35,6 +35,19 @@ describe("reassessGate", () => {
     expect(reassessGate(gate({ requires_approval: false }), 4)).toEqual({ act: "ungated" });
   });
 
+  it("lets a security hold stand whatever the clone count says", () => {
+    const held = gate({ hold_reason: "Security gate: Prime has 1 critical open finding." });
+    // One clone would discharge a commit gate; a security hold is not a
+    // blast-radius verdict and only a person releases it.
+    expect(reassessGate(held, 1)).toEqual({
+      act: "stands",
+      reason: "Security gate: Prime has 1 critical open finding.",
+    });
+    expect(planGateReassessment([held, gate({ id: "other" })], 1).discharge.map((d) => d.id)).toEqual([
+      "other",
+    ]);
+  });
+
   it("never re-derives over a person's approval", () => {
     const approved = gate({ approved_at: "2026-09-19T07:00:00.000Z" });
     expect(reassessGate(approved, 4)).toEqual({ act: "approved" });

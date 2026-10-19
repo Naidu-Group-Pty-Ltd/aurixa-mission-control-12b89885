@@ -23,6 +23,7 @@ import { decideSpend } from "@/server/cascade/githubBudget.pure";
 import { readGitHubRemaining } from "@/server/githubAllowance.server";
 import { beginGithubLane } from "@/server/githubUsageMeter";
 import { sweepStalledScans } from "@/server/codex-scheduling.server";
+import { dispatchAutomaticFixes } from "@/server/codex-autofix.server";
 
 export const Route = createFileRoute("/hooks/codex-sweep")({
   server: {
@@ -56,6 +57,16 @@ export const Route = createFileRoute("/hooks/codex-sweep")({
 
         try {
           const result = await sweepStalledScans();
+          // Then tonight's fixes, once the nightly Prime scan has completed:
+          // P0/P1 by Claude, P2 and below by Codex (codex-autofix-policy.ts).
+          // Once per scan; every later tick finds it done and stands down.
+          const autofix = await dispatchAutomaticFixes().catch((err) => {
+            console.error("codex-sweep automatic fixes failed:", err);
+            return {
+              ran: false as const,
+              reason: err instanceof Error ? err.message : String(err),
+            };
+          });
           return new Response(
             JSON.stringify({
               success: true,
@@ -63,6 +74,7 @@ export const Route = createFileRoute("/hooks/codex-sweep")({
               failed: result.failed.length,
               timedOut: result.timedOut.length,
               detail: result,
+              autofix,
             }),
             { headers: { "Content-Type": "application/json" } },
           );

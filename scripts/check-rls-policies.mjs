@@ -43,6 +43,13 @@ const SERVICE_ROLE_ONLY = new Set([
   // here would open a table holding SQL that the drain executes as `postgres`.
   // Remove this entry when the backup is dropped.
   "schema_migration_queue_backup_20260909",
+  // One row per accepted Codex scan/remediation callback signature, so a
+  // replayed callback is refused. Written and read only by the two webhook
+  // routes, which hold the service role; its migration REVOKEs the default
+  // grants from anon and authenticated. A policy here would let a browser
+  // learn which signatures have been seen — or delete one and re-enable a
+  // replay.
+  "codex_callback_receipts",
   // A per-commit cache of what the PRIME repo declares — secret NAMES and
   // function slugs, never a value. Written and read only by the provisioning
   // server routes, which hold the service role; its migration REVOKEs the

@@ -165,7 +165,11 @@ describe("the apply workflow classifies by ACCOUNT, never by the file", () => {
     // written after a shape heuristic misread six genuine applies, and a UUID
     // filename is a shape. Measured: the two signals disagree on 4 of 268
     // files and the author is right both times.
-    expect(classify.env?.LOVABLE_APP_AUTHOR).toContain("159125892");
+    expect(classify.env?.LOVABLE_BOT_ID).toBe("159125892");
+    // The id alone. The whole address names the login too, and the login has
+    // changed: this account has committed as gpt-engineer-app[bot] and as
+    // lovable-dev[bot].
+    expect(classify.env?.LOVABLE_APP_AUTHOR).toBeUndefined();
     expect(classify.run ?? "").toContain("git log --diff-filter=A --format=%ae -1");
     expect(classify.run ?? "").not.toMatch(/\[0-9a-f\]\{8\}|uuid/i);
   });
@@ -220,7 +224,7 @@ describe("the apply workflow classifies by ACCOUNT, never by the file", () => {
       env: {
         ...process.env,
         FILES: files,
-        LOVABLE_APP_AUTHOR: classify.env?.LOVABLE_APP_AUTHOR ?? "",
+        LOVABLE_BOT_ID: classify.env?.LOVABLE_BOT_ID ?? "",
         GITHUB_OUTPUT: outFile,
       },
       encoding: "utf8",
@@ -250,6 +254,29 @@ describe("the apply workflow classifies by ACCOUNT, never by the file", () => {
     const r = runClassifyIn(repo, `${uuidName} ${slugName}`);
     expect(r.status).toBe(0);
     expect(r.recordOnly).toEqual([uuidName, slugName]);
+  });
+
+  it("records a migration the same account added under its newer name", () => {
+    // Measured in this repository: `fdb0647b` (28 Aug 2026) is committed by
+    // 159125892+lovable-dev[bot], the same account as the 1,717 commits by
+    // 159125892+gpt-engineer-app[bot]. Matching the whole address would have
+    // EXECUTED a migration Lovable had already applied.
+    const file = "supabase/migrations/20261001000000_renamed.sql";
+    const repo = fixture([{ author: "159125892+lovable-dev[bot]@users.noreply.github.com", file }]);
+    const r = runClassifyIn(repo, file);
+    expect(r.status).toBe(0);
+    expect(r.recordOnly).toEqual([file]);
+  });
+
+  it.each([
+    "1591258920+other[bot]@users.noreply.github.com",
+    "x159125892+other@users.noreply.github.com",
+    "159125892+other@users.noreply.github.com.example.invalid",
+  ])("executes a migration from a lookalike address: %s", (author) => {
+    const file = "supabase/migrations/20261002000000_lookalike.sql";
+    const r = runClassifyIn(fixture([{ author, file }]), file);
+    expect(r.status).toBe(0);
+    expect(r.recordOnly).toEqual([]);
   });
 
   it("executes a migration a person added, even with a UUID filename", () => {

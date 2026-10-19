@@ -3,8 +3,16 @@ import crypto from "crypto";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { createCascadeForAllClones } from "@/server/cascade-trigger.server";
 import { executeCascade } from "@/server/cascade-engine.server";
-import { enqueueScanNoAuth, resolveScanTarget } from "@/server/codex-scheduling.server";
 import { writeAuditLog } from "@/server/audit.server";
+import {
+  closePullRequestFindings,
+  noteRemediationPullRequestHead,
+  syncRemediationPullRequestClosed,
+} from "@/server/codex-pr-sync.server";
+import {
+  REVIEWED_REMEDIATION_MERGE_TITLE,
+  SELF_HEALING_MERGE_TITLE,
+} from "@/lib/cascade-security-gate";
 
 // GitHub webhook receiver. Verifies HMAC-SHA256 signature with
 // GITHUB_WEBHOOK_SECRET, and on a `push` event to prime's default branch
@@ -51,9 +59,9 @@ export const Route = createFileRoute("/hooks/github")({
           });
         }
 
-        // Phase 4 — PR-driven Codex Security scans. `pull_request` opens,
-        // synchronizes, or reopens trigger a scan against the PR head SHA;
-        // scans are deduped within prime_config.codex_scan_dedup_hours.
+        // Pull requests: Codex fix PR bookkeeping, and a merged PR cascading.
+        // They are no longer scanned — security scans run nightly on Prime
+        // only (src/lib/codex-scan-policy.ts).
         if (eventType === "pull_request") {
           let prPayload: any;
           try {
@@ -71,6 +79,42 @@ export const Route = createFileRoute("/hooks/github")({
             prPayload?.repository?.owner?.login ?? prPayload?.repository?.owner?.name ?? "";
           const repoName = prPayload?.repository?.name ?? "";
           const repoFullName = repoOwner && repoName ? `${repoOwner}/${repoName}` : "";
+          const prNumberForCodex: number | null =
+            typeof prPayload?.pull_request?.number === "number"
+              ? prPayload.pull_request.number
+              : null;
+
+          // ── Codex bookkeeping, for Prime and clones alike ─────────────────
+          // A fix PR closed or merged on GitHub, and a PR's own scan findings,
+          // used to be invisible here. Best effort: the cascade logic below
+          // must run whatever this does.
+          if (repoFullName && prNumberForCodex != null) {
+            try {
+              if (action === "closed") {
+                const merged = prPayload?.pull_request?.merged === true;
+                await syncRemediationPullRequestClosed({
+                  repoFullName,
+                  prNumber: prNumberForCodex,
+                  merged,
+                  mergeSha: prPayload?.pull_request?.merge_commit_sha ?? null,
+                  headSha: prPayload?.pull_request?.head?.sha ?? null,
+                });
+                await closePullRequestFindings({
+                  repoFullName,
+                  prNumber: prNumberForCodex,
+                  merged,
+                });
+              } else if (action === "synchronize" && prPayload?.pull_request?.head?.sha) {
+                await noteRemediationPullRequestHead({
+                  repoFullName,
+                  prNumber: prNumberForCodex,
+                  headSha: prPayload.pull_request.head.sha,
+                });
+              }
+            } catch (err) {
+              console.error("[hooks/github] codex PR bookkeeping failed:", err);
+            }
+          }
 
           // ── A merged pull request is prime moving ──────────────────────────
           //
@@ -102,6 +146,13 @@ export const Route = createFileRoute("/hooks/github")({
               repoOwner.toLowerCase() === primeCfgForMerge!.github_owner.toLowerCase() &&
               repoName.toLowerCase() === primeCfgForMerge!.github_repo.toLowerCase();
 
+            // A Codex fix PR cascades from its `push`, never from here: only
+            // the push carries the merge commit's title, which is what marks
+            // it as a security fix that passes the cascade security gate. The
+            // push always follows a merge.
+            const codexFixBranch = String(prPayload?.pull_request?.head?.ref ?? "").startsWith(
+              "codex/fix-",
+            );
             const decline = !primeCfgForMerge
               ? "prime_not_configured"
               : !onPrime
@@ -112,7 +163,9 @@ export const Route = createFileRoute("/hooks/github")({
                     ? `not_default_branch:${baseBranch}`
                     : !mergeSha
                       ? "no_merge_commit_sha"
-                      : null;
+                      : codexFixBranch
+                        ? "codex_fix_pr_cascades_from_push"
+                        : null;
 
             if (decline) {
               await writeAuditLog({
@@ -195,69 +248,13 @@ export const Route = createFileRoute("/hooks/github")({
             );
           }
 
-          if (
-            !action ||
-            !["opened", "reopened", "synchronize", "ready_for_review"].includes(action)
-          ) {
-            return new Response(
-              JSON.stringify({
-                skipped: true,
-                reason: `pull_request action ${action ?? "?"} ignored`,
-              }),
-              { headers: { "Content-Type": "application/json" } },
-            );
-          }
-          const headSha = prPayload?.pull_request?.head?.sha ?? null;
-          const prNumber = prPayload?.pull_request?.number ?? null;
-          const baseRef = prPayload?.pull_request?.base?.ref ?? null;
-
-          const { data: primeCfg } = await supabaseAdmin
-            .from("prime_config")
-            .select("codex_pr_scan_enabled, codex_scan_dedup_hours")
-            .limit(1)
-            .maybeSingle();
-          if (!primeCfg?.codex_pr_scan_enabled) {
-            return new Response(
-              JSON.stringify({ skipped: true, reason: "codex_pr_scan_disabled" }),
-              { headers: { "Content-Type": "application/json" } },
-            );
-          }
-          const target = repoFullName ? await resolveScanTarget(repoFullName) : null;
-          if (!target) {
-            return new Response(
-              JSON.stringify({ skipped: true, reason: `unknown_repo:${repoFullName}` }),
-              { headers: { "Content-Type": "application/json" } },
-            );
-          }
-          try {
-            const r = await enqueueScanNoAuth({
-              kind: "pr_open",
-              targetKind: target.targetKind,
-              cloneId: target.cloneId ?? null,
-              repoFullName,
-              ref: headSha,
-              // Scope the scan to the PR's own diff: a full-tree scan on
-              // every push would take minutes and drown the PR in findings
-              // the author did not introduce.
-              diffBase: baseRef,
-              dedupWindowHours: primeCfg.codex_scan_dedup_hours ?? 6,
-              requestPayload: {
-                source: "github_pr",
-                delivery: deliveryId,
-                action,
-                pr: prNumber,
-                baseRef,
-              },
-            });
-            return new Response(JSON.stringify({ success: true, ...r }), {
-              headers: { "Content-Type": "application/json" },
-            });
-          } catch (err) {
-            return new Response(JSON.stringify({ success: false, error: (err as Error).message }), {
-              status: 500,
-              headers: { "Content-Type": "application/json" },
-            });
-          }
+          return new Response(
+            JSON.stringify({
+              skipped: true,
+              reason: `pull_request action ${action ?? "?"}: security scans run nightly on Prime only`,
+            }),
+            { headers: { "Content-Type": "application/json" } },
+          );
         }
 
         /*
@@ -442,6 +439,18 @@ export const Route = createFileRoute("/hooks/github")({
         const sourceBranch = prime.default_branch || "main";
         const summary = payload.head_commit?.message?.slice(0, 200) ?? null;
 
+        // No post-merge scan: Prime is scanned nightly, and that scan
+        // confirms tonight's merged fixes (src/lib/codex-scan-policy.ts).
+        //
+        // A merged security fix — merged by itself, or by a person — fans out
+        // like any other commit, and goes through even while the security gate
+        // holds other automatic cascades: it is the change that clears the
+        // gate's findings. Clones receive Prime's fixes this way and no other.
+        const headTitle = payload.head_commit?.message ?? "";
+        const securityFix =
+          SELF_HEALING_MERGE_TITLE.test(headTitle) ||
+          REVIEWED_REMEDIATION_MERGE_TITLE.test(headTitle);
+
         const { eventId, cloneCount, error, alreadyExisted, foldedIntoPending } =
           await createCascadeForAllClones({
             supabase: supabaseAdmin,
@@ -451,6 +460,7 @@ export const Route = createFileRoute("/hooks/github")({
             sourceSha,
             initiatedBy: null,
             summary,
+            skipSecurityGate: securityFix,
           });
 
         if (error || !eventId) {
@@ -507,26 +517,6 @@ export const Route = createFileRoute("/hooks/github")({
         executeCascade(supabaseAdmin, eventId).catch((e) => {
           console.error("Webhook-triggered cascade failed:", e);
         });
-
-        // Phase 4 — post-merge revalidate: run a Codex Security scan against
-        // the freshly merged SHA so drift/fix regressions are caught fast.
-        if (prime.codex_post_merge_revalidate !== false) {
-          const primeRepo = `${prime.github_owner}/${prime.github_repo}`;
-          // Awaited: dispatch is a couple of GitHub calls, and a floating
-          // promise here dies with the isolate before the scan is ever sent.
-          try {
-            await enqueueScanNoAuth({
-              kind: "post_merge_revalidate",
-              targetKind: "prime",
-              repoFullName: primeRepo,
-              ref: sourceSha,
-              dedupWindowHours: prime.codex_scan_dedup_hours ?? 6,
-              requestPayload: { source: "post_merge", delivery: deliveryId, sha: sourceSha },
-            });
-          } catch (e) {
-            console.error("post-merge codex scan enqueue failed:", e);
-          }
-        }
 
         return new Response(
           JSON.stringify({

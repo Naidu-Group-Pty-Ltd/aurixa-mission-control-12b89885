@@ -1,5 +1,9 @@
 // Server-only orchestration for Codex Security scans without a user context
-// (pg_cron nightly job, the GitHub webhook receiver, and the sweeper).
+// (pg_cron nightly job and the sweeper).
+//
+// Scans run on Prime only, once a night (src/lib/codex-scan-policy.ts), plus
+// a person's explicit "Scan Prime now". The policy is checked here, at the
+// one place a scan is queued, so no caller can route around it.
 //
 // This is the single insert-then-dispatch path for the whole feature; the
 // authenticated `enqueueScan` server fn in src/lib/codex-security.functions.ts
@@ -11,14 +15,35 @@
 // on Cloudflare Workers the isolate can be reclaimed as soon as the response
 // is written, so jobs were routinely left stranded at `queued` with no event
 // row at all — a large part of why the pipeline looked dead.
+//
+// Each job is dispatched with its OWN callback key, derived from the master
+// secret and the job id (see codex-callback-keys.server.ts). The master never
+// leaves Mission Control; a key that leaks from one run's log opens that one
+// run and nothing else.
 import type { Json } from "@/integrations/supabase/types";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
-import { mapWithConcurrency } from "@/lib/concurrency";
+import { asJson } from "@/lib/json-cast";
 import {
   dispatchCodexScan,
   resolveScanEngine,
   scanCallbackUrl,
 } from "@/server/codex-security-client.server";
+import {
+  SCAN_CALLBACK_KEY_VERSION,
+  deriveCallbackKey,
+  pruneCallbackReceipts,
+  resolveScanMasterSecrets,
+} from "@/server/codex-callback-keys.server";
+import { resolveDispatchTarget } from "@/server/codex-dispatch-target.server";
+import {
+  completePrCheckForJob,
+  scanDetailsUrl,
+  startScanCheckRun,
+} from "@/server/codex-pr-checks.server";
+import { alertOnScanFailed } from "@/server/codex-scan-alerts.server";
+import { scanRequestAllowed } from "@/lib/codex-scan-policy";
+
+export { resolveDispatchTarget, type DispatchTarget } from "@/server/codex-dispatch-target.server";
 
 const admin = supabaseAdmin;
 
@@ -41,7 +66,10 @@ export type EnqueueOpts = {
   requestedBy?: string | null;
   /** Only scan files changed against this ref (PR scans). */
   diffBase?: string | null;
-  /** Opt out of the Codex CLI reasoning pass for cheap/fast scans. */
+  /**
+   * Run the (slower, paid) Codex CLI review. Omitted, it follows
+   * `prime_config.codex_deep_scan_scope`; manual scans always ask for it.
+   */
   deepScan?: boolean;
 };
 
@@ -55,53 +83,75 @@ export type EnqueueResult =
       dispatchError?: string;
     };
 
-/** How long a dispatched scan may run before the sweeper gives up on it. */
+/** How long a STARTED scan may run before the sweeper gives up on it. */
 const RUNNING_TIMEOUT_MINUTES = 75;
+/**
+ * How long a dispatched scan may wait for a runner before it is called lost.
+ * A fleet-wide nightly can queue behind the organisation's concurrency limit
+ * for a long time; failing those at 75 minutes threw away scans that were
+ * merely waiting their turn.
+ */
+const NEVER_STARTED_TIMEOUT_MINUTES = 6 * 60;
 /** How long a job may sit undispatched before the sweeper retries it. */
 const QUEUED_STALL_MINUTES = 10;
 /** Dispatch attempts (initial + sweeper retries) before a job is failed. */
 const MAX_DISPATCH_ATTEMPTS = 3;
-/** Parallel dispatches during a fleet-wide nightly run. */
-const NIGHTLY_CONCURRENCY = 5;
+
+export type DeepScanScope = "off" | "prime" | "fleet";
 
 /**
- * HMAC secret shared with the scanner. Prefers the deployment env var, then
- * falls back to the auto-generated secret on the built-in `codex` intake
- * source — so a fresh deployment authenticates its own scanners with no
- * manual secret provisioning at all.
+ * Which scans run the Codex CLI review. Manual scans are explicit operator
+ * intent and always ask; everything automatic follows the configured scope.
+ * The default (`prime`) stopped every clone running a 20-minute paid review
+ * every night.
  */
-export async function resolveScanWebhookSecret(): Promise<string> {
-  const fromEnv = process.env.CODEX_SECURITY_WEBHOOK_SECRET;
-  if (fromEnv) return fromEnv;
-  try {
-    const { data } = await admin
-      .from("security_intake_sources")
-      .select("hmac_secret")
-      .eq("slug", "codex")
-      .maybeSingle();
-    return data?.hmac_secret || "";
-  } catch {
-    return "";
-  }
+export function deepScanFor(input: {
+  kind: ScanKind;
+  targetKind: "prime" | "clone";
+  scope: DeepScanScope;
+}): boolean {
+  if (input.kind === "manual") return true;
+  if (input.scope === "off") return false;
+  if (input.scope === "prime") return input.targetKind === "prime";
+  return true;
+}
+
+type ScanSettings = {
+  deepScanScope: DeepScanScope;
+  prCheckEnabled: boolean;
+};
+
+/**
+ * Read the scan policy. `select("*")` on purpose: a column a deployment has
+ * not migrated yet must read as its default, not fail the whole select.
+ */
+async function loadScanSettings(): Promise<ScanSettings> {
+  const { data, error } = await admin.from("prime_config").select("*").limit(1).maybeSingle();
+  if (error || !data) return { deepScanScope: "prime", prCheckEnabled: true };
+  const row = data as Record<string, unknown>;
+  const scope = row.codex_deep_scan_scope;
+  return {
+    deepScanScope: scope === "off" || scope === "fleet" ? scope : "prime",
+    prCheckEnabled: row.codex_pr_check_enabled !== false,
+  };
 }
 
 /**
- * HMAC secret shared with the remediation workflow. Same fallback chain as
- * the scan secret so the two halves of the pipeline can never disagree about
- * which key is in play.
+ * The scan master secret. Prefers the deployment env var, then falls back to
+ * the auto-generated secret on the built-in `codex` intake source — so a fresh
+ * deployment authenticates its own scanners with no manual provisioning.
+ * Never sent to a repository: per-job keys are derived from it.
  */
-export async function resolveRemediationWebhookSecret(): Promise<string> {
-  const fromEnv = process.env.CODEX_REMEDIATION_WEBHOOK_SECRET;
-  if (fromEnv) return fromEnv;
-  return resolveScanWebhookSecret();
+export async function resolveScanWebhookSecret(): Promise<string> {
+  return (await resolveScanMasterSecrets()).current;
 }
 
 async function recordEvent(jobId: string, eventType: string, payload: Json = {}) {
-  try {
-    await admin.from("codex_scan_events").insert({ job_id: jobId, event_type: eventType, payload });
-  } catch {
-    // The event log is an audit convenience — never let it break a scan.
-  }
+  const { error } = await admin
+    .from("codex_scan_events")
+    .insert({ job_id: jobId, event_type: eventType, payload });
+  // The event log is an audit convenience — never let it break a scan.
+  if (error) console.warn(`[codex-scheduling] could not record ${eventType}:`, error.message);
 }
 
 /**
@@ -129,73 +179,7 @@ async function recentDuplicate(opts: EnqueueOpts): Promise<boolean> {
   return !!data?.length;
 }
 
-export type DispatchTarget = {
-  owner: string;
-  repo: string;
-  installationId: string | null;
-  defaultBranch: string;
-};
-
-/**
- * Resolve the GitHub coordinates a scan must be dispatched against. The
- * workflow lives on a branch, so `defaultBranch` is what we dispatch on even
- * when the scan itself targets a PR head SHA.
- */
-export async function resolveDispatchTarget(opts: {
-  targetKind: "prime" | "clone";
-  cloneId?: string | null;
-  repoFullName: string;
-}): Promise<DispatchTarget> {
-  const [fallbackOwner, fallbackRepo] = (opts.repoFullName || "").split("/");
-
-  if (opts.targetKind === "prime") {
-    const { data: p } = await admin
-      .from("prime_config")
-      .select("github_owner, github_repo, default_branch, github_app_installation_id")
-      .limit(1)
-      .maybeSingle();
-    return {
-      owner: p?.github_owner || fallbackOwner || "",
-      repo: p?.github_repo || fallbackRepo || "",
-      installationId: p?.github_app_installation_id ?? null,
-      defaultBranch: p?.default_branch || "main",
-    };
-  }
-
-  if (!opts.cloneId) {
-    return {
-      owner: fallbackOwner || "",
-      repo: fallbackRepo || "",
-      installationId: null,
-      defaultBranch: "main",
-    };
-  }
-
-  // The installation id is fetched separately: it is an optional column, and
-  // naming an unknown column fails the entire PostgREST select, which would
-  // take owner/repo/branch down with it.
-  const { loadCloneInstallationId } = await import("@/server/clone-installation.server");
-  const [{ data: c }, installationId] = await Promise.all([
-    admin
-      .from("clones")
-      .select("github_owner, github_repo, default_branch")
-      .eq("id", opts.cloneId)
-      .maybeSingle(),
-    loadCloneInstallationId(admin, opts.cloneId),
-  ]);
-  return {
-    owner: c?.github_owner || fallbackOwner || "",
-    repo: c?.github_repo || fallbackRepo || "",
-    installationId,
-    defaultBranch: c?.default_branch || "main",
-  };
-}
-
-/**
- * Send an already-inserted job to the scan engine and record the outcome.
- * Shared by the initial enqueue and by the sweeper's retry path.
- */
-async function dispatchJob(job: {
+type DispatchableJob = {
   id: string;
   kind: ScanKind;
   target_kind: "prime" | "clone";
@@ -205,7 +189,74 @@ async function dispatchJob(job: {
   path_globs: string[] | null;
   failure_count?: number | null;
   request_payload?: Json | null;
-}): Promise<{ ok: true } | { ok: false; error: string; terminal: boolean }> {
+};
+
+/**
+ * The key this job's workflow signs its callbacks with. Jobs created before
+ * per-job keys existed carry no `callback_key` and are dispatched with the
+ * master, which is what their webhook verification expects.
+ */
+async function callbackKeyForJob(job: DispatchableJob): Promise<string> {
+  const master = await resolveScanWebhookSecret();
+  if (!master) return "";
+  const payload = (job.request_payload ?? {}) as Record<string, unknown>;
+  return payload.callback_key === SCAN_CALLBACK_KEY_VERSION
+    ? deriveCallbackKey(master, "scan", job.id)
+    : master;
+}
+
+/**
+ * Open the PR's "Codex Security" check as soon as its scan is on its way, so
+ * the pull request shows a scan is running. Once per job: a sweeper retry
+ * finds the id already recorded.
+ */
+async function openPrCheck(
+  job: DispatchableJob,
+  target: { owner: string; repo: string; installationId: string | null },
+) {
+  const payload = (job.request_payload ?? {}) as Record<string, unknown>;
+  if (job.kind !== "pr_open" || payload.pr_check !== true || payload.check_run_id) return;
+  if (!job.ref || !/^[0-9a-f]{40}$/i.test(job.ref)) return;
+
+  const res = await startScanCheckRun({
+    owner: target.owner,
+    repo: target.repo,
+    installationId: target.installationId,
+    headSha: job.ref,
+    jobId: job.id,
+    detailsUrl: scanDetailsUrl(job.id),
+  });
+  if (!res.ok) {
+    await recordEvent(
+      job.id,
+      "check_run_unavailable",
+      asJson({ http_status: res.status ?? null, error: res.error }),
+    );
+    return;
+  }
+  const { error } = await admin
+    .from("codex_scan_jobs")
+    .update({ request_payload: asJson({ ...payload, check_run_id: res.id }) })
+    .eq("id", job.id);
+  if (error) {
+    await recordEvent(
+      job.id,
+      "check_run_unrecorded",
+      asJson({ check_run_id: res.id, error: error.message }),
+    );
+  } else {
+    payload.check_run_id = res.id;
+    job.request_payload = asJson(payload);
+  }
+}
+
+/**
+ * Send an already-inserted job to the scan engine and record the outcome.
+ * Shared by the initial enqueue and by the sweeper's retry path.
+ */
+async function dispatchJob(
+  job: DispatchableJob,
+): Promise<{ ok: true } | { ok: false; error: string; terminal: boolean }> {
   const attempt = (job.failure_count ?? 0) + 1;
   const payload = (job.request_payload ?? {}) as Record<string, unknown>;
 
@@ -223,7 +274,7 @@ async function dispatchJob(job: {
       pathGlobs: job.path_globs ?? null,
       kind: job.kind,
       callbackUrl: scanCallbackUrl(),
-      callbackSecret: await resolveScanWebhookSecret(),
+      callbackSecret: await callbackKeyForJob(job),
       owner: target.owner,
       repo: target.repo,
       installationId: target.installationId,
@@ -233,7 +284,7 @@ async function dispatchJob(job: {
       metadata: payload,
     });
 
-    await admin
+    const { error: updErr } = await admin
       .from("codex_scan_jobs")
       .update({
         external_scan_id: res.externalScanId,
@@ -243,19 +294,21 @@ async function dispatchJob(job: {
         last_error: null,
       })
       .eq("id", job.id);
+    if (updErr)
+      console.error("[codex-scheduling] dispatched but could not mark running:", updErr.message);
 
-    await recordEvent(job.id, "dispatched", {
-      engine: res.engine,
-      externalScanId: res.externalScanId,
-      kind: job.kind,
-      attempt,
-    });
+    await recordEvent(
+      job.id,
+      "dispatched",
+      asJson({ engine: res.engine, externalScanId: res.externalScanId, kind: job.kind, attempt }),
+    );
+    await openPrCheck(job, target);
     return { ok: true };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     const terminal = attempt >= MAX_DISPATCH_ATTEMPTS;
 
-    await admin
+    const { error: updErr } = await admin
       .from("codex_scan_jobs")
       .update({
         status: terminal ? "failed" : "queued",
@@ -268,27 +321,38 @@ async function dispatchJob(job: {
         completed_at: terminal ? new Date().toISOString() : null,
       })
       .eq("id", job.id);
+    if (updErr)
+      console.error("[codex-scheduling] could not record dispatch failure:", updErr.message);
 
-    await recordEvent(job.id, terminal ? "dispatch_failed" : "dispatch_retry_scheduled", {
-      error: message,
-      kind: job.kind,
-      attempt,
-    });
+    await recordEvent(
+      job.id,
+      terminal ? "dispatch_failed" : "dispatch_retry_scheduled",
+      asJson({ error: message, kind: job.kind, attempt }),
+    );
     return { ok: false, error: message, terminal };
   }
 }
 
 export async function enqueueScanNoAuth(opts: EnqueueOpts): Promise<EnqueueResult> {
+  const allowed = scanRequestAllowed({ kind: opts.kind, targetKind: opts.targetKind });
+  if (!allowed.ok) return { skipped: true, reason: allowed.reason };
   if (!opts.repoFullName) return { skipped: true, reason: "missing_repo" };
   if (await recentDuplicate(opts)) {
     return { skipped: true, reason: "duplicate_within_window" };
   }
 
+  const settings = await loadScanSettings();
+  const deepScan =
+    opts.deepScan ??
+    deepScanFor({ kind: opts.kind, targetKind: opts.targetKind, scope: settings.deepScanScope });
+
   const requestPayload = {
     source: opts.kind,
     ...(opts.requestPayload ?? {}),
     ...(opts.diffBase ? { diffBase: opts.diffBase } : {}),
-    ...(opts.deepScan === false ? { deepScan: false } : {}),
+    ...(deepScan === false ? { deepScan: false } : {}),
+    ...(opts.kind === "pr_open" ? { pr_check: settings.prCheckEnabled } : {}),
+    callback_key: SCAN_CALLBACK_KEY_VERSION,
   };
 
   const { data: job, error } = await admin
@@ -301,7 +365,7 @@ export async function enqueueScanNoAuth(opts: EnqueueOpts): Promise<EnqueueResul
       ref: opts.ref ?? null,
       path_globs: opts.pathGlobs ?? null,
       requested_by: opts.requestedBy ?? null,
-      request_payload: requestPayload,
+      request_payload: asJson(requestPayload),
       engine: resolveScanEngine(),
     })
     .select(
@@ -332,9 +396,9 @@ export type NightlyResult = {
 };
 
 /**
- * Enqueue nightly scans across Prime + every clone that has
- * `codex_nightly_enabled = true` and a resolvable repo. Prime is skipped
- * when `prime_config.codex_nightly_enabled` is false.
+ * Enqueue the nightly scan of Prime, unless `prime_config.codex_nightly_enabled`
+ * is off. Clones are not scanned (src/lib/codex-scan-policy.ts): they receive
+ * Prime's fixes through the cascade.
  */
 export async function runNightlyScans(): Promise<NightlyResult> {
   const enqueued: NightlyResult["enqueued"] = [];
@@ -348,65 +412,30 @@ export async function runNightlyScans(): Promise<NightlyResult> {
     .limit(1)
     .maybeSingle();
 
-  const dedupHours = prime?.codex_scan_dedup_hours ?? 6;
-
-  if (prime && prime.codex_nightly_enabled) {
-    const repo = `${prime.github_owner}/${prime.github_repo}`;
-    try {
-      const r = await enqueueScanNoAuth({
-        kind: "nightly_full",
-        targetKind: "prime",
-        repoFullName: repo,
-        ref: prime.default_branch || "main",
-        dedupWindowHours: dedupHours,
-        requestPayload: { source: "nightly" },
-      });
-      if (r.skipped) skipped.push({ target: `prime:${repo}`, reason: r.reason });
-      else enqueued.push({ target: `prime:${repo}`, jobId: r.jobId, kind: "nightly_full" });
-    } catch (err) {
-      skipped.push({ target: `prime:${repo}`, reason: (err as Error).message });
-    }
-  } else if (prime) {
+  if (!prime) {
+    skipped.push({ target: "prime", reason: "prime_not_configured" });
+    return { enqueued, skipped };
+  }
+  if (!prime.codex_nightly_enabled) {
     skipped.push({ target: "prime", reason: "nightly_disabled" });
+    return { enqueued, skipped };
   }
 
-  // owner/repo only — `repo_full_name` is a generated convenience column and
-  // naming it here would fail the whole select on an unmigrated deployment,
-  // silently yielding an empty fleet.
-  const { data: clones } = await admin
-    .from("clones")
-    .select("id, name, github_owner, github_repo, default_branch, codex_nightly_enabled")
-    .eq("codex_nightly_enabled", true);
-
-  // Fan out across the fleet instead of dispatching one clone at a time —
-  // a 40-clone fleet used to serialize 40 round-trips to GitHub.
-  const outcomes = await mapWithConcurrency(clones ?? [], NIGHTLY_CONCURRENCY, async (c) => {
-    const label = `clone:${c.name ?? c.id}`;
-    const repo = c.github_owner && c.github_repo ? `${c.github_owner}/${c.github_repo}` : "";
-    if (!repo) return { label, skipped: true, reason: "no_repo" } as const;
-    try {
-      const r = await enqueueScanNoAuth({
-        kind: "nightly_full",
-        targetKind: "clone",
-        cloneId: c.id,
-        repoFullName: repo,
-        ref: c.default_branch || "main",
-        dedupWindowHours: dedupHours,
-        requestPayload: { source: "nightly", cloneId: c.id },
-      });
-      return r.skipped
-        ? ({ label, skipped: true, reason: r.reason } as const)
-        : ({ label, skipped: false, jobId: r.jobId } as const);
-    } catch (err) {
-      return { label, skipped: true, reason: (err as Error).message } as const;
-    }
-  });
-
-  for (const o of outcomes) {
-    if (o.skipped) skipped.push({ target: o.label, reason: o.reason });
-    else enqueued.push({ target: o.label, jobId: o.jobId, kind: "nightly_full" });
+  const repo = `${prime.github_owner}/${prime.github_repo}`;
+  try {
+    const r = await enqueueScanNoAuth({
+      kind: "nightly_full",
+      targetKind: "prime",
+      repoFullName: repo,
+      ref: prime.default_branch || "main",
+      dedupWindowHours: prime.codex_scan_dedup_hours ?? 6,
+      requestPayload: { source: "nightly" },
+    });
+    if (r.skipped) skipped.push({ target: `prime:${repo}`, reason: r.reason });
+    else enqueued.push({ target: `prime:${repo}`, jobId: r.jobId, kind: "nightly_full" });
+  } catch (err) {
+    skipped.push({ target: `prime:${repo}`, reason: (err as Error).message });
   }
-
   return { enqueued, skipped };
 }
 
@@ -414,7 +443,39 @@ export type SweepResult = {
   retried: string[];
   failed: Array<{ jobId: string; reason: string }>;
   timedOut: string[];
+  receiptsPruned: number;
 };
+
+type SweepJob = {
+  id: string;
+  kind: string;
+  target_kind: string;
+  clone_id: string | null;
+  repo_full_name: string;
+  request_payload: unknown;
+  workflow_run_url: string | null;
+};
+
+async function failHungJob(job: SweepJob, reason: string, eventType: string, payload: Json) {
+  const { error } = await admin
+    .from("codex_scan_jobs")
+    .update({ status: "failed", last_error: reason, completed_at: new Date().toISOString() })
+    .eq("id", job.id)
+    .eq("status", "running");
+  if (error) {
+    console.error("[codex-scheduling] could not retire hung scan:", error.message);
+    return false;
+  }
+  await recordEvent(job.id, eventType, payload);
+  if (job.kind === "pr_open") {
+    await completePrCheckForJob({
+      job,
+      outcome: { kind: "failed", reason, runUrl: job.workflow_run_url },
+    });
+  }
+  await alertOnScanFailed({ ...job, last_error: reason });
+  return true;
+}
 
 /**
  * Reconcile jobs the happy path lost track of:
@@ -422,8 +483,10 @@ export type SweepResult = {
  *  - `queued` past the stall window → the dispatch never landed (isolate
  *    reclaimed mid-flight, GitHub outage, missing workflow). Re-dispatch,
  *    then fail once the attempt budget is spent.
- *  - `running` past the timeout → the workflow died without ever posting a
- *    terminal callback. Fail it so the UI stops showing a phantom scan.
+ *  - `running` and STARTED (a `scan.started` callback named its run) past
+ *    the timeout → the workflow died without a terminal callback.
+ *  - `running` but never started past the much longer runner-wait window →
+ *    the run was lost before it began.
  *
  * Without this, a single lost dispatch left a job "queued" forever and the
  * dedup window then suppressed every subsequent scan of that target.
@@ -431,10 +494,12 @@ export type SweepResult = {
 export async function sweepStalledScans(options?: {
   queuedStallMinutes?: number;
   runningTimeoutMinutes?: number;
+  neverStartedTimeoutMinutes?: number;
   limit?: number;
 }): Promise<SweepResult> {
   const queuedStall = options?.queuedStallMinutes ?? QUEUED_STALL_MINUTES;
   const runningTimeout = options?.runningTimeoutMinutes ?? RUNNING_TIMEOUT_MINUTES;
+  const neverStarted = options?.neverStartedTimeoutMinutes ?? NEVER_STARTED_TIMEOUT_MINUTES;
   const limit = options?.limit ?? 50;
   const now = Date.now();
 
@@ -458,7 +523,7 @@ export async function sweepStalledScans(options?: {
     if (job.next_attempt_at && new Date(job.next_attempt_at).getTime() > now) continue;
 
     if ((job.failure_count ?? 0) >= MAX_DISPATCH_ATTEMPTS) {
-      await admin
+      const { error } = await admin
         .from("codex_scan_jobs")
         .update({
           status: "failed",
@@ -466,39 +531,72 @@ export async function sweepStalledScans(options?: {
           completed_at: new Date().toISOString(),
         })
         .eq("id", job.id);
+      if (error) {
+        console.error("[codex-scheduling] could not retire stranded scan:", error.message);
+        continue;
+      }
       await recordEvent(job.id, "sweep_failed", { reason: "dispatch_attempts_exhausted" });
+      await alertOnScanFailed({
+        ...job,
+        last_error: job.last_error || "dispatch_attempts_exhausted",
+      });
       failed.push({ jobId: job.id, reason: "dispatch_attempts_exhausted" });
       continue;
     }
 
     await recordEvent(job.id, "sweep_retry", { failureCount: job.failure_count ?? 0 });
-    const r = await dispatchJob({ ...job, target_kind: job.target_kind as "prime" | "clone" });
+    const r = await dispatchJob({
+      ...job,
+      kind: job.kind as ScanKind,
+      target_kind: job.target_kind as "prime" | "clone",
+    });
     if (r.ok) retried.push(job.id);
     else if (r.terminal) failed.push({ jobId: job.id, reason: r.error });
   }
 
-  // 2) Runs that never reported a terminal callback.
+  // 2) Started runs that never reported a terminal callback. `started_at` is
+  // reset by the `scan.started` callback, so this clock starts when the run
+  // did, not when it was dispatched.
   const { data: hung } = await admin
     .from("codex_scan_jobs")
-    .select("id")
+    .select("id, kind, target_kind, clone_id, repo_full_name, request_payload, workflow_run_url")
     .eq("status", "running")
+    .not("workflow_run_id", "is", null)
     .lte("started_at", new Date(now - runningTimeout * 60 * 1000).toISOString())
     .limit(limit);
 
   for (const job of hung ?? []) {
-    await admin
-      .from("codex_scan_jobs")
-      .update({
-        status: "failed",
-        last_error: `Scan timed out after ${runningTimeout} minutes with no completion callback.`,
-        completed_at: new Date().toISOString(),
-      })
-      .eq("id", job.id);
-    await recordEvent(job.id, "sweep_timeout", { runningTimeoutMinutes: runningTimeout });
-    timedOut.push(job.id);
+    const ok = await failHungJob(
+      job,
+      `Scan timed out after ${runningTimeout} minutes with no completion callback.`,
+      "sweep_timeout",
+      { runningTimeoutMinutes: runningTimeout },
+    );
+    if (ok) timedOut.push(job.id);
   }
 
-  return { retried, failed, timedOut };
+  // 3) Dispatched runs that never started at all.
+  const { data: lost } = await admin
+    .from("codex_scan_jobs")
+    .select("id, kind, target_kind, clone_id, repo_full_name, request_payload, workflow_run_url")
+    .eq("status", "running")
+    .is("workflow_run_id", null)
+    .lte("started_at", new Date(now - neverStarted * 60 * 1000).toISOString())
+    .limit(limit);
+
+  for (const job of lost ?? []) {
+    const ok = await failHungJob(
+      job,
+      `The scan was dispatched but its workflow never started within ${Math.round(neverStarted / 60)} hours.`,
+      "sweep_never_started",
+      { neverStartedTimeoutMinutes: neverStarted },
+    );
+    if (ok) timedOut.push(job.id);
+  }
+
+  const receiptsPruned = await pruneCallbackReceipts();
+
+  return { retried, failed, timedOut, receiptsPruned };
 }
 
 /**
@@ -529,14 +627,24 @@ export async function resolveScanTarget(
   // Matched on owner/repo rather than the generated `repo_full_name` column:
   // those two always exist, whereas an `.or()` naming a column a deployment
   // has not migrated yet fails the whole query — which silently disabled
-  // PR-driven scans for every clone.
-  const { data: clone } = await admin
+  // PR-driven scans for every clone. `ilike` with the LIKE wildcards escaped:
+  // GitHub names may contain `_`, which would otherwise match any character
+  // and could attribute one clone's PR to another.
+  const { data: clones } = await admin
     .from("clones")
-    .select("id")
-    .ilike("github_owner", owner)
-    .ilike("github_repo", repo)
-    .limit(1)
-    .maybeSingle();
-  if (clone?.id) return { targetKind: "clone", cloneId: clone.id };
+    .select("id, github_owner, github_repo")
+    .ilike("github_owner", escapeLike(owner))
+    .ilike("github_repo", escapeLike(repo))
+    .limit(5);
+  const match = (clones ?? []).find(
+    (c) =>
+      c.github_owner?.toLowerCase() === owner.toLowerCase() &&
+      c.github_repo?.toLowerCase() === repo.toLowerCase(),
+  );
+  if (match?.id) return { targetKind: "clone", cloneId: match.id };
   return null;
+}
+
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, (m) => `\\${m}`);
 }

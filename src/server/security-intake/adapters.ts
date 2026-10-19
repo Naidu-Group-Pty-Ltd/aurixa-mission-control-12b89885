@@ -8,21 +8,30 @@
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import type { TablesInsert, TablesUpdate } from "@/integrations/supabase/types";
 import { asJson, asRow } from "@/lib/json-cast";
+import {
+  SECRET_SCANNERS,
+  intakeReason,
+  intakeResolution,
+  resolveIntakeState,
+  validateTriage,
+} from "@/lib/codex-finding-lifecycle";
+import type { FindingState } from "@/lib/codex-finding-state";
 
-const CODEX_FINDING_STATES = [
-  "open",
-  "triaging",
-  "fix_drafted",
-  "pr_open",
-  "fix_merged",
-  "resolved",
-  "dismissed",
-  "false_positive",
-] as const;
-type CodexFindingState = (typeof CODEX_FINDING_STATES)[number];
-function isCodexFindingState(value: string): value is CodexFindingState {
-  return (CODEX_FINDING_STATES as readonly string[]).includes(value);
+/**
+ * A partner's status change that was refused. `status` is the HTTP answer:
+ * 400 an unknown status word, 404 no such finding, 409 a change the triage
+ * rules do not allow from the finding's current state.
+ */
+export class IntakeStatusError extends Error {
+  constructor(
+    message: string,
+    public status: 400 | 404 | 409,
+  ) {
+    super(message);
+  }
 }
+
+export type IntakeStatusResult = { changed: boolean; from?: string; to?: string };
 
 export type NormalizedSeverity = "critical" | "high" | "medium" | "low" | "info";
 
@@ -55,7 +64,12 @@ export interface SecurityIntakeAdapter {
     finding: NormalizedFinding,
     source: IntakeSource,
   ): Promise<{ id: string; created: boolean }>;
-  updateStatus(externalId: string, state: string): Promise<void>;
+  updateStatus(
+    externalId: string,
+    state: string,
+    source: IntakeSource,
+    reason?: string | null,
+  ): Promise<IntakeStatusResult>;
   linkExternalTicket(
     findingId: string,
     ticket: { provider: string; external_id: string; url?: string; status?: string },
@@ -121,13 +135,102 @@ async function upsertFinding(finding: NormalizedFinding, source: IntakeSource) {
   return { id: inserted.data.id as string, created: true };
 }
 
-async function updateFindingState(externalId: string, sourceSlug: string, state: string) {
-  if (!isCodexFindingState(state)) return;
-  const { error } = await admin
+function isMissingColumn(error: { code?: string; message?: string } | null): boolean {
+  return (
+    !!error && (error.code === "42703" || /column .* does not exist/i.test(error.message ?? ""))
+  );
+}
+
+/**
+ * A partner changes the status of one of ITS findings (the codex_finding_id
+ * carries the source slug, so a source can only ever reach its own).
+ *
+ * The same rules as a person's triage: the status word must map onto a state
+ * a person may set, the move must be allowed from the finding's current
+ * state, and a verdict carries a reason. Each change is recorded on the
+ * finding's history. Before this a partner could set any state at all —
+ * including the fix-in-flight states Mission Control owns — with no trace,
+ * and an unknown word was dropped without an error.
+ */
+async function updateFindingState(
+  externalId: string,
+  source: IntakeSource,
+  rawState: string,
+  reason?: string | null,
+): Promise<IntakeStatusResult> {
+  const to = resolveIntakeState(rawState);
+  if (!to) {
+    throw new IntakeStatusError(
+      `unknown status "${rawState}" — use open, triaging, resolved (rotated, for a credential), dismissed or false_positive`,
+      400,
+    );
+  }
+  const { data: f, error } = await admin
     .from("codex_findings")
-    .update({ state })
-    .eq("codex_finding_id", `${sourceSlug}:${externalId}`);
+    .select("id, state, scanner")
+    .eq("codex_finding_id", `${source.slug}:${externalId}`)
+    .maybeSingle();
   if (error) throw new Error(error.message);
+  if (!f) throw new IntakeStatusError("finding not found", 404);
+  // Re-sending the status a finding already has is a no-op, not an error.
+  if (f.state === to) return { changed: false, from: f.state, to };
+
+  const why = intakeReason(source.name, to, reason);
+  const verdict = validateTriage({
+    from: f.state as FindingState,
+    to,
+    reason: why,
+    scanner: f.scanner,
+    resolution: to === "resolved" ? intakeResolution(rawState) : null,
+  });
+  if (!verdict.ok) {
+    const secret = to === "resolved" && !!f.scanner && SECRET_SCANNERS.has(f.scanner);
+    throw new IntakeStatusError(
+      secret ? `${verdict.error} — send the status "rotated" once it has been` : verdict.error,
+      409,
+    );
+  }
+
+  const nowIso = new Date().toISOString();
+  const patch: Record<string, unknown> = { state: to, triaged_at: nowIso, triage_reason: why };
+  if (to === "resolved") {
+    patch.resolution = verdict.resolution;
+    patch.resolved_at = nowIso;
+  } else if (to === "open" || to === "triaging") {
+    patch.resolution = null;
+    patch.resolved_at = null;
+  }
+  const apply = (p: Record<string, unknown>) => {
+    // Only from the state just read: a concurrent change wins.
+    return admin
+      .from("codex_findings")
+      .update(asRow<TablesUpdate<"codex_findings">>(p))
+      .eq("id", f.id)
+      .eq("state", f.state)
+      .select("id");
+  };
+  let res = await apply(patch);
+  if (res.error && isMissingColumn(res.error)) {
+    delete patch.triage_reason;
+    delete patch.resolution;
+    res = await apply(patch);
+  }
+  if (res.error) throw new Error(res.error.message);
+  if (!res.data?.length)
+    throw new IntakeStatusError("the finding changed meanwhile — send it again", 409);
+
+  const { error: evErr } = await admin.from("codex_finding_events").insert({
+    finding_id: f.id,
+    event_type: "intake.status",
+    from_state: f.state,
+    to_state: to,
+    reason: why,
+    payload: asJson({ source: source.slug, status: rawState }),
+  });
+  if (evErr && !/does not exist|Could not find/i.test(evErr.message)) {
+    console.warn("[security-intake] status history not recorded:", evErr.message);
+  }
+  return { changed: true, from: f.state, to };
 }
 
 async function linkTicket(
@@ -168,8 +271,13 @@ class BaseAdapter implements SecurityIntakeAdapter {
   async ingestFinding(finding: NormalizedFinding, source: IntakeSource) {
     return upsertFinding(finding, source);
   }
-  async updateStatus(externalId: string, state: string) {
-    return updateFindingState(externalId, this.slug, state);
+  async updateStatus(
+    externalId: string,
+    state: string,
+    source: IntakeSource,
+    reason?: string | null,
+  ) {
+    return updateFindingState(externalId, source, state, reason);
   }
   async linkExternalTicket(
     findingId: string,
@@ -201,14 +309,19 @@ export class TicketingAdapter implements SecurityIntakeAdapter {
   async ingestFinding(): Promise<{ id: string; created: boolean }> {
     throw new Error("ticketing_adapter_cannot_ingest_findings");
   }
-  async updateStatus(externalId: string, state: string) {
-    // Ticketing status updates land on security_external_tickets instead.
-    const { error } = await admin
+  async updateStatus(externalId: string, state: string): Promise<IntakeStatusResult> {
+    // Ticketing status updates land on security_external_tickets instead. A
+    // ticket closing does not close its finding: closed is not fixed, and the
+    // finding shows the ticket's status for a person to act on.
+    const { data, error } = await admin
       .from("security_external_tickets")
       .update({ status: state })
       .eq("source_slug", this.slug)
-      .eq("external_id", externalId);
+      .eq("external_id", externalId)
+      .select("id");
     if (error) throw new Error(error.message);
+    if (!data?.length) throw new IntakeStatusError("ticket not found", 404);
+    return { changed: true, to: state };
   }
   async linkExternalTicket(
     findingId: string,

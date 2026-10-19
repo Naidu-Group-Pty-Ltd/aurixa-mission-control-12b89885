@@ -605,42 +605,9 @@ export async function provisionCloneCore(
     }
   }
 
-  // ─── Auto-sync Codex Actions secrets to the new repo ──────────────
-  // The scan and remediation workflows need the model API key to run.
-  // Push the secrets immediately so the clone is ready for autonomous
-  // scanning and remediation from minute one. Non-fatal.
-  if (data.method !== "clone" && githubUrl) {
-    try {
-      const { syncRepoSecrets, buildCodexRepoSecrets } =
-        await import("@/server/github-secrets.server");
-      const secretResult = await syncRepoSecrets({
-        owner: githubOwner,
-        repo: githubRepo,
-        secrets: await buildCodexRepoSecrets(),
-      });
-      // github_secret_syncs grants only SELECT to `authenticated`; writing
-      // through the request-scoped client was denied by RLS and the error
-      // discarded, so provisioning never left a history row.
-      const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-      const { error: historyErr } = await supabaseAdmin.from("github_secret_syncs").insert({
-        target_kind: "clone",
-        clone_id: inserted.id,
-        owner: githubOwner,
-        repo: githubRepo,
-        written: secretResult.written,
-        skipped: secretResult.skipped,
-        failed: secretResult.failed,
-        ok: secretResult.ok,
-        trigger_source: "auto-provision",
-        triggered_by: userId,
-      });
-      if (historyErr) {
-        console.error("[provisionClone] failed to record secret sync history:", historyErr.message);
-      }
-    } catch (e) {
-      console.error("[provisionClone] github secret sync failed:", e);
-    }
-  }
+  // No Codex Actions secrets for a new clone: clones are neither scanned nor
+  // fixed on their own (src/lib/codex-scan-policy.ts) — Prime's fixes reach
+  // them through the cascade — so their repositories need no model keys.
 
   // The reservation travels back because the deployment step below attaches
   // THIS name — the one fact the extracted block produces that its caller

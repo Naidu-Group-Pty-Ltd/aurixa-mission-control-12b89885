@@ -9,6 +9,9 @@ import {
   type ResolveAction,
 } from "@/server/migration-enqueue.server";
 import { verifyCronAuth } from "@/server/cron-auth.server";
+import { decideSpend } from "@/server/cascade/githubBudget.pure";
+import { readGitHubRemaining } from "@/server/githubAllowance.server";
+import { beginGithubLane } from "@/server/githubUsageMeter";
 import type { MigrationSubmission } from "@/server/migrationQueue.pure";
 
 // Called by `.github/workflows/apply-migrations.yml` on merge, not by a timer.
@@ -29,11 +32,11 @@ import type { MigrationSubmission } from "@/server/migrationQueue.pure";
 // admin schema onto a tenant. Here the target is whichever database this
 // deployment is connected to, which is the only answer there is.
 //
-// Five actions on one route rather than five routes, so the "what is
+// Six actions on one route rather than six routes, so the "what is
 // scheduled" story stays one line: enqueue submits, status polls a caller's own
-// versions, queue reports the whole queue, digests reports what ran, resolve
-// ends a halt. None is on a timer, because there is nothing to do until a merge
-// happens.
+// versions, queue reports the whole queue, digests reports what ran,
+// propose_digests puts that on Prime as a pull request, resolve ends a halt.
+// None is on a timer, because there is nothing to do until a merge happens.
 //
 // `queue` and `resolve` are the two halves of the September incident. A halted
 // queue is ordered, so one failed row stops every migration behind it — and
@@ -46,13 +49,22 @@ import type { MigrationSubmission } from "@/server/migrationQueue.pure";
 // from the first version of this queue "so what RAN can be compared to the
 // repo" and nothing ever compared it — measured, 2 of 55 settled rows differ
 // from their repository file today.
+//
+// `propose_digests` is what the apply workflow calls once its migrations have
+// settled. It used to commit the manifest and push it to `main` itself; `main`
+// is protected now and no workflow token may push there, so Mission Control
+// proposes it through its App (`applied-digests-proposal.server.ts`). A
+// failure is a 200 with `state: "failed"`, never a 5xx: the migrations have
+// applied by then, and bookkeeping that could turn that run red would be worse
+// than a stale file.
 type EnqueueBody = { action?: "enqueue"; migrations?: MigrationSubmission[]; enqueuedBy?: string };
 type StatusBody = { action: "status"; versions?: string[] };
 type DigestsBody = { action: "digests" };
 type QueueBody = { action: "queue" };
+type ProposeDigestsBody = { action: "propose_digests" };
 type ResolveBody = { action: "resolve"; version?: string; resolution?: string; reason?: string };
 
-type Body = EnqueueBody | StatusBody | DigestsBody | QueueBody | ResolveBody;
+type Body = EnqueueBody | StatusBody | DigestsBody | QueueBody | ResolveBody | ProposeDigestsBody;
 
 export const Route = createFileRoute("/hooks/migration-enqueue")({
   server: {
@@ -110,6 +122,31 @@ export const Route = createFileRoute("/hooks/migration-enqueue")({
             // caller is a workflow step, and a step that has to read a field to
             // find out it failed is a step that goes green when nobody does.
             return json({ success: result.ok, ...result }, result.ok ? 200 : 409);
+          }
+
+          if (body?.action === "propose_digests") {
+            // The one action here that spends the App installation's window,
+            // and bookkeeping: a refresh postponed costs a manifest one push
+            // behind, which the next migration push closes. So it yields at
+            // the scan floor, like the other readings.
+            beginGithubLane("migration-digests");
+            const spend = decideSpend({ role: "scan", remaining: await readGitHubRemaining() });
+            if (!spend.proceed) {
+              return json({
+                success: false,
+                proposal: {
+                  state: "failed",
+                  detail: `Not proposed now: ${spend.why}. The next migration push refreshes it.`,
+                },
+              });
+            }
+            const { proposeAppliedDigests } =
+              await import("@/server/applied-digests-proposal.server");
+            const proposal = await proposeAppliedDigests(supabaseAdmin).catch((e: unknown) => ({
+              state: "failed" as const,
+              detail: e instanceof Error ? e.message : String(e),
+            }));
+            return json({ success: proposal.state !== "failed", proposal });
           }
 
           if (body?.action === "digests") {

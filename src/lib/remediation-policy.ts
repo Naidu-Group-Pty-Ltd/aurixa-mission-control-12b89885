@@ -6,8 +6,14 @@
 //
 // The contract this encodes: P2 and below flow through self-remediation;
 // P0/P1 never execute unattended; and even below P2, an action that could
-// destroy value (destructive SQL, an unverified patch, a diff too large to
-// trust) is parked for human validation instead of executed.
+// destroy value (destructive SQL, a diff too large to trust) is parked for
+// human validation instead of executed.
+//
+// One exception, by the platform owner's decision (October 2026): a security
+// fix PR merges with no person at EVERY priority — Claude writes the P0/P1
+// fixes, Codex the rest (codex-autofix-policy.ts) — as long as its automated
+// checks pass (`decideFixMerge`). One that fails them is not parked for a
+// person either: the fix is closed and the finding goes back to the queue.
 
 import type { SqlRiskAssessment } from "./destructive-sql";
 import type { TicketPriority } from "./ticket-classification";
@@ -23,7 +29,11 @@ export const REMEDIATION_ACTION_TYPES = [
 ] as const;
 export type RemediationActionType = (typeof REMEDIATION_ACTION_TYPES)[number];
 
-/** Auto-merge diff ceilings — a patch bigger than this is not "non-destructive". */
+/**
+ * Auto-merge diff ceilings — a patch bigger than this is not "non-destructive".
+ * Counted without lockfiles (the workflow regenerates those itself; their
+ * churn says nothing about what the fix touched).
+ */
 export const AUTO_MERGE_MAX_FILES = 10;
 export const AUTO_MERGE_MAX_LINES = 400;
 
@@ -70,11 +80,65 @@ function auto(reasons: string[]): RemediationPolicyDecision {
   return { autoExecute: true, requiresHuman: false, reasons };
 }
 
+export type FixMergeInput = {
+  /** Outcome of the remediation workflow's verification step. */
+  verified?: boolean | null;
+  /** gitleaks result on the lines the patch adds. */
+  secretsClean?: boolean | null;
+  filesChanged?: number | null;
+  linesChanged?: number | null;
+};
+
+export type FixMergeDecision = { merge: boolean; reasons: string[] };
+
+/**
+ * Whether a security fix PR merges by itself. Every priority: the check is
+ * the patch, not the finding. A fix that is unverified, adds a secret, or is
+ * too large or of unknown size does not merge — and is not parked for a
+ * person: the caller closes it and the finding goes back to the queue.
+ */
+export function decideFixMerge(input: FixMergeInput): FixMergeDecision {
+  if (input.verified !== true) {
+    return {
+      merge: false,
+      reasons: [
+        input.verified === false
+          ? "the patched tree failed the repository's own checks"
+          : "remediation PR has no passing verification",
+      ],
+    };
+  }
+  if (input.secretsClean === false) {
+    return { merge: false, reasons: ["secret scan on the patched tree did not come back clean"] };
+  }
+  const files = input.filesChanged ?? null;
+  const lines = input.linesChanged ?? null;
+  if (files == null || lines == null) {
+    return { merge: false, reasons: ["patch size unknown — cannot bound the blast radius"] };
+  }
+  if (files > AUTO_MERGE_MAX_FILES) {
+    return { merge: false, reasons: [`patch touches ${files} files (> ${AUTO_MERGE_MAX_FILES})`] };
+  }
+  if (lines > AUTO_MERGE_MAX_LINES) {
+    return { merge: false, reasons: [`patch changes ${lines} lines (> ${AUTO_MERGE_MAX_LINES})`] };
+  }
+  return {
+    merge: true,
+    reasons: [`verified patch within auto-merge bounds (${files} files, ${lines} lines)`],
+  };
+}
+
 export function decideRemediation(input: RemediationPolicyInput): RemediationPolicyDecision {
   // Read-only actions are always safe to run, whatever the priority — they
   // gather the evidence a human (or a later action) needs.
   if (input.actionType === "monitor_recovery" || input.actionType === "rescan") {
     return auto([`${input.actionType} is read-only`]);
+  }
+
+  // Security fix PRs merge unattended at every priority; see the header.
+  if (input.actionType === "pr_merge") {
+    const decision = decideFixMerge(input);
+    return decision.merge ? auto(decision.reasons) : human(decision.reasons);
   }
 
   if (!priorityAtOrBelow(input.priority, "P2")) {
@@ -83,29 +147,6 @@ export function decideRemediation(input: RemediationPolicyInput): RemediationPol
 
   if (input.actionType === "manual") {
     return human(["action is explicitly manual"]);
-  }
-
-  if (input.actionType === "pr_merge") {
-    const reasons: string[] = [];
-    if (input.verified !== true) {
-      return human(["remediation PR has no passing verification"]);
-    }
-    if (input.secretsClean === false) {
-      return human(["secret scan on the patched tree did not come back clean"]);
-    }
-    const files = input.filesChanged ?? null;
-    const lines = input.linesChanged ?? null;
-    if (files == null || lines == null) {
-      return human(["patch size unknown — cannot bound the blast radius"]);
-    }
-    if (files > AUTO_MERGE_MAX_FILES) {
-      return human([`patch touches ${files} files (> ${AUTO_MERGE_MAX_FILES})`]);
-    }
-    if (lines > AUTO_MERGE_MAX_LINES) {
-      return human([`patch changes ${lines} lines (> ${AUTO_MERGE_MAX_LINES})`]);
-    }
-    reasons.push(`verified patch within auto-merge bounds (${files} files, ${lines} lines)`);
-    return auto(reasons);
   }
 
   if (input.actionType === "sql_migration") {

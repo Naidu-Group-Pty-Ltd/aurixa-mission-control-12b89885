@@ -6,6 +6,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import type { Json as DbJson } from "@/integrations/supabase/types";
 
 // ─── Brand version diff ──────────────────────────────────────────────
 type Json = Record<string, unknown> | unknown[] | string | number | boolean | null;
@@ -85,18 +86,45 @@ export const listPendingApprovals = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth])
   .handler(async ({ context }) => {
     const { supabase } = context;
-    const { data, error } = await supabase
-      .from("cascade_events")
-      .select(
-        "id, mode, summary, source_branch, source_sha, initiated_by, created_at, requires_approval, approved_at, scope_filter",
-      )
-      .eq("requires_approval", true)
-      .is("approved_at", null)
-      .neq("status", "failed")
-      .order("created_at", { ascending: false })
-      .limit(200);
-    if (error) return { ok: false as const, error: error.message, events: [] };
-    return { ok: true as const, events: data ?? [] };
+    const columns =
+      "id, mode, trigger, summary, source_branch, source_sha, initiated_by, created_at, requires_approval, approved_at, scope_filter";
+    const query = (cols: string) =>
+      supabase
+        .from("cascade_events")
+        .select(cols)
+        .eq("requires_approval", true)
+        .is("approved_at", null)
+        .neq("status", "failed")
+        .order("created_at", { ascending: false })
+        .limit(200);
+    // `hold_reason` (20261018090000) says why a cascade waits when it is not
+    // a blast-radius gate — a security hold, or an unattended self-healing
+    // merge. Without it a held cascade looked like any other.
+    let res = await query(`${columns}, hold_reason`);
+    if (
+      res.error &&
+      (res.error.code === "42703" || /column .* does not exist/i.test(res.error.message))
+    ) {
+      res = await query(columns);
+    }
+    if (res.error) return { ok: false as const, error: res.error.message, events: [] };
+    return {
+      ok: true as const,
+      events: (res.data ?? []) as unknown as Array<{
+        id: string;
+        mode: string;
+        trigger: string;
+        summary: string | null;
+        source_branch: string | null;
+        source_sha: string | null;
+        initiated_by: string | null;
+        created_at: string;
+        requires_approval: boolean;
+        approved_at: string | null;
+        scope_filter: DbJson;
+        hold_reason?: string | null;
+      }>,
+    };
   });
 
 // ─── Bulk clone delete (admin only — RLS enforces) ────────────────────

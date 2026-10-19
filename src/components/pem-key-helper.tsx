@@ -7,7 +7,7 @@ import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { CheckCircle2, XCircle, Copy, Key, Terminal, ShieldCheck, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import forge from "node-forge";
+import { pkcs1ToPkcs8Pem, pkcs8PemToDer } from "@/lib/rsa-key-pem";
 
 type KeyFormat = "idle" | "pkcs1" | "pkcs8" | "other-pem" | "invalid";
 
@@ -27,16 +27,21 @@ function detectFormat(pem: string): KeyFormat {
   return "invalid";
 }
 
-/** Convert PKCS#1 PEM → PKCS#8 PEM using node-forge */
+/** Convert PKCS#1 PEM → PKCS#8 PEM: the same key, its DER wrapped (`@/lib/rsa-key-pem`). */
 function convertToPkcs8(pkcs1Pem: string): string {
-  const privateKey = forge.pki.privateKeyFromPem(pkcs1Pem);
-  const asn1 = forge.pki.privateKeyToAsn1(privateKey);
-  const wrapped = forge.pki.wrapRsaPrivateKey(asn1);
-  return forge.pki.privateKeyInfoToPem(wrapped);
+  return pkcs1ToPkcs8Pem(pkcs1Pem);
 }
 
-/** Deep-verify: parse the key, check it's RSA, check bit length is GitHub-compatible */
-function deepVerify(pem: string): VerifyResult {
+const SELF_TEST = new TextEncoder().encode("github-app-key-test");
+const RSA_SHA256 = { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" } as const;
+
+/**
+ * Deep-verify, with the browser's own WebCrypto: the key imports as an RSA
+ * PKCS#8 private key, is long enough for GitHub, and signs a payload its own
+ * public half verifies. WebCrypto is what the JWT library imports it with
+ * too, so a key that passes here is one the server can use.
+ */
+async function deepVerify(pem: string): Promise<VerifyResult> {
   const trimmed = pem.trim();
 
   // Must be PKCS#8
@@ -49,12 +54,11 @@ function deepVerify(pem: string): VerifyResult {
     };
   }
 
-  // Try to extract the RSA private key from PKCS#8 wrapper
-  let privateKey: forge.pki.rsa.PrivateKey;
+  let privateKey: CryptoKey;
   try {
-    const der = forge.pki.pemToDer(trimmed);
-    const asn1 = forge.asn1.fromDer(der);
-    privateKey = forge.pki.privateKeyFromAsn1(asn1) as forge.pki.rsa.PrivateKey;
+    privateKey = await crypto.subtle.importKey("pkcs8", pkcs8PemToDer(trimmed), RSA_SHA256, true, [
+      "sign",
+    ]);
   } catch {
     return {
       ok: false,
@@ -65,18 +69,7 @@ function deepVerify(pem: string): VerifyResult {
     };
   }
 
-  // Check it's RSA by verifying expected properties
-  if (!privateKey.n || !privateKey.e || !privateKey.d) {
-    return {
-      ok: false,
-      algorithm: "unknown",
-      bitLength: 0,
-      message:
-        "Key parsed but does not contain RSA components (n, e, d). GitHub Apps require an RSA key.",
-    };
-  }
-
-  const bitLength = privateKey.n.bitLength();
+  const bitLength = (privateKey.algorithm as RsaHashedKeyAlgorithm).modulusLength ?? 0;
 
   // GitHub requires RSA 2048+
   if (bitLength < 2048) {
@@ -90,13 +83,25 @@ function deepVerify(pem: string): VerifyResult {
 
   // Quick sanity: sign + verify a test payload
   try {
-    const md = forge.md.sha256.create();
-    md.update("github-app-key-test", "utf8");
-    const signature = privateKey.sign(md);
-    const publicKey = forge.pki.setRsaPublicKey(privateKey.n, privateKey.e);
-    const verifyMd = forge.md.sha256.create();
-    verifyMd.update("github-app-key-test", "utf8");
-    const valid = publicKey.verify(verifyMd.digest().bytes(), signature);
+    const jwk = await crypto.subtle.exportKey("jwk", privateKey);
+    if (!jwk.n || !jwk.e || !jwk.d) {
+      return {
+        ok: false,
+        algorithm: "unknown",
+        bitLength,
+        message:
+          "Key parsed but does not contain RSA components (n, e, d). GitHub Apps require an RSA key.",
+      };
+    }
+    const publicKey = await crypto.subtle.importKey(
+      "jwk",
+      { kty: "RSA", n: jwk.n, e: jwk.e, alg: "RS256", ext: true },
+      RSA_SHA256,
+      false,
+      ["verify"],
+    );
+    const signature = await crypto.subtle.sign(RSA_SHA256, privateKey, SELF_TEST);
+    const valid = await crypto.subtle.verify(RSA_SHA256, publicKey, signature, SELF_TEST);
     if (!valid) {
       return {
         ok: false,
@@ -171,17 +176,13 @@ export function PemKeyHelper() {
     }
   };
 
-  const runVerify = () => {
+  const runVerify = async () => {
     setVerifying(true);
     setError(null);
-    // Small timeout so the spinner renders
-    setTimeout(() => {
-      const pem = converted || input;
-      const result = deepVerify(pem);
-      setVerifyResult(result);
-      if (!result.ok) setFormat("invalid");
-      setVerifying(false);
-    }, 100);
+    const result = await deepVerify(converted || input);
+    setVerifyResult(result);
+    if (!result.ok) setFormat("invalid");
+    setVerifying(false);
   };
 
   const copyToClipboard = async () => {

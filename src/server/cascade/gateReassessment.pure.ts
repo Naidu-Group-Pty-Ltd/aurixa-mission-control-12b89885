@@ -57,6 +57,13 @@ export type RecordedGate = {
   readonly mode: string;
   readonly requires_approval: boolean;
   readonly approved_at: string | null;
+  /**
+   * A hold that is not about blast radius — the security gate, or an
+   * unattended self-healing merge (`cascade-security-gate.ts`). Re-deriving
+   * the blast-radius rule says nothing about it, so it is never discharged
+   * here: a person's approval is the only thing that releases it.
+   */
+  readonly hold_reason?: string | null;
 };
 
 export type GateVerdict =
@@ -106,6 +113,9 @@ export function reassessGate(event: RecordedGate, cloneCount: number): GateVerdi
   if (!event.requires_approval) return { act: "ungated" };
   // An approval is a person's act. This module is not one, and never overwrites one.
   if (event.approved_at) return { act: "approved" };
+  // A security hold was not assessed from a clone count, so a clone count
+  // cannot discharge it.
+  if (event.hold_reason) return { act: "stands", reason: event.hold_reason };
 
   const origin = originForTrigger(event.trigger);
   const blast = assessBlastRadius(event.mode as CascadeMode, cloneCount, origin);

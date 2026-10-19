@@ -3,6 +3,7 @@ import { assessSqlDestructiveness } from "./destructive-sql";
 import {
   AUTO_MERGE_MAX_FILES,
   AUTO_MERGE_MAX_LINES,
+  decideFixMerge,
   decideRemediation,
 } from "./remediation-policy";
 
@@ -14,22 +15,24 @@ const verifiedSmallPatch = {
 } as const;
 
 describe("decideRemediation", () => {
-  it("never auto-executes a P0 or P1 action, even a perfect one", () => {
+  it("never auto-executes a P0 or P1 action other than a security fix, even a perfect one", () => {
     for (const priority of ["P0", "P1"] as const) {
-      const d = decideRemediation({ actionType: "pr_merge", priority, ...verifiedSmallPatch });
-      expect(d.autoExecute).toBe(false);
-      expect(d.requiresHuman).toBe(true);
+      for (const actionType of ["sql_migration", "edge_function_deploy"] as const) {
+        const d = decideRemediation({ actionType, priority, sqlAssessedByLane: true });
+        expect(d.autoExecute).toBe(false);
+        expect(d.requiresHuman).toBe(true);
+      }
     }
   });
 
-  it("auto-merges a verified, bounded patch at P2 and below", () => {
-    for (const priority of ["P2", "P3", "P4"] as const) {
+  it("auto-merges a verified, bounded security fix at every priority", () => {
+    for (const priority of ["P0", "P1", "P2", "P3", "P4"] as const) {
       const d = decideRemediation({ actionType: "pr_merge", priority, ...verifiedSmallPatch });
       expect(d.autoExecute).toBe(true);
     }
   });
 
-  it("parks an unverified patch for a human", () => {
+  it("does not merge an unverified patch", () => {
     const d = decideRemediation({
       actionType: "pr_merge",
       priority: "P3",
@@ -37,7 +40,7 @@ describe("decideRemediation", () => {
       verified: false,
     });
     expect(d.autoExecute).toBe(false);
-    expect(d.reasons.join(" ")).toMatch(/verification/);
+    expect(d.reasons.join(" ")).toMatch(/own checks/);
   });
 
   it("parks a patch whose secret scan failed", () => {
@@ -173,5 +176,34 @@ describe("decideRemediation", () => {
   it("never marks manual actions as auto", () => {
     const d = decideRemediation({ actionType: "manual", priority: "P4" });
     expect(d.autoExecute).toBe(false);
+  });
+});
+
+describe("decideFixMerge", () => {
+  it("merges a verified, clean, bounded fix", () => {
+    expect(decideFixMerge(verifiedSmallPatch)).toEqual({
+      merge: true,
+      reasons: ["verified patch within auto-merge bounds (2 files, 40 lines)"],
+    });
+  });
+
+  it("says why an unverified fix does not merge", () => {
+    expect(decideFixMerge({ ...verifiedSmallPatch, verified: false }).reasons[0]).toMatch(
+      /failed the repository's own checks/,
+    );
+    expect(decideFixMerge({ ...verifiedSmallPatch, verified: null }).reasons[0]).toMatch(
+      /no passing verification/,
+    );
+  });
+
+  it("never merges a fix that adds a secret, or one too large or of unknown size", () => {
+    expect(decideFixMerge({ ...verifiedSmallPatch, secretsClean: false }).merge).toBe(false);
+    expect(decideFixMerge({ ...verifiedSmallPatch, filesChanged: null }).merge).toBe(false);
+    expect(
+      decideFixMerge({ ...verifiedSmallPatch, linesChanged: AUTO_MERGE_MAX_LINES + 1 }).merge,
+    ).toBe(false);
+    expect(
+      decideFixMerge({ ...verifiedSmallPatch, filesChanged: AUTO_MERGE_MAX_FILES + 1 }).merge,
+    ).toBe(false);
   });
 });

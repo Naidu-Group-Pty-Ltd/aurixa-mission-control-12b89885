@@ -158,7 +158,7 @@ function ApprovalsPage() {
             <EmptyState
               icon={<Inbox />}
               title="No cascades waiting"
-              description="High-blast-radius cascades that need a second operator will appear here."
+              description="Cascades that need a second operator — high blast radius, a security hold, or an unattended self-healing merge — appear here."
             />
           ) : (
             <div className="space-y-2">
@@ -187,6 +187,20 @@ function ApprovalsPage() {
                       )}
                     </div>
                     {e.summary && <p className="mt-1 text-sm">{e.summary}</p>}
+                    {e.hold_reason ? (
+                      <p className="mt-1 flex items-start gap-1 text-xs text-amber-600 dark:text-amber-400">
+                        <ShieldAlert className="mt-0.5 h-3 w-3 shrink-0" />
+                        <span>
+                          <span className="font-medium">Held:</span> {e.hold_reason}
+                        </span>
+                      </p>
+                    ) : (
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {e.trigger === "commit"
+                          ? "Gated by blast radius."
+                          : "Operator-started cascade above the auto-merge threshold."}
+                      </p>
+                    )}
                   </div>
                   <Link
                     to="/cascades/$eventId"

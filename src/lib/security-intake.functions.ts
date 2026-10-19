@@ -98,12 +98,37 @@ export const rotateSecurityIntakeSecret = createServerFn({ method: "POST" })
     const secret = Array.from(bytes)
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("");
-    const res = await admin
+    // The built-in `codex` source's secret is also the master every scan
+    // job's callback key is derived from. Keeping the previous value for a
+    // grace window lets scans already running still report after a rotation.
+    const current = await admin
       .from("security_intake_sources")
-      .update({ hmac_secret: secret })
+      .select("hmac_secret")
+      .eq("id", data.id)
+      .maybeSingle();
+    if (current.error) throw new Error(current.error.message);
+    let res = await admin
+      .from("security_intake_sources")
+      .update({
+        hmac_secret: secret,
+        previous_hmac_secret: current.data?.hmac_secret ?? null,
+        hmac_rotated_at: new Date().toISOString(),
+      })
       .eq("id", data.id)
       .select("id, slug")
       .single();
+    // Before migration 20261018090000 there are no rotation columns.
+    if (
+      res.error &&
+      (res.error.code === "42703" || /column .* does not exist/i.test(res.error.message))
+    ) {
+      res = await admin
+        .from("security_intake_sources")
+        .update({ hmac_secret: secret })
+        .eq("id", data.id)
+        .select("id, slug")
+        .single();
+    }
     if (res.error) throw new Error(res.error.message);
     await admin.from("audit_log").insert({
       action: "security.intake_source.secret_rotated",

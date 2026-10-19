@@ -279,8 +279,13 @@ and a UUID filename is a shape.
 
 `apply-migrations.yml` reads the author of the commit that **added** each file.
 A migration added by the Lovable app was applied by Lovable before it reached
-the repository. It is matched on the numeric account id (`159125892`), because a
-display name can be changed and an account id cannot.
+the repository. It is matched on the numeric account id (`159125892`, the `<id>+`
+that opens the bot's noreply address) and on nothing else, because a display
+name can be changed and an account id cannot — and this one has: the same
+account has committed as both `gpt-engineer-app[bot]` and `lovable-dev[bot]`.
+Until 18 Oct 2026 the workflow compared the whole address, so a Lovable
+migration committed under the newer name would have been executed rather than
+recorded.
 
 The two signals disagree on **4 of 268** files and the author is right both
 times: one bot-authored file is slug-named (the shape would have replayed it)
@@ -416,37 +421,47 @@ until somebody remembered `npm run migrations:digests` — and "somebody
 remembered" is the failure mode every other part of this pipeline exists to
 remove.
 
-So the apply job closes it in the same run. After the enqueue settles it
-regenerates the manifest and commits it, which is the only moment where the new
-digests are both known and reachable: the apply has finished, and that job is
-the one place holding the credential to read them.
+So the apply job asks for it to be closed in the same run, after the enqueue
+settles — the only moment the new digests are both known and reachable.
+
+**It asks Mission Control; it no longer pushes.** Until 18 Oct 2026 the job
+regenerated the manifest and pushed it straight to `main` with its own
+`contents: write` token (47 commits by github-actions[bot]). `main` is protected
+now (`src/server/primeBranchProtection.pure.ts`): nothing lands except through a
+pull request whose two CI jobs passed, and no workflow token is on the bypass
+list. So the last step posts `{"action": "propose_digests"}` to
+`/hooks/migration-enqueue` (`.github/scripts/propose-applied-digests.mjs`), and
+Mission Control renders the same file from the same queue
+(`appliedDigestManifest.pure.ts`, the renderer `npm run migrations:digests` uses
+too) and opens it on Prime as a pull request through its own App, from the
+branch `mission-control/applied-digests`, armed with auto-merge
+(`applied-digests-proposal.server.ts`). GitHub merges it when CI passes. The job
+is `contents: read` throughout — the job that holds `CRON_SECRET` no longer
+holds a write token as well.
 
 Four things hold it.
 
 **It never fails the run.** The migrations are applied by the time it is
-reached, and a bookkeeping commit that could undo that would be worse than a
-stale file. A failed read, a refused push and a race all warn and exit 0.
+reached, and bookkeeping that could undo that would be worse than a stale file.
+An unreachable Mission Control, an older deployment that does not know the
+action (HTTP 400), a proposal that could not be made and a GitHub budget below
+the scan floor all warn and exit 0.
 
 **It is never silent about giving up.** A manifest that quietly stopped
-refreshing is this same failure pointed the other way, so both the
-unreachable-Mission-Control path and the could-not-push path emit a
-`::warning` naming the remedy.
+refreshing is this same failure pointed the other way, so every path that does
+not end in a proposal armed to merge emits a `::warning` naming the remedy.
 
-**The write permission is on the JOB, not the workflow.** `contents: write`
-where it is needed, and nothing else this file might grow inherits it. The push
-credential is built into the remote URL in-step rather than persisted by
-`checkout`, so the rest of the job — which submits SQL — never has repository
-credentials in `.git/config`. This job already holds `CRON_SECRET`, which can
-execute arbitrary SQL as `postgres`; committing one generated file is strictly
-the smaller capability.
+**There is only ever one proposal.** Every refresh moves the same branch — which
+holds nothing but this generated file, so moving it by force loses nothing —
+and reuses the open pull request. When `main` already agrees, an open proposal
+is closed as moot.
 
-**A lost race costs a regeneration, not a merge.** The manifest is a pure
-function of the live queue, so on a rejected push it resets to the current tip
-and asks again rather than stashing and replaying. Two attempts, then it warns.
+**An empty digest list is refused, as everywhere.** Proposing it would erase
+every entry.
 
-There is no loop: the commit touches `scripts/`, and this workflow triggers only
-on `supabase/migrations/**.sql`. It does re-run `ci.yml`, which is wanted —
-that is `check:applied-digests` reading the manifest it just wrote.
+There is no loop: the proposal touches `scripts/`, and this workflow triggers
+only on `supabase/migrations/**.sql`. Its pull request runs `ci.yml`, which is
+wanted — that is `check:applied-digests` reading the manifest it proposes.
 
 ## A halt that resolves itself
 

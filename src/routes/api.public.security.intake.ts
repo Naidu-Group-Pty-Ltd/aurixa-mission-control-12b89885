@@ -16,6 +16,9 @@
 //     "op": "ingest" | "status" | "link_ticket",
 //     "finding": NormalizedFinding,         // when op = ingest
 //     "external_id": string, "state": str,   // when op = status
+//     "reason": string                        // op = status, optional: why
+//                                             // (a verdict without one records
+//                                             // the source as the decider)
 //     "ticket": { provider, external_id, url?, status? },   // when op = link_ticket
 //     "finding_external_id": string          // when op = link_ticket
 //   }
@@ -23,8 +26,9 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { z } from "zod";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
-import { adapterFor, loadSourceBySlug } from "@/server/security-intake/adapters";
+import { IntakeStatusError, adapterFor, loadSourceBySlug } from "@/server/security-intake/adapters";
 import { verifyIntakeSignature } from "@/server/security-intake/signature";
+import { writeAuditLog } from "@/server/audit.server";
 
 const FindingSchema = z.object({
   external_id: z.string().min(1),
@@ -54,6 +58,7 @@ const PayloadSchema = z.discriminatedUnion("op", [
     op: z.literal("status"),
     external_id: z.string().min(1),
     state: z.string().min(1),
+    reason: z.string().max(2000).optional(),
   }),
   z.object({
     version: z.string().default("1"),
@@ -99,27 +104,35 @@ export const Route = createFileRoute("/api/public/security/intake")({
         try {
           if (payload.op === "ingest") {
             const result = await adapter.ingestFinding(payload.finding, source);
-            await admin.from("audit_log").insert({
+            await writeAuditLog({
               action: "security.intake.ingest",
-              entity_type: "codex_finding",
-              entity_id: result.id,
+              entityType: "codex_finding",
+              entityId: result.id,
               metadata: { source: source.slug, created: result.created },
             });
             return json({ ok: true, finding_id: result.id, created: result.created });
           }
 
           if (payload.op === "status") {
-            await adapter.updateStatus(payload.external_id, payload.state);
-            await admin.from("audit_log").insert({
+            const result = await adapter.updateStatus(
+              payload.external_id,
+              payload.state,
+              source,
+              payload.reason ?? null,
+            );
+            await writeAuditLog({
               action: "security.intake.status",
-              entity_type: "codex_finding",
+              entityType: "codex_finding",
               metadata: {
                 source: source.slug,
                 external_id: payload.external_id,
                 state: payload.state,
+                from: result.from ?? null,
+                to: result.to ?? null,
+                changed: result.changed,
               },
             });
-            return json({ ok: true });
+            return json({ ok: true, changed: result.changed, state: result.to ?? null });
           }
 
           // link_ticket
@@ -135,14 +148,17 @@ export const Route = createFileRoute("/api/public/security/intake")({
             source,
             null,
           );
-          await admin.from("audit_log").insert({
+          await writeAuditLog({
             action: "security.intake.link_ticket",
-            entity_type: "security_external_ticket",
-            entity_id: link.id,
+            entityType: "security_external_ticket",
+            entityId: link.id,
             metadata: { source: source.slug, ...payload.ticket },
           });
           return json({ ok: true, ticket_id: link.id });
         } catch (err) {
+          if (err instanceof IntakeStatusError) {
+            return json({ error: err.message }, err.status);
+          }
           return json({ error: "intake failed", detail: (err as Error).message }, 500);
         }
       },

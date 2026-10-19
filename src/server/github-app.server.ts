@@ -3,10 +3,10 @@
 // Worker isolate to avoid re-signing JWTs on every call.
 import { createAppAuth } from "@octokit/auth-app";
 import { Octokit } from "@octokit/rest";
-import forge from "node-forge";
 import { withRetry, isTransientHttpError } from "@/lib/with-retry";
 import { countGithubCall } from "./githubUsageMeter";
 import { githubApiHeaders } from "./githubRequestHeaders.pure";
+import { ensurePkcs8Pem } from "@/lib/rsa-key-pem";
 
 const cache = new Map<string, Octokit>();
 
@@ -17,56 +17,25 @@ function readEnv(name: string): string {
 }
 
 /**
- * Normalize and, if necessary, convert a PEM private key to PKCS#8 format.
- * GitHub's API (via @octokit/auth-app / universal-github-app-jwt) only
- * accepts PKCS#8 (`BEGIN PRIVATE KEY`). Keys downloaded from GitHub App
- * settings are PKCS#1 (`BEGIN RSA PRIVATE KEY`), so we auto-convert.
+ * The App key as `@octokit/auth-app` needs it: PKCS#8 (`BEGIN PRIVATE KEY`).
+ * Keys downloaded from GitHub App settings are PKCS#1 (`BEGIN RSA PRIVATE
+ * KEY`), so those are converted — by wrapping the DER, in
+ * `@/lib/rsa-key-pem`, which replaced node-forge here.
  */
-function normalizePemWhitespace(pem: string): string {
-  let p = pem.replace(/\\n/g, "\n").trim();
-  // Some secret stores flatten newlines to spaces. If the PEM has no real
-  // newlines but does contain BEGIN/END markers, rebuild it: extract the
-  // base64 body between the markers and re-wrap at 64 chars per line.
-  if (!p.includes("\n")) {
-    const m = p.match(/-----BEGIN ([A-Z0-9 ]+?)-----([\s\S]+?)-----END \1-----/);
-    if (m) {
-      const label = m[1].trim();
-      const body = m[2].replace(/\s+/g, "");
-      const wrapped = body.match(/.{1,64}/g)?.join("\n") ?? body;
-      p = `-----BEGIN ${label}-----\n${wrapped}\n-----END ${label}-----`;
-    }
-  }
-  return p;
-}
-
 function ensurePkcs8(pem: string): string {
-  const normalized = normalizePemWhitespace(pem);
-
-  // Already PKCS#8 — nothing to do
-  if (normalized.includes("-----BEGIN PRIVATE KEY-----")) {
-    return normalized;
-  }
-
-  // PKCS#1 → PKCS#8 conversion using node-forge
-  if (normalized.includes("-----BEGIN RSA PRIVATE KEY-----")) {
-    try {
-      const privateKey = forge.pki.privateKeyFromPem(normalized);
-      const asn1 = forge.pki.privateKeyToAsn1(privateKey);
-      const wrapped = forge.pki.wrapRsaPrivateKey(asn1);
-      const pkcs8Pem = forge.pki.privateKeyInfoToPem(wrapped);
+  try {
+    const pkcs8 = ensurePkcs8Pem(pem);
+    if (pem.includes("-----BEGIN RSA PRIVATE KEY-----")) {
       console.log("[github-app] Auto-converted private key from PKCS#1 to PKCS#8");
-      return pkcs8Pem.trim();
-    } catch (e) {
-      throw new Error(
-        `Failed to convert PKCS#1 private key to PKCS#8: ${e instanceof Error ? e.message : String(e)}. ` +
-          `Use the PEM Key Helper on the auth page to convert manually, or run: ` +
-          `openssl pkcs8 -topk8 -inform PEM -outform PEM -nocrypt -in key.pem -out converted.pem`,
-      );
     }
+    return pkcs8;
+  } catch (e) {
+    throw new Error(
+      `Failed to convert PKCS#1 private key to PKCS#8: ${e instanceof Error ? e.message : String(e)}. ` +
+        `Use the PEM Key Helper on the auth page to convert manually, or run: ` +
+        `openssl pkcs8 -topk8 -inform PEM -outform PEM -nocrypt -in key.pem -out converted.pem`,
+    );
   }
-
-  // Unknown format — pass through and let the auth library report the error
-  return normalized;
 }
 
 /**

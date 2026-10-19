@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SealedBoxError } from "@/server/github-sealed-box.server";
 import {
+  CLONE_CODEX_REPO_SECRETS,
+  RETIRED_CODEX_REPO_SECRETS,
   buildCodexRepoSecrets,
   describeSecretError,
   previewCodexRepoSecrets,
@@ -16,6 +18,7 @@ vi.mock("@/server/github-app.server", () => ({
 
 const TOUCHED = [
   "OPENAI_API_KEY",
+  "ANTHROPIC_API_KEY",
   "CODEX_SECURITY_API_KEY",
   "CODEX_REMEDIATION_WEBHOOK_SECRET",
   "CODEX_SECURITY_WEBHOOK_SECRET",
@@ -205,6 +208,38 @@ describe("syncRepoSecrets", () => {
   });
 });
 
+describe("removing secrets", () => {
+  it("deletes the names it is given, an absent one included", async () => {
+    request.mockImplementation(async (route: string, params: { secret_name: string }) => {
+      if (route.startsWith("DELETE") && params.secret_name === "CODEX_SECURITY_WEBHOOK_SECRET") {
+        throw Object.assign(new Error("Not Found"), { status: 404 });
+      }
+      return { data: {} };
+    });
+    const result = await syncRepoSecrets({
+      owner: "o",
+      repo: "r",
+      secrets: {},
+      remove: RETIRED_CODEX_REPO_SECRETS,
+    });
+    expect(result.removed).toEqual([...RETIRED_CODEX_REPO_SECRETS]);
+    expect(result.ok).toBe(true);
+    expect(result.nothingConfigured).toBe(true);
+    const deletes = request.mock.calls.filter(([route]) => String(route).startsWith("DELETE"));
+    expect(deletes.map(([, p]) => p.secret_name)).toEqual([...RETIRED_CODEX_REPO_SECRETS]);
+  });
+
+  it("takes every Codex name out of a clone, the masters included", () => {
+    expect(CLONE_CODEX_REPO_SECRETS).toEqual(
+      expect.arrayContaining([
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        ...RETIRED_CODEX_REPO_SECRETS,
+      ]),
+    );
+  });
+});
+
 describe("buildCodexRepoSecrets", () => {
   it("uses CODEX_SECURITY_API_KEY as the legacy alias for OPENAI_API_KEY", async () => {
     process.env.CODEX_SECURITY_API_KEY = "legacy-key";
@@ -217,6 +252,16 @@ describe("buildCodexRepoSecrets", () => {
     process.env.CODEX_SECURITY_API_KEY = "legacy-key";
     const secrets = await buildCodexRepoSecrets();
     expect(secrets.OPENAI_API_KEY).toBe("new-key");
+  });
+
+  it("carries the Claude key, and never the callback-signing masters", async () => {
+    process.env.ANTHROPIC_API_KEY = "anthropic-test";
+    process.env.CODEX_SECURITY_WEBHOOK_SECRET = "scan-master";
+    process.env.CODEX_REMEDIATION_WEBHOOK_SECRET = "rem-master";
+    const secrets = await buildCodexRepoSecrets();
+    expect(secrets.ANTHROPIC_API_KEY).toBe("anthropic-test");
+    for (const name of RETIRED_CODEX_REPO_SECRETS) expect(secrets).not.toHaveProperty(name);
+    expect(JSON.stringify(secrets)).not.toContain("master");
   });
 
   it("derives callback URLs from the configured origin", async () => {
@@ -240,8 +285,10 @@ describe("previewCodexRepoSecrets", () => {
     expect(preview.entries.find((e) => e.name === "OPENAI_API_KEY")?.configured).toBe(false);
   });
 
-  it("clears the required-missing list once the key is set", async () => {
+  it("needs both model keys: Codex for P2 and below, Claude for P0/P1", async () => {
     process.env.OPENAI_API_KEY = "sk-test";
+    expect((await previewCodexRepoSecrets()).missingRequired).toEqual(["ANTHROPIC_API_KEY"]);
+    process.env.ANTHROPIC_API_KEY = "anthropic-test";
     const preview = await previewCodexRepoSecrets();
     expect(preview.missingRequired).toEqual([]);
     expect(preview.configuredCount).toBeGreaterThan(0);
