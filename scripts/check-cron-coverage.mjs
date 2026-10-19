@@ -39,6 +39,14 @@ const NOT_SCHEDULED = new Map([
       "because there is nothing to enqueue until a merge happens.",
   ],
   [
+    "codex-repo-secrets",
+    "Invoked on demand (cron-secret bearer) to put the Codex secrets where they " +
+      "belong now: Mission Control's keys in Prime's repository, none in any " +
+      "clone's. What IS scheduled is /hooks/codex-nightly, which runs the same " +
+      "pass (codex-repo-secrets.server.ts) before every scan, so a second " +
+      "schedule here would only write the same keys twice a night.",
+  ],
+  [
     "backend-provisioning-retry",
     "Invoked on demand (cron-secret bearer) to re-queue a FAILED clone backend " +
       "— an operator's decision or a deliberate automation, never a schedule: " +

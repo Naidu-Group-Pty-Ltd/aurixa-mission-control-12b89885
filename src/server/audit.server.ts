@@ -43,14 +43,27 @@ export type OperatorNotification = {
   metadata?: Record<string, unknown>;
 };
 
-/** Record an operator action. Never throws; a failed write is logged. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Record an operator action. Never throws; a failed write is logged.
+ *
+ * `entity_id` is a uuid column, and some of what gets recorded has no uuid: a
+ * repository is an owner/repo name, a webhook a path. Postgres refused every
+ * such row whole — on 19 Oct 2026 the nightly retraction of Prime's stray
+ * digest pull request did its work and left no row behind it. A reference that
+ * is not a uuid now travels in `metadata.entity_ref` instead, so the row lands.
+ */
 export async function writeAuditLog(entry: AuditEntry): Promise<void> {
+  const ref = entry.entityId ?? null;
+  const isUuid = ref !== null && UUID.test(ref);
+  const metadata = ref === null || isUuid ? entry.metadata : { ...entry.metadata, entity_ref: ref };
   const { error } = await supabaseAdmin.from("audit_log").insert({
     action: entry.action,
     entity_type: entry.entityType,
-    entity_id: entry.entityId ?? null,
+    entity_id: isUuid ? ref : null,
     actor_user_id: entry.actorUserId ?? null,
-    metadata: (entry.metadata ?? {}) as Json,
+    metadata: (metadata ?? {}) as Json,
   });
   if (error) {
     console.error(

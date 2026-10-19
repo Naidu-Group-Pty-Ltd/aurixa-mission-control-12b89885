@@ -348,6 +348,38 @@ export async function provisionCloneCore(
     }
   }
 
+  // ─── No Codex secrets in the new repository ──────────────────────────
+  //
+  // Clones are neither scanned nor fixed (src/lib/codex-scan-policy.ts), so a
+  // clone's repository holds none of the secrets the Codex workflows read.
+  // Provisioning used to write them all here — OpenAI's key and both
+  // callback-signing masters — and four clones still held them on 19 Oct 2026.
+  //
+  // A repository just forked or created from a template carries no secrets,
+  // so this checks rather than cleans; what it adds is the history row that
+  // says so, and the same rule the nightly run applies to every clone. Only
+  // for a repository this run created: the `clone` method wires one up by
+  // hand later, and the nightly run covers it from then on. Never fatal.
+  if (githubUrl) {
+    const { removeCodexSecretsFromClones } = await import("./codex-repo-secrets.server");
+    const checked = await removeCodexSecretsFromClones({
+      cloneIds: [inserted.id],
+      triggerSource: "provisioning",
+      triggeredBy: userId,
+      recordClean: true,
+    }).catch((err: unknown) => ({
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+      results: [] as Array<{ error?: string }>,
+    }));
+    if (!checked.ok) {
+      console.error("[provisionCloneCore] Codex secrets not checked", {
+        cloneId: inserted.id,
+        error: checked.error ?? checked.results[0]?.error ?? null,
+      });
+    }
+  }
+
   // Record any add-ons bought alongside the tier. Written as purchase rows,
   // not to `clones.purchased_addon_slugs` — that column is derived by a
   // trigger now, so writing it directly would be overwritten on the next

@@ -90,6 +90,7 @@ import { Route as HooksCloneSecretWithholdRouteImport } from './routes/hooks.clo
 import { Route as HooksCloneSecretsReconcileRouteImport } from './routes/hooks.clone-secrets-reconcile'
 import { Route as HooksCloneSigningPairReconcileRouteImport } from './routes/hooks.clone-signing-pair-reconcile'
 import { Route as HooksCodexNightlyRouteImport } from './routes/hooks.codex-nightly'
+import { Route as HooksCodexRepoSecretsRouteImport } from './routes/hooks.codex-repo-secrets'
 import { Route as HooksCodexSweepRouteImport } from './routes/hooks.codex-sweep'
 import { Route as HooksCrmSweepRouteImport } from './routes/hooks.crm-sweep'
 import { Route as HooksDeploymentDrainRouteImport } from './routes/hooks.deployment-drain'
@@ -654,6 +655,11 @@ const HooksCloneSigningPairReconcileRoute =
 const HooksCodexNightlyRoute = HooksCodexNightlyRouteImport.update({
   id: '/hooks/codex-nightly',
   path: '/hooks/codex-nightly',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksCodexRepoSecretsRoute = HooksCodexRepoSecretsRouteImport.update({
+  id: '/hooks/codex-repo-secrets',
+  path: '/hooks/codex-repo-secrets',
   getParentRoute: () => rootRouteImport,
 } as any)
 const HooksCodexSweepRoute = HooksCodexSweepRouteImport.update({
@@ -1524,6 +1530,7 @@ export interface FileRoutesByFullPath {
   '/hooks/clone-secrets-reconcile': typeof HooksCloneSecretsReconcileRoute
   '/hooks/clone-signing-pair-reconcile': typeof HooksCloneSigningPairReconcileRoute
   '/hooks/codex-nightly': typeof HooksCodexNightlyRoute
+  '/hooks/codex-repo-secrets': typeof HooksCodexRepoSecretsRoute
   '/hooks/codex-sweep': typeof HooksCodexSweepRoute
   '/hooks/crm-sweep': typeof HooksCrmSweepRoute
   '/hooks/deployment-drain': typeof HooksDeploymentDrainRoute
@@ -1752,6 +1759,7 @@ export interface FileRoutesByTo {
   '/hooks/clone-secrets-reconcile': typeof HooksCloneSecretsReconcileRoute
   '/hooks/clone-signing-pair-reconcile': typeof HooksCloneSigningPairReconcileRoute
   '/hooks/codex-nightly': typeof HooksCodexNightlyRoute
+  '/hooks/codex-repo-secrets': typeof HooksCodexRepoSecretsRoute
   '/hooks/codex-sweep': typeof HooksCodexSweepRoute
   '/hooks/crm-sweep': typeof HooksCrmSweepRoute
   '/hooks/deployment-drain': typeof HooksDeploymentDrainRoute
@@ -1983,6 +1991,7 @@ export interface FileRoutesById {
   '/hooks/clone-secrets-reconcile': typeof HooksCloneSecretsReconcileRoute
   '/hooks/clone-signing-pair-reconcile': typeof HooksCloneSigningPairReconcileRoute
   '/hooks/codex-nightly': typeof HooksCodexNightlyRoute
+  '/hooks/codex-repo-secrets': typeof HooksCodexRepoSecretsRoute
   '/hooks/codex-sweep': typeof HooksCodexSweepRoute
   '/hooks/crm-sweep': typeof HooksCrmSweepRoute
   '/hooks/deployment-drain': typeof HooksDeploymentDrainRoute
@@ -2215,6 +2224,7 @@ export interface FileRouteTypes {
     | '/hooks/clone-secrets-reconcile'
     | '/hooks/clone-signing-pair-reconcile'
     | '/hooks/codex-nightly'
+    | '/hooks/codex-repo-secrets'
     | '/hooks/codex-sweep'
     | '/hooks/crm-sweep'
     | '/hooks/deployment-drain'
@@ -2443,6 +2453,7 @@ export interface FileRouteTypes {
     | '/hooks/clone-secrets-reconcile'
     | '/hooks/clone-signing-pair-reconcile'
     | '/hooks/codex-nightly'
+    | '/hooks/codex-repo-secrets'
     | '/hooks/codex-sweep'
     | '/hooks/crm-sweep'
     | '/hooks/deployment-drain'
@@ -2673,6 +2684,7 @@ export interface FileRouteTypes {
     | '/hooks/clone-secrets-reconcile'
     | '/hooks/clone-signing-pair-reconcile'
     | '/hooks/codex-nightly'
+    | '/hooks/codex-repo-secrets'
     | '/hooks/codex-sweep'
     | '/hooks/crm-sweep'
     | '/hooks/deployment-drain'
@@ -2901,6 +2913,7 @@ export interface RootRouteChildren {
   HooksCloneSecretsReconcileRoute: typeof HooksCloneSecretsReconcileRoute
   HooksCloneSigningPairReconcileRoute: typeof HooksCloneSigningPairReconcileRoute
   HooksCodexNightlyRoute: typeof HooksCodexNightlyRoute
+  HooksCodexRepoSecretsRoute: typeof HooksCodexRepoSecretsRoute
   HooksCodexSweepRoute: typeof HooksCodexSweepRoute
   HooksCrmSweepRoute: typeof HooksCrmSweepRoute
   HooksDeploymentDrainRoute: typeof HooksDeploymentDrainRoute
@@ -3593,6 +3606,13 @@ declare module '@tanstack/react-router' {
       path: '/hooks/codex-nightly'
       fullPath: '/hooks/codex-nightly'
       preLoaderRoute: typeof HooksCodexNightlyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/codex-repo-secrets': {
+      id: '/hooks/codex-repo-secrets'
+      path: '/hooks/codex-repo-secrets'
+      fullPath: '/hooks/codex-repo-secrets'
+      preLoaderRoute: typeof HooksCodexRepoSecretsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/hooks/codex-sweep': {
@@ -4844,6 +4864,7 @@ const rootRouteChildren: RootRouteChildren = {
   HooksCloneSecretsReconcileRoute: HooksCloneSecretsReconcileRoute,
   HooksCloneSigningPairReconcileRoute: HooksCloneSigningPairReconcileRoute,
   HooksCodexNightlyRoute: HooksCodexNightlyRoute,
+  HooksCodexRepoSecretsRoute: HooksCodexRepoSecretsRoute,
   HooksCodexSweepRoute: HooksCodexSweepRoute,
   HooksCrmSweepRoute: HooksCrmSweepRoute,
   HooksDeploymentDrainRoute: HooksDeploymentDrainRoute,
