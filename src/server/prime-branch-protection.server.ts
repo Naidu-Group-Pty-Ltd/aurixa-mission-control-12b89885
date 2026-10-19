@@ -78,6 +78,23 @@ const PERMISSION_FIX =
   "installation (organisation Settings → GitHub Apps → aurixa-mission-control → Review request). " +
   "The next nightly run, or “Protect main now”, applies the ruleset.";
 
+/**
+ * What the installation token may do, as GitHub granted it: the token the
+ * client already holds carries its permissions, so this costs no call. Null
+ * when it cannot be read, which changes nothing — the write is attempted and
+ * GitHub's answer is reported instead.
+ */
+async function installationPermission(octokit: Octo, name: string): Promise<string | null> {
+  try {
+    const auth = (await octokit.auth({ type: "installation" })) as {
+      permissions?: Record<string, string>;
+    };
+    return auth?.permissions ? (auth.permissions[name] ?? "none") : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Lovable's App, found from the bot account its commits carry — never from a name alone. */
 async function resolveLovableApp(octokit: Octo): Promise<{ id: number; slug: string } | null> {
   const { data: bot } = await octokit.request("GET /user/{account_id}", {
@@ -226,6 +243,24 @@ export async function ensurePrimeBranchProtection(opts: {
     let rulesetId = decision.kind === "create" ? undefined : decision.id;
     const shortfall = decision.kind === "update" ? decision.shortfall : undefined;
     if (decision.kind === "create" || decision.kind === "update") {
+      // Said before it is tried, so engine health names the setting to change
+      // rather than promising a nightly run that would be refused.
+      const administration = await installationPermission(octokit, "administration");
+      if (administration !== null && administration !== "write") {
+        return {
+          ...base,
+          ok: false,
+          status: "needs_permission",
+          rulesetId,
+          shortfall,
+          detail:
+            (decision.kind === "create"
+              ? `${branch} has no protection: any token that can write to the repository can push to it. `
+              : `“${PRIME_RULESET_NAME}” has drifted: ${decision.shortfall.join("; ")}. `) +
+            `Mission Control's App holds Administration: ${administration}, and changing a ruleset needs write.`,
+          fix: PERMISSION_FIX,
+        };
+      }
       if (!opts.apply) {
         return {
           ...base,

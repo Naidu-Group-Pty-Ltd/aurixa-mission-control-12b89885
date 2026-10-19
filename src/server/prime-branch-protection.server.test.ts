@@ -14,6 +14,7 @@ const h = vi.hoisted(() => ({
   botLogin: "lovable-dev[bot]" as string | null,
   writeStatus: 0,
   autoMerge: false,
+  permissions: null as Record<string, string> | null,
 }));
 
 const fail = (status: number, message = "nope") =>
@@ -62,6 +63,10 @@ vi.mock("@/server/github-app.server", () => {
   return {
     getAppOctokit: () => ({
       request,
+      auth: async () => {
+        if (!h.permissions) throw new Error("no installation token in this fake");
+        return { type: "token", permissions: h.permissions };
+      },
       repos: {
         get: async () => ({
           data: {
@@ -96,6 +101,7 @@ beforeEach(() => {
   h.botLogin = "lovable-dev[bot]";
   h.writeStatus = 0;
   h.autoMerge = false;
+  h.permissions = null;
 });
 
 describe("ensurePrimeBranchProtection", () => {
@@ -170,6 +176,23 @@ describe("ensurePrimeBranchProtection", () => {
     const r = await ensurePrimeBranchProtection({ apply: true });
     expect(r).toMatchObject({ ok: false, status: "needs_permission" });
     expect(r.fix).toMatch(/Administration: Read and write/);
+  });
+
+  it("names the missing permission before trying, read from the token it holds", async () => {
+    h.permissions = { contents: "write", pull_requests: "write", administration: "read" };
+    for (const apply of [false, true]) {
+      const r = await ensurePrimeBranchProtection({ apply });
+      expect(r).toMatchObject({ ok: false, status: "needs_permission" });
+      expect(r.detail).toMatch(/Administration: read/);
+      expect(r.fix).toMatch(/Administration: Read and write/);
+    }
+    expect(writes()).toEqual([]);
+  });
+
+  it("goes ahead when the token may administer the repository", async () => {
+    h.permissions = { administration: "write" };
+    const r = await ensurePrimeBranchProtection({ apply: true });
+    expect(r).toMatchObject({ ok: true, status: "created" });
   });
 
   it("leaves a ruleset a person switched off", async () => {
