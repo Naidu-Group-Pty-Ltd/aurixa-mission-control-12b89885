@@ -18,7 +18,7 @@ the fourth clone is `npc-crm-independent-6505dc`. Supabase projects: Prime
 Independent `qvuwrvwzjyigptmnijyb`, NPC Test `umrtusxohxjxzodxorim`, Preflight
 Property Group `egrmsulhtmqnmhvuccxr`.
 
-## Where things stand (13:10 UTC, 19 Oct 2026)
+## Where things stand (13:35 UTC, 19 Oct 2026)
 
 | Piece | Where | State |
 |---|---|---|
@@ -26,7 +26,7 @@ Property Group `egrmsulhtmqnmhvuccxr`.
 | Prime: every action pinned to a commit, Deno and the Supabase CLI from their own releases | PR #3342 (draft), branch `claude/serene-gates-b7f5pi-pin-actions`, head `f2eef880` | CI 9083 running. CI 9080, on the Deno commit, had its `security` job pass the new Deno step and every Deno check before the Supabase CLI push superseded it. |
 | Mission Control: forwarded configuration follows Mission Control's value | PR #345, branch `claude/serene-gates-b7f5pi`, head `773f7932` (code unchanged since `be2f94cd`; this document on top) | Green, `mergeable_state: clean`, deliberately **not merged** until Prime's fix reaches the clones (§ Order). |
 | Clone `npc-client-dashboard`: cascade `prime@6bd6e86` | PR #379, branch `aurixa/cascade-70132e8-mvb39lqx`, head `06d2d096` | Three hand commits on top of the engine's (`3922a634` pins + Deno, `5b6cf760` the held App.tsx reconcile, `06d2d096` the Supabase CLI step in nine workflows, byte-identical to Prime). CI 1307 running. CI 1306, on `5b6cf760`, had `security` (with the regenerated inventory check), `render-container` and `supply-chain` green before the push superseded it. |
-| Clone `npc-crm-independent`: stuck cascade rows | Mission Control `cascade_results` | Not yet re-examined this round (task #45 second half). |
+| Clone `npc-crm-independent`: its workflows pinned, so a run can start there at all | PR #123, branch `claude/serene-gates-b7f5pi-crm-pin-actions`, head `86a9fa5` | Opened 13:30 UTC against `main` (`6322c63`). Nothing had run in that repository since CI 629 on 17 Oct, so its first run is the measurement of the policy there. Its cascade PR #121 (`prime@0da692c`, head `25acc6eb`) is red for its own reasons (§ F10) and is the engine's to refresh once `main` carries the pins. |
 | Organisation Actions policy | Enterprise / organisation settings | Two rules in force since ~11:00 UTC: SHA pins required, and only GitHub-owned actions admitted. Both measured by effect (§ F6). Needs the owner for the two publishers not replaced. |
 
 ## What the job was
@@ -170,6 +170,55 @@ theirs.
 pages and sheds them itself. With #3341 that is safe; it is still more bytes
 than the read needs.
 
+### F10. The CRM-independent line: a variant whose cascade has been red since 16 Oct
+
+`npc-crm-independent-6505dc` is the fleet's only `sync_scope: modules` clone
+(the other three are mirrors), so its workflows are its own variants:
+`ci.yml` differs from the prime's by 1,052 lines, `deploy-supabase-functions.yml`
+by 27, the two Codex workflows by over 1,200 each, `apply-migration.yml` by
+186, and `decommission-crm-line-functions.yml` exists only there. Every one of
+them named its actions by tag (`actions/checkout@v7` and `@v4`,
+`supabase/setup-cli@v3`, `denoland/setup-deno@v2`, `superfly/…@master`), so
+under the policy none could start — but nothing had run there since CI 629 on
+17 Oct, so the repository had not yet shown it. PR #123 pins every `uses:` in
+place (the `@v4`/`@v5` tags to their OWN commits, resolved with
+`git ls-remote --tags`, never to the prime's newer majors), installs Deno and
+the Supabase CLI from their releases exactly as the prime does, and names the
+four workflows still refused for `google-github-actions` and `superfly`.
+
+Its open cascade PR #121 (`aurixa/cascade-536a2d2-mv9eqjjx`, prime@0da692c,
+945 files, base `6a0601dc`, one engine commit) failed CI 624–628 before the
+policy, on held-file omissions of the shape the line's own CLAUDE.md describes
+("a spec and its subject travel together"):
+
+- `src/security/googleMapsProxies.security.test.ts` reads
+  `supabase/functions/street-view/index.ts`, which the line does not carry
+  (the prime has since removed Street View altogether, 16 Oct);
+- `src/lib/security/__tests__/stepUpPasswordAssured.spec.ts` reads
+  `supabase/functions/messaging-hub/recovery.ts`, absent on the line;
+- `src/lib/security/__tests__/supabaseJsVersionPins.spec.ts`'s `FROZEN` list
+  names 13 withheld GoHighLevel functions ("these are pinned now: delete their
+  lines") and omits the line's own `voice-automation-settings/index.ts`
+  ("pin these imports rather than adding them to FROZEN");
+- `src/lib/security/__tests__/phantomColumnWrites.spec.ts` asserts a
+  `finance-portal-automations` reminder message the line's held copy does not
+  carry;
+- the `security` job's edge-function inventory diff.
+
+Mission Control's ledger shows the engine still working the line: four
+`running` events (`0b329741`, `d9fd07ee`, `0aa71083`, `58333aed`) each carry a
+`pushing` row for the CRM clone started 13:08–13:22 UTC, with `held_evidence`
+over the line's variant files, while Preflight and NPC Test wait on lineage for
+their parent (`npc-client-dashboard`) to carry `prime@6bd6e86`, which is #379.
+
+The CRM line also still names the retired table id in
+`_shared/listings/marketplaceListings.pure.ts` and has none of the
+`UNREAD_BULK_COLUMNS` shedding, in `listings-cache` or in `listing-enrichment`
+(the 16 Oct fix never reached it either): it is 924 commits behind the prime.
+So the CRM line receives the Airtable fix only once #121, refreshed to a head
+carrying #3341, goes green — which needs the pins (PR #123) and then a hand
+reconcile of the held specs above, naming `prime@<sha>` once in its commit.
+
 ### F9. Environment facts worth knowing
 
 - `cdn.sheetjs.com` (the `xlsx` tarball host) is unreachable from this
@@ -207,6 +256,10 @@ Clone `npc-client-dashboard`, branch `aurixa/cascade-70132e8-mvb39lqx`
 workflows plus `CI_SCOPE.md`, copied byte for byte from Prime `efeead42` (no
 `prime@` token).
 
+Clone `npc-crm-independent-6505dc`, branch
+`claude/serene-gates-b7f5pi-crm-pin-actions` (PR #123): `86a9fa5` every action
+pinned in place, Deno and the Supabase CLI from their releases (30 workflows).
+
 ## Owed, in order
 
 1. **Prime #3342 → `main`.** When CI 9083 (on `f2eef880`) is green: mark the
@@ -222,9 +275,13 @@ workflows plus `CI_SCOPE.md`, copied byte for byte from Prime `efeead42` (no
    `dduzbchuswwbefdunfct`.
 3. **The cascade carries #3341 and #3342 to all four clones.** For
    `npc-client-dashboard`, PR #379 is the vehicle (never convert it to a
-   draft; the engine merges it when green). Re-examine the
-   `npc-crm-independent` rows in `cascade_results` for anything stuck; the
-   FLEET_SYNC_STALL documents in this directory record how.
+   draft; the engine merges it when green), and Preflight and NPC Test follow
+   it by lineage. For `npc-crm-independent`: merge PR #123 (the pins) when its
+   CI is green — `.github/CODEOWNERS` there covers renderer paths only, not
+   workflows — then reconcile cascade PR #121's held files (§ F10) on its
+   branch, naming `prime@<sha>` exactly once, and let the engine refresh and
+   merge it. The CRM line's cascade rows are not stuck: the engine is working
+   them (§ F10), the PR is simply red.
 4. **The owner: the Actions allowed list.** In the enterprise or organisation
    settings → Policies → Actions → "Allow select actions and reusable
    workflows", add `google-github-actions/*` and `superfly/*` (or
