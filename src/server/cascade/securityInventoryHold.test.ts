@@ -3,11 +3,13 @@ import { readFileSync } from "node:fs";
 import {
   FUNCTION_COUNT_RATCHET_PATH,
   SECURITY_INVENTORY_PATH,
+  baselineSourceWords,
   cloneOnlyEdgeFunctions,
   describeFunctionSetDifference,
   edgeFunctionNames,
   functionCountRatchetHold,
   securityInventoryHold,
+  withheldBySource,
 } from "./securityInventoryHold.pure";
 import { REPOSITORY_INVARIANTS, repositoryInvariantGlobs } from "./repositoryInvariants.pure";
 import { approvableHeld, reportableHeld } from "./syncExclusions.pure";
@@ -28,6 +30,36 @@ const invariantCovers = (path: string): boolean =>
   validateModuleGlobs(repositoryInvariantGlobs())
     .valid.map(globToRegex)
     .some((m) => m.test(path));
+
+/**
+ * The first call at `anchor` (which ends with its opening parenthesis): where
+ * it is, and its arguments with whitespace collapsed and any trailing comma
+ * dropped — so a call is pinned by what it passes, not by how a formatter
+ * happened to wrap it. `at` is -1 where the anchor is absent, and every test
+ * asserts it is not, because a missing anchor makes `toContain`/`not` checks
+ * on an empty slice pass for nothing.
+ */
+function callAt(source: string, anchor: string): { at: number; args: string } {
+  const at = source.indexOf(anchor);
+  if (at < 0) return { at, args: "" };
+  let depth = 1;
+  let i = at + anchor.length;
+  while (i < source.length && depth > 0) {
+    if (source[i] === "(") depth += 1;
+    else if (source[i] === ")") depth -= 1;
+    i += 1;
+  }
+  const args = source
+    .slice(at + anchor.length, i - 1)
+    .replace(/\s+/g, " ")
+    .replace(/,\s*([}\]])/g, " $1")
+    .trim()
+    .replace(/,$/, "");
+  return { at, args };
+}
+
+const INVENTORY_HOLD = "const inventoryHold = securityInventoryHold(";
+const RATCHET_HOLD = "const ratchetHold = functionCountRatchetHold(";
 
 describe("whether prime's security baseline may be written over a clone's", () => {
   it("lets it travel to a mirror, exactly as it does today", () => {
@@ -81,10 +113,42 @@ describe("how the engine uses it", () => {
     // fires — a control that is present, reachable and always answers no.
     const config = engine.indexOf("reconcileConfigToml({");
     const registry = engine.indexOf("reconcileSecurityRegistry({");
-    const hold = engine.indexOf("securityInventoryHold(cloneOwnedFunctions, withheldFunctions)");
+    const hold = engine.indexOf(INVENTORY_HOLD);
     expect(config).toBeGreaterThan(-1);
     expect(registry).toBeGreaterThan(config);
     expect(hold).toBeGreaterThan(registry);
+  });
+
+  it("asks it of the set measured against the source, naming the source", () => {
+    // `withheldFunctions` is read off the clone's tree; the baseline that
+    // travels is the SOURCE's (F22). Both holds take the same evidence.
+    for (const anchor of [INVENTORY_HOLD, RATCHET_HOLD]) {
+      const call = callAt(engine, anchor);
+      expect(call.at).toBeGreaterThan(-1);
+      expect(call.args).toBe("cloneOwnedFunctions, withheldFromSource, sourceLabel");
+    }
+  });
+
+  it("measures the set against the tree it copies FROM", () => {
+    const call = callAt(engine, "const withheldFromSource = withheldBySource(");
+    expect(call.at).toBeGreaterThan(-1);
+    expect(call.args).toBe("{ withheld: withheldFunctions, sourcePaths: primeShaByPath?.keys() }");
+    // Decided before either hold reads it.
+    expect(engine.indexOf(INVENTORY_HOLD)).toBeGreaterThan(call.at);
+  });
+
+  it("still removes DECLARATIONS by the clone's own reading", () => {
+    // A clone never declares a function its tree does not hold, whoever it
+    // copies from: the declarations stay on `withheldFunctions`.
+    const at = engine.indexOf("const declarationsWithheld: string[] =");
+    expect(at).toBeGreaterThan(-1);
+    const block = engine.slice(at, engine.indexOf(";", at));
+    expect(block).toContain("withheldFunctions");
+    expect(block).not.toContain("withheldFromSource");
+    const toml = engine.indexOf("reconcileConfigToml({");
+    expect(engine.slice(toml, engine.indexOf("})", toml))).toContain(
+      "withheld: declarationsWithheld",
+    );
   });
 
   it("removes prime's copy from the tree whatever happens next", () => {
@@ -109,7 +173,7 @@ describe("how the engine uses it", () => {
     // Bounded by the next pump rather than by a count of characters: the
     // block grew once already, and a window that silently stops short of the
     // second settle fails for a reason that has nothing to do with it.
-    const at = engine.indexOf("securityInventoryHold(cloneOwnedFunctions, withheldFunctions)");
+    const at = engine.indexOf(INVENTORY_HOLD);
     const end = engine.indexOf("reconcileApiSurface({", at);
     expect(at).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(at);
@@ -252,7 +316,7 @@ describe("the engine reads the tree before it decides", () => {
   it("does it after both reconciles and before the hold", () => {
     const registry = engine.indexOf("reconcileSecurityRegistry({");
     const tree = engine.indexOf("const ownedByTree = cloneOnlyEdgeFunctions({");
-    const hold = engine.indexOf("securityInventoryHold(cloneOwnedFunctions, withheldFunctions)");
+    const hold = engine.indexOf(INVENTORY_HOLD);
     expect(tree).toBeGreaterThan(registry);
     expect(hold).toBeGreaterThan(tree);
   });
@@ -313,7 +377,7 @@ describe("how the engine uses the ratchet hold", () => {
 
   it("decides it from the same reconciled evidence, after both reconciles", () => {
     const registry = engine.indexOf("reconcileSecurityRegistry({");
-    const hold = engine.indexOf("functionCountRatchetHold(cloneOwnedFunctions, withheldFunctions)");
+    const hold = engine.indexOf(RATCHET_HOLD);
     expect(registry).toBeGreaterThan(-1);
     expect(hold).toBeGreaterThan(registry);
   });
@@ -323,7 +387,7 @@ describe("how the engine uses the ratchet hold", () => {
     // listed as `modified` and the count was replaced anyway. It is settled
     // through the same `settleBaseline` the inventory is, which drops prime's
     // copy before it decides anything else.
-    const at = engine.indexOf("functionCountRatchetHold(cloneOwnedFunctions, withheldFunctions)");
+    const at = engine.indexOf(RATCHET_HOLD);
     expect(at).toBeGreaterThan(-1);
     expect(engine.slice(at)).toMatch(/await settleBaseline\(\s*ratchetHold,/);
   });
@@ -426,8 +490,131 @@ describe("the one clause that describes the difference", () => {
 
   it("is what the pull request body says, so the three cannot drift", () => {
     const engine = stripComments(readFileSync("src/server/cascade-engine.server.ts", "utf8"));
-    expect(engine).toContain(
-      "describeFunctionSetDifference(cloneOwnedFunctions, withheldFunctions)",
+    const call = callAt(engine, "describeFunctionSetDifference(");
+    expect(call.at).toBeGreaterThan(-1);
+    expect(call.args).toBe("cloneOwnedFunctions, withheldFromSource, sourceLabel");
+  });
+});
+
+/*
+  F22, 20 Oct 2026. NPC Test #228 and Preflight #227 are children of
+  npc-client-dashboard and copy ITS tree. All three lack the twenty-eight
+  functions of the GoHighLevel account migration, so the parent's committed
+  baseline already describes each child — yet both holds fired on the
+  twenty-eight, read off the child's tree alone, and both proposals went red
+  on `security` over a file the cascade declined to write.
+*/
+describe("what a clone withholds, measured against the tree it copies from", () => {
+  const ALL_28 = PRIME_ONLY_FEATURES.find((f) => f.key === "ghl-account-migration")!.functions;
+  const KEPT = ["generate-investment-report", "voice-to-text"];
+  const prime = [...ALL_28, ...KEPT].map((n) => `supabase/functions/${n}/index.ts`);
+  const parent = KEPT.map((n) => `supabase/functions/${n}/index.ts`);
+
+  it("is every withheld function where the source is the prime", () => {
+    expect(withheldBySource({ withheld: ALL_28, sourcePaths: prime })).toEqual([...ALL_28].sort());
+  });
+
+  it("is nothing where the source withholds the same functions", () => {
+    expect(withheldBySource({ withheld: ALL_28, sourcePaths: parent })).toEqual([]);
+  });
+
+  it("keeps exactly the ones the source still holds", () => {
+    const some = ["migration-dispatcher", "migration-job-status"];
+    const source = [...parent, ...some.map((n) => `supabase/functions/${n}/lib/x.ts`)];
+    expect(withheldBySource({ withheld: ALL_28, sourcePaths: source })).toEqual(some);
+  });
+
+  it("answers the clone's own reading unchanged where the source was not read", () => {
+    // An unread source is not a source that lacks everything: saying so would
+    // let prime's baseline travel on no evidence.
+    for (const sourcePaths of [null, undefined]) {
+      expect(withheldBySource({ withheld: ["b", "a", "b"], sourcePaths })).toEqual(["a", "b"]);
+    }
+  });
+
+  it("reads a function off a directory, as the generator does", () => {
+    // `edgeFunctionNames`, never "a directory with an index.ts".
+    const source = ["supabase/functions/migration-dispatcher/lib/send.ts"];
+    expect(withheldBySource({ withheld: ["migration-dispatcher"], sourcePaths: source })).toEqual([
+      "migration-dispatcher",
+    ]);
+  });
+
+  it("takes a Map's keys, which is what the engine holds", () => {
+    const tree = new Map(parent.map((p) => [p, "sha"]));
+    expect(withheldBySource({ withheld: ALL_28, sourcePaths: tree.keys() })).toEqual([]);
+  });
+
+  it("lets a child with nothing of its own take its parent's baseline", () => {
+    const withheld = withheldBySource({ withheld: ALL_28, sourcePaths: parent });
+    expect(securityInventoryHold([], withheld, "npc-client-dashboard")).toBeNull();
+    expect(functionCountRatchetHold([], withheld, "npc-client-dashboard")).toBeNull();
+  });
+
+  it("still holds for a child that differs from its parent", () => {
+    const withheld = withheldBySource({ withheld: ALL_28, sourcePaths: parent });
+    const held = securityInventoryHold(["crm-calendar"], withheld, "npc-client-dashboard");
+    expect(held?.path).toBe(SECURITY_INVENTORY_PATH);
+  });
+});
+
+describe("the notes name the tree the baseline came from", () => {
+  it("names the parent, never the prime, for a child routed by lineage", () => {
+    const inv = securityInventoryHold(["crm-calendar"], [], "npc-client-dashboard");
+    expect(inv?.note).toBe(
+      "This clone owns 1 edge function(s) npc-client-dashboard does not (crm-calendar), so " +
+        "npc-client-dashboard's security baseline is a static analysis of a different " +
+        "repository. The clone's own copy is kept. Where it later goes stale, " +
+        "`npm run security:inventory` regenerates it from this repository.",
     );
+    const ratchet = functionCountRatchetHold(["crm-calendar"], [], "npc-client-dashboard");
+    expect(ratchet?.note).toContain("declares 1 npc-client-dashboard does not (crm-calendar)");
+    expect(ratchet?.note).toContain(
+      "npc-client-dashboard's copy states npc-client-dashboard's count",
+    );
+    expect(ratchet?.note).not.toMatch(/\bprime\b/i);
+  });
+
+  it("reads exactly as it always has where the source is the prime", () => {
+    // `sourceLabel` is "prime" off the lineage edge, and every CRM pass has
+    // shown an operator these sentences.
+    for (const source of [undefined, "prime", "", "  "]) {
+      expect(securityInventoryHold(["crm-calendar"], [], source)?.note).toBe(
+        securityInventoryHold(["crm-calendar"])?.note,
+      );
+      expect(functionCountRatchetHold(["crm-calendar"], [], source)?.note).toBe(
+        functionCountRatchetHold(["crm-calendar"])?.note,
+      );
+      expect(describeFunctionSetDifference(["a"], ["migration-dispatcher"], source)).toBe(
+        describeFunctionSetDifference(["a"], ["migration-dispatcher"]),
+      );
+    }
+    expect(functionCountRatchetHold(["crm-calendar"])?.note).toContain(
+      "The prime's copy states the prime's count",
+    );
+  });
+
+  it("keeps the prime-only register's own words, which are about the prime", () => {
+    // "which the prime keeps for itself" describes the REGISTER, and stays
+    // true whoever the bytes came from.
+    expect(
+      describeFunctionSetDifference([], ["migration-dispatcher"], "npc-client-dashboard"),
+    ).toBe(
+      "does not carry the GoHighLevel account migration (1 of 28 functions: " +
+        "migration-dispatcher), which the prime keeps for itself",
+    );
+  });
+
+  it("is one rule for every note", () => {
+    expect(baselineSourceWords()).toEqual({
+      name: "the prime",
+      possessive: "the prime's",
+      possessiveOpening: "The prime's",
+    });
+    expect(baselineSourceWords("Preflight")).toEqual({
+      name: "Preflight",
+      possessive: "Preflight's",
+      possessiveOpening: "Preflight's",
+    });
   });
 });

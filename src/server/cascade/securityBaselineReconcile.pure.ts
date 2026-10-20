@@ -102,6 +102,7 @@
  */
 
 import { withheldClause } from "../crmLineFeatures.pure";
+import { baselineSourceWords } from "./securityInventoryHold.pure";
 
 /** The file the generator writes and CI diffs. */
 export const SECURITY_INVENTORY_PATH = "docs/security/SECURITY_INVENTORY.json";
@@ -624,15 +625,17 @@ function ratchetNote(
   indent: string,
   owned: readonly string[],
   withheld: readonly string[],
+  source?: string,
 ): string {
+  const from = baselineSourceWords(source);
   const declares =
     owned.length > 0
-      ? `declares ${owned.length} edge function(s) the prime does not — ${owned.join(", ")} —`
+      ? `declares ${owned.length} edge function(s) ${from.name} does not — ${owned.join(", ")} —`
       : "";
   const omits = withheld.length > 0 ? `does not declare ${withheldClause(withheld)},` : "";
   const difference = declares && omits ? `${declares} and ${omits}` : declares || omits;
   const sentence =
-    `${RECONCILED_MARKER} This deployment ${difference} so the prime's number counts a ` +
+    `${RECONCILED_MARKER} This deployment ${difference} so ${from.possessive} number counts a ` +
     `different repository. The count below is this one's, taken from the config this same ` +
     `pass composed.`;
 
@@ -744,6 +747,13 @@ export function reconcileFunctionCountRatchet(args: {
    * the spec's tables (`dropWithheldTableRows`).
    */
   withheld?: readonly string[];
+  /**
+   * The engine's `sourceLabel`: the repository `primeSpec` came from. The
+   * note names it, because a clone routed by lineage receives its parent's
+   * spec and a note naming the prime would be about a file the prime never
+   * wrote. Left out, the note reads as it always has.
+   */
+  source?: string;
 }): BaselineReconcile<string> {
   const withheld = [...new Set(args.withheld ?? [])].sort();
   const pruned = dropWithheldTableRows(args.primeSpec, withheld);
@@ -775,7 +785,10 @@ export function reconcileFunctionCountRatchet(args: {
   const count = ratchetCount(args.mergedToml, rule);
   const owned = [...new Set(args.cloneOwnedFunctions)].sort();
 
-  const note = owned.length > 0 || withheld.length > 0 ? ratchetNote(indent, owned, withheld) : "";
+  const note =
+    owned.length > 0 || withheld.length > 0
+      ? ratchetNote(indent, owned, withheld, args.source)
+      : "";
   const merged =
     stripPriorNote(primeSpec.slice(0, assertion.index)) +
     note +

@@ -180,9 +180,11 @@ import {
   FUNCTION_COUNT_RATCHET_PATH,
   SECURITY_INVENTORY_PATH,
   cloneOnlyEdgeFunctions,
+  baselineSourceWords,
   describeFunctionSetDifference,
   functionCountRatchetHold,
   securityInventoryHold,
+  withheldBySource,
 } from "./cascade/securityInventoryHold.pure";
 import {
   reconcileFunctionCountRatchet,
@@ -3855,8 +3857,25 @@ export async function processClone(args: {
   // half: a clone that does NOT hold what the prime keeps for itself
   // (`withheldFunctions`) differs from prime's function set by subtraction,
   // and prime's two numbers count what it does not have.
-  const inventoryHold = securityInventoryHold(cloneOwnedFunctions, withheldFunctions);
-  const ratchetHold = functionCountRatchetHold(cloneOwnedFunctions, withheldFunctions);
+  //
+  // `withheldFunctions` is read off the clone's tree, and the baseline that
+  // travels is the SOURCE's. A clone routed by lineage copies its parent, and
+  // a function the parent lacks too is no difference between the two trees:
+  // holding for it held npc-client-dashboard's children on a baseline that
+  // already described them (F22). From the prime this is every withheld
+  // function, so nothing changes off the lineage edge. The notes name the
+  // source for the same reason the commit message does: the baseline they
+  // describe is the one the bytes came with.
+  const withheldFromSource = withheldBySource({
+    withheld: withheldFunctions,
+    sourcePaths: primeShaByPath?.keys(),
+  });
+  const inventoryHold = securityInventoryHold(cloneOwnedFunctions, withheldFromSource, sourceLabel);
+  const ratchetHold = functionCountRatchetHold(
+    cloneOwnedFunctions,
+    withheldFromSource,
+    sourceLabel,
+  );
   /**
    * What the baseline was reconciled FROM, kept for the one recount this pass
    * owes it once the delivery is final (below the deletion plan). Set only
@@ -3988,7 +4007,7 @@ export async function processClone(args: {
               mergedRegistryJson,
               mergedTreePaths,
               deliveredPaths,
-              withheld: withheldFunctions,
+              withheld: withheldFromSource,
               primeTree: primeShaByPath,
               cloneTree: cloneShaByPath,
               rewrittenPaths: reconciledPaths,
@@ -4023,7 +4042,8 @@ export async function processClone(args: {
               primeSpec: primeRatchetSpec,
               mergedToml,
               cloneOwnedFunctions,
-              withheld: withheldFunctions,
+              withheld: withheldFromSource,
+              source: sourceLabel,
             })
           : null,
       );
@@ -5264,7 +5284,7 @@ export async function processClone(args: {
       mergedRegistryJson: inventoryRecount.mergedRegistryJson,
       mergedTreePaths: finalTree,
       deliveredPaths: finalDelivered,
-      withheld: withheldFunctions,
+      withheld: withheldFromSource,
       primeTree: inventoryRecount.primeTree,
       cloneTree: inventoryRecount.cloneTree,
       rewrittenPaths: reconciledPaths,
@@ -5829,8 +5849,16 @@ export async function processClone(args: {
         (baselineNotes.length
           ? `\n\n### The security baselines were recomputed, not copied\n\n` +
             `\`${SECURITY_INVENTORY_PATH}\` and \`${FUNCTION_COUNT_RATCHET_PATH}\` each state how ` +
-            `many edge functions a repository has, so prime's copies state PRIME'S count. This ` +
-            `deployment ${describeFunctionSetDifference(cloneOwnedFunctions, withheldFunctions)}, ` +
+            `many edge functions a repository has, so ${
+              baselineSourceWords(sourceLabel).name === "the prime"
+                ? "prime's copies state PRIME'S count"
+                : `${baselineSourceWords(sourceLabel).possessive} copies state its own count`
+            }. This ` +
+            `deployment ${describeFunctionSetDifference(
+              cloneOwnedFunctions,
+              withheldFromSource,
+              sourceLabel,
+            )}, ` +
             `so both were computed from the \`config.toml\` and ` +
             `security registry this same pass reconciled — the numbers describe the tree this ` +
             `proposal creates rather than either side's.\n\n` +
