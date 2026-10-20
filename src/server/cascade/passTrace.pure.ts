@@ -38,9 +38,40 @@ export const PASS_PHASES = [
   "prefetch",
   /** Each file judged and prepared. */
   "prepare",
-  /** The delivery decided: specs, subjects, reconciles, the baselines. */
+  /**
+   * The prepared files absorbed into the delivery, `supabase/config.toml`,
+   * the merged line variants, and what the prime keeps for itself. Split
+   * further on 20 Oct 2026, into the five stages below: the CRM line's first
+   * traced pass entered `deliver` at 25.3 s and recorded nothing after it,
+   * and every one of them reads the clone over the API.
+   */
   "deliver",
-  /** The tree written, a chunk at a time. */
+  /** The security registry: prime's entries, plus the clone's own. */
+  "registry",
+  /** The security baselines, held or regenerated against the source. */
+  "baselines",
+  /** The mobile API surface, generated from the files just reconciled. */
+  "surface",
+  /** The deploy workflow, reconciled the same way. */
+  "workflow",
+  /**
+   * Which of prime's deletions this delivery makes: the clone's held and
+   * clone-only sources read for anything that still imports a deleted file.
+   */
+  "survivors",
+  /**
+   * The membrane's spec channel over the finished delivery, and the subjects
+   * and bridges it carries, round after round. Split from `deliver` on
+   * 20 Oct 2026: the CRM line's first traced pass entered `deliver` at
+   * 25.3 s and recorded nothing after it, and one name for a dozen steps
+   * could not say which.
+   */
+  "specs",
+  /** The removals narrowed by the specs that stay, and the baselines recounted. */
+  "recount",
+  /** Held files read for what this delivery would break, and the final entries. */
+  "references",
+  /** The tree written, a chunk at a time, asking the budget (`treeChain.pure.ts`). */
   "tree",
   /** The commit, the branch and the pull request. */
   "proposal",

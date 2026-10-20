@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   MAX_CONSECUTIVE_SUPERSESSIONS,
+  plansBesideParked,
   slugsOwedAfterSupersession,
   supersededChain,
   supersessionVerdict,
@@ -112,5 +114,49 @@ describe("slugsOwedAfterSupersession", () => {
 
   it("owes the union of two named lists, once each, in order", () => {
     expect(slugsOwedAfterSupersession(["c", "a"], ["b", "a"])).toEqual(["a", "b", "c"]);
+  });
+});
+
+describe("plansBesideParked (F23 remedy 1)", () => {
+  // The four runs parked from 12 to 20 Oct 2026, as the table held them: each
+  // whole-fleet, each the fourth of a chain the planner had retired itself.
+  const parkedWholeFleet = { openStatus: "awaiting_validation", openSlugs: null };
+
+  it("puts a merge's named list in a run of its own beside a parked whole-fleet run", () => {
+    expect(plansBesideParked({ ...parkedWholeFleet, incomingSlugs: ["listings-cache"] })).toBe(
+      true,
+    );
+  });
+
+  it("still folds a whole-fleet plan, which is the work the person is being asked about", () => {
+    expect(plansBesideParked({ ...parkedWholeFleet, incomingSlugs: null })).toBe(false);
+  });
+
+  it("never steps around a parked NAMED run, which may have parked over the same bundles", () => {
+    expect(
+      plansBesideParked({
+        openStatus: "awaiting_validation",
+        openSlugs: ["listings-cache"],
+        incomingSlugs: ["listings-cache"],
+      }),
+    ).toBe(false);
+  });
+
+  it("leaves a run the drain will take, and an empty list, exactly as before", () => {
+    for (const openStatus of ["planned", "approved", "executing"]) {
+      expect(plansBesideParked({ openStatus, openSlugs: null, incomingSlugs: ["a"] })).toBe(false);
+    }
+    expect(plansBesideParked({ ...parkedWholeFleet, incomingSlugs: [] })).toBe(false);
+  });
+
+  it("is asked by the planner before the fold, and the run it plans says what it stands beside", () => {
+    const sync = readFileSync("src/server/backendSync.server.ts", "utf8");
+    const fn = sync.slice(sync.indexOf("async function planFunctionDeploy("));
+    const beside = fn.indexOf("plansBesideParked({");
+    const fold = fn.indexOf("— BLOCKED: that run is parked for a human");
+    expect(beside).toBeGreaterThan(-1);
+    expect(fold).toBeGreaterThan(beside);
+    expect(fn).toContain("besideParked = open.id;");
+    expect(fn).toContain("...(besideParked ? { beside_parked: besideParked } : {}),");
   });
 });

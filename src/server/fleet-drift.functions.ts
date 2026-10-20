@@ -1,5 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import { driftNoticesToRaise } from "@/lib/driftNotice.pure";
 
 // AI Fleet Manager — analyzes each clone vs prime and writes drift suggestions.
 // Manually invokable from the Fleet Manager UI; also triggered by cron via
@@ -184,9 +185,6 @@ export async function runFleetDriftScan(
     const installedNames = (cmods ?? []).map((m: any) => m.modules?.name).filter(Boolean);
 
     const previousSuggestions = (c.drift_suggestions as DriftSuggestion[] | null) ?? [];
-    const previousHighTitles = new Set(
-      previousSuggestions.filter((s) => s.severity === "high").map((s) => s.title),
-    );
 
     let suggestions: DriftSuggestion[] = [];
     if (newCommitsBehind > 0) {
@@ -224,11 +222,15 @@ export async function runFleetDriftScan(
     // titles are model-authored and vary per run, so "genuinely new" was true
     // every 15 minutes — the dry-run clone drew ten identical warnings in one
     // afternoon, two of them in the same insert at the same microsecond. A
-    // transition is a fact the model cannot rephrase.
-    const wasAlreadyBehind = c.sync_status === "behind" || c.sync_status === "failed";
-    const newHigh = wasAlreadyBehind
-      ? []
-      : suggestions.filter((s) => s.severity === "high" && !previousHighTitles.has(s.title));
+    // transition is a fact the model cannot rephrase, and the one this scan
+    // can see is its own: whether the last scan stored a high suggestion.
+    // Reading `sync_status` alone missed `cascading`, which a stuck clone
+    // holds for days (`driftNoticesToRaise`).
+    const newHigh = driftNoticesToRaise({
+      syncStatus: c.sync_status,
+      previous: previousSuggestions,
+      current: suggestions,
+    });
     if (newHigh.length > 0) {
       await supabase.from("notifications").insert(
         newHigh.map((s) => ({

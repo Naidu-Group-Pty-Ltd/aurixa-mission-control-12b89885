@@ -135,3 +135,39 @@ export function slugsOwedAfterSupersession(
   if (parked === null || planned === null) return null;
   return [...new Set([...parked, ...planned])].sort();
 }
+
+/**
+ * Whether a NAMED plan becomes a run of its own beside a parked whole-fleet
+ * run, instead of being folded into it (F23 remedy 1, 20 Oct 2026).
+ *
+ * A parked run takes nothing from the drain, and every plan that reaches it
+ * after the supersession chain is spent is folded in and reported `BLOCKED`.
+ * From 12 to 20 Oct 2026 that was every clone's backend: four whole-fleet
+ * runs, each the fourth of a chain the planner retired itself, sat in front
+ * of a person while every function merged to the prime since — `#3341`'s
+ * `listings-cache` among them — was folded into a run nothing would execute.
+ * A cascade's own list is small and is exactly what the merge changed, so it
+ * goes in a run of its own and lands in a pass or two, while the parked run
+ * keeps its place in front of a person.
+ *
+ * Narrow on purpose. Only a named list goes beside, so at most one run moves
+ * beside a parked one and it widens itself with every later named plan; a
+ * whole-fleet plan still folds, because a second whole-fleet run is the same
+ * work the person is being asked about. Only a WHOLE-FLEET parked run is
+ * stepped around: a parked named run was parked over the very bundles a
+ * later list may name again.
+ */
+export function plansBesideParked(input: {
+  openStatus: string;
+  /** What the parked run owes; null is the whole fleet. */
+  openSlugs: readonly string[] | null;
+  /** What this plan names; null is the whole fleet. */
+  incomingSlugs: readonly string[] | null;
+}): boolean {
+  return (
+    input.openStatus === "awaiting_validation" &&
+    input.openSlugs === null &&
+    input.incomingSlugs !== null &&
+    input.incomingSlugs.length > 0
+  );
+}

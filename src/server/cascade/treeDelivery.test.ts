@@ -130,14 +130,18 @@ describe("the engine delivers text inline and chains the tree", () => {
   });
 
   it("the tree is a chunked chain over base_tree, ending in the sha the commit uses", () => {
-    const at = engine.indexOf("let chainedTreeSha = cloneCommit.tree.sha;");
+    // Since F25 the chain is `writeTreeChain` (treeChain.pure.ts), which layers
+    // each chunk over the previous call's tree and is held to that, and to
+    // ending where one uninterrupted chain ends, in treeChain.test.ts. The
+    // engine supplies the chunks and the call.
+    const at = engine.indexOf("const chunks = chunkTreeEntries(treeEntries);");
     expect(at).toBeGreaterThan(-1);
-    const chain = engine.slice(at, at + 700);
-    expect(chain).toContain("for (const chunk of chunkTreeEntries(treeEntries))");
-    expect(chain).toContain("base_tree: chainedTreeSha,");
+    const chain = engine.slice(at, at + 1_200);
+    expect(chain).toContain("baseTreeSha: cloneCommit.tree.sha,");
+    expect(chain).toContain("base_tree: baseTree,");
     expect(chain).toContain("tree: chunk.map(toGitTreeParam),");
-    expect(chain).toContain("chainedTreeSha = chunkTree.sha;");
-    expect(chain).toContain("const newTree = { sha: chainedTreeSha };");
+    expect(chain).toContain(").data.sha,");
+    expect(engine).toContain("const newTree = { sha: chain.sha };");
   });
 
   it("a deletion is still marked by sha === null wherever the proposal narrates it", () => {

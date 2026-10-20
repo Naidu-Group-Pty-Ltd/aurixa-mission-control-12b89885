@@ -561,7 +561,7 @@ async function judgeExhaustedEvents(): Promise<{ retired: number; refunded: numb
         await terminaliseOrphanedRows(
           admin,
           event.id,
-          `Skipped: the carrier event was retired after ${MAX_ATTEMPTS} attempts without processing this clone.`,
+          `was retired after ${MAX_ATTEMPTS} attempts without processing this clone.`,
         );
         const { error: notifyError } = await admin.from("notifications").insert({
           kind: "cascade_failed",
@@ -1001,8 +1001,8 @@ async function drainOne(
           admin,
           claimed.id,
           res.status === "unarmed"
-            ? "Skipped: the carrier event was retired after being claimed with no armed rows; this row arrived too late to be part of any pass."
-            : "Skipped: the carrier event was failed at the attempt ceiling — one clone's pass is larger than one tick.",
+            ? "was retired after being claimed with no armed rows; this row arrived too late to be part of any pass."
+            : "was failed at the attempt ceiling — one clone's pass is larger than one tick.",
         );
       }
       return { processed: true, ok: true, held: res.status };
@@ -1037,10 +1037,7 @@ async function drainOne(
       await terminaliseOrphanedRows(
         admin,
         claimed.id,
-        `Skipped: the carrier event was failed at the attempt ceiling after a pass error — ${msg}`.slice(
-          0,
-          500,
-        ),
+        `was failed at the attempt ceiling after a pass error — ${msg}`.slice(0, 470),
       );
     }
     return { processed: true, ok: false, error: msg, id: claimed.id };

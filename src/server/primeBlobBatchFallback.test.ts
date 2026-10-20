@@ -172,3 +172,66 @@ describe("fetchBlobTextsBatched", () => {
     }
   });
 });
+
+describe("fetchBlobTextsBatched runs its batches a few at a time", () => {
+  /**
+   * The batches ran one after another, and on 20 Oct 2026 that was the deploy
+   * lane's whole pass: 30 batches for 33.2 MB took 49.3 s and 53.8 s of
+   * passes the platform ends at 60, and one bundle landed per pass. These pin
+   * that batches overlap, never more than four at once, and that overlapping
+   * changes nothing about what arrives or how a failed batch is answered.
+   */
+  function manyEntries(n: number) {
+    const entries = Array.from({ length: n }, (_, i) => ({
+      rel: `fn-${i}/index.ts`,
+      sha: `sha-${i}`,
+    }));
+    const bodies = Object.fromEntries(entries.map((e, i) => [e.sha, `export const v = ${i};\n`]));
+    return { entries, bodies };
+  }
+
+  function answerFor(bodies: Record<string, string>, query: string) {
+    const repository: Record<string, unknown> = {};
+    for (const [, alias, oid] of query.matchAll(/(b\d+): object\(oid: "([^"]+)"\)/g)) {
+      repository[alias] = { text: bodies[oid], isBinary: false, isTruncated: false };
+    }
+    return { repository };
+  }
+
+  it("keeps up to four batches in flight, and never more", async () => {
+    const { entries, bodies } = manyEntries(80 * 10);
+    let inFlight = 0;
+    let peak = 0;
+    const { octokit, graphqlCalls } = fakeOctokit({
+      bodies,
+      graphql: async (query: string) => {
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        await new Promise((r) => setTimeout(r, 5));
+        inFlight -= 1;
+        return answerFor(bodies, query);
+      },
+    });
+    const out = await fetchBlobTextsBatched(octokit, REF, entries);
+    expect(graphqlCalls).toHaveLength(10);
+    expect(peak).toBe(4);
+    expect(decoded(out)).toEqual(Object.fromEntries(entries.map((e) => [e.rel, bodies[e.sha]])));
+  });
+
+  it("re-asks only a failed batch by REST while the others overlap it", async () => {
+    const { entries, bodies } = manyEntries(80 * 3);
+    let call = 0;
+    const { octokit, restCalls } = fakeOctokit({
+      bodies,
+      graphql: async (query: string) => {
+        call += 1;
+        if (call === 2) throw new Error("502 Bad Gateway");
+        return answerFor(bodies, query);
+      },
+    });
+    const out = await fetchBlobTextsBatched(octokit, REF, entries);
+    expect(restCalls).toHaveLength(80);
+    expect(out.size).toBe(240);
+    expect(decoded(out)).toEqual(Object.fromEntries(entries.map((e) => [e.rel, bodies[e.sha]])));
+  });
+});

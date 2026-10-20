@@ -314,8 +314,13 @@ describe("the drift sweep leaves provisioning clones alone", () => {
   });
 
   it("alarms fire on the transition into behind, not on every scan there", () => {
+    /* This pinned `wasAlreadyBehind … ? []`, a guard that read `sync_status`
+       alone and so never held for a clone held at `cascading` — every scan of
+       one raised a notice (20 Oct 2026: 1,934 in a week). The rule and its
+       measured cases are in `driftNotice.pure.test.ts`; this keeps the scan
+       on it. */
     const src = drift();
-    expect(src).toMatch(/wasAlreadyBehind[\s\S]{0,200}\? \[\]/);
+    expect(src).toMatch(/driftNoticesToRaise\(\{[\s\S]{0,200}previous: previousSuggestions/);
   });
 });
 

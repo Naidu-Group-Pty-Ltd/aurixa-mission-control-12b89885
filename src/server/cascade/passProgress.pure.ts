@@ -82,6 +82,7 @@
  */
 
 import type { SettledDeletionEvidence } from "./deletionPropagation.pure";
+import { readTreeChain, treeChainGrew, type TreeChainProgress } from "./treeChain.pure";
 import type { SettledHeldEvidence } from "./heldEvidence.pure";
 
 export type PreparedBlob = {
@@ -149,6 +150,12 @@ export type CascadeProgress = {
    * records. See "A variant merge is decided once" in the module header.
    */
   variant_evidence?: Record<string, VariantEvidenceEntry>;
+  /**
+   * How far the delivery's tree write had got when a pass stopped inside it.
+   * Absent on old records and wherever no pass has stopped there. Resumed only
+   * by a pass about to write the very same chain (`treeChain.pure.ts`).
+   */
+  tree_chain?: TreeChainProgress;
   /** Files the pass had to prepare in total, for the sentence. */
   total: number;
 };
@@ -210,6 +217,9 @@ export function readProgress(raw: unknown): CascadeProgress | null {
       if (parsed) variant_evidence[path] = parsed;
     }
   }
+  // Dropped alone where malformed, like an evidence entry: the cost is one
+  // rewrite of the chain, never a wrong tree.
+  const tree_chain = readTreeChain((r as { tree_chain?: unknown }).tree_chain);
   return {
     version: 1,
     source_sha: r.source_sha,
@@ -217,6 +227,7 @@ export function readProgress(raw: unknown): CascadeProgress | null {
     deletion_evidence,
     held_evidence,
     variant_evidence,
+    ...(tree_chain ? { tree_chain } : {}),
     total,
   };
 }
@@ -403,7 +414,9 @@ export function ledgerGrew(prior: CascadeProgress | null, now: CascadeProgress |
     const was = p?.variant_evidence?.[path];
     if (!was || variantKey(was) !== variantKey(e)) return true;
   }
-  return false;
+  // A tree chain further along is the same kind of kept work: the next pass
+  // writes only the chunks after it.
+  return treeChainGrew(p?.tree_chain, now.tree_chain);
 }
 
 /** One held-evidence entry, or nothing — dropped alone by the deletion rule. */

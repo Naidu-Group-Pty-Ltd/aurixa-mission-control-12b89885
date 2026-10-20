@@ -72,6 +72,7 @@ import {
   CHECKS_PERMISSION_REMEDY,
   NEVER_STARTED_REMEDY,
 } from "./autoMergeGate.pure";
+import { settledByCarrier } from "./carrierSettlement.pure";
 
 /** Terminal-enough facts about a pull request, from one `pulls.get`. */
 export type PullRequestFacts = {
@@ -397,6 +398,15 @@ export type CascadeCounts = {
   skipped: number;
   total: number;
   owedReconcile: number;
+  /**
+   * Rows the event's carrier settled without ever reaching them: retired at
+   * the attempt ceiling, rejected, or failed before the clone's turn
+   * (`settledByCarrier`). Stored as `skipped`, because nothing failed in the
+   * row, and never counted as one here: a clone the event never reached did
+   * not receive what it carried (F24). Absent where the writer could not see
+   * such rows, which is the engine's own tally at the end of a pass.
+   */
+  undelivered?: number;
 };
 
 /**
@@ -408,24 +418,38 @@ export type CascadeCounts = {
  * "0 merged" and "1 merged" come to be rendered by two writers in two shapes.
  */
 export function summariseCascade(counts: CascadeCounts): string {
+  const undelivered = counts.undelivered ?? 0;
   return (
     `${counts.succeeded} merged · ${counts.opened} PRs · ${counts.failed} failed · ` +
     `${counts.skipped} skipped (of ${counts.total})` +
+    (undelivered > 0 ? ` · ${undelivered} never reached` : "") +
     (counts.owedReconcile > 0 ? ` · ${counts.owedReconcile} awaiting manual reconcile` : "")
   );
 }
 
-/** The event status those counts imply. The rule the engine has always used. */
+/**
+ * The event status those counts imply. The rule the engine has always used,
+ * with one addition: a clone the event never reached counts against it as a
+ * failure does (F24). That is what keeps a retired event `failed` (or
+ * `partial`, where something else landed) for the readers that act on it:
+ * `headRedelivery` redelivers prime's head only after an automatic failure.
+ */
 export function cascadeEventStatus(
-  counts: Pick<CascadeCounts, "succeeded" | "opened" | "failed">,
+  counts: Pick<CascadeCounts, "succeeded" | "opened" | "failed" | "undelivered">,
 ): "completed" | "failed" | "partial" {
-  if (counts.failed > 0 && counts.succeeded + counts.opened === 0) return "failed";
-  return counts.failed > 0 ? "partial" : "completed";
+  const against = counts.failed + (counts.undelivered ?? 0);
+  if (against > 0 && counts.succeeded + counts.opened === 0) return "failed";
+  return against > 0 ? "partial" : "completed";
 }
 
 /** Tally a set of result rows into the counts the summary is composed from. */
 export function countResults(
-  rows: ReadonlyArray<{ status: string | null; diff_summary: string | null }>,
+  rows: ReadonlyArray<{
+    status: string | null;
+    diff_summary: string | null;
+    /** Read where the caller selected it; a row without it is never `undelivered`. */
+    error_message?: string | null;
+  }>,
   owesReconcile: (summary: string | null) => boolean,
 ): CascadeCounts {
   const counts: CascadeCounts = {
@@ -435,12 +459,16 @@ export function countResults(
     skipped: 0,
     total: rows.length,
     owedReconcile: 0,
+    undelivered: 0,
   };
   for (const r of rows) {
     if (r.status === "succeeded") counts.succeeded += 1;
     else if (r.status === "pr_opened") counts.opened += 1;
     else if (r.status === "failed") counts.failed += 1;
-    else if (r.status === "skipped") counts.skipped += 1;
+    else if (r.status === "skipped") {
+      if (settledByCarrier(r.error_message)) counts.undelivered = (counts.undelivered ?? 0) + 1;
+      else counts.skipped += 1;
+    }
     if (owesReconcile(r.diff_summary)) counts.owedReconcile += 1;
   }
   return counts;

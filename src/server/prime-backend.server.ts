@@ -960,6 +960,23 @@ const BLOB_FETCH_CONCURRENCY = 24;
 const GRAPHQL_BLOB_BATCH = 80;
 
 /**
+ * GraphQL batches in flight at once.
+ *
+ * They ran one after another, and that was the deploy lane's whole pass.
+ * Measured 20 Oct 2026, the first passes of the four fresh deploy runs: the
+ * snapshot took 49.3 s and 53.8 s of 57.0 s and 59.3 s, leaving room for one
+ * bundle a pass. The same snapshot over the same commit, run against a GitHub
+ * that answers instantly, takes 1.6 s (2.3 s digesting every bundle): 30
+ * batches carrying 33.2 MB, so the rest is thirty round trips in a row.
+ *
+ * Four at a time is well inside GitHub's concurrency limits, which the REST
+ * pools here already run wider than, and it does not change how MANY requests
+ * a snapshot makes, which is the cost the note on `BLOB_FETCH_CONCURRENCY`
+ * records as binding. Only the wait between them goes.
+ */
+const GRAPHQL_BATCH_CONCURRENCY = 4;
+
+/**
  * Fetch many blobs' contents in a handful of GraphQL queries instead of one
  * REST round trip each.
  *
@@ -985,8 +1002,11 @@ export async function fetchBlobTextsBatched(
   const out = new Map<string, string>();
   const restFallback: Array<{ rel: string; sha: string }> = [];
 
+  const groups: Array<Array<{ rel: string; sha: string }>> = [];
   for (let i = 0; i < entries.length; i += GRAPHQL_BLOB_BATCH) {
-    const group = entries.slice(i, i + GRAPHQL_BLOB_BATCH);
+    groups.push(entries.slice(i, i + GRAPHQL_BLOB_BATCH));
+  }
+  await mapPool(groups, GRAPHQL_BATCH_CONCURRENCY, async (group) => {
     // Object oids are 40-char hex straight from the tree listing — inert in
     // a query string. Everything user-shaped travels as variables.
     const fields = group
@@ -1040,18 +1060,19 @@ export async function fetchBlobTextsBatched(
 
     if (!repository) {
       restFallback.push(...group);
-      continue;
+      return;
     }
 
+    const answered = repository;
     group.forEach((e, j) => {
-      const blob = repository[`b${j}`];
+      const blob = answered[`b${j}`];
       if (blob && blob.text !== null && blob.isBinary === false && blob.isTruncated === false) {
         out.set(e.rel, Buffer.from(blob.text, "utf8").toString("base64"));
       } else {
         restFallback.push(e);
       }
     });
-  }
+  });
 
   if (restFallback.length > 0) {
     await mapPool(restFallback, BLOB_FETCH_CONCURRENCY, async (e) => {

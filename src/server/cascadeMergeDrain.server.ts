@@ -85,6 +85,7 @@ import {
   type PullRequestFacts,
 } from "./cascade/prReconcile.pure";
 import { summaryOwesReconcile } from "./cascade/syncExclusions.pure";
+import { isReviewerRejection, isSupersededSummary } from "./cascade/headRedelivery.pure";
 import { repairConflictedProposal } from "./cascadeProposalRepair.server";
 import { resolveConflictedProposal } from "./cascadeConflictMerge.server";
 import {
@@ -1217,16 +1218,28 @@ async function writeReconciliation(
  *
  * Derived, never incremented: `0 merged · 1 PRs` was frozen at the moment the
  * run finished and had no way to learn that the pull request later landed.
+ *
+ * A row its carrier settled without reaching it counts as `never reached`,
+ * which keeps a retired event `failed` (or `partial`) rather than rewriting it
+ * as `completed` (F24), so `error_message` is read with the status. And two
+ * summaries are verdicts other readers key on by their first words, so they
+ * are never recounted over: a reviewer's rejection, which `headRedelivery`
+ * treats as final, and a fold's supersession, which is how it finds the
+ * carrier that took the event's delivery.
  */
 async function recountEvent(supabase: Db, eventId: string): Promise<boolean> {
   const { data, error } = await supabase
     .from("cascade_results")
-    .select("status, diff_summary")
+    .select("status, diff_summary, error_message")
     .eq("cascade_event_id", eventId);
   if (error) throw new Error(`Could not recount event ${eventId}: ${error.message}`);
 
   const counts = countResults(
-    (data ?? []) as Array<{ status: string | null; diff_summary: string | null }>,
+    (data ?? []) as Array<{
+      status: string | null;
+      diff_summary: string | null;
+      error_message: string | null;
+    }>,
     summaryOwesReconcile,
   );
   const summary = summariseCascade(counts);
@@ -1250,6 +1263,8 @@ async function recountEvent(supabase: Db, eventId: string): Promise<boolean> {
   // the engine says so, not when the counts happen to add up.
   if (current.data?.status === "running" || current.data?.status === "pending") return false;
   if (current.data?.worker_started_at && !current.data?.worker_finished_at) return false;
+  if (isReviewerRejection(current.data?.summary ?? null)) return false;
+  if (isSupersededSummary(current.data?.summary ?? null)) return false;
   if (current.data?.summary === summary && current.data?.status === status) return false;
 
   const { error: writeErr } = await supabase
