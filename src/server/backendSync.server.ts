@@ -55,6 +55,7 @@ import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { decideRemediation } from "@/lib/remediation-policy";
 import { cascadeBackendWork, hasBackendWork } from "@/server/cascadeBackendWork.pure";
 import {
+  plansBesideParked,
   slugsOwedAfterSupersession,
   supersessionVerdict,
 } from "@/server/parkedDeploySupersession.pure";
@@ -300,6 +301,11 @@ async function workForCascade(
  * never takes it. One whose park records only exhaustion is retired and the
  * work planned afresh; any other stays in front of a person and every plan
  * says so. See `parkedDeploySupersession.pure.ts`.
+ *
+ * The one place a clone holds two open runs: a NAMED plan meeting a parked
+ * WHOLE-FLEET run is planned as a run of its own beside it
+ * (`plansBesideParked`, F23), which later named plans then widen as they
+ * would any queued run.
  */
 async function planFunctionDeploy(
   input: { cloneId: string; reason: string; toSha: string },
@@ -323,6 +329,8 @@ async function planFunctionDeploy(
   let primeSha: string | null = input.toSha;
   let supersedes: readonly string[] = [];
   let retiredNote = "";
+  /** The parked whole-fleet run a named run is planned beside, when one is. */
+  let besideParked: string | null = null;
 
   if (open) {
     const verdict =
@@ -386,6 +394,24 @@ async function planFunctionDeploy(
       }
       supersedes = verdict.chain;
       retiredNote = ` (retired parked run ${open.id.slice(0, 8)}: ${verdict.why})`;
+    } else if (
+      plansBesideParked({
+        openStatus: open.status,
+        openSlugs: plannedSlugsOf(open.plan),
+        incomingSlugs: slugs,
+      })
+    ) {
+      /*
+        A NAMED PLAN IS NOT FOLDED INTO A PARKED WHOLE-FLEET RUN (F23).
+
+        The parked run stays exactly where it is, in front of a person, and
+        this plan's list — what the merge changed — becomes a run the drain
+        will take, with this plan's own reach. Folded in, it waited behind
+        nobody: from 12 to 20 Oct 2026 every clone's backend missed every
+        function merged to the prime, `listings-cache` among them.
+      */
+      besideParked = open.id;
+      retiredNote = ` (beside parked run ${open.id.slice(0, 8)}, which stays in front of a person)`;
     } else {
       /*
         `awaiting_validation` is "open" in the sense that the work is still
@@ -465,6 +491,7 @@ async function planFunctionDeploy(
       ...(primeSha ? { prime_sha: primeSha } : {}),
       reasons: [...reasons],
       ...(supersedes.length > 0 ? { supersedes: [...supersedes] } : {}),
+      ...(besideParked ? { beside_parked: besideParked } : {}),
     },
   });
   if (insErr) return `not planned: ${insErr.message}${retiredNote}`;
