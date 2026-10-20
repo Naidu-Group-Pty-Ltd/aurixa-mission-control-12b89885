@@ -121,7 +121,7 @@ describe("the prepare step reads through the cache", () => {
   });
 });
 
-describe("both preparation pools are prefetched, and paced on the budget", () => {
+describe("both preparation pools are prefetched, and only the main one is paced", () => {
   const beforeMain = engine.slice(mainPool - 900, mainPool);
   const beforeCarry = engine.slice(carryPool - 900, carryPool);
 
@@ -132,10 +132,12 @@ describe("both preparation pools are prefetched, and paced on the budget", () =>
     expect(beforeMain).toMatch(/resume\.budget!\.isPastDeadline\(reserveMs\)/);
   });
 
-  it("prefetches what the carry will read, the same way", () => {
+  it("prefetches what the carry will read, whole, because the carry reads all of it", () => {
+    // Paced, a pass past its window started no batch and the carry read every
+    // subject per file: the most requests on the pass with the least time.
     expect(beforeCarry).toMatch(
-      /await prefetchPrimeText\(\s*gated\.write\.filter\(\(path\) => isSpecPath\(path\) \|\| !known\.has\(path\)\),/,
+      /await prefetchPrimeText\(\s*gated\.write\.filter\(\(path\) => isSpecPath\(path\) \|\| !known\.has\(path\)\)\s*\);/,
     );
-    expect(beforeCarry).toMatch(/resume\.budget!\.isPastDeadline\(reserveMs\)/);
+    expect(beforeCarry).not.toMatch(/isPastDeadline/);
   });
 });

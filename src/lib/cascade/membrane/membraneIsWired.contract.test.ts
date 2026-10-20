@@ -267,12 +267,11 @@ describe("the engine asks the membrane", () => {
     expect(block).not.toContain("shouldStop");
     expect(block).not.toContain("mapWithConcurrencyUntil");
     expect(block).toMatch(/limit: Math\.max\(0, MAX_SUBJECTS_CARRIED - carriedSubjects\.length\)/);
-    // The one reading of the clock left is the read ahead's pace, which
-    // decides how long the carry takes and never what it carries: a text it
-    // leaves unread is read per file by `prepareOne`.
-    expect(block.match(/isPastDeadline/g) ?? []).toHaveLength(1);
+    // Not even the read ahead's pace: the pool reads every text it would
+    // have left, so pacing it only made a late pass read them one by one.
+    expect(block).not.toContain("isPastDeadline");
     expect(block).toMatch(
-      /await prefetchPrimeText\(\s*gated\.write\.filter\([\s\S]{0,120}?\),\s*resume\?\.budget \? \(reserveMs\) => resume\.budget!\.isPastDeadline\(reserveMs\) : undefined,\s*\);/,
+      /await prefetchPrimeText\(\s*gated\.write\.filter\([\s\S]{0,120}?\)\s*\);/,
     );
   });
 

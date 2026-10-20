@@ -5343,13 +5343,12 @@ export async function processClone(args: {
 
     if (carryingAllowed && gated.write.length > 0) {
       for (const subject of plan.carry) attemptedSubjects.add(subject);
-      // The read ahead is paced on the budget, because a text it leaves
-      // unread is read per file by `prepareOne`: the clock decides how long
-      // the carry takes, never what it carries.
-      await prefetchPrimeText(
-        gated.write.filter((path) => isSpecPath(path) || !known.has(path)),
-        resume?.budget ? (reserveMs) => resume.budget!.isPastDeadline(reserveMs) : undefined,
-      );
+      // Read ahead whole, unlike the main pool's: every text it reads is one
+      // the pool below reads anyway, since the carry no longer stops on the
+      // clock. Paced, a pass already past its window started no batch, and
+      // `prepareOne` read up to `MAX_SUBJECTS_CARRIED` files one request each
+      // — the slowest carry on exactly the pass with the least time left.
+      await prefetchPrimeText(gated.write.filter((path) => isSpecPath(path) || !known.has(path)));
       // Every subject the plan admitted is prepared: the plan's own ceiling
       // bounds the carry, the clock does not (the rule at the top of the
       // channel). A carry the clock stopped held every spec still waiting on

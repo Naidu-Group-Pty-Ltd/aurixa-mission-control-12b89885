@@ -148,9 +148,11 @@ function repoOf(owner: unknown, name: unknown): Repo {
 }
 
 const notFound = () => Object.assign(new Error("Not Found"), { status: 404 });
-const gitBlobId = (bytes: Buffer) =>
+/** A string is hashed as its UTF-8 bytes, as git stores it. */
+const gitBlobId = (bytes: Buffer | string) =>
   createHash("sha1")
-    .update(Buffer.concat([Buffer.from(`blob ${bytes.length}\0`), bytes]))
+    .update(`blob ${Buffer.byteLength(bytes)}\0`)
+    .update(bytes)
     .digest("hex");
 
 // ── What each request costs, in production milliseconds ────────────────────
@@ -361,8 +363,7 @@ function fakeOctokit(openPr: A | null) {
           content?: string;
         }>;
         for (const e of tree) {
-          const content =
-            e.content !== undefined ? gitBlobId(Buffer.from(e.content, "utf8")) : (e.sha ?? null);
+          const content = e.content !== undefined ? gitBlobId(e.content) : (e.sha ?? null);
           delivery.update(JSON.stringify([e.path, e.mode, e.type, content]));
           deliveryEntries += 1;
         }

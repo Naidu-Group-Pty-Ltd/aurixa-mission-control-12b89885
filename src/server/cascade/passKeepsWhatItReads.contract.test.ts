@@ -182,10 +182,9 @@ describe("the budget never decides what the spec channel delivers", () => {
     expect(c).not.toContain("shouldStop");
     expect(c).not.toContain("carryStoppedOnBudget");
     expect(c).not.toContain("mapWithConcurrencyUntil");
-    // Two readings of the clock remain, and neither shapes the delivery:
-    // whether a pass already past its window writes each answer at once, and
-    // the carry's read ahead, whose unread texts `prepareOne` reads per file.
-    expect(c.match(/isPastDeadline/g) ?? []).toHaveLength(2);
+    // One reading of the clock remains, and it does not shape the delivery:
+    // whether a pass already past its window writes each answer at once.
+    expect(c.match(/isPastDeadline/g) ?? []).toHaveLength(1);
     expect(c).toMatch(/if \(bridgePool\.length > 0\) await prefetchPrimeText\(bridgePool\);/);
   });
 
