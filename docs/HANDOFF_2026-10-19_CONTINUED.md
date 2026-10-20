@@ -117,6 +117,20 @@ were re-read between 09:20 and 09:50 UTC.
   (F28). It is not merged or published; that is the owner's word (§5,
   item 9).
 
+**Updated a seventh time at 11:00 UTC, by the same session, on the owner's
+word.** Asked and answered at about 10:35 UTC:
+
+- **#349 is merged and published.** It was marked ready, merged as
+  `804e7d7f` (a merge commit, 10:37 UTC) and published from Lovable once
+  Lovable held that commit (deployment `0a559bab`). What the first passes
+  on it showed is in Step J.
+- **The `version.json` declaration is in four draft pull requests**
+  (F28): npc-property-dashbord#3345, npc-test-76b3b3#229,
+  preflight-property-group#228 and npc-client-dashboard#380. Each carries
+  the CRM line's plugin block and the same spec, and the spec fails on
+  each repository's `main` config in three of six tests. Merging them is
+  the owner's word (§5, item 10), in an order that matters.
+
 **Merges need the owner.** This session merged Prime #3342 (step 1 of the plan).
 The session's safety controls then refused the next merge-related action as
 "merge without review", so no other merge was attempted. Every remaining merge
@@ -143,7 +157,8 @@ below is the owner's to approve, or to make.
 | ¤ Clone backends: edge functions | MC `remediation_runs`, `edge_function_deploy` | Each clone's latest run is parked `awaiting_validation`, the fourth of a chain whose first three the planner retired itself: npc-client-dashboard `28ddbe05` (parked 12 Oct 16:20 UTC), npc-crm-independent `12cce521` (12 Oct 16:34), Preflight `6b905563` (12 Oct 15:48) and NPC Test `10638fbc` (13 Oct 16:24). Each reads *"1 bundle(s) deployed over 30 passes and more remain"*. On `plisdzywzleljorrphxv` the last function the lane deployed is `generate-investment-report`, at 16:20:48 UTC on 12 Oct (F23). ✦ All four unchanged: `awaiting_validation`, 31 of 30 attempts, none rejected. ♦ **All four rejected** at 08:44:14 UTC on the owner's word, by the same write the admin button makes (no ticket was linked to any of them). The 08:50 catch-up sweep planned four fresh whole-fleet runs (`be33dee3` CD, `638d36d8` CRM, `91387dc1` NPC Test, `0598f988` Preflight), status `planned`. By 09:33 they had landed 9, 2, 3 and 3 bundles, 17 rows in `clone_function_deploys`: one bundle every two minutes or so across the fleet, because the drain serves one run a tick (F26). CD's first were `bulk-import-clients` and `estimate-property-value`, never on that project before. Every pass's `pass_ms` reads a 49–59 s snapshot of a 55–66 s pass (F26), and two passes ran long enough to be reclaimed by the 20-minute stall rule. On `plisdzywzleljorrphxv`, `listings-cache` is still the 11 Oct copy. |
 | ✦ MC: the engine fixes for F21, F22 and F23 | aurixa-mission-control-12b89885, branch `claude/confidential-report-cleanup-at2jfw`, head `d4a3854c` | Three commits on top of the fourth update (§4), no pull request. Three additive migrations: `20261020090000_clone_function_deploys`, `20261020100000_cascade_results_progressed_at` and `20261020100500_cascade_results_pass_trace`. Checked locally on `d4a3854c`: 469 test files and 9,441 tests passed, along with `tsc --noEmit`, the seventeen repository checks, Prettier and ESLint (one warning, also on `main`). MC runs no CI on a branch without a pull request, so CI has not seen it. ♦ **Merged** by the owner as #347 (`941c61a1`, 08:22 UTC), published by 08:27, and its three migrations applied (the digest manifest refresh #348 lists them). The new retirement text was on the 08:27 notice. |
 | ♦ MC: Cascade now for the children and the CRM line | MC `cascade_events` `e2c35fc3`, scope `selected` | Created at 08:43:48 UTC on the owner's word: `pr` mode, NPC Test, Preflight and NPC CRM Independent, the rows the Cascades page writes. Claimed at 08:46, 08:57 and 09:08, and retired at 09:19:05 with nothing delivered. Its three traces are F25's and F27's readings: NPC Test was ended in `tree`, Preflight in `proposal`, and the CRM line in `deliver`. The children were landed by hand instead (Step I). |
-| ♦ MC: the engine changes the traces call for | aurixa-mission-control-12b89885#349 (draft), branch `claude/gifted-meitner-b3towe` | Six engine commits on `main` `4e94c9bc`, then this update and two corrections: `5493b9a1` (F24), `47330853` (F25), `c47b3f90` (F26), `4930b4aa` (F23 remedy 1), `64ee4047` (F28) and `d30fbd48` (F27). CI's build failed on `cdb2f148`: `64ee4047` put the drift rule under `src/server/`, which TanStack Start's import protection denies to client-reachable code, so the last commit moves it to `src/lib/`. No migration. Checked locally on the head: `npm run build` (and the same build failing with the old import), `tsc --noEmit`, the eighteen `check:*` scripts, and the full suite, 472 files and 9,487 tests. Every new guard was shown to fail on the defect it names. Not merged or published. |
+| ♦ MC: the engine changes the traces call for | aurixa-mission-control-12b89885#349 (draft), branch `claude/gifted-meitner-b3towe` | Six engine commits on `main` `4e94c9bc`, then this update and two corrections: `5493b9a1` (F24), `47330853` (F25), `c47b3f90` (F26), `4930b4aa` (F23 remedy 1), `64ee4047` (F28) and `d30fbd48` (F27). CI's build failed on `cdb2f148`: `64ee4047` put the drift rule under `src/server/`, which TanStack Start's import protection denies to client-reachable code, so the last commit moves it to `src/lib/`. No migration. Checked locally on the head: `npm run build` (and the same build failing with the old import), `tsc --noEmit`, the eighteen `check:*` scripts, and the full suite, 472 files and 9,487 tests. Every new guard was shown to fail on the defect it names. CI green on `6bc16113`. **Merged** on the owner's word as `804e7d7f` (a merge commit, 10:37 UTC) and **published** from Lovable (deployment `0a559bab`). The first deploy pass on it, CD's at 10:42, landed 8 bundles in 40.6 s (Step J). |
+| ♦ The `version.json` declaration (F28) | npc-test-76b3b3#229 (`c8b633d`), preflight-property-group#228 (`db80699`), npc-client-dashboard#380 (`7299ab5`), npc-property-dashbord#3345 (`7d7bf7de`), each on `claude/gifted-meitner-b3towe` | Opened as drafts at about 10:40 UTC on the owner's word. Each carries the CRM line's `buildVersionManifest(env)` block and the same `buildDeclaresItsBackend.spec.ts`; on each, the spec passes 6 of 6, and fails 3 of 6 on `main`'s config. CI was running every job on all four at 10:41. Merge order: NPC Test and Preflight, then CD, then Prime (§5, item 10). |
 | `clone_backend_secrets.AIRTABLE_TABLE_NAME` | all four clones | `inherited`, last set in September; `AIRTABLE_TOKEN` and `AIRTABLE_BASE_ID` `withheld`. Unchanged until #345 is published. |
 
 ---
@@ -533,6 +548,19 @@ only exhaustion and plans a fresh run, three times in a row, and the
 fourth waits for a person: about two days from now, if nothing changes.
 The ledger keeps what landed, so no bundle is owed twice. #349's pool is
 what keeps a pass inside its window.
+
+♦ **#349 is live, and the first pass on it did better than computed.** CD's
+pass from 10:42:00 to 10:42:41 UTC read the snapshot in 15.7 s (49.5 s
+before), spent 24.7 s deploying, and ended at 40.6 s, inside the 47-second
+tick. It landed 8 bundles, about 3 s each: `get-user-names`,
+`get-vapid-public-key`, `ghl-calendar`, `get-system-logs`,
+`ghl-calendar-test`, `ghl-conversations-cron`, `ghl-calendar-proxy` and
+`get-token-event-trail`. Every earlier pass landed one. A pass that ends
+inside the tick is not reclaimed, so it charges no attempt. At one run a
+tick, each clone gets a pass about every eight minutes, which is about
+sixty bundles an hour a clone: CD's 387 in six or seven hours, and
+`listings-cache`, about 20 bundles further down CD's order, within the
+hour.
 
 ---
 
@@ -1313,7 +1341,18 @@ it pushed only to two of the engine's, on the owner's word.
   it names, by putting the old rule back. Checked locally on the head:
   `npm run build`, `tsc --noEmit`, the eighteen `check:*` scripts,
   Prettier on every changed source file, and the full suite, 472 files and
-  9,487 tests. Nothing was merged or published.
+  9,487 tests. Nothing was merged or published until the owner's word below.
+- On the owner's word, at about 10:35 UTC:
+  - #349 marked ready, merged as `804e7d7f` (a merge commit) and published
+    from Lovable. Its watch was ended once it merged.
+  - Prime's `7d7bf7de` (the spec's header made true in every repository)
+    and draft pull request npc-property-dashbord#3345.
+  - The same change on a new `claude/gifted-meitner-b3towe` branch in each
+    mirror, from its `main`: `7299ab5` (npc-client-dashboard#380),
+    `c8b633d` (npc-test-76b3b3#229) and `db80699`
+    (preflight-property-group#228), each a draft.
+  - This seventh update, on MC's branch restarted from `main` after the
+    merge.
 
 ---
 
@@ -1367,7 +1406,8 @@ it pushed only to two of the engine's, on the owner's word.
    publish from Lovable. It needs no migration, and this update rides
    along. Once it is live, the CRM line's next pass names where it dies
    (Step H), each deploy pass should land three or four bundles, a retired
-   event stays failed, and the inbox stops repeating itself.
+   event stays failed, and the inbox stops repeating itself. ♦ Done on the
+   owner's word: merged as `804e7d7f` and published by 10:42 UTC.
 10. ♦ The root of F28's bundle notice. Add the CRM line's
     `buildVersionManifest(env)` to `vite.config.ts` in npc-client-dashboard,
     npc-test-76b3b3 and preflight-property-group, and in Prime. The file is
@@ -1375,7 +1415,14 @@ it pushed only to two of the engine's, on the owner's word.
     request in its own repository. Prime's half is written (`629db7de` on
     Prime's `claude/gifted-meitner-b3towe`), and the same plugin block
     applies unchanged to each mirror's copy. Until then #349 keeps that
-    notice to one per artefact.
+    notice to one per artefact. ♦ On the owner's word, all four are open as
+    drafts: npc-test-76b3b3#229 and preflight-property-group#228, then
+    npc-client-dashboard#380, then npc-property-dashbord#3345, which is the
+    order to merge them in. The spec is not protected and travels by
+    cascade (prime to CD, CD to its two children), and it fails on a config
+    without the block, so a clone takes its own pull request before the
+    spec reaches it from upstream. Each runs every CI job even as a draft,
+    because a `vite.config.ts` change reaches all of them.
 
 ---
 
