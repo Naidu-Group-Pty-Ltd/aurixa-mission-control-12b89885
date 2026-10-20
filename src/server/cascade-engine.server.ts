@@ -265,6 +265,12 @@ import {
   type PassTrace,
 } from "./cascade/passTrace.pure";
 import { carrierSettledMessage } from "./cascade/carrierSettlement.pure";
+import {
+  describeTreePause,
+  resumableTreeChain,
+  treeChainKey,
+  writeTreeChain,
+} from "./cascade/treeChain.pure";
 
 type CascadeResultUpdate = Database["public"]["Tables"]["cascade_results"]["Update"];
 
@@ -2351,6 +2357,10 @@ export async function processClone(args: {
     deletion_evidence: evidenceLedger,
     held_evidence: heldLedger,
     variant_evidence: variantLedger,
+    // Carried as it was kept, so a pass that pauses BEFORE the tree does not
+    // drop the chain an earlier pass wrote. Whether it is resumed is decided
+    // at the tree, against the chain this pass would write (F25).
+    ...(priorProgress?.tree_chain ? { tree_chain: priorProgress.tree_chain } : {}),
     // The write list is not final until the hold releases below have run;
     // set once `primeFiles` exists.
     total: 0,
@@ -4526,6 +4536,7 @@ export async function processClone(args: {
    */
   let deletesCrossing: ReadonlySet<string> = new Set(deletionPlan.deletes);
 
+  markPhase("specs");
   // ── The membrane's spec channel, over the FINISHED delivery ────────────
   //
   // Here rather than in the prepare loop, and the difference is a defect
@@ -5368,6 +5379,7 @@ export async function processClone(args: {
     }
   }
 
+  markPhase("recount");
   // ── …and the removals, once the specs that stay are known ───────────────
   //
   // A kept spec the channel did not bring across stays on the clone as it is,
@@ -5684,6 +5696,7 @@ export async function processClone(args: {
     };
   }
 
+  markPhase("references");
   // Does this cascade break a file it is not allowed to touch?
   //
   // A `manual_reconcile` path is held because the clone's copy must win. That
@@ -5896,18 +5909,65 @@ export async function processClone(args: {
   // (`sha: null`) composes over `base_tree` exactly as it did in one call.
   // A rate limit mid-chain throws to the per-clone classifier and the clone
   // defers; the part-built trees are unreachable objects GitHub collects.
+  //
+  // THE CHAIN ASKS THE BUDGET, AND IS KEPT WHERE IT STOPS (F25).
+  //
+  // It was the one stage of a pass that never asked. Measured 20 Oct 2026 by
+  // the pass trace: the lineage children's ~1,100-file refreshes spent ~28 s
+  // judging and ~27 s here, the platform ended both, and each next pass wrote
+  // the same chain again from the start. So the budget is asked before every
+  // chunk but this pass's first, and a pass that stops keeps the chain on its
+  // ledger, keyed to exactly what it is a chain OF; the next pass about to
+  // write the same chain continues it (`treeChain.pure.ts`). A pass that wrote
+  // some of it and has no window left for the commit stops there too, with
+  // the whole chain kept — and one that wrote none of it never stops, so every
+  // pass moves the delivery forward.
   markPhase("tree");
-  let chainedTreeSha = cloneCommit.tree.sha;
-  for (const chunk of chunkTreeEntries(treeEntries)) {
-    const { data: chunkTree } = await octokit.git.createTree({
-      owner: cloneRef.owner,
-      repo: cloneRef.repo,
-      base_tree: chainedTreeSha,
-      tree: chunk.map(toGitTreeParam),
-    });
-    chainedTreeSha = chunkTree.sha;
+  const chunks = chunkTreeEntries(treeEntries);
+  const chainKey = treeChainKey(cloneCommit.tree.sha, chunks);
+  const chain = await writeTreeChain({
+    chunks,
+    baseTreeSha: cloneCommit.tree.sha,
+    resumed: resume
+      ? resumableTreeChain(priorProgress?.tree_chain ?? null, chainKey, chunks.length)
+      : null,
+    createTree: async (baseTree, chunk) =>
+      (
+        await octokit.git.createTree({
+          owner: cloneRef.owner,
+          repo: cloneRef.repo,
+          base_tree: baseTree,
+          tree: chunk.map(toGitTreeParam),
+        })
+      ).data.sha,
+    isPastDeadline: resume?.budget
+      ? (reserveMs) => resume.budget!.isPastDeadline(reserveMs)
+      : undefined,
+    isStaleObject: isStaleObjectError,
+  });
+  if (chain.kind === "paused") {
+    // Only a pass with a ledger has a budget to pause on. Were that ever not
+    // so, the half-written tree must never reach the commit below.
+    if (!resume) throw new Error("the tree write paused on a pass with no ledger to keep it");
+    // No commit and no pull request, as with every other pause: a proposal
+    // that carries half the diff is worse than none.
+    progress.tree_chain = { key: chainKey, done: chain.done, of: chunks.length, sha: chain.sha };
+    await resume.onProgress(progress);
+    return {
+      status: "queued",
+      started_at: null,
+      diff_summary: describeTreePause({
+        done: chain.done,
+        of: chunks.length,
+        files: treeEntries.length,
+      }),
+      progress: progress as unknown as Json,
+    };
   }
-  const newTree = { sha: chainedTreeSha };
+  // Written in full: the chain is spent, and a finished pass keeps only its
+  // blob and evidence lists.
+  delete progress.tree_chain;
+  const newTree = { sha: chain.sha };
   markPhase("proposal");
 
   // A removal is marked in the commit body. The subject line's shape is

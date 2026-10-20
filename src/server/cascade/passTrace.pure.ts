@@ -38,9 +38,25 @@ export const PASS_PHASES = [
   "prefetch",
   /** Each file judged and prepared. */
   "prepare",
-  /** The delivery decided: specs, subjects, reconciles, the baselines. */
+  /**
+   * The delivery's reconciled files: config, the security registry and
+   * baselines, the mobile surface, the deploy workflow, and which of prime's
+   * deletions it makes.
+   */
   "deliver",
-  /** The tree written, a chunk at a time. */
+  /**
+   * The membrane's spec channel over the finished delivery, and the subjects
+   * and bridges it carries, round after round. Split from `deliver` on
+   * 20 Oct 2026: the CRM line's first traced pass entered `deliver` at
+   * 25.3 s and recorded nothing after it, and one name for a dozen steps
+   * could not say which.
+   */
+  "specs",
+  /** The removals narrowed by the specs that stay, and the baselines recounted. */
+  "recount",
+  /** Held files read for what this delivery would break, and the final entries. */
+  "references",
+  /** The tree written, a chunk at a time, asking the budget (`treeChain.pure.ts`). */
   "tree",
   /** The commit, the branch and the pull request. */
   "proposal",

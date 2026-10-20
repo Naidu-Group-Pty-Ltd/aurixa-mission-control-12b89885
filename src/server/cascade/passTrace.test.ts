@@ -91,9 +91,8 @@ describe("the engine names every stage, once, in order", () => {
     expect(closure).toBeGreaterThan(-1);
     expect(fn.indexOf("await closeOver(candidatePaths", closure)).toBeGreaterThan(closure);
     const tree = fn.indexOf('markPhase("tree")');
-    expect(fn.indexOf("for (const chunk of chunkTreeEntries(treeEntries))", tree)).toBeGreaterThan(
-      tree,
-    );
+    // The chain is written by `writeTreeChain` since F25 (treeChain.pure.ts).
+    expect(fn.indexOf("await writeTreeChain({", tree)).toBeGreaterThan(tree);
   });
 });
 
