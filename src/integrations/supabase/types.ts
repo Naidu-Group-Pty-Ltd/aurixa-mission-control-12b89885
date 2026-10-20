@@ -1011,9 +1011,11 @@ export type Database = {
           error_message: string | null
           files_changed: number
           id: string
+          pass_trace: Json | null
           pr_url: string | null
           previous_sha: string | null
           progress: Json | null
+          progressed_at: string | null
           started_at: string | null
           status: Database["public"]["Enums"]["cascade_result_status"]
           updated_at: string
@@ -1029,9 +1031,11 @@ export type Database = {
           error_message?: string | null
           files_changed?: number
           id?: string
+          pass_trace?: Json | null
           pr_url?: string | null
           previous_sha?: string | null
           progress?: Json | null
+          progressed_at?: string | null
           started_at?: string | null
           status?: Database["public"]["Enums"]["cascade_result_status"]
           updated_at?: string
@@ -1047,9 +1051,11 @@ export type Database = {
           error_message?: string | null
           files_changed?: number
           id?: string
+          pass_trace?: Json | null
           pr_url?: string | null
           previous_sha?: string | null
           progress?: Json | null
+          progressed_at?: string | null
           started_at?: string | null
           status?: Database["public"]["Enums"]["cascade_result_status"]
           updated_at?: string

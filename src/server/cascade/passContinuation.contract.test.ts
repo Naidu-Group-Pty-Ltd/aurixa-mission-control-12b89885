@@ -57,6 +57,26 @@ function sliceFunction(src: string, anchor: string): string {
   return src.slice(at, end + 3);
 }
 
+/**
+ * The per-clone loop of a pass, from its first line to the hand-back after it.
+ *
+ * The same lesson as `sliceFunction`, one level in: these were 11,000-character
+ * windows from the loop's first line, and the first thing added to the loop
+ * since (the pass trace, F21) pushed three of the assertions' anchors out of
+ * the window — real code reported missing by the size of a constant. The
+ * hand-back that follows the loop is the end, exactly.
+ */
+function sliceClonesLoop(src: string): string {
+  const at = src.indexOf("for (const r of orderedRows) {");
+  expect(at, "the per-clone loop").toBeGreaterThan(-1);
+  const end = src.indexOf(
+    "if (deferred || stoppedEarly || lineageHolds.length > 0 || serverDeferrals.length > 0) {",
+    at,
+  );
+  expect(end, "the hand-back after the per-clone loop").toBeGreaterThan(at);
+  return src.slice(at, end);
+}
+
 describe("the column the pacing rests on", () => {
   it("is NOT NULL with a default, so the claim is one comparison", () => {
     // A nullable column needs `.or("next_attempt_at.is.null,…")`, which is a
@@ -260,7 +280,10 @@ describe("the order the pass walks", () => {
     // So a pass can deliver a parent and then its child in the same run
     // rather than holding the child for a tick that had nothing to wait for.
     const setup = sliceFrom(engine, "const orderedRows = followsLineage", 700);
-    expect(setup).toContain("orderByLineageDepth(");
+    // And a child behind nothing it does not depend on: a depth sort put every
+    // root — the CRM line among them — ahead of every child (F21).
+    expect(setup).toContain("orderByLineage(");
+    expect(setup).not.toContain("orderByLineageDepth(");
   });
 
   it("counts the tally against every queued row, not just the walked ones", () => {
@@ -489,7 +512,7 @@ describe("a pass resumes inside a clone", () => {
     // A pass that spent its whole tick settling evidence prepared no blobs;
     // counting only `prepared` made it read as no progress, spend its
     // attempt, and die in three ticks inside a healthy convergence.
-    const loop = sliceFrom(engine, "for (const r of orderedRows) {", 11_000);
+    const loop = sliceClonesLoop(engine);
     // Measured by identity, not by size (`ledgerGrew`): a variant verdict
     // replacing a borrowed one leaves the count unchanged and is still
     // progress.
@@ -527,10 +550,10 @@ describe("a pass resumes inside a clone", () => {
   });
 
   it("the engine supplies the writer, and only from the real pass", () => {
-    const loop = sliceFrom(engine, "for (const r of orderedRows) {", 11_000);
+    const loop = sliceClonesLoop(engine);
     expect(loop).toContain("resume: {");
     expect(loop).toMatch(
-      /onProgress: async \(progress\) => \{[\s\S]{0,400}\.update\(\{ progress: progress as unknown as Json \}\)/,
+      /onProgress: async \(progress\) => \{[\s\S]{0,1200}const ledgerWrite = \{ progress: progress as unknown as Json \};[\s\S]{0,600}\.update\(/,
     );
     // A rehearsal passes no `resume` at all.
     const rehearsal = sliceFrom(engine, "export async function regenerateCloneProposal", 3_000);
@@ -538,7 +561,7 @@ describe("a pass resumes inside a clone", () => {
   });
 
   it("a paused clone stops the pass; a finished one KEEPS its list", () => {
-    const loop = sliceFrom(engine, "for (const r of orderedRows) {", 11_000);
+    const loop = sliceClonesLoop(engine);
     // The pass is handed back (`stoppedEarly`), but the loop goes ON to the
     // next clone: a clone pauses on its own bound as well as on the clock,
     // and one clone's bound is no reason for the others to wait a tick. The
@@ -557,7 +580,7 @@ describe("a pass resumes inside a clone", () => {
   });
 
   it("a pass with no list of its own borrows the clone's newest one", () => {
-    const loop = sliceFrom(engine, "for (const r of orderedRows) {", 11_000);
+    const loop = sliceClonesLoop(engine);
     expect(loop).toContain(
       "const priorRecord = ownRecord ?? (await borrowLatestProgress(supabase, clone.id, r.id));",
     );
@@ -576,7 +599,7 @@ describe("a pass resumes inside a clone", () => {
   });
 
   it("progress inside a clone is refunded like a finished clone", () => {
-    const loop = sliceFrom(engine, "for (const r of orderedRows) {", 11_000);
+    const loop = sliceClonesLoop(engine);
     expect(loop).toContain("if (ledgerGrew(priorLedger, lastLedger)) progressed = true;");
     expect(engine).toContain('{ ok: true, status: "resuming", done, total, progressed }');
   });

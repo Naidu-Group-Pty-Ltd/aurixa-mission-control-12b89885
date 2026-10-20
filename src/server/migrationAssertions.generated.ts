@@ -1141,4 +1141,14 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "column", table: "clone_function_deploys", column: "function_version" },
     ],
   },
+  {
+    migration: "20261020100000_cascade_results_progressed_at.sql",
+    version: "20261020100000",
+    assertions: [{ kind: "column", table: "cascade_results", column: "progressed_at" }],
+  },
+  {
+    migration: "20261020100500_cascade_results_pass_trace.sql",
+    version: "20261020100500",
+    assertions: [{ kind: "column", table: "cascade_results", column: "pass_trace" }],
+  },
 ];

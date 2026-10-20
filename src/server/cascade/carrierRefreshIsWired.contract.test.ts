@@ -103,10 +103,15 @@ describe("every failed result row names the head it failed against", () => {
   // the stamp. A failed row written without one is read as never attempted at
   // any head, and is re-offered on every claim of a held carrier: the bound
   // turns into a five-minute retry loop with nothing reporting it.
-  /** Each `.from("cascade_results")…update({ … })` object literal, as written. */
+  /**
+   * Each `.from("cascade_results")…update({ … })` object literal, as written,
+   * and each one handed to `writeSettlement` — which is where a row that
+   * leaves the queue is written since F21, stamped as progress.
+   */
   const resultUpdates = (() => {
     const found: string[] = [];
-    const marker = /\.from\("cascade_results"\)\s*\.update\(\{/g;
+    const marker =
+      /\.from\("cascade_results"\)\s*\.update\(\{|writeSettlement\(supabase, r\.id, \{/g;
     for (const m of code.matchAll(marker)) {
       let depth = 1;
       let at = (m.index ?? 0) + m[0].length;
@@ -121,6 +126,7 @@ describe("every failed result row names the head it failed against", () => {
   })();
 
   it("finds the literal writes at all, so the next assertion cannot pass vacuously", () => {
+    // The failed pin and the error the pass could not defer.
     expect(resultUpdates.filter((u) => /status: "failed"/.test(u)).length).toBeGreaterThanOrEqual(
       2,
     );
@@ -136,12 +142,24 @@ describe("every failed result row names the head it failed against", () => {
     // `processClone` returns its own failures (a refused conversion, a pull
     // request that could not be opened) as a patch. The finished-pass write is
     // where they reach the row.
-    expect(code).toContain(".update(settledRowPatch(patch, sourceSha))");
-    // The one raw patch write to a result row left is the pause, whose
-    // status is `queued`.
+    expect(code).toContain(
+      "await writeSettlement(supabase, r.id, settledRowPatch(patch, sourceSha));",
+    );
+    // The raw patch writes to a result row left are the pause, whose status
+    // is `queued`, and `writeSettlement`'s own retry on a database the
+    // progress column has not reached — of the patch its caller settled.
     const raw = [...code.matchAll(/\.from\("cascade_results"\)\s*\.update\(patch\)/g)];
-    expect(raw).toHaveLength(1);
-    const pause = raw[0].index ?? 0;
+    expect(raw).toHaveLength(2);
+    const helper = code.indexOf("async function writeSettlement(");
+    expect(helper).toBeGreaterThan(-1);
+    const helperEnd = code.indexOf("\n}\n", helper);
+    const [inHelper, outside] = [
+      raw.filter((m) => (m.index ?? 0) > helper && (m.index ?? 0) < helperEnd),
+      raw.filter((m) => (m.index ?? 0) < helper || (m.index ?? 0) > helperEnd),
+    ];
+    expect(inHelper).toHaveLength(1);
+    expect(outside).toHaveLength(1);
+    const pause = outside[0].index ?? 0;
     expect(code.slice(Math.max(0, pause - 600), pause)).toContain('patch.status === "queued"');
   });
 });
