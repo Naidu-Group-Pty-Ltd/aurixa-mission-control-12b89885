@@ -521,6 +521,19 @@ cuts the snapshot to about 16 s. That leaves about 29 s of each pass for
 deploys, at 5–10 s each. Remedy 1 is in #349 too. Nothing is parked now,
 so it changes nothing until a run parks again.
 
+♦ **And without #349 they will park again.** At 10:19 UTC the four runs had
+landed 26 bundles (CD 12, CRM 3, NPC Test 7, Preflight 4), and
+`listings-cache` was on none of the four backends. CD's run still owed 389
+bundles. At about eight an hour that is two days, and at #349's three or
+four a pass it is about fifteen hours. A pass that overruns is
+reclaimed after 20 minutes and charged an attempt, and 90 minutes in, the
+runs stood at 3 or 4 of their 30. At that rate each exhausts its attempts
+in 11–15 hours and parks. The planner then retires a park that records
+only exhaustion and plans a fresh run, three times in a row, and the
+fourth waits for a person: about two days from now, if nothing changes.
+The ledger keeps what landed, so no bundle is owed twice. #349's pool is
+what keeps a pass inside its window.
+
 ---
 
 ## 3. Findings since 14:05 (F15–F28)
