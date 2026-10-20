@@ -5,6 +5,7 @@
 import { describe, expect, it } from "vitest";
 import {
   blankStringContents,
+  memoisedSpecifiers,
   pruneBundleToReachable,
   readSpecifiers,
   resolveRelative,
@@ -390,5 +391,66 @@ describe("a literal broken over two lines is not a computed import", () => {
     // specifier is computed wherever the line breaks.
     expect(readSpecifiers("await import(\n  modulePath);").opaque).toBe(true);
     expect(readSpecifiers("await import(\n  `./${name}.ts`);").opaque).toBe(true);
+  });
+});
+
+describe("pruning many bundles over one tree reads each file once", () => {
+  /*
+    The redeploy lane digests EVERY bundle a commit defines, every pass, and
+    every bundle carries the same shared tree. Read per bundle, the shared
+    files are parsed hundreds of times over; `memoisedSpecifiers` parses each
+    once. It must change nothing the prune decides.
+  */
+  const sources: Record<string, string | null> = {
+    "a/index.ts": 'import { x } from "../_shared/x.ts";\nexport default x;\n',
+    "b/index.ts": 'import { y } from "../_shared/y.ts";\nexport default y;\n',
+    "c/index.ts": "const m = await import(name);\n",
+    "_shared/x.ts": 'import { y } from "./y.ts";\nexport const x = y;\n',
+    "_shared/y.ts": "export const y = 1;\n",
+    "_shared/logo.png": null,
+  };
+  const files = Object.keys(sources).map((path) => ({ path }));
+
+  it("decides exactly what the unmemoised walk decides, bundle by bundle", () => {
+    const reads: string[] = [];
+    const textOf = (p: string) => {
+      reads.push(p);
+      return sources[p] ?? null;
+    };
+    const specifiersOf = memoisedSpecifiers(textOf);
+    for (const entry of ["a/index.ts", "b/index.ts", "c/index.ts"]) {
+      const plain = pruneBundleToReachable({
+        entrypointPath: entry,
+        files,
+        importMapPath: null,
+        textOf: (p) => sources[p] ?? null,
+      });
+      const memo = pruneBundleToReachable({
+        entrypointPath: entry,
+        files,
+        importMapPath: null,
+        textOf: () => {
+          throw new Error("textOf must not be read when specifiersOf is given");
+        },
+        specifiersOf,
+      });
+      expect(memo).toEqual(plain);
+    }
+    // `_shared/y.ts` is reached by two bundles and read once.
+    expect(reads.filter((p) => p === "_shared/y.ts")).toHaveLength(1);
+    expect(new Set(reads).size).toBe(reads.length);
+  });
+
+  it("remembers that a file is not text, and a computed import, like any other answer", () => {
+    let reads = 0;
+    const specifiersOf = memoisedSpecifiers((p) => {
+      reads += 1;
+      return sources[p] ?? null;
+    });
+    expect(specifiersOf("_shared/logo.png")).toBeNull();
+    expect(specifiersOf("_shared/logo.png")).toBeNull();
+    expect(specifiersOf("c/index.ts")?.opaque).toBe(true);
+    expect(specifiersOf("c/index.ts")?.opaque).toBe(true);
+    expect(reads).toBe(2);
   });
 });

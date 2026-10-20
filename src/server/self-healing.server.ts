@@ -58,6 +58,8 @@ import {
   runWithinBudget,
   stalestFirst,
 } from "@/server/edgeDeployBatch.pure";
+import { ledgerCurrentSlugs } from "@/server/edgeBundleLedger.pure";
+import { freshnessOf } from "@/server/projectFunctionCopies.pure";
 import { planUpstreamDeferral, UPSTREAM_DEFERRAL_KEY } from "@/server/upstreamRefusal.pure";
 import { functionsRevisionOfSuccess } from "@/server/functionsBaseline.pure";
 import { MIGRATION_CLAIMABLE_STATUSES } from "@/server/fleetMigrationEligibility.pure";
@@ -1535,6 +1537,17 @@ async function executeSqlMigration(
 }
 
 /**
+ * A deploy result with when its call ran. The deploy ledger records it beside
+ * the function id and version the call was answered with, so an operator can
+ * line a ledger row up with the run that wrote it; it proves nothing about the
+ * clone's copy (`edgeBundleLedger.pure.ts`).
+ */
+type TimedDeployResult = EdgeFunctionDeployResult & {
+  readonly startedMs: number;
+  readonly endedMs: number;
+};
+
+/**
  * Deploy a batch, stopping at the invocation budget rather than being killed
  * by it.
  *
@@ -1548,17 +1561,19 @@ async function deployWithinBudget(
   projectRef: string,
   batch: readonly EdgeFunctionBundle[],
   deadlineAt: number,
-): Promise<{ results: EdgeFunctionDeployResult[]; stoppedEarly: boolean }> {
+): Promise<{ results: TimedDeployResult[]; stoppedEarly: boolean }> {
   const { deployEdgeFunctions } = await import("@/server/backend-provisioning.server");
   let done = 0;
-  return runWithinBudget<EdgeFunctionBundle, EdgeFunctionDeployResult>({
+  return runWithinBudget<EdgeFunctionBundle, TimedDeployResult>({
     items: batch,
     runOne: async (fn) => {
+      const startedMs = Date.now();
       const out = (await deployEdgeFunctions(projectRef, [fn])) ?? [];
+      const endedMs = Date.now();
       done += 1;
       // Alive, and this far through the batch — see `touchRun`.
       await touchRun(run, { in_flight: { done, of: batch.length, last: fn.slug } });
-      return out;
+      return out.map((r) => ({ ...r, startedMs, endedMs }));
     },
     // Reserve the slowest deploy seen this pass: an item begun with less than
     // that left is one the invocation may not live to finish.
@@ -1581,6 +1596,22 @@ async function executeEdgeFunctionDeploy(
     tickDeadlineAt ?? Number.POSITIVE_INFINITY,
   );
 
+  // Where this pass spends its budget, recorded on every result it writes. On
+  // 12–13 Oct 2026 a pass landed one bundle in 45 seconds and nothing said
+  // which step took the rest, so nobody could choose between the remedies
+  // that would have made it carry more (F23 in the 19 Oct hand-over).
+  const laneEnteredMs = Date.now();
+  const passMs: Record<string, number> = {};
+  const timed = async <T>(phase: string, work: () => Promise<T>): Promise<T> => {
+    const at = Date.now();
+    try {
+      return await work();
+    } finally {
+      passMs[phase] = Date.now() - at;
+    }
+  };
+  const passTimings = () => ({ ...passMs, total: Date.now() - laneEnteredMs });
+
   if (!run.clone_id)
     return parkRun(run, ["no clone scope — prime functions are not self-deployed"]);
 
@@ -1597,8 +1628,10 @@ async function executeEdgeFunctionDeploy(
     });
     return { status: "skipped" };
   }
+  // Narrowed once, for the closures below that a narrowing does not reach.
+  const projectRef: string = backend.supabase_project_ref;
 
-  const { resolvePrimeSource, fetchPrimeBackendSnapshot, resolvePrimeHeadSha } =
+  const { resolvePrimeSource, fetchPrimeBackendSnapshot } =
     await import("@/server/prime-backend.server");
   const { getAppOctokit } = await import("@/server/github-app.server");
   const source = await resolvePrimeSource(admin);
@@ -1653,29 +1686,37 @@ async function executeEdgeFunctionDeploy(
   // bundles and then lost its invocation still counts, which is the whole
   // point: the state that has to survive is on the clone, not in a `result`
   // column the dying pass never got to write.
-  const { listProjectEdgeFunctionFreshness } = await import("@/server/backend-provisioning.server");
-  const freshness = await listProjectEdgeFunctionFreshness(backend.supabase_project_ref);
+  //
+  // One reading serves everything this pass asks of the clone — what landed
+  // since the generation began, which copy is stalest, and which deploy wrote
+  // each copy — so the answers cannot disagree with one another.
+  const { listProjectEdgeFunctionCopies } = await import("@/server/backend-provisioning.server");
+  const copies = await timed("clone", () => listProjectEdgeFunctionCopies(projectRef));
+  const freshness = freshnessOf(copies);
 
-  // Which prime revision this pass is deploying, read BEFORE the snapshot so
-  // the freshness baseline is computed against it rather than discovered
-  // afterwards. One extra branch read against a snapshot that fetches ~1,033
-  // files, and it is what stops a run that spans a prime merge from marking
-  // its early bundles delivered at a tree that no longer exists — see
-  // `planDeployGeneration` for the measured case.
-  const observedSourceSha = await resolvePrimeHeadSha(getAppOctokit(), source);
-  const generation = planDeployGeneration({
-    runStartedAt: run.started_at,
-    lastGenerationAt:
-      (run.result as { generation_at?: string | null } | null)?.generation_at ?? null,
-    lastSourceSha: (run.result as { source_sha?: string | null } | null)?.source_sha ?? null,
-    observedSourceSha,
-    now: new Date().toISOString(),
-  });
+  // What THIS LANE put on the clone, bundle by bundle: the digest of what it
+  // sent and which deploy the project answered with. The half of "delivered"
+  // the target cannot answer — which TREE a copy came from — kept beside the
+  // target and never instead of it: a copy counts only where the clone still
+  // lists that very deploy, same function id at the same version
+  // (`edgeBundleLedger.pure.ts`).
+  //
+  // Without it a timestamp was all the lane had, so every prime merge
+  // restarted the generation and re-owed all ~400 bundles at about one a
+  // pass; no run could finish, and every clone's run parked on 12–13 Oct 2026
+  // (F23). Unreadable — including before its migration has run — it vouches
+  // for nothing, and the lane behaves exactly as it did without it.
+  const { readFunctionDeployLedger, recordFunctionDeploys } =
+    await import("@/server/functionDeployLedger.server");
+  const ledger = await timed("ledger", () => readFunctionDeployLedger(run.clone_id));
 
-  const refreshed = refreshedSince(freshness, generation.baselineAt);
-
-  // This lane redeploys FUNCTION bundles; migration SQL bodies are half the
-  // snapshot's round trips and nothing here reads them.
+  // The generation and the skip list are decided INSIDE the snapshot, at the
+  // commit it read (`planSkip`). Both depend on which tree this pass deploys:
+  // the generation on whether the prime moved since the last pass, the ledger
+  // on whether a bundle's digest changed — and a digest exists only for a
+  // tree that has been read. Decided before the read, against a HEAD resolved
+  // a moment earlier, they could judge one commit and deploy another. Decided
+  // here, the revision judged is the revision deployed.
   //
   // `functionLimit` is applied only where this run owes the WHOLE fleet.
   // Against a named list it measures truncation over the UNFILTERED set, so
@@ -1692,12 +1733,42 @@ async function executeEdgeFunctionDeploy(
   // not reset when the generation restarts. Ordered by name, the walk began
   // at `abs-data-service` again on every prime merge and never reached the
   // end of the alphabet. See `stalestFirst`.
-  const snapshot = await fetchPrimeBackendSnapshot(getAppOctokit(), source, {
-    includeMigrationSql: false,
-    skipFunctionSlugs: lineWithheld.length > 0 ? [...refreshed, ...lineWithheld] : refreshed,
-    deployOrder: stalestFirst(freshness),
-    ...(wanted === null ? { functionLimit: EDGE_DEPLOY_BATCH } : {}),
-  });
+  const planned: {
+    generation: ReturnType<typeof planDeployGeneration> | null;
+    refreshed: string[];
+    proven: string[];
+  } = { generation: null, refreshed: [], proven: [] };
+  const snapshot = await timed("snapshot", () =>
+    fetchPrimeBackendSnapshot(getAppOctokit(), source, {
+      includeMigrationSql: false,
+      skipFunctionSlugs: lineWithheld,
+      deployOrder: stalestFirst(freshness),
+      planSkip: ({ commitSha, bundleDigests }) => {
+        const generation = planDeployGeneration({
+          runStartedAt: run.started_at,
+          lastGenerationAt:
+            (run.result as { generation_at?: string | null } | null)?.generation_at ?? null,
+          lastSourceSha: (run.result as { source_sha?: string | null } | null)?.source_sha ?? null,
+          observedSourceSha: commitSha,
+          now: new Date().toISOString(),
+        });
+        planned.generation = generation;
+        planned.refreshed = refreshedSince(freshness, generation.baselineAt);
+        planned.proven =
+          ledger.state === "read"
+            ? ledgerCurrentSlugs({ ledger: ledger.entries, digests: bundleDigests, copies })
+            : [];
+        return [...planned.refreshed, ...planned.proven];
+      },
+      ...(wanted === null ? { functionLimit: EDGE_DEPLOY_BATCH } : {}),
+    }),
+  );
+  const generation = planned.generation;
+  if (!generation) throw new Error("the prime snapshot returned without planning its skip list");
+  const { refreshed, proven } = planned;
+  // What the clone holds that this run owes nothing more for: copies newer
+  // than the generation, and copies the ledger proves are this tree's.
+  const delivered = new Set([...refreshed, ...proven]);
 
   const fetched = snapshot.functions ?? [];
   const pass = planEdgeDeployPass({
@@ -1705,19 +1776,25 @@ async function executeEdgeFunctionDeploy(
     fetched: fetched.map((fn) => fn.slug),
     truncated: snapshot.functionSourceTruncated,
     batchLimit: EDGE_DEPLOY_BATCH,
+    deployableCount: snapshot.deployableCount,
   });
   const chosen = new Set(pass.batch);
   const batch = fetched.filter((fn) => chosen.has(fn.slug));
 
-  // An empty batch means "nothing left to fetch", which is only the same as
-  // "nothing left to do" while the tree has held still. On a restarted
-  // generation the skip list was computed against the SUPERSEDED revision,
-  // so this pass is empty for the wrong reason — it hands the run back with
-  // the new baseline recorded, and the next pass fetches the whole set again.
-  if (batch.length === 0 && !generation.sourceMoved) {
-    // Nothing left to fetch with the tree held still: every bundle this run
-    // owed holds a copy on the clone newer than this generation began, so
-    // there is nothing for the run to do and it completes.
+  // An empty batch means "nothing left to fetch", and since the skip list
+  // was planned at the commit this pass read, that is "nothing left to do".
+  // It used to need the tree to have held still as well: the skip list was
+  // computed before the read, against the revision the last pass recorded,
+  // so on a move it was computed against a SUPERSEDED tree and the pass was
+  // empty for the wrong reason. Planned inside the snapshot, a move restarts
+  // the generation before the skip list is taken — nothing is newer than
+  // "now" — so what is still skipped is only what the ledger proves is THIS
+  // tree's bundle.
+  if (batch.length === 0) {
+    // Nothing left to fetch: every bundle this run owed holds a copy on the
+    // clone newer than this generation began, or the very copy the ledger
+    // recorded for this tree, so there is nothing for the run to do and it
+    // completes.
     //
     // It proves NO revision, though, and records none. "Newer than this
     // generation" is read from the TARGET's timestamps, which say a copy
@@ -1729,23 +1806,21 @@ async function executeEdgeFunctionDeploy(
     // again. Recording none steps the catch-up back to the previous proof,
     // which can only make its next diff wider: a redeploy, never a skip.
     return succeedRun(run, {
-      deployed: refreshed.length,
+      deployed: delivered.size,
       note:
-        refreshed.length > 0
+        delivered.size > 0
           ? "every bundle this run owed is on the clone"
           : "no function bundles to deploy",
       source_sha: snapshot.sourceSha ?? null,
       functions_revision: null,
       revision_recorded: false,
       generation_at: generation.baselineAt,
+      pass_ms: passTimings(),
     });
   }
 
-  const { results, stoppedEarly } = await deployWithinBudget(
-    run,
-    backend.supabase_project_ref,
-    batch,
-    deadlineAt,
+  const { results, stoppedEarly } = await timed("deploy", () =>
+    deployWithinBudget(run, projectRef, batch, deadlineAt),
   );
   const failures = (results ?? []).filter((r) => r.error);
   if (failures.length === (results ?? []).length && failures.length > 0) {
@@ -1756,6 +1831,45 @@ async function executeEdgeFunctionDeploy(
     slug: f.slug,
     error: String(f.error).slice(0, 200),
   }));
+
+  // What landed goes in the ledger, with the digest of what was sent and the
+  // deploy the project answered with, so the next prime merge re-owes it only
+  // if it changes it. Never what failed: a refused bundle is not on the clone.
+  const ledgerWrite = await timed("record", () =>
+    recordFunctionDeploys(
+      run.clone_id,
+      (results ?? []).flatMap((r) => {
+        const digest = r.error ? undefined : snapshot.bundleDigests?.get(r.slug);
+        return digest
+          ? [
+              {
+                slug: r.slug,
+                digest,
+                sourceSha: snapshot.sourceSha ?? null,
+                functionId: r.functionId ?? null,
+                functionVersion: r.functionVersion ?? null,
+                deployedFromMs: r.startedMs,
+                deployedToMs: r.endedMs,
+              },
+            ]
+          : [];
+      }),
+    ),
+  );
+  // A merge restarts the generation, and a restart is charged an attempt
+  // because it re-owes everything the run had delivered. Where the ledger was
+  // read, and this pass's own landings reached it, nothing delivered was lost:
+  // the merge re-owed only the bundles it changed, so there is nothing for
+  // the charge to bound. See `planEdgeDeployResume`.
+  const ledgerCarries = ledger.state === "read" && ledgerWrite.ok;
+  const ledgerNote =
+    ledger.state === "read"
+      ? {
+          proven: proven.length,
+          recorded: ledgerWrite.ok ? ledgerWrite.recorded : 0,
+          ...(ledgerWrite.ok ? {} : { write_error: ledgerWrite.error.slice(0, 300) }),
+        }
+      : { unavailable: ledger.why.slice(0, 300) };
 
   // More to come? Hand the run back to the queue rather than pronouncing a
   // partial deployment complete — the rule `functionSourceTruncated` is
@@ -1775,12 +1889,12 @@ async function executeEdgeFunctionDeploy(
     stoppedEarly,
     attempts,
     maxAttempts: run.max_attempts ?? 30,
-    sourceMoved: generation.sourceMoved,
+    sourceMoved: generation.sourceMoved && !ledgerCarries,
   });
 
   if (resume.kind === "park") {
     return parkRun(run, [
-      `${refreshed.length + landed} bundle(s) deployed over ${attempts} passes and more remain`,
+      `${delivered.size + landed} bundle(s) deployed over ${attempts} passes and more remain`,
       ...(failedDetail.length > 0
         ? [`last pass could not deploy ${failedDetail[0].slug}: ${failedDetail[0].error}`]
         : []),
@@ -1821,15 +1935,18 @@ async function executeEdgeFunctionDeploy(
           : null,
       result: {
         resuming: true,
-        deployed: refreshed.length + landed,
+        deployed: delivered.size + landed,
         last_batch: landed,
+        owed: pass.owed,
         paused_at_budget: stoppedEarly,
         failed: failedDetail,
+        ledger: ledgerNote,
+        pass_ms: passTimings(),
         // The revision this pass deployed from, and the baseline the next
         // pass measures "already delivered" against. Written together
         // because they are one fact: a bundle is delivered only against the
         // revision it came from. Read back by `planDeployGeneration`.
-        source_sha: snapshot.sourceSha ?? observedSourceSha ?? null,
+        source_sha: snapshot.sourceSha ?? null,
         generation_at: generation.baselineAt,
         ...(generation.sourceMoved ? { source_moved: true } : {}),
       },
@@ -1860,17 +1977,21 @@ async function executeEdgeFunctionDeploy(
   });
 
   return succeedRun(run, {
-    deployed: refreshed.length + landed,
+    deployed: delivered.size + landed,
     failed: failedDetail,
-    // The revision this run deployed FROM. A run reaches here only with
-    // `sourceMoved` false, so every bundle it counts came from this one
-    // revision. Which revision the clone's functions are PROVEN to be at is
+    ledger: ledgerNote,
+    // The revision this run deployed FROM. A run reaches here only where no
+    // uncarried move happened on this pass, so every bundle it counts is this
+    // revision's: landed from it now, newer than a generation that began with
+    // no move since, or the very copy the ledger recorded with this tree's
+    // digest. Which revision the clone's functions are PROVEN to be at is
     // `functions_revision` — for a named run, the revision its slug list was
     // computed up to, which is older than this one.
     source_sha: snapshot.sourceSha ?? null,
     functions_revision: functionsRevision,
     revision_recorded: functionsRevision !== null,
     generation_at: generation.baselineAt,
+    pass_ms: passTimings(),
   });
 }
 

@@ -13,6 +13,8 @@ import {
   runWithinBudget,
   stalestFirst,
 } from "./edgeDeployBatch.pure";
+import { ledgerCurrentSlugs, type LedgerEntry } from "./edgeBundleLedger.pure";
+import { freshnessOf, type ProjectFunctionCopy } from "./projectFunctionCopies.pure";
 
 const LIMIT = 60;
 const slugs = (n: number, prefix = "fn") =>
@@ -47,7 +49,7 @@ describe("refreshedSince — progress read off the target", () => {
   });
 
   it("presumes nothing fresh when the read itself failed", () => {
-    // `listProjectEdgeFunctionFreshness` answers an empty map on failure.
+    // `listProjectEdgeFunctionCopies` answers an empty map on failure.
     expect(refreshedSince(new Map(), started)).toEqual([]);
   });
 });
@@ -573,7 +575,7 @@ describe("stalestFirst — the copy the clone has held longest goes first", () =
   });
 
   it("keeps the snapshot's own order when the clone could not be read", () => {
-    // `listProjectEdgeFunctionFreshness` answers an empty map on a failed
+    // `listProjectEdgeFunctionCopies` answers an empty map on a failed
     // read, so every key is equal and the lane deploys as it did before.
     const names = slugs(12);
     expect(order(new Map(), names)).toEqual(names);
@@ -983,5 +985,302 @@ describe("the deploy order across a run's passes — the lane's decisions agains
       expect(stalest.perRun).toHaveLength(14);
       expect(stalest.everLanded).toBe(FLEET.length - 1);
     });
+  });
+});
+
+describe("the deploy ledger across a run's passes — a merge re-owes only what it changed", () => {
+  /*
+   * The same model clone as above, with the ledger wired the way
+   * `executeEdgeFunctionDeploy` now wires it: the skip list is what landed
+   * this generation (`refreshedSince`) plus what the ledger proves is the
+   * prime's bundle at this commit (`ledgerCurrentSlugs`), and a move is
+   * charged only where the ledger could not carry it.
+   *
+   * What is modelled from outside: the prime's digest per bundle (a merge
+   * changes `changedPerMerge` of them), and the clone's copies — a deploy, by
+   * this lane or by anything else, bumps the copy's version and stamps it.
+   */
+  const PASS_MS = 8 * 60_000;
+  const MAX_ATTEMPTS = 30;
+  const START_MS = Date.parse("2026-10-20T00:00:00.000Z");
+  const FLEET = slugs(395);
+
+  /** Every bundle on the clone, copied long ago at version 1. */
+  const cloneOf = (bundles: readonly string[] = FLEET) =>
+    new Map<string, ProjectFunctionCopy>(
+      bundles.map((slug, i) => [
+        slug,
+        {
+          updatedMs: START_MS - 86_400_000 - ((i * 37) % bundles.length) * 60_000,
+          id: `id:${slug}`,
+          version: 1,
+          active: true,
+        },
+      ]),
+    );
+
+  /** A deploy of `slug` onto the clone, by whoever made it. */
+  const write = (copies: Map<string, ProjectFunctionCopy>, slug: string, atMs: number) => {
+    const before = copies.get(slug);
+    const next: ProjectFunctionCopy = {
+      updatedMs: atMs,
+      id: before?.id ?? `id:${slug}`,
+      version: (before?.version ?? 0) + 1,
+      active: true,
+    };
+    copies.set(slug, next);
+    return next;
+  };
+
+  /** The prime's digests at commit `k`: a merge changes `perMerge` bundles. */
+  const primeAt = (k: number, perMerge: number) => {
+    const changedAt = new Map<string, number>();
+    for (let c = 1; c <= k; c++) {
+      for (let j = 0; j < perMerge; j++) {
+        changedAt.set(FLEET[(c * 7 + j * 131) % FLEET.length], c);
+      }
+    }
+    return new Map(FLEET.map((slug) => [slug, `${slug}#${changedAt.get(slug) ?? 0}`]));
+  };
+
+  /** A ledger that proves every copy on the clone is the prime's commit-0 bundle. */
+  const provenLedger = (copies: Map<string, ProjectFunctionCopy>) => {
+    const digests = primeAt(0, 0);
+    return new Map<string, LedgerEntry>(
+      FLEET.map((slug) => [
+        slug,
+        {
+          digest: digests.get(slug) as string,
+          functionId: copies.get(slug)?.id ?? null,
+          functionVersion: copies.get(slug)?.version ?? null,
+        },
+      ]),
+    );
+  };
+
+  async function simulate(input: {
+    readonly passes: number;
+    readonly slots: number;
+    readonly mergeEvery: number;
+    readonly changedPerMerge: number;
+    readonly copies: Map<string, ProjectFunctionCopy>;
+    readonly ledger: Map<string, LedgerEntry>;
+    /** False: every read fails, as before the migration has run. */
+    readonly ledgerReadable: boolean;
+    /** False: every write fails, so nothing this run lands is ever proven. */
+    readonly ledgerWritable: boolean;
+    /** Deploys of these slugs by something else, just before the pass. */
+    readonly foreignWrites?: ReadonlyMap<number, string>;
+    /** The prime's commit when the run starts; merges count on from it. */
+    readonly startCommit?: number;
+  }) {
+    const runStartedAt = new Date(START_MS).toISOString();
+    let lastGenerationAt: string | null = null;
+    let lastSourceSha: string | null = null;
+    let attempts = 0;
+    let restarts = 0;
+    let deploys = 0;
+    let digests = primeAt(input.startCommit ?? 0, input.changedPerMerge);
+    const end = (kind: "complete" | "park" | null, pass: number) => ({
+      outcome: kind === null ? null : { kind, pass },
+      restarts,
+      deploys,
+      attempts,
+      digests,
+    });
+
+    for (let p = 0; p < input.passes; p++) {
+      const nowMs = START_MS + p * PASS_MS;
+      const commit =
+        (input.startCommit ?? 0) + (input.mergeEvery > 0 ? Math.floor(p / input.mergeEvery) : 0);
+      digests = primeAt(commit, input.changedPerMerge);
+      const foreign = input.foreignWrites?.get(p);
+      if (foreign) write(input.copies, foreign, nowMs - 60_000);
+
+      const generation = planDeployGeneration({
+        runStartedAt,
+        lastGenerationAt,
+        lastSourceSha,
+        observedSourceSha: `sha-${commit}`,
+        now: new Date(nowMs).toISOString(),
+      });
+      if (generation.sourceMoved) restarts += 1;
+
+      // One reading of the clone; the skip list planned at the commit read.
+      const freshness = freshnessOf(input.copies);
+      const refreshed = refreshedSince(freshness, generation.baselineAt);
+      const proven = input.ledgerReadable
+        ? ledgerCurrentSlugs({ ledger: input.ledger, digests, copies: input.copies })
+        : [];
+      const skip = new Set([...refreshed, ...proven]);
+      const deployable = inDeployOrder(
+        FLEET.filter((slug) => !skip.has(slug)).map((slug) => ({ slug })),
+        stalestFirst(freshness),
+      );
+      const truncated = deployable.length > LIMIT;
+      const pass = planEdgeDeployPass({
+        wanted: null,
+        fetched: (truncated ? deployable.slice(0, LIMIT) : deployable).map((b) => b.slug),
+        truncated,
+        batchLimit: LIMIT,
+        deployableCount: deployable.length,
+      });
+      expect(pass.owed).toBe(deployable.length);
+      if (pass.batch.length === 0) return end("complete", p);
+
+      let tried = 0;
+      const { results, stoppedEarly } = await runWithinBudget<
+        string,
+        { slug: string; error?: string }
+      >({
+        items: pass.batch,
+        runOne: async (slug) => {
+          tried += 1;
+          const landed = write(input.copies, slug, nowMs + tried * 1_000);
+          deploys += 1;
+          if (input.ledgerWritable) {
+            input.ledger.set(slug, {
+              digest: digests.get(slug) as string,
+              functionId: landed.id,
+              functionVersion: landed.version,
+            });
+          }
+          return [{ slug }];
+        },
+        isPastDeadline: () => tried >= input.slots,
+      });
+
+      const ledgerCarries = input.ledgerReadable && input.ledgerWritable;
+      const resume = planEdgeDeployResume({
+        landed: countLanded(results),
+        moreRemain: pass.moreRemain,
+        stoppedEarly,
+        attempts,
+        maxAttempts: MAX_ATTEMPTS,
+        sourceMoved: generation.sourceMoved && !ledgerCarries,
+      });
+      if (resume.kind !== "requeue") return end(resume.kind, p);
+      if (!resume.attemptNeutral) attempts += 1;
+      lastGenerationAt = generation.baselineAt;
+      lastSourceSha = `sha-${commit}`;
+    }
+    return end(null, input.passes);
+  }
+
+  it("finishes the run that parked, with the prime merging every nine passes", async () => {
+    /*
+      The measured shape of 12–13 Oct 2026: two deploys a pass, a merge every
+      nine. Without a ledger every merge re-owes all 395 bundles and charges
+      an attempt, so the run parks having proven nothing (the model clone
+      above parks it at pass 279). With one, a merge re-owes the three
+      bundles it changed and costs no attempt.
+    */
+    const copies = cloneOf();
+    const ledger = new Map<string, LedgerEntry>();
+    const run = await simulate({
+      passes: 600,
+      slots: 2,
+      mergeEvery: 9,
+      changedPerMerge: 3,
+      copies,
+      ledger,
+      ledgerReadable: true,
+      ledgerWritable: true,
+    });
+    expect(run.outcome).toEqual({ kind: "complete", pass: 215 });
+    // Twenty-three merges landed under it, and not one was charged.
+    expect(run.restarts).toBe(23);
+    expect(run.attempts).toBe(0);
+    // The fleet once, and the bundles those merges changed after they landed.
+    expect(run.deploys).toBe(431);
+
+    // And what it completed over is the prime's LAST tree, bundle by bundle:
+    // every copy is the deploy the ledger recorded, at the digest the last
+    // commit gives — no bundle from a superseded tree is counted as current.
+    for (const slug of FLEET) {
+      const entry = ledger.get(slug);
+      expect(entry?.digest).toBe(run.digests.get(slug));
+      expect(copies.get(slug)?.version).toBe(entry?.functionVersion);
+    }
+  });
+
+  it("is the old behaviour exactly while the ledger cannot be read", async () => {
+    const run = await simulate({
+      passes: 600,
+      slots: 2,
+      mergeEvery: 9,
+      changedPerMerge: 3,
+      copies: cloneOf(),
+      ledger: new Map(),
+      ledgerReadable: false,
+      ledgerWritable: true,
+    });
+    expect(run.outcome).toEqual({ kind: "park", pass: 279 });
+    expect(run.restarts).toBe(31);
+  });
+
+  it("charges every restart as before while this run's landings cannot be recorded", async () => {
+    // Read, but never written: nothing this run lands can be proven after a
+    // merge, so a merge does re-owe it all and the charge is what bounds it.
+    const run = await simulate({
+      passes: 600,
+      slots: 2,
+      mergeEvery: 9,
+      changedPerMerge: 3,
+      copies: cloneOf(),
+      ledger: new Map(),
+      ledgerReadable: true,
+      ledgerWritable: false,
+    });
+    expect(run.outcome).toEqual({ kind: "park", pass: 279 });
+  });
+
+  it("deploys nothing over a clone the ledger proves current", async () => {
+    const copies = cloneOf();
+    const run = await simulate({
+      passes: 10,
+      slots: 2,
+      mergeEvery: 0,
+      changedPerMerge: 0,
+      copies,
+      ledger: provenLedger(copies),
+      ledgerReadable: true,
+      ledgerWritable: true,
+    });
+    expect(run.outcome).toEqual({ kind: "complete", pass: 0 });
+    expect(run.deploys).toBe(0);
+  });
+
+  it("re-owes exactly what the prime changed and what something else wrote over", async () => {
+    /*
+      A clone the ledger proves current at commit 0; the prime has since
+      merged once, changing three bundles; and the clone's own CI deployed
+      `fn-100` just before the run. `fn-100` is unchanged in the prime, so
+      only the version can tell its copy is no longer this lane's. Owed: the
+      three and `fn-100`, and nothing else of the 395.
+    */
+    const copies = cloneOf();
+    const ledger = provenLedger(copies);
+    const run = await simulate({
+      passes: 20,
+      slots: 2,
+      mergeEvery: 0,
+      changedPerMerge: 3,
+      startCommit: 1,
+      copies,
+      ledger,
+      ledgerReadable: true,
+      ledgerWritable: true,
+      foreignWrites: new Map([[0, "fn-100"]]),
+    });
+    const changed = [...run.digests].filter(([, d]) => !d.endsWith("#0")).map(([slug]) => slug);
+    expect(changed).toHaveLength(3);
+    expect(changed).not.toContain("fn-100");
+    expect(run.deploys).toBe(4);
+    expect(run.outcome).toEqual({ kind: "complete", pass: 1 });
+    for (const slug of [...changed, "fn-100"]) {
+      expect(ledger.get(slug)?.functionVersion).toBe(copies.get(slug)?.version);
+      expect(ledger.get(slug)?.digest).toBe(run.digests.get(slug));
+    }
   });
 });

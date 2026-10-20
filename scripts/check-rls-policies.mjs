@@ -56,6 +56,12 @@ const SERVICE_ROLE_ONLY = new Set([
   // default grants from anon and authenticated, so there is no policy to
   // write and adding one would open a table no browser has business reading.
   "prime_snapshot_scans",
+  // What the edge-function deploy lane deployed to each clone, bundle by
+  // bundle — the digest it sent and when. Written and read only by that lane,
+  // which holds the service role; its migration REVOKEs the default grants
+  // from anon and authenticated. A policy here would let a browser write a
+  // row that makes the lane skip a deploy a tenant is owed.
+  "clone_function_deploys",
   // The Voice Cloning Studio's two secret-bearing tables: a client's VAPI
   // private key, and each deployed fleet's webhook secret and Make transfer
   // hook, all encrypted by the application. Read only by the Studio's server

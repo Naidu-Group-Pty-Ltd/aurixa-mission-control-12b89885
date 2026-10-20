@@ -289,11 +289,39 @@ export function readSpecifiers(source: string): {
   return { specifiers, opaque };
 }
 
+/** What `readSpecifiers` answers for one file, or null where it is not text. */
+export type FileSpecifiers = ReturnType<typeof readSpecifiers> | null;
+
+/**
+ * A `specifiersOf` that reads each file once, however many bundles reach it.
+ *
+ * Every bundle carries the same shared tree, so pruning every bundle a commit
+ * defines reads the same shared files hundreds of times over; the answer for a
+ * file depends only on its text, so it is kept the first time it is read. The
+ * text itself is not kept — only the specifiers, which are a few strings.
+ */
+export function memoisedSpecifiers(
+  textOf: (path: string) => string | null,
+): (path: string) => FileSpecifiers {
+  const seen = new Map<string, FileSpecifiers>();
+  return (path) => {
+    const hit = seen.get(path);
+    if (hit !== undefined) return hit;
+    const source = textOf(path);
+    const answer = source === null ? null : readSpecifiers(source);
+    seen.set(path, answer);
+    return answer;
+  };
+}
+
 /**
  * Walk a bundle from its entrypoint and keep only what it reaches.
  *
  * `textOf` returns a file's source, or null where it is not text (an asset, a
  * binary) — such a file is kept when reached but contributes no edges.
+ * `specifiersOf`, where given, answers the same question already parsed, so a
+ * caller pruning many bundles over one tree parses each file once
+ * (`memoisedSpecifiers`); it must agree with `readSpecifiers(textOf(path))`.
  */
 export function pruneBundleToReachable(input: {
   readonly entrypointPath: string;
@@ -301,6 +329,7 @@ export function pruneBundleToReachable(input: {
   /** Kept whatever the walk finds: the runtime reads it, not the module graph. */
   readonly importMapPath: string | null;
   readonly textOf: (path: string) => string | null;
+  readonly specifiersOf?: (path: string) => FileSpecifiers;
 }): PruneOutcome {
   const all = input.files.map((f) => f.path);
   const present = new Set(all);
@@ -313,13 +342,20 @@ export function pruneBundleToReachable(input: {
   const reached = new Set<string>([input.entrypointPath]);
   if (input.importMapPath && present.has(input.importMapPath)) reached.add(input.importMapPath);
 
+  const parsed =
+    input.specifiersOf ??
+    ((path: string): FileSpecifiers => {
+      const source = input.textOf(path);
+      return source === null ? null : readSpecifiers(source);
+    });
+
   const queue = [input.entrypointPath];
   while (queue.length > 0) {
     const path = queue.shift() as string;
-    const source = input.textOf(path);
-    if (source === null) continue; // not text — reached, but contributes no edges
+    const read = parsed(path);
+    if (read === null) continue; // not text — reached, but contributes no edges
 
-    const { specifiers, opaque } = readSpecifiers(source);
+    const { specifiers, opaque } = read;
     if (opaque) {
       return { ...everything, reason: `${path} imports a computed specifier` };
     }

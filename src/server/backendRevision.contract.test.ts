@@ -85,10 +85,13 @@ describe("a succeeded deploy records the revision its functions are proven at", 
     */
     expect(emptyBatch).toContain("functions_revision: null");
     expect(emptyBatch).toContain("revision_recorded: false");
-    const emptyBranch = lane.slice(
-      lane.indexOf("if (batch.length === 0 && !generation.sourceMoved)"),
-      lane.indexOf("return succeedRun(run, {"),
-    );
+    // Sliced by string, so the anchor is checked first: a branch condition
+    // that changes leaves `indexOf` at -1, the slice empty, and the
+    // `not.toContain` below passing over nothing.
+    const branchAt = lane.indexOf("if (batch.length === 0) {");
+    expect(branchAt).toBeGreaterThan(-1);
+    const emptyBranch = lane.slice(branchAt, lane.indexOf("return succeedRun(run, {", branchAt));
+    expect(emptyBranch.startsWith("if (batch.length === 0) {")).toBe(true);
     expect(emptyBranch).not.toContain("functionsRevisionOfSuccess(");
   });
 

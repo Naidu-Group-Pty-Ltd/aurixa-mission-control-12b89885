@@ -1132,4 +1132,13 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "column", table: "prime_config", column: "codex_autofix_max_per_night" },
     ],
   },
+  {
+    migration: "20261020090000_clone_function_deploys.sql",
+    version: "20261020090000",
+    assertions: [
+      { kind: "table", table: "clone_function_deploys" },
+      { kind: "column", table: "clone_function_deploys", column: "digest" },
+      { kind: "column", table: "clone_function_deploys", column: "function_version" },
+    ],
+  },
 ];
