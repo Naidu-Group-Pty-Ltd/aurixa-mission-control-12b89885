@@ -21,12 +21,38 @@
  *   - the human's work is read as a TREE difference — every path whose entry
  *     on the branch head differs from the engine's last statement on it;
  *   - each of those paths keeps the human's version on top of the new
- *     statement, PROVIDED the new statement did not change that same path
- *     again: a path both changed is a conflict, and a conflict is never
- *     resolved here;
+ *     statement where the new statement did not change that same path again;
+ *   - a path the new statement ALSO changed, to exactly the human's entry
+ *     (same blob, same mode, or both deleted), is AGREEMENT, not a conflict:
+ *     the new statement already carries the human's version, so nothing is
+ *     overlaid and nothing is lost;
+ *   - a path both changed differently is three-way merged by the engine —
+ *     the last statement is the base, the head is ours, the new statement is
+ *     theirs — with `threeWayMerge`, the merge held line variants already use
+ *     (`variantMerge.pure.ts`). Only a CLEAN merge is overlaid; one
+ *     conflicting hunk, a text that cannot be read, a deletion against an
+ *     edit, an add against an add or a mode change defers the refresh;
  *   - the result is a MERGE COMMIT (parents: the branch head, the new
  *     statement), so the branch only ever moves forward and the human's
  *     commits stay in its history.
+ *
+ * ## Why agreement had to be named
+ *
+ * The rule used to call every path both sides changed a conflict, without
+ * asking what either side changed it TO. That made the house rule — fix it at
+ * prime and let the cascade carry it — deadlock on the proposals it was meant
+ * to free. Measured on npc-client-dashboard #379, 19 Oct 2026: the proposal
+ * carried three hand commits (every workflow pinned to a commit, Deno and the
+ * Supabase CLI installed from their releases, and a held `App.tsx` reconcile),
+ * written byte for byte from prime's own pull request so the clone could run
+ * CI under the organisation's new Actions policy. Prime then merged that pull
+ * request, and the refresh deferred on "29 path(s) the proposal's own commits
+ * also changed": all 29 were workflow files the new statement carried with
+ * EXACTLY the bytes the hand commits had written. The proposal could not go
+ * green without prime's next change, and prime's next change could not reach
+ * it. The next one, adding `--with-deps` to a workflow the hand commit had
+ * also pinned, needs the three-way merge: the hand's change is a subset of
+ * prime's, and the merge takes prime's text.
  *
  * Anything this cannot decide exactly defers the refresh — the proposal is
  * left exactly as it is, and it lands (or is reconciled) as it stands; the
@@ -41,16 +67,21 @@
  *     older `main`);
  *   - more paths changed by hand than `MAX_PRESERVED_PATHS`, which is a
  *     rebuild rather than a reconcile;
- *   - any path conflicts.
+ *   - a path both changed differently cannot be three-way merged here: a
+ *     deletion against an edit, two different additions, a mode either side
+ *     changed, more such paths than `MAX_REFRESH_TEXT_MERGES`, or, once the
+ *     engine has read the texts, a text it could not read or a merge that
+ *     conflicts (`completeRefreshPlan`).
  *
  * The engine's own preserving merges are recognised by their message
  * (`PRESERVING_MERGE_PREFIX`) and are not "somebody else's merge"; they do
  * not start with `ENGINE_COMMIT_PREFIX`, so `isEngineOnlyBranch` still reads
  * the branch as carrying human work, which it does.
  *
- * Pure: the engine supplies the listings.
+ * Pure: the engine supplies the listings, and the texts a merge needs.
  */
 import { ENGINE_COMMIT_PREFIX } from "./proposalRepair.pure";
+import { threeWayMerge } from "./variantMerge.pure";
 
 /** The message every preserving merge starts with. Never `ENGINE_COMMIT_PREFIX`. */
 export const PRESERVING_MERGE_PREFIX =
@@ -58,6 +89,20 @@ export const PRESERVING_MERGE_PREFIX =
 
 /** Past this, the branch is a rebuild, not a reconcile, and is not overlaid. */
 export const MAX_PRESERVED_PATHS = 400;
+
+/**
+ * Past this, a refresh that would have to merge text is deferred. Each merge
+ * costs the engine three blob reads and one write, and a proposal whose
+ * reconcile collides with prime on more files than this is being rebuilt, not
+ * followed.
+ */
+export const MAX_REFRESH_TEXT_MERGES = 8;
+
+/** A text longer than this is not merged here: the line matcher's cost grows with it. */
+export const MAX_REFRESH_MERGE_CHARS = 1_000_000;
+
+/** The two modes a text file can carry. A link or a submodule is never merged as text. */
+const TEXT_MODES = new Set(["100644", "100755"]);
 
 export type BranchCommit = { sha: string; message: string; parents: number };
 
@@ -70,13 +115,40 @@ export type Listing = {
 
 export type OverlayEntry = { path: string; mode: string; sha: string | null };
 
+/**
+ * A path the human and the new statement both changed, differently: the three
+ * blobs a merge reads. `base` is the branch's last statement, `ours` the head,
+ * `theirs` the new statement. The mode is the one both sides carry.
+ */
+export type TextMergeCandidate = {
+  path: string;
+  mode: string;
+  base: string;
+  ours: string;
+  theirs: string;
+};
+
 export type RefreshPlan =
   /** Only the engine's statements are on the branch: move it, as always. */
   | { kind: "replace" }
-  /** Keep the human's paths on top of the new statement, in a merge commit. */
-  | { kind: "merge"; overlay: OverlayEntry[]; preserved: string[] }
+  /**
+   * Keep the human's paths on top of the new statement, in a merge commit.
+   * `agreed` are paths the new statement already carries exactly as the human
+   * left them (nothing to overlay). `textMerges` are owed a three-way merge
+   * before anything is written: the engine reads their texts and completes
+   * the plan with `completeRefreshPlan`, which defers on any doubt.
+   */
+  | {
+      kind: "merge";
+      overlay: OverlayEntry[];
+      preserved: string[];
+      agreed: string[];
+      textMerges: TextMergeCandidate[];
+    }
   /** Leave the proposal exactly as it is. */
   | { kind: "defer"; why: string };
+
+type MergePlan = Extract<RefreshPlan, { kind: "merge" }>;
 
 /** The newest engine statement on the branch (commits oldest first, as GitHub lists a pull request's). */
 export function lastStatement(commits: readonly BranchCommit[]): BranchCommit | null {
@@ -146,9 +218,37 @@ export function planRefreshOverHumanWork(input: {
 
   const conflicts: string[] = [];
   const overlay: OverlayEntry[] = [];
+  const agreed: string[] = [];
+  const textMerges: TextMergeCandidate[] = [];
   for (const path of [...changedByHand].sort()) {
     if (next.entries.get(path) !== statement.entries.get(path)) {
-      conflicts.push(path);
+      // Both sides changed it. What matters is what each changed it TO.
+      const ours = head.entries.get(path);
+      const theirs = next.entries.get(path);
+      const base = statement.entries.get(path);
+      if (
+        ours === theirs &&
+        (ours === undefined || head.modes.get(path) === next.modes.get(path))
+      ) {
+        // The new statement already holds the human's version (or both
+        // deleted it): nothing is overlaid, and nothing is lost.
+        agreed.push(path);
+        continue;
+      }
+      const mode = head.modes.get(path);
+      if (
+        ours === undefined ||
+        theirs === undefined ||
+        base === undefined ||
+        mode === undefined ||
+        mode !== next.modes.get(path) ||
+        mode !== statement.modes.get(path) ||
+        !TEXT_MODES.has(mode)
+      ) {
+        conflicts.push(path);
+        continue;
+      }
+      textMerges.push({ path, mode, base, ours, theirs });
       continue;
     }
     const sha = head.entries.get(path) ?? null;
@@ -168,9 +268,75 @@ export function planRefreshOverHumanWork(input: {
     return {
       kind: "defer",
       why:
-        `the refresh would change ${conflicts.length} path(s) the proposal's own commits also changed ` +
-        `(${listed}${conflicts.length > 5 ? ", …" : ""})`,
+        `the refresh would change ${conflicts.length} path(s) the proposal's own commits also changed, ` +
+        `in a way no text merge can settle (${listed}${conflicts.length > 5 ? ", …" : ""})`,
     };
   }
-  return { kind: "merge", overlay, preserved: [...changedByHand].sort() };
+  if (textMerges.length > MAX_REFRESH_TEXT_MERGES) {
+    return {
+      kind: "defer",
+      why:
+        `${textMerges.length} path(s) changed differently here and in the refresh — more than the ` +
+        `${MAX_REFRESH_TEXT_MERGES} a refresh merges`,
+    };
+  }
+  return { kind: "merge", overlay, preserved: [...changedByHand].sort(), agreed, textMerges };
+}
+
+/**
+ * The verdict on one candidate, from the three texts the engine read. `null`
+ * for a text that could not be read as text: a read that FAILED is not a text
+ * that is EMPTY, and the safe side of an unread file is the proposal left as
+ * it stands.
+ */
+export type RefreshTextMerge =
+  | { path: string; act: "write"; text: string }
+  | { path: string; act: "hold"; why: string };
+
+export function decideRefreshTextMerge(
+  candidate: TextMergeCandidate,
+  texts: { base: string | null; ours: string | null; theirs: string | null },
+): RefreshTextMerge {
+  const { path } = candidate;
+  const { base, ours, theirs } = texts;
+  if (base === null || ours === null || theirs === null) {
+    return { path, act: "hold", why: `\`${path}\` could not be read as text to merge` };
+  }
+  if (Math.max(base.length, ours.length, theirs.length) > MAX_REFRESH_MERGE_CHARS) {
+    return { path, act: "hold", why: `\`${path}\` is too large to merge here` };
+  }
+  const merged = threeWayMerge(base, ours, theirs);
+  if (!merged.clean) {
+    return {
+      path,
+      act: "hold",
+      why: `${merged.conflicts} hunk(s) of \`${path}\` changed differently here and in the refresh`,
+    };
+  }
+  return { path, act: "write", text: merged.text };
+}
+
+/**
+ * The merge plan with every candidate settled. `stored` is the blob each
+ * written merge was stored as (null where the store failed). Any hold, or any
+ * merge that could not be stored, defers the whole refresh: half a merge is
+ * worse than none, because the overlay is one tree.
+ */
+export function completeRefreshPlan(
+  plan: MergePlan,
+  settled: readonly { verdict: RefreshTextMerge; stored: string | null }[],
+): RefreshPlan {
+  const byPath = new Map(settled.map((s) => [s.verdict.path, s]));
+  const overlay = [...plan.overlay];
+  for (const candidate of plan.textMerges) {
+    const s = byPath.get(candidate.path);
+    if (!s) return { kind: "defer", why: `\`${candidate.path}\` was not merged` };
+    if (s.verdict.act === "hold") return { kind: "defer", why: s.verdict.why };
+    if (s.stored === null) {
+      return { kind: "defer", why: `the merge of \`${candidate.path}\` could not be stored` };
+    }
+    overlay.push({ path: candidate.path, mode: candidate.mode, sha: s.stored });
+  }
+  overlay.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  return { ...plan, overlay, textMerges: [] };
 }
