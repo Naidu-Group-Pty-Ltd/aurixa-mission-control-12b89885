@@ -217,6 +217,13 @@ export function planResolutionMerge(input: {
 }
 
 /**
+ * What every resolution commit's message starts with. A refresh reads a branch
+ * whose only other commits are the engine's statements as the engine's own by
+ * it (`carriesHumanWork` in `refreshOverHumanWork.pure.ts`).
+ */
+export const RESOLUTION_MERGE_PREFIX = "chore(aurixa): restate proposal #";
+
+/**
  * The resolution commit's message.
  *
  * Deliberately NOT the engine's statement prefix: `isEngineOnlyBranch`
@@ -231,7 +238,7 @@ export function resolutionCommitMessage(input: {
   deleted: number;
 }): string {
   const message =
-    `chore(aurixa): restate proposal #${input.prNumber} over ${input.baseShort}\n\n` +
+    `${RESOLUTION_MERGE_PREFIX}${input.prNumber} over ${input.baseShort}\n\n` +
     `Conflict resolution by standing instruction: the proposal's side stands for every path ` +
     `it states (${input.restated} restated, ${input.deleted} deleted); everything else keeps ` +
     `the default branch's content. A merge commit, so nothing on this branch is rewritten.`;

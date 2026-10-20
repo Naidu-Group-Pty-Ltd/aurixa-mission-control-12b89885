@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { resolutionCommitMessage } from "./conflictMerge.pure";
 import { ENGINE_COMMIT_PREFIX, isEngineOnlyBranch } from "./proposalRepair.pure";
 import {
   carriesHumanWork,
   completeRefreshPlan,
   decideRefreshTextMerge,
+  isResolutionMerge,
   lastStatement,
   MAX_REFRESH_MERGE_CHARS,
   MAX_REFRESH_TEXT_MERGES,
@@ -36,6 +38,60 @@ describe("whose work is on the branch", () => {
     expect(carriesHumanWork([statement])).toBe(false);
     expect(carriesHumanWork([statement, reconcile])).toBe(true);
     expect(lastStatement([statement, reconcile])).toBe(statement);
+  });
+
+  describe("the merge drain's own resolution", () => {
+    // npc-crm-independent-6505dc #121 on 20 Oct 2026: one statement, then the
+    // drain's `f024824`, and the line's refresh deferred on it as a stranger's.
+    const resolution: BranchCommit = {
+      sha: "f0248243",
+      message: resolutionCommitMessage({
+        prNumber: 121,
+        baseShort: "2a26ddc",
+        restated: 939,
+        deleted: 6,
+      }),
+      parents: 2,
+    };
+
+    it("is the engine's work on a branch of statements, so the branch moves as before", () => {
+      expect(isResolutionMerge(resolution)).toBe(true);
+      expect(carriesHumanWork([statement, resolution])).toBe(false);
+      expect(
+        planRefreshOverHumanWork({
+          commits: [statement, resolution],
+          statement: null,
+          head: null,
+          next: null,
+        }),
+      ).toEqual({ kind: "replace" });
+    });
+
+    it("still defers beside a hand commit, where its base paths would read as hand edits", () => {
+      const before = listing({ "a.ts": "A0" });
+      const head = listing({ "a.ts": "A1" });
+      const next = listing({ "a.ts": "A2" });
+      for (const commits of [
+        [statement, reconcile, resolution],
+        [statement, resolution, reconcile],
+      ]) {
+        expect(carriesHumanWork(commits)).toBe(true);
+        const plan = planRefreshOverHumanWork({ commits, statement: before, head, next });
+        expect(plan).toEqual({ kind: "defer", why: expect.stringContaining("f024824") });
+      }
+    });
+
+    it("is recognised only as a merge wearing the drain's message", () => {
+      expect(isResolutionMerge({ ...resolution, parents: 1 })).toBe(false);
+      expect(carriesHumanWork([statement, { ...resolution, parents: 1 }])).toBe(true);
+      const mergeMain: BranchCommit = {
+        sha: "mm",
+        message: "Merge remote-tracking branch 'origin/main' into recon",
+        parents: 2,
+      };
+      expect(isResolutionMerge(mergeMain)).toBe(false);
+      expect(carriesHumanWork([statement, mergeMain])).toBe(true);
+    });
   });
 
   it("never lets a preserving merge make a worked branch read as pristine", () => {

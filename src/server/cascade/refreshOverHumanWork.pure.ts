@@ -78,8 +78,26 @@
  * not start with `ENGINE_COMMIT_PREFIX`, so `isEngineOnlyBranch` still reads
  * the branch as carrying human work, which it does.
  *
+ * ## The merge drain's own resolution is not human work
+ *
+ * A conflicted proposal is resolved by the merge drain in one merge commit
+ * (`conflictMerge.pure.ts`): the base branch's tree with the proposal's own
+ * paths restated, parents `[head, base]`. Its tree is two things the next
+ * statement regenerates — the base branch, and the statement's paths — so
+ * where every other commit on the branch is a statement, the branch carries
+ * nothing but the engine's work and is moved as an engine-only branch.
+ * Measured on npc-crm-independent-6505dc #121, 20 Oct 2026: its commits were
+ * one statement and the drain's `f024824`, and the first pass to deliver the
+ * line's 1,375 files since 17 Oct deferred on that merge as somebody else's,
+ * so no later pass could have refreshed the proposal either.
+ *
+ * Beside a hand commit it is still a merge of the base branch, and reading
+ * its base paths as hand edits could restore an older `main`, so it defers
+ * there as before.
+ *
  * Pure: the engine supplies the listings, and the texts a merge needs.
  */
+import { RESOLUTION_MERGE_PREFIX } from "./conflictMerge.pure";
 import { ENGINE_COMMIT_PREFIX } from "./proposalRepair.pure";
 import { threeWayMerge } from "./variantMerge.pure";
 
@@ -158,12 +176,20 @@ export function lastStatement(commits: readonly BranchCommit[]): BranchCommit | 
   return null;
 }
 
-/** Whether anything on the branch is not the engine's statement or its own preserving merge. */
+/** The merge drain's conflict resolution: a merge, by its message (`conflictMerge.pure.ts`). */
+export function isResolutionMerge(c: BranchCommit): boolean {
+  return c.parents > 1 && c.message.startsWith(RESOLUTION_MERGE_PREFIX);
+}
+
+/**
+ * Whether anything on the branch is not the engine's statement or its own
+ * preserving merge. The merge drain's resolution counts as the engine's only
+ * where nothing else on the branch is somebody's (see the module header).
+ */
 export function carriesHumanWork(commits: readonly BranchCommit[]): boolean {
-  return commits.some(
-    (c) =>
-      !c.message.startsWith(ENGINE_COMMIT_PREFIX) && !c.message.startsWith(PRESERVING_MERGE_PREFIX),
-  );
+  const human = (c: BranchCommit) =>
+    !c.message.startsWith(ENGINE_COMMIT_PREFIX) && !c.message.startsWith(PRESERVING_MERGE_PREFIX);
+  return commits.some((c) => human(c) && !isResolutionMerge(c));
 }
 
 export function planRefreshOverHumanWork(input: {
