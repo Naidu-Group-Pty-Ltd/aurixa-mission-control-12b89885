@@ -143,7 +143,7 @@ below is the owner's to approve, or to make.
 | ¤ Clone backends: edge functions | MC `remediation_runs`, `edge_function_deploy` | Each clone's latest run is parked `awaiting_validation`, the fourth of a chain whose first three the planner retired itself: npc-client-dashboard `28ddbe05` (parked 12 Oct 16:20 UTC), npc-crm-independent `12cce521` (12 Oct 16:34), Preflight `6b905563` (12 Oct 15:48) and NPC Test `10638fbc` (13 Oct 16:24). Each reads *"1 bundle(s) deployed over 30 passes and more remain"*. On `plisdzywzleljorrphxv` the last function the lane deployed is `generate-investment-report`, at 16:20:48 UTC on 12 Oct (F23). ✦ All four unchanged: `awaiting_validation`, 31 of 30 attempts, none rejected. ♦ **All four rejected** at 08:44:14 UTC on the owner's word, by the same write the admin button makes (no ticket was linked to any of them). The 08:50 catch-up sweep planned four fresh whole-fleet runs (`be33dee3` CD, `638d36d8` CRM, `91387dc1` NPC Test, `0598f988` Preflight), status `planned`. By 09:33 they had landed 9, 2, 3 and 3 bundles, 17 rows in `clone_function_deploys`: one bundle every two minutes or so across the fleet, because the drain serves one run a tick (F26). CD's first were `bulk-import-clients` and `estimate-property-value`, never on that project before. Every pass's `pass_ms` reads a 49–59 s snapshot of a 55–66 s pass (F26), and two passes ran long enough to be reclaimed by the 20-minute stall rule. On `plisdzywzleljorrphxv`, `listings-cache` is still the 11 Oct copy. |
 | ✦ MC: the engine fixes for F21, F22 and F23 | aurixa-mission-control-12b89885, branch `claude/confidential-report-cleanup-at2jfw`, head `d4a3854c` | Three commits on top of the fourth update (§4), no pull request. Three additive migrations: `20261020090000_clone_function_deploys`, `20261020100000_cascade_results_progressed_at` and `20261020100500_cascade_results_pass_trace`. Checked locally on `d4a3854c`: 469 test files and 9,441 tests passed, along with `tsc --noEmit`, the seventeen repository checks, Prettier and ESLint (one warning, also on `main`). MC runs no CI on a branch without a pull request, so CI has not seen it. ♦ **Merged** by the owner as #347 (`941c61a1`, 08:22 UTC), published by 08:27, and its three migrations applied (the digest manifest refresh #348 lists them). The new retirement text was on the 08:27 notice. |
 | ♦ MC: Cascade now for the children and the CRM line | MC `cascade_events` `e2c35fc3`, scope `selected` | Created at 08:43:48 UTC on the owner's word: `pr` mode, NPC Test, Preflight and NPC CRM Independent, the rows the Cascades page writes. Claimed at 08:46, 08:57 and 09:08, and retired at 09:19:05 with nothing delivered. Its three traces are F25's and F27's readings: NPC Test was ended in `tree`, Preflight in `proposal`, and the CRM line in `deliver`. The children were landed by hand instead (Step I). |
-| ♦ MC: the engine changes the traces call for | aurixa-mission-control-12b89885#349 (draft), branch `claude/gifted-meitner-b3towe` | Six engine commits on `main` `4e94c9bc`, then this update: `5493b9a1` (F24), `47330853` (F25), `c47b3f90` (F26), `4930b4aa` (F23 remedy 1), `64ee4047` (F28) and `d30fbd48` (F27). No migration. Checked locally on `d30fbd48`: `tsc --noEmit` clean, the eighteen `check:*` scripts pass, and the full suite passes 472 files and 9,487 tests. Every new guard was shown to fail on the defect it names. Not merged or published. |
+| ♦ MC: the engine changes the traces call for | aurixa-mission-control-12b89885#349 (draft), branch `claude/gifted-meitner-b3towe` | Six engine commits on `main` `4e94c9bc`, then this update and two corrections: `5493b9a1` (F24), `47330853` (F25), `c47b3f90` (F26), `4930b4aa` (F23 remedy 1), `64ee4047` (F28) and `d30fbd48` (F27). CI's build failed on `cdb2f148`: `64ee4047` put the drift rule under `src/server/`, which TanStack Start's import protection denies to client-reachable code, so the last commit moves it to `src/lib/`. No migration. Checked locally on the head: `npm run build` (and the same build failing with the old import), `tsc --noEmit`, the eighteen `check:*` scripts, and the full suite, 472 files and 9,487 tests. Every new guard was shown to fail on the defect it names. Not merged or published. |
 | `clone_backend_secrets.AIRTABLE_TABLE_NAME` | all four clones | `inherited`, last set in September; `AIRTABLE_TOKEN` and `AIRTABLE_BASE_ID` `withheld`. Unchanged until #345 is published. |
 
 ---
@@ -1129,7 +1129,10 @@ its blockers are F10's.
     repository, as the CRM line made it in its own, and in Prime, so that a
     clone provisioned from now on starts with it. Each clone's next build
     then declares `carries_own`, and the check stops inferring. That is
-    four pull requests, each the owner's word (§5).
+    four pull requests, each the owner's word (§5). Prime's half is
+    written: `629db7de` on Prime's `claude/gifted-meitner-b3towe`, with no
+    pull request. It is the CRM line's plugin and spec, ported, and three
+    of the spec's six tests fail on Prime's config without it.
 
 ---
 
@@ -1284,13 +1287,20 @@ it pushed only to two of the engine's, on the owner's word.
     every scan (`driftNoticesToRaise`, `repeatsLastBundleNotice`).
   - `d30fbd48` — **F27**: the trace names the five steps left inside
     `deliver`.
-  - This sixth update.
+  - This sixth update, a correction to F28's remedy (`cdb2f148`), and the
+    fix for the build CI refused on it: the drift rule moves from
+    `src/server/` to `src/lib/`, because TanStack Start's import protection
+    denies `**/server/**` to client-reachable code and
+    `fleet-drift.functions.ts` is reached from `/fleet-manager`.
+- On Prime's `claude/gifted-meitner-b3towe`, with no pull request:
+  `629db7de`, the build declares its backend in `version.json` (F28's
+  root, for clones provisioned from now on).
 
   None needs a migration. Each new guard was shown to fail on the defect
-  it names, by putting the old rule back. Checked locally on `d30fbd48`:
-  `tsc --noEmit`, the eighteen `check:*` scripts, Prettier on every
-  changed file, and the full suite, 472 files and 9,487 tests. Nothing was
-  merged or published.
+  it names, by putting the old rule back. Checked locally on the head:
+  `npm run build`, `tsc --noEmit`, the eighteen `check:*` scripts,
+  Prettier on every changed source file, and the full suite, 472 files and
+  9,487 tests. Nothing was merged or published.
 
 ---
 
@@ -1349,8 +1359,10 @@ it pushed only to two of the engine's, on the owner's word.
     `buildVersionManifest(env)` to `vite.config.ts` in npc-client-dashboard,
     npc-test-76b3b3 and preflight-property-group, and in Prime. The file is
     `protected` on every clone, so no cascade carries it, and each is a pull
-    request in its own repository. Until then #349 keeps that notice to one
-    per artefact.
+    request in its own repository. Prime's half is written (`629db7de` on
+    Prime's `claude/gifted-meitner-b3towe`), and the same plugin block
+    applies unchanged to each mirror's copy. Until then #349 keeps that
+    notice to one per artefact.
 
 ---
 
@@ -1424,6 +1436,11 @@ it pushed only to two of the engine's, on the owner's word.
   unchanged state every fifteen minutes buries the alarm that matters: 95%
   of the inbox was two such kinds, beside the park notices nobody read
   (F28).
+- **Run the build, not only the type checker and the tests.** TanStack
+  Start's client import protection is a rule only the build applies. F28's
+  first push passed `tsc`, the eighteen checks and 9,487 tests, and CI's
+  build refused it for importing a pure module under `src/server/` from a
+  client-reachable `.functions.ts`.
 - **A protected file is fixed once in every repository that protects it.**
   The CRM line added its `version.json` declaration to its own
   `vite.config.ts`, which every clone protects, so no cascade could carry

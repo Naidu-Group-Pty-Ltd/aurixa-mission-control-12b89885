@@ -1,6 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
-import { driftNoticesToRaise } from "@/server/driftNotice.pure";
+import { driftNoticesToRaise } from "@/lib/driftNotice.pure";
 
 // AI Fleet Manager — analyzes each clone vs prime and writes drift suggestions.
 // Manually invokable from the Fleet Manager UI; also triggered by cron via
