@@ -14,10 +14,12 @@ const read = (p: string) => readFileSync(join(process.cwd(), p), "utf8");
 // meets, and this file's module globs (`src/**`) carry one inside a string —
 // a stripped copy loses the whole branch and every anchor below with it.
 const engine = read("src/server/cascade-engine.server.ts");
-// The branch's own opening line. `scopeLabel` became a template literal when
+// The branch's own listing. `scopeLabel` became a template literal when
 // repository invariants were added to the candidate set, so the anchor is the
-// call that BUILDS the candidates rather than the label describing them.
-const start = engine.indexOf("candidatePaths = await listFilesMatchingGlobs(");
+// read the candidates are BUILT from rather than the label describing them —
+// one listing of each tree since 20 Oct 2026, the widened set selected from
+// prime's (`pathsMatchingGlobs`).
+const start = engine.indexOf("const [primeRead, cloneRead] = await Promise.allSettled([");
 const end = engine.indexOf("const partition = partitionCascadePaths(candidatePaths, exclusions");
 const branch = engine.slice(start, end);
 
@@ -38,17 +40,28 @@ describe("both trees are read once, and the SHAs decide what is read", () => {
       already diffs the trees; this one now does too.
     */
     expect(branch).toMatch(
-      /\[primeTree, cloneTree\] = await Promise\.all\(\[\s*listTreeEntries\(octokit, primeRef\),\s*listTreeEntries\(octokit, cloneRef\),/,
+      /const \[primeRead, cloneRead\] = await Promise\.allSettled\(\[\s*listTreeEntries\(octokit, primeRef\),\s*listTreeEntries\(octokit, cloneRef\),/,
     );
+    // And prime's ONCE: the widened candidates are selected from that listing.
+    expect(branch).toMatch(
+      /candidatePaths = await pathsMatchingGlobs\(\s*primeTree\.entries\.keys\(\),/,
+    );
+    expect(branch.match(/listTreeEntries\(octokit, primeRef\)/g) ?? []).toHaveLength(1);
   });
 
   it("narrows the candidates to paths whose blob SHA differs, before anything is read", () => {
     const narrowed = branch.indexOf("cloneTree.entries.get(path) !== primeTree.entries.get(path)");
     expect(narrowed).toBeGreaterThan(-1);
-    // Before the partition, which is the last thing before content is read.
-    expect(branch.indexOf("candidatePaths = candidatePaths.filter(")).toBeLessThan(
-      branch.indexOf("validateModuleGlobs(installedGlobs)"),
+    // Before the first content read: the import closure reads prime's text
+    // of the candidates, so the candidates are narrowed before it runs.
+    const narrowAt = branch.indexOf("candidatePaths = candidatePaths.filter(");
+    const firstRead = Math.min(
+      ...["await prefetchPrimeText(", "getFileContent("]
+        .map((read) => branch.indexOf(read))
+        .filter((at) => at > -1),
     );
+    expect(narrowAt).toBeGreaterThan(-1);
+    expect(firstRead).toBeGreaterThan(narrowAt);
   });
 
   it("does not narrow on a truncated tree — a file not listed is not a file unchanged", () => {
@@ -86,12 +99,16 @@ describe("the deletion pass still sees the module's whole section on prime", () 
       and taking it wholesale would be the bug.
     */
     const decl = branch.slice(
-      branch.indexOf("const primeInScope"),
+      branch.indexOf("const { valid } = validateModuleGlobs(installedGlobs);"),
       branch.indexOf("candidatePaths = candidatePaths.filter("),
     );
-    expect(decl).toContain("installedGlobs");
+    expect(decl).toContain("const inInstalledGlobs = globsMatcher(valid);");
+    expect(decl).toContain(
+      "const primeInScope = new Set(candidatePaths.filter(inInstalledGlobs));",
+    );
     expect(decl).not.toMatch(/const primeInScope = new Set\(candidatePaths\);/);
-    // And the deletion matchers themselves are still built from the narrow set.
-    expect(branch).toMatch(/validateModuleGlobs\(installedGlobs\)/);
+    // And the deletion matcher itself is the same narrow set, never the widened one.
+    expect(branch).toMatch(/if \(!inInstalledGlobs\(path\)\) continue;/);
+    expect(branch).not.toMatch(/globsMatcher\(\s*globsForModuleScopedClone/);
   });
 });

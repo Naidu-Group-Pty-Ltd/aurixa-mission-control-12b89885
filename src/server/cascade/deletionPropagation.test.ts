@@ -527,7 +527,7 @@ describe("the rules the engine has to keep", () => {
        installed. Before this it only ever learned what prime HAS, so a file
        prime removed from an installed module stayed for ever. */
     expect(code).toContain("listTreeEntries(octokit, cloneRef)");
-    expect(code).toContain("matchers.some((rx) => rx.test(path))");
+    expect(code).toContain("if (!inInstalledGlobs(path)) continue;");
   });
 
   it("re-validates the globs before letting one decide a deletion", () => {
@@ -558,8 +558,8 @@ describe("the rules the engine has to keep", () => {
        cascaded from its parent — look like a break in the repair path. */
     expect(ENGINE_COMMIT_PREFIX).toBe("chore(aurixa): cascade ");
     expect(code).toContain("`" + ENGINE_COMMIT_PREFIX + "${treeEntries.length} file(s) from ");
-    expect(isEngineOnlyBranch([{ message: "chore(aurixa): cascade 3 file(s) from x@abc1234" }])).toBe(
-      true,
-    );
+    expect(
+      isEngineOnlyBranch([{ message: "chore(aurixa): cascade 3 file(s) from x@abc1234" }]),
+    ).toBe(true);
   });
 });

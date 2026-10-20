@@ -125,3 +125,23 @@ export function globToRegex(glob: string): RegExp {
   out += "$";
   return new RegExp(out);
 }
+
+/**
+ * Whether a path matches ANY of `globs`, as `globs.some((g) =>
+ * globToRegex(g).test(path))` answers it — in one regular expression rather
+ * than one per glob.
+ *
+ * Every pattern `globToRegex` writes is anchored at both ends, carries no
+ * flags and no capture group (each metacharacter is escaped), so the
+ * alternation of them matches a path exactly when one of them does.
+ *
+ * Measured 20 Oct 2026 on `npc-crm-independent-6505dc`: 135 installed modules
+ * are 1,160 distinct globs, and the cascade asks them of prime's 11,712 paths
+ * and the clone's 10,837. One `RegExp.test` per glob per path was two seconds
+ * of the pass's CPU; the alternation is one native match per path.
+ */
+export function globsMatcher(globs: readonly string[]): (path: string) => boolean {
+  if (globs.length === 0) return () => false;
+  const combined = new RegExp(globs.map((g) => `(?:${globToRegex(g).source})`).join("|"));
+  return (path) => combined.test(path);
+}

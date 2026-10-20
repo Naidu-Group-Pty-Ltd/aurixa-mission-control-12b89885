@@ -173,6 +173,67 @@ export function isReExportShim(source: string): boolean {
   return reExportSpecifiers(source) !== null;
 }
 
+/**
+ * What a source text says, as the questions below ask it: its imports, what
+ * it re-exports if it is a shim, and the paths it names. Each answer is a
+ * function of the text (and the path it is read as) alone.
+ *
+ * `memoSourceReadings` takes each answer once and keeps it for as long as
+ * the readings object lives. The spec channel asks the same texts over and
+ * over — every kept spec on every shim hop, every delivered spec on every
+ * carry round — and replayed 20 Oct 2026 against `npc-crm-independent-6505dc`
+ * at prime@adb6bc5 (F27's second reading), that re-reading was most of the
+ * eight seconds of CPU the channel spent. One object per pass; it holds the
+ * texts the pass already holds, and nothing past the pass.
+ */
+export type SourceReadings = {
+  importsOf: (source: string) => readonly string[];
+  reExportSpecifiers: (source: string) => readonly string[] | null;
+  namedBy: (text: string, path: string) => readonly string[];
+  namedOutsideRoots: (text: string, path: string) => readonly string[];
+};
+
+/** Every answer taken afresh: what a caller with no readings object asks. */
+const FRESH_READINGS: SourceReadings = {
+  importsOf,
+  reExportSpecifiers,
+  namedBy: subjectsNamedBy,
+  namedOutsideRoots: subjectsNamedOutsideRoots,
+};
+
+/** A readings object that answers each text once. See `SourceReadings`. */
+export function memoSourceReadings(): SourceReadings {
+  const byText = <T>(read: (source: string) => T) => {
+    const kept = new Map<string, T>();
+    return (source: string): T => {
+      if (kept.has(source)) return kept.get(source) as T;
+      const answer = read(source);
+      kept.set(source, answer);
+      return answer;
+    };
+  };
+  const byPathAndText = <T>(read: (text: string, path: string) => T) => {
+    const kept = new Map<string, Map<string, T>>();
+    return (text: string, path: string): T => {
+      let forPath = kept.get(path);
+      if (forPath === undefined) {
+        forPath = new Map();
+        kept.set(path, forPath);
+      }
+      if (forPath.has(text)) return forPath.get(text) as T;
+      const answer = read(text, path);
+      forPath.set(text, answer);
+      return answer;
+    };
+  };
+  return {
+    importsOf: byText(importsOf),
+    reExportSpecifiers: byText(reExportSpecifiers),
+    namedBy: byPathAndText(subjectsNamedBy),
+    namedOutsideRoots: byPathAndText(subjectsNamedOutsideRoots),
+  };
+}
+
 /** A directory's index module: `index.ts`, `index.tsx`, `index.js`, … */
 const DIRECTORY_INDEX = /(?:^|\/)index\.[cm]?[jt]sx?$/;
 
@@ -183,9 +244,14 @@ function directoryOf(path: string): string {
 }
 
 /** Every `@/` or relative specifier in `source`, resolved against `tree`. */
-function resolvedImports(source: string, importer: string, tree: TreeIndex): string[] {
+function resolvedImports(
+  source: string,
+  importer: string,
+  tree: TreeIndex,
+  readings: SourceReadings,
+): string[] {
   const out: string[] = [];
-  for (const specifier of importsOf(source)) {
+  for (const specifier of readings.importsOf(source)) {
     const target = resolveSpecifier(specifier, importer, tree);
     if (target !== null) out.push(target);
   }
@@ -209,14 +275,17 @@ export function specSubjects(args: {
   tree: TreeIndex;
   readText: (path: string) => string | undefined;
   onUnread?: (path: string) => void;
+  /** Where a caller asking the same texts again keeps their readings. */
+  readings?: SourceReadings;
 }): string[] {
   const { specPath, specText, tree, readText, onUnread } = args;
+  const readings = args.readings ?? FRESH_READINGS;
   const found = new Set<string>([
-    ...subjectsNamedBy(specText, specPath),
-    ...subjectsNamedOutsideRoots(specText, specPath),
+    ...readings.namedBy(specText, specPath),
+    ...readings.namedOutsideRoots(specText, specPath),
   ]);
 
-  const direct = resolvedImports(specText, specPath, tree);
+  const direct = resolvedImports(specText, specPath, tree, readings);
   for (const path of direct) found.add(path);
 
   // Through shims only. Each hop reads modules the previous hop reached, and
@@ -234,19 +303,19 @@ export function specSubjects(args: {
         onUnread?.(module);
         continue;
       }
-      if (!isReExportShim(text)) {
+      if (readings.reExportSpecifiers(text) === null) {
         // A directory's index that does work is the directory's surface: the
         // modules it imports from its own directory are what a spec importing
         // the directory asserts about. Added, never walked further.
         if (DIRECTORY_INDEX.test(module)) {
           const dir = directoryOf(module);
-          for (const member of resolvedImports(text, module, tree)) {
+          for (const member of resolvedImports(text, module, tree, readings)) {
             if (member !== module && directoryOf(member) === dir) found.add(member);
           }
         }
         continue;
       }
-      for (const target of resolvedImports(text, module, tree)) {
+      for (const target of resolvedImports(text, module, tree, readings)) {
         if (seen.has(target)) continue;
         seen.add(target);
         found.add(target);
@@ -286,6 +355,8 @@ export function subjectsOfKeptSpec(args: {
   specPath: string;
   sides: readonly SpecSide[];
   onUnread?: (side: SpecSide["side"], path: string) => void;
+  /** Where a caller asking the same texts again keeps their readings. */
+  readings?: SourceReadings;
 }): string[] {
   const found = new Set<string>();
   for (const s of args.sides) {
@@ -297,6 +368,7 @@ export function subjectsOfKeptSpec(args: {
       tree: s.tree,
       readText: s.readText,
       onUnread: onUnread ? (path) => onUnread(s.side, path) : undefined,
+      readings: args.readings,
     })) {
       found.add(subject);
     }

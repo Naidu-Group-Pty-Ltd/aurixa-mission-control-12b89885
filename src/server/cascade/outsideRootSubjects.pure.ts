@@ -156,10 +156,16 @@ export function outsideRootCandidates(args: {
   cloneSha: ReadonlyMap<string, string>;
   /** Every path the delivery covers. */
   crossing: ReadonlySet<string>;
+  /**
+   * `subjectsNamedOutsideRoots` for this text, where the caller keeps its
+   * answers between questions (`memoSourceReadings`). Read afresh otherwise.
+   */
+  readNamed?: (text: string, path: string) => readonly string[];
 }): string[] {
   const { specPath, specText, primeSha, cloneSha, crossing } = args;
   if (!isSpecPath(specPath)) return [];
-  return subjectsNamedOutsideRoots(specText, specPath).filter((path) => {
+  const named = (args.readNamed ?? subjectsNamedOutsideRoots)(specText, specPath);
+  return named.filter((path) => {
     if (crossing.has(path)) return false;
     const onPrime = primeSha.get(path);
     const onClone = cloneSha.get(path);

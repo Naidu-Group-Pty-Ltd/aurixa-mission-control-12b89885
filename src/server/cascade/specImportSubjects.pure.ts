@@ -43,10 +43,21 @@
 import { isSubjectPath } from "@/lib/cascade/membrane/membrane.pure";
 import { importsOf, resolveSpecifier, type TreeIndex } from "./importClosure.pure";
 
-/** The repository files a spec imports, resolved against prime's tree, sorted. */
-export function subjectsImportedBy(text: string, specPath: string, prime: TreeIndex): string[] {
+/**
+ * The repository files a spec imports, resolved against prime's tree, sorted.
+ *
+ * `readImports` is `importsOf` unless the caller keeps its answers between
+ * questions (`memoSourceReadings`); either way the specifiers are the
+ * closure's own.
+ */
+export function subjectsImportedBy(
+  text: string,
+  specPath: string,
+  prime: TreeIndex,
+  readImports: (source: string) => readonly string[] = importsOf,
+): string[] {
   const found = new Set<string>();
-  for (const specifier of importsOf(text)) {
+  for (const specifier of readImports(text)) {
     const resolved = resolveSpecifier(specifier, specPath, prime);
     if (resolved === null || resolved === specPath) continue;
     if (!isSubjectPath(resolved)) continue;

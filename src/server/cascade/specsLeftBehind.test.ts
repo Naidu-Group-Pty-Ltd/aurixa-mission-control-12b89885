@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { MAX_OUTSIDE_ROOT_PROBES } from "./outsideRootSubjects.pure";
+import { importsOf } from "./importClosure.pure";
 import {
   describeSpecsBroughtAcross,
   isReExportShim,
   leftBehindSpecHold,
+  memoSourceReadings,
   reExportSpecifiers,
   MAX_LEFT_BEHIND_PROBES,
   MAX_SHIM_HOPS,
@@ -885,5 +887,81 @@ describe("steadyStatePumpPaths — a pump that changed nothing is not a delivery
         reconcileWrites: new Set([baseline]),
       }),
     ).toEqual([]);
+  });
+});
+
+describe("memoSourceReadings — a text read once, however often a pass asks", () => {
+  const SPEC = "src/lib/crm/__tests__/crmInbox.spec.ts";
+  const SHIM = "src/lib/crm/inbox.ts";
+  const TARGET = "src/lib/crm/inboxCore.ts";
+  const SPEC_TEXT =
+    `import { readFileSync } from "node:fs";\n` +
+    `import { i } from "../inbox";\n` +
+    `const doc = readFileSync("docs/crm/INBOX.md", "utf8");\n` +
+    `const rules = readFileSync(".claude/skills/crm/RULES.md", "utf8");\n`;
+  const SHIM_TEXT = `export * from "./inboxCore";`;
+
+  it("answers every question exactly as a fresh reading does", () => {
+    const r = memoSourceReadings();
+    for (const text of [SPEC_TEXT, SHIM_TEXT, `export const x = 1;`]) {
+      expect(r.importsOf(text)).toEqual(importsOf(text));
+      expect(r.reExportSpecifiers(text)).toEqual(reExportSpecifiers(text));
+    }
+    const fresh = specSubjects({
+      specPath: SPEC,
+      specText: SPEC_TEXT,
+      tree: tree(SPEC, SHIM, TARGET),
+      readText: (p) => (p === SHIM ? SHIM_TEXT : undefined),
+    });
+    const kept = specSubjects({
+      specPath: SPEC,
+      specText: SPEC_TEXT,
+      tree: tree(SPEC, SHIM, TARGET),
+      readText: (p) => (p === SHIM ? SHIM_TEXT : undefined),
+      readings: r,
+    });
+    expect(kept).toEqual(fresh);
+    expect(fresh).toEqual(
+      expect.arrayContaining([SHIM, TARGET, "docs/crm/INBOX.md", ".claude/skills/crm/RULES.md"]),
+    );
+  });
+
+  it("keeps each answer, so asking again is a lookup rather than another read", () => {
+    const r = memoSourceReadings();
+    expect(r.importsOf(SPEC_TEXT)).toBe(r.importsOf(SPEC_TEXT));
+    expect(r.reExportSpecifiers(SHIM_TEXT)).toBe(r.reExportSpecifiers(SHIM_TEXT));
+    expect(r.namedBy(SPEC_TEXT, SPEC)).toBe(r.namedBy(SPEC_TEXT, SPEC));
+    expect(r.namedOutsideRoots(SPEC_TEXT, SPEC)).toBe(r.namedOutsideRoots(SPEC_TEXT, SPEC));
+    // A null — "not a shim" — is an answer too, and is kept like one.
+    const notShim = `import a from "./a";\nexport default a;`;
+    expect(r.reExportSpecifiers(notShim)).toBeNull();
+    expect(r.reExportSpecifiers(notShim)).toBeNull();
+  });
+
+  it("keys a named path by the path it is read as, not by the text alone", () => {
+    // The same bytes under two names resolve a relative path differently.
+    const text = `const t = readFileSync(join(__dirname, "fixtures", "a.json"), "utf8");`;
+    const r = memoSourceReadings();
+    const a = r.namedBy(text, "src/lib/a/__tests__/x.spec.ts");
+    const b = r.namedBy(text, "src/lib/b/__tests__/x.spec.ts");
+    expect(a).toEqual([...r.namedBy(text, "src/lib/a/__tests__/x.spec.ts")]);
+    expect(b).not.toEqual(a);
+  });
+
+  it("gives a kept spec's subjects on every hop as a fresh walk does", () => {
+    const primeTree = tree(SPEC, SHIM, TARGET);
+    const sides = [
+      {
+        side: "prime" as const,
+        text: SPEC_TEXT,
+        tree: primeTree,
+        readText: (p: string) => (p === SHIM ? SHIM_TEXT : undefined),
+      },
+    ];
+    const r = memoSourceReadings();
+    const fresh = subjectsOfKeptSpec({ specPath: SPEC, sides });
+    for (let hop = 0; hop < 3; hop += 1) {
+      expect(subjectsOfKeptSpec({ specPath: SPEC, sides, readings: r })).toEqual(fresh);
+    }
   });
 });
