@@ -20,6 +20,7 @@ import {
   entryAssetPaths,
   isWrongBackend,
   readBundleIdentity,
+  repeatsLastBundleNotice,
   shouldRequestResync,
   verdictIsAboutTheClone,
   type BundleIdentityReading,
@@ -449,7 +450,19 @@ export async function verifyCloneBundleIdentity(
   const newBillingFault =
     reading.billingUid === "fallback" &&
     (row.bundle_billing_uid !== "fallback" || row.bundle_artefact !== reading.artefact);
-  if (wrongBackend || newBillingFault) {
+  // An unproven reading of unchanged bytes is reported once per artefact too
+  // (`repeatsLastBundleNotice`); a definite wrong backend keeps its cadence.
+  const repeatsLast =
+    wrongBackend &&
+    reading.verdict === "carries_both" &&
+    !resyncRequested &&
+    repeatsLastBundleNotice({
+      verdict: reading.verdict,
+      artefact: reading.artefact,
+      resyncRequested,
+      last: await lastBundleNotice(cloneId),
+    });
+  if ((wrongBackend && !repeatsLast) || newBillingFault) {
     const remedy = resyncRequested
       ? "An environment re-sync and rebuild have been requested."
       : decision.reason;
@@ -484,6 +497,30 @@ export async function verifyCloneBundleIdentity(
   }
 
   return { probed: true, reading, resyncRequested };
+}
+
+/**
+ * The `metadata` of the newest bundle-identity notice for this clone, or null.
+ *
+ * Null for a failed read as well as for none, so a read that fails reports
+ * rather than stays quiet: under-notifying is the worse error.
+ */
+async function lastBundleNotice(
+  cloneId: string,
+): Promise<{ verdict?: unknown; artefact?: unknown; resync_requested?: unknown } | null> {
+  const { data, error } = await admin
+    .from("notifications")
+    .select("metadata")
+    .eq("kind", "deployment_bundle_identity")
+    .eq("clone_id", cloneId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error || !data) return null;
+  const metadata = data.metadata;
+  return metadata && typeof metadata === "object" && !Array.isArray(metadata)
+    ? (metadata as { verdict?: unknown; artefact?: unknown; resync_requested?: unknown })
+    : null;
 }
 
 /**

@@ -23,6 +23,7 @@ const db = vi.hoisted(() => ({
   updates: [] as Array<{ table: string; patch: Record<string, unknown> }>,
   inserts: [] as Array<{ table: string; values: Record<string, unknown> }>,
   resyncs: [] as Array<{ cloneId: string; reason: string }>,
+  failedReads: new Set<string>(),
 }));
 
 vi.mock("@/integrations/supabase/client.server", () => {
@@ -30,7 +31,12 @@ vi.mock("@/integrations/supabase/client.server", () => {
     const b: Record<string, unknown> = {};
     b.select = () => b;
     b.eq = () => b;
-    b.maybeSingle = async () => ({ data: db.rows[table] ?? null, error: null });
+    b.order = () => b;
+    b.limit = () => b;
+    b.maybeSingle = async () =>
+      db.failedReads.has(table)
+        ? { data: null, error: { message: "read failed" } }
+        : { data: db.rows[table] ?? null, error: null };
     b.update = (patch: Record<string, unknown>) => {
       db.updates.push({ table, patch });
       return { eq: async () => ({ error: null }) };
@@ -88,6 +94,7 @@ beforeEach(() => {
   db.updates = [];
   db.inserts = [];
   db.resyncs = [];
+  db.failedReads = new Set();
   vi.stubGlobal("fetch", async (url: string) => {
     fetched.push(url);
     const path = url.startsWith(ORIGIN) ? url.slice(ORIGIN.length) || "/" : url;
@@ -341,5 +348,108 @@ describe("verifyCloneBundleIdentity acts on what it found, and says what it foun
     expect(notes[0].severity).toBe("error");
     expect(notes[0].body).toMatch(/credits the prime/);
     expect(db.resyncs[0].reason).toMatch(/wrong backend AND carries no billing identity/);
+  });
+});
+
+describe("an unproven reading of unchanged bytes is reported once per artefact", () => {
+  const CLONE = "7e2c004d-5a56-4d9f-bdae-09d28885d234";
+
+  /** What NPC Test's card held on 20 Oct 2026: re-synced once, and the rebuild came back the same. */
+  function seedAfterRebuild(lastNotice: Record<string, unknown> | null) {
+    db.rows = {
+      clone_deployments: {
+        clone_id: CLONE,
+        provider_slug: "vercel",
+        bundle_resync_artefact: ENTRY,
+        bundle_billing_uid: "own",
+        bundle_artefact: ENTRY,
+      },
+      clones: { id: CLONE, name: "NPC Test", deploy_url: ORIGIN, billing_user_id: UID },
+      clone_backends: { supabase_project_ref: OWN_REF },
+      clone_turnstile_identities: null,
+      notifications: lastNotice ? { metadata: lastNotice } : null,
+    };
+  }
+
+  /** The newest notice's metadata, in the shape production wrote it. */
+  const said = (over: Record<string, unknown> = {}) => ({
+    artefact: ENTRY,
+    billing_uid: "own",
+    resync_requested: false,
+    scanned: [ENTRY],
+    verdict: "carries_both",
+    ...over,
+  });
+
+  /** A correctly configured clone: its own project, and the prime's ref beside it. */
+  const BOTH = `const u="https://${OWN_REF}.supabase.co",p="${PRIME_REF}";${RESOLVER}const Cu="${UID}";`;
+
+  const inserted = (table: string) =>
+    db.inserts.filter((i) => i.table === table).map((i) => i.values);
+
+  it("says nothing when the last notice said the same of the same bytes", async () => {
+    seedAfterRebuild(said());
+    serve({ "/version.json": JSON.stringify({ buildId: "b-3" }), "/": HTML, [ENTRY]: BOTH });
+
+    const out = await verifyCloneBundleIdentity(CLONE, { primeRef: PRIME_REF });
+
+    expect(out.reading?.verdict).toBe("carries_both");
+    expect(out.resyncRequested).toBe(false);
+    expect(inserted("notifications")).toHaveLength(0);
+    // Still recorded: a notice that stops repeating must not stop the log.
+    const [event] = inserted("deployment_events");
+    expect(event.success).toBe(false);
+    expect((event.payload as Record<string, unknown>).verdict).toBe("carries_both");
+  });
+
+  it("says once that the re-sync it asked for changed nothing", async () => {
+    seedAfterRebuild(said({ resync_requested: true }));
+    serve({ "/version.json": JSON.stringify({ buildId: "b-3" }), "/": HTML, [ENTRY]: BOTH });
+
+    await verifyCloneBundleIdentity(CLONE, { primeRef: PRIME_REF });
+
+    const notes = inserted("notifications");
+    expect(notes).toHaveLength(1);
+    expect(notes[0].body).toMatch(/already requested for this exact artefact/);
+    expect((notes[0].metadata as Record<string, unknown>).resync_requested).toBe(false);
+  });
+
+  it("reports a new artefact, and asks for its re-sync", async () => {
+    seedAfterRebuild(said({ artefact: "/assets/index-OLD.js" }));
+    db.rows.clone_deployments = {
+      ...(db.rows.clone_deployments as Record<string, unknown>),
+      bundle_resync_artefact: "/assets/index-OLD.js",
+      bundle_artefact: "/assets/index-OLD.js",
+    };
+    serve({ "/version.json": JSON.stringify({ buildId: "b-4" }), "/": HTML, [ENTRY]: BOTH });
+
+    const out = await verifyCloneBundleIdentity(CLONE, { primeRef: PRIME_REF });
+
+    expect(out.resyncRequested).toBe(true);
+    expect(inserted("notifications")).toHaveLength(1);
+  });
+
+  it("keeps the cadence of a deployment that names only the prime", async () => {
+    seedAfterRebuild(said({ verdict: "carries_prime" }));
+    serve({
+      "/version.json": JSON.stringify({ buildId: "b-3" }),
+      "/": HTML,
+      [ENTRY]: `const p="${PRIME_REF}";${RESOLVER}const Cu="${UID}";`,
+    });
+
+    const out = await verifyCloneBundleIdentity(CLONE, { primeRef: PRIME_REF });
+
+    expect(out.reading?.verdict).toBe("carries_prime");
+    expect(inserted("notifications")).toHaveLength(1);
+  });
+
+  it("reports when the last notice cannot be read", async () => {
+    seedAfterRebuild(said());
+    db.failedReads.add("notifications");
+    serve({ "/version.json": JSON.stringify({ buildId: "b-3" }), "/": HTML, [ENTRY]: BOTH });
+
+    await verifyCloneBundleIdentity(CLONE, { primeRef: PRIME_REF });
+
+    expect(inserted("notifications")).toHaveLength(1);
   });
 });

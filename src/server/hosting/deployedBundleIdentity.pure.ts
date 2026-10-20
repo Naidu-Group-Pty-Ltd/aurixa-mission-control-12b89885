@@ -441,6 +441,43 @@ export function shouldRequestResync(input: {
 }
 
 /**
+ * Whether a `carries_both` notice would only repeat the last one.
+ *
+ * `carries_both` is the scan reading bytes, and the same bytes give the same
+ * reading, so a re-probe of an artefact nobody has changed cannot tell a
+ * person anything the last notice did not. Measured 20 Oct 2026: 917 unread
+ * "Wrong backend in the bundle" notices on three clones, every one
+ * `carries_both`. Every correctly configured clone names the prime's ref (it
+ * is how a build recognises the prime), and no build in the fleet publishes
+ * the `supabase` block in `/version.json` that would settle it, so each probe
+ * of the same bytes said the same thing again: on every deploy, every six
+ * hours, and after every re-sync rebuild.
+ *
+ * So it is reported as a missing billing identity is, once per artefact, plus
+ * once more when the re-sync asked for that artefact is seen to have changed
+ * nothing, which is a different sentence. Nothing else is suppressed:
+ * `carries_prime` keeps its cadence, since a deployment signing its customers
+ * in to another tenant's database is not a reading to go quiet about. And a
+ * last notice that cannot be read is no last notice, so a lost read reports.
+ */
+export function repeatsLastBundleNotice(input: {
+  verdict: BundleIdentityVerdict;
+  artefact: string | null;
+  /** Whether this probe asked for a re-sync. */
+  resyncRequested: boolean;
+  /** The `metadata` of the newest bundle-identity notice for this clone. */
+  last: { verdict?: unknown; artefact?: unknown; resync_requested?: unknown } | null | undefined;
+}): boolean {
+  if (input.verdict !== "carries_both") return false;
+  if (input.resyncRequested || !input.artefact || !input.last) return false;
+  return (
+    input.last.verdict === input.verdict &&
+    input.last.artefact === input.artefact &&
+    input.last.resync_requested === false
+  );
+}
+
+/**
  * What the re-sync guard is keyed on when the build DECLARED its backend.
  *
  * Two faults, two keys, because a rebuild answers each of them differently.
