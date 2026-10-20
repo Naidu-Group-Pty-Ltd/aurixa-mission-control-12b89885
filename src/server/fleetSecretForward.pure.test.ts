@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  FLEET_CONFIGURATION,
   decideFleetForward,
   fleetNamesToWrite,
   fleetNamesWithoutValue,
@@ -176,6 +177,89 @@ describe("planFleetForwards — the case that made this exist", () => {
       ]),
     });
     expect(fleetNamesToWrite(outcomes)).toEqual([]);
+  });
+});
+
+/**
+ * The ledger records THAT a name was delivered, not WHAT. On 15 Oct 2026
+ * Mission Control's `AIRTABLE_TABLE_NAME` moved to the rebuilt base's table,
+ * all four clones' rows read `inherited` from September, and no pass sent the
+ * new value — every clone asked the broker for the retired table and was
+ * refused, its marketplace frozen at 8 Sep.
+ */
+describe("a setting follows Mission Control's value; a credential is delivered once", () => {
+  const settled = (name: string, extra: Partial<Parameters<typeof decideFleetForward>[0]> = {}) =>
+    decideFleetForward({
+      name,
+      secretClass: "vendor",
+      inherit: true,
+      presentInEnv: true,
+      settledOnClone: true,
+      inheritedOnClone: true,
+      withheldOnClone: false,
+      ...extra,
+    });
+
+  it("sends a delivered setting again, so a changed value arrives", () => {
+    expect(settled("AIRTABLE_TABLE_NAME")).toEqual({ act: "refresh", name: "AIRTABLE_TABLE_NAME" });
+    expect(fleetNamesToWrite([settled("AIRTABLE_TABLE_NAME")])).toEqual(["AIRTABLE_TABLE_NAME"]);
+  });
+
+  it("never re-sends a credential, however it was delivered", () => {
+    for (const name of ["ANTHROPIC_API_KEY", "RESEND_API_KEY", "DIDIT_API_KEY"]) {
+      expect(settled(name).act).toBe("already_set");
+    }
+  });
+
+  it("never replaces a value that is the clone's own", () => {
+    // `set` by a person on this clone, or `minted` for it: not the forward's.
+    expect(settled("AIRTABLE_TABLE_NAME", { inheritedOnClone: false }).act).toBe("already_set");
+  });
+
+  it("with nothing here, leaves a delivered setting standing rather than missing or cleared", () => {
+    expect(settled("AIRTABLE_TABLE_NAME", { presentInEnv: false }).act).toBe("already_set");
+  });
+
+  it("still lets a withheld name win", () => {
+    expect(settled("AIRTABLE_TABLE_NAME", { withheldOnClone: true }).act).toBe("withheld");
+  });
+
+  it("holds configuration and nothing that authenticates", () => {
+    expect([...FLEET_CONFIGURATION].sort()).toEqual([
+      "AIRTABLE_IMAGE_LIBRARY_FIELD",
+      "AIRTABLE_TABLE_ALIASES",
+      "AIRTABLE_TABLE_ALLOWLIST",
+      "AIRTABLE_TABLE_NAME",
+    ]);
+    for (const name of FLEET_CONFIGURATION) {
+      expect(name).not.toMatch(/(KEY|TOKEN|SECRET|PASSWORD|BASE_ID)$/);
+    }
+  });
+
+  it("on the fleet as it stood on 19 Oct, re-sends the table name and nothing else", () => {
+    const outcomes = planFleetForwards({
+      fleet: new Map([
+        ["AIRTABLE_TOKEN", true],
+        ["AIRTABLE_BASE_ID", true],
+        ["AIRTABLE_TABLE_NAME", true],
+        ["AIRTABLE_TABLE_ALLOWLIST", true],
+        ["ANTHROPIC_API_KEY", true],
+        ["OPENAI_API_KEY", true],
+      ]),
+      classOf: classOf({ AIRTABLE_TOKEN: "brokered", AIRTABLE_BASE_ID: "brokered" }),
+      envHas: (name) => name !== "AIRTABLE_TABLE_ALLOWLIST",
+      settled: new Set(["AIRTABLE_TABLE_NAME", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"]),
+      inherited: new Set(["AIRTABLE_TABLE_NAME", "ANTHROPIC_API_KEY"]),
+      withheld: new Set(["AIRTABLE_TOKEN", "AIRTABLE_BASE_ID"]),
+    });
+    expect(fleetNamesToWrite(outcomes)).toEqual(["AIRTABLE_TABLE_NAME"]);
+  });
+
+  it("is told which names the forward delivered, read from the ledger's own status", () => {
+    const server = readFileSync(new URL("./fleetSecretForward.server.ts", import.meta.url), "utf8");
+    expect(server).toMatch(
+      /inherited: new Set\(\s*\(ledger\.data \?\? \[\]\)\.filter\(\(r\) => r\.status === "inherited"\)/,
+    );
   });
 });
 
