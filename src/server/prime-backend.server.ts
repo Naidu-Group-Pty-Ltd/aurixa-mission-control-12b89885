@@ -16,7 +16,13 @@ import type { Octokit } from "@octokit/rest";
 import type { MigrationObjectIndex } from "./surplusOrigin.pure";
 import type { RepoRef } from "./github-app.server";
 import { countGithubCall } from "./githubUsageMeter";
-import { pruneBundleToReachable } from "./functionBundlePrune.pure";
+import {
+  memoisedSpecifiers,
+  pruneBundleToReachable,
+  type PruneOutcome,
+} from "./functionBundlePrune.pure";
+import { bundleDigest } from "./functionBundleDigest.pure";
+import { deployedVerifyJwt } from "./anonymousFunctionSlugs.pure";
 import { inDeployOrder } from "./edgeDeployBatch.pure";
 import { isPrimeOnlySecret } from "./primeOnlySecrets.pure";
 import { isPrimeOnlyPath } from "./primeOnlyFeatures.pure";
@@ -132,6 +138,18 @@ export type PrimeBackendSnapshot = {
    * the schema complete. The caller pauses on it instead.
    */
   functionSourceTruncated: boolean;
+  /**
+   * How many bundles were deployable before `functionLimit` was applied: what
+   * the caller owes, of which `functions` is the part it fetched. Zero when
+   * the function source was omitted.
+   */
+  deployableCount: number;
+  /**
+   * Every bundle's digest at `sourceSha` (`functionBundleDigest.pure.ts`).
+   * Present only when the caller asked to plan its skip list from this read
+   * (`planSkip`), because computing it prunes every bundle the commit defines.
+   */
+  bundleDigests?: ReadonlyMap<string, string>;
 };
 
 // ─── Pure helpers (unit-tested) ──────────────────────────────────────
@@ -1796,6 +1814,24 @@ export async function fetchPrimeBackendSnapshot(
      * deployable set.
      */
     deployOrder?: (slug: string) => number;
+    /**
+     * Decide what to skip from what THIS snapshot read, at the commit it read.
+     *
+     * Handed every bundle's digest (`functionBundleDigest.pure.ts`) before the
+     * skip list and the cap are applied; whatever it returns is skipped as
+     * `skipFunctionSlugs` is. The redeploy lane needs this because what it may
+     * skip depends on whether a bundle CHANGED, which only the tree being
+     * deployed can answer: a skip list computed before the read is computed
+     * against whatever commit the branch held a moment earlier.
+     *
+     * Costs no fetch — every bundle's files are fetched for the secret scan
+     * already — but every bundle is pruned, once, to digest it. Without it
+     * nothing here changes.
+     */
+    planSkip?: (ctx: {
+      readonly commitSha: string;
+      readonly bundleDigests: ReadonlyMap<string, string>;
+    }) => readonly string[];
   },
 ): Promise<PrimeBackendSnapshot> {
   const { blobs, commitSha } = await listSupabaseBlobs(octokit, ref);
@@ -1846,6 +1882,7 @@ export async function fetchPrimeBackendSnapshot(
       declaredFunctionSlugs: declaredEarly,
       functionSourceOmitted: true,
       functionSourceTruncated: false,
+      deployableCount: 0,
     };
   }
   // Everything below is built from this one list: the bundles, the secret
@@ -1872,11 +1909,12 @@ export async function fetchPrimeBackendSnapshot(
     : null;
   const fnConfig = parseFunctionConfig(configToml);
 
-  // Decide which bundles are deployable FIRST, so the fetch pool below pulls
-  // exactly the set of blobs the bundles need — each once, whole set pooled.
-  // EVERY bundle the prime repo defines, whatever the target already holds.
-  // This is the set the secret scan reads (see below); the deploy set is
-  // derived from it.
+  // EVERY bundle the prime repo defines, whatever the target already holds, so
+  // the fetch pool below pulls exactly the set of blobs the bundles need —
+  // each once, whole set pooled. This is the set the secret scan reads (see
+  // below); the deploy set is derived from it after the fetch, because a
+  // caller planning its skip list from this read (`planSkip`) needs the
+  // bundles' contents to do it.
   const allBundles: Array<{ slug: string; bundlePaths: string[]; entrypointPath: string }> = [];
   for (const [slug, ownPaths] of Array.from(slugs.entries()).sort((a, b) =>
     a[0].localeCompare(b[0]),
@@ -1886,21 +1924,6 @@ export async function fetchPrimeBackendSnapshot(
     if (!entrypointPath) continue; // no runnable entrypoint — not a deployable function
     allBundles.push({ slug, bundlePaths, entrypointPath });
   }
-  // What this pass may DEPLOY: minus whatever the project already holds.
-  const skip = new Set(opts?.skipFunctionSlugs ?? []);
-  // In the caller's order, else alphabetical (`allBundles` is sorted above).
-  // Either way the order is deterministic, so a pass never re-fetches what
-  // the last one landed: that is skipped, not merely reordered. But "the same
-  // prefix on every pass" holds only while the skip list grows, and the
-  // redeploy lane's empties on every prime merge. That lane orders by the
-  // clone's own staleness rather than by name — see `deployOrder`.
-  const deployable = inDeployOrder(
-    allBundles.filter((b) => !skip.has(b.slug)),
-    opts?.deployOrder,
-  );
-  const limit = opts?.functionLimit;
-  const functionSourceTruncated = typeof limit === "number" && deployable.length > limit;
-  const selected = functionSourceTruncated ? deployable.slice(0, limit) : deployable;
 
   // Fetch each needed blob once, keyed by relative path — GraphQL batches,
   // not per-blob round trips. ~1,033 function files (15.6 MB) become about
@@ -1992,30 +2015,93 @@ export async function fetchPrimeBackendSnapshot(
     the secret scan below walks. Decoding per bundle would be 423 × a 6.3 MB
     tree, which is the 2.7 GB that killed this worker on 31 Aug.
   */
+  const decodedText = (rel: string): string | null => {
+    const file = fileByPath.get(rel);
+    if (!file || !isTextFile(rel)) return null;
+    try {
+      return decodeBase64Utf8(file.contentBase64);
+    } catch {
+      return null; // undecodable is "not text", which contributes no edges
+    }
+  };
   const textCache = new Map<string, string | null>();
   const textOf = (rel: string): string | null => {
     const hit = textCache.get(rel);
     if (hit !== undefined) return hit;
-    const file = fileByPath.get(rel);
-    let text: string | null = null;
-    if (file && isTextFile(rel)) {
-      try {
-        text = decodeBase64Utf8(file.contentBase64);
-      } catch {
-        text = null; // undecodable is "not text", which contributes no edges
-      }
-    }
+    const text = decodedText(rel);
     textCache.set(rel, text);
     return text;
   };
 
+  /*
+    Every bundle's digest at THIS commit, for a caller planning its skip list
+    from this read (`planSkip`).
+
+    Pruned once each, and through ONE parse of each file: every bundle carries
+    the same shared tree, so pruning all of them one at a time would re-read the
+    same shared files hundreds of times. `memoisedSpecifiers` keeps only what
+    each file imports, never its text, so this holds the decoded tree no
+    longer than one file at a time. The outcomes are kept, so a selected
+    bundle is not pruned a second time below.
+  */
+  const prunedBySlug = new Map<string, PruneOutcome>();
+  let bundleDigests: Map<string, string> | undefined;
+  if (opts?.planSkip) {
+    const specifiersOf = memoisedSpecifiers(decodedText);
+    bundleDigests = new Map();
+    for (const { slug, bundlePaths, entrypointPath } of allBundles) {
+      const outcome = pruneBundleToReachable({
+        entrypointPath,
+        files: bundlePaths.map((path) => ({ path })),
+        importMapPath,
+        textOf,
+        specifiersOf,
+      });
+      prunedBySlug.set(slug, outcome);
+      bundleDigests.set(
+        slug,
+        bundleDigest({
+          slug,
+          entrypointPath,
+          importMapPath,
+          // The flag the deploy SENDS, override included — not the prime's.
+          verifyJwt: deployedVerifyJwt(slug, fnConfig.get(slug)?.verifyJwt ?? true).verifyJwt,
+          // Every path here was listed with its blob id above, or the fetch
+          // would already have thrown "Blob not found".
+          files: outcome.keep.map((path) => ({ path, sha: shaByRel.get(path) as string })),
+        }),
+      );
+    }
+  }
+
+  // What this pass may DEPLOY: minus whatever the project already holds.
+  const skip = new Set([
+    ...(opts?.skipFunctionSlugs ?? []),
+    ...(opts?.planSkip && bundleDigests ? opts.planSkip({ commitSha, bundleDigests }) : []),
+  ]);
+  // In the caller's order, else alphabetical (`allBundles` is sorted above).
+  // Either way the order is deterministic, so a pass never re-fetches what
+  // the last one landed: that is skipped, not merely reordered. But "the same
+  // prefix on every pass" holds only while the skip list grows, and the
+  // redeploy lane's empties on every prime merge. That lane orders by the
+  // clone's own staleness rather than by name — see `deployOrder`.
+  const deployable = inDeployOrder(
+    allBundles.filter((b) => !skip.has(b.slug)),
+    opts?.deployOrder,
+  );
+  const limit = opts?.functionLimit;
+  const functionSourceTruncated = typeof limit === "number" && deployable.length > limit;
+  const selected = functionSourceTruncated ? deployable.slice(0, limit) : deployable;
+
   const functions: PrimeEdgeFunction[] = selected.map(({ slug, bundlePaths, entrypointPath }) => {
-    const prune = pruneBundleToReachable({
-      entrypointPath,
-      files: bundlePaths.map((path) => ({ path })),
-      importMapPath,
-      textOf,
-    });
+    const prune =
+      prunedBySlug.get(slug) ??
+      pruneBundleToReachable({
+        entrypointPath,
+        files: bundlePaths.map((path) => ({ path })),
+        importMapPath,
+        textOf,
+      });
     if (!prune.pruned) {
       // Loud, because a bundle carrying the whole tree is one the deploy API
       // will refuse — and the reason names which file to look at.
@@ -2059,6 +2145,8 @@ export async function fetchPrimeBackendSnapshot(
     declaredFunctionSlugs: declaredFunctionSlugsFromPaths(relPaths),
     functionSourceOmitted: false,
     functionSourceTruncated,
+    deployableCount: deployable.length,
+    ...(bundleDigests ? { bundleDigests } : {}),
   };
 }
 

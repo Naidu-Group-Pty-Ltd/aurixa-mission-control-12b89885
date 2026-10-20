@@ -43,7 +43,11 @@ import {
   type PriorRedeliveries,
   type RedeliveryEventReading,
 } from "@/server/cascade/headRedelivery.pure";
-import { decideExhaustedEvent, retirementSummary } from "@/server/cascade/exhaustedEvents.pure";
+import {
+  PROGRESS_COLUMN,
+  decideExhaustedEvent,
+  retirementSummary,
+} from "@/server/cascade/exhaustedEvents.pure";
 import {
   createCascadeForAllClones,
   findCommitCascadeForSha,
@@ -483,11 +487,17 @@ async function claimOne(
  * empty-handed — never runs for it. Three kills and the event is a zombie:
  * `pending` for ever, claimable by nothing, reported nowhere.
  * `decideExhaustedEvent` (cascade/exhaustedEvents.pure.ts) reads the
- * event's result rows for the verdict: a recent ledger write means the
- * kills were CONVERGING and one attempt is refunded; a still ledger means
- * three passes learned nothing, and the event is retired visibly with the
- * operator's lever named. Every write is guarded on `pending` + unclaimed
- * so a racing claim wins and this tick simply misses the event.
+ * event's result rows for the verdict: recent PROGRESS means the kills
+ * were CONVERGING and one attempt is refunded; none means the last pass
+ * kept nothing, and the event is retired visibly with the operator's lever
+ * named. Every write is guarded on `pending` + unclaimed so a racing claim
+ * wins and this tick simply misses the event.
+ *
+ * Progress is `progressed_at`, which a pass writes only where it kept
+ * something — a grown ledger, a settled row — the two things `drainOne`
+ * counts for a pass that returned. It used to be the newest `updated_at`,
+ * which the pass's own `pushing` mark moves before any work — so a pass cut
+ * before it learned anything was refunded for ever (F21).
  */
 async function judgeExhaustedEvents(): Promise<{ retired: number; refunded: number }> {
   const out = { retired: 0, refunded: 0 };
@@ -503,15 +513,17 @@ async function judgeExhaustedEvents(): Promise<{ retired: number; refunded: numb
   for (const event of exhausted ?? []) {
     const { data: newest, error: newestErr } = await admin
       .from("cascade_results")
-      .select("updated_at")
+      .select(PROGRESS_COLUMN)
       .eq("cascade_event_id", event.id)
-      .order("updated_at", { ascending: false })
+      .not(PROGRESS_COLUMN, "is", null)
+      .order(PROGRESS_COLUMN, { ascending: false })
       .limit(1)
       .maybeSingle();
     const verdict = decideExhaustedEvent({
       attempts: event.attempts ?? 0,
       maxAttempts: MAX_ATTEMPTS,
-      lastResultWriteAt: newestErr ? null : (newest?.updated_at ?? null),
+      lastProgressAt: newest?.progressed_at ?? null,
+      readFailed: newestErr !== null,
       nowMs: Date.now(),
     });
     if (verdict.act === "refund") {

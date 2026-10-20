@@ -196,38 +196,87 @@ export function describeLineageHold(input: {
 
 /**
  * Parents before children, so a pass can deliver a parent and then its child
- * in the same run rather than holding the child for the next tick.
+ * in the same run rather than holding the child for the next tick — and a
+ * child behind nothing it does not depend on.
  *
- * Depth is counted through the rows PRESENT in this pass. A clone whose parent
- * is not in the event sorts as a root: it is not waiting on anything here, and
- * sinking it to the bottom would delay it behind work it does not depend on.
+ * This used to sort by DEPTH: every root, then every child. So a child waited
+ * behind every root in the pass, including roots it has nothing to do with.
+ * Measured 20 Oct 2026 (F21 in the 19 Oct hand-over): NPC Test and Preflight
+ * are children of npc-client-dashboard, and the CRM line is a root whose pass
+ * could not finish inside a tick. In an event whose client-dashboard row was
+ * still queued, the depth sort put the CRM line ahead of both children, the
+ * tick died inside the CRM line's pass, and the children waited for the next
+ * claim — after the ten-minute stall reclaim — although their parent had
+ * delivered minutes earlier. `passOrder.test.ts` pinned that order as intended.
  *
- * The walk is bounded and a cycle sorts as a root rather than looping — the
- * database refuses a cycle (`trg_clones_parent_acyclic`), and this does not
- * depend on the database having been right.
+ * Now the input order (the round robin, `leastRecentlyTouchedFirst`) decides
+ * among everything that is free to go, and a parent goes when the EARLIEST of
+ * itself and its present descendants would: a child's turn is its parent's
+ * turn, because the child cannot be served until the parent has been. So a
+ * clone is preceded only by its own ancestors, by clones the round robin
+ * offered ahead of it, and by clones pulled forward for a descendant the round
+ * robin offered ahead of it.
  *
- * Stable within a depth: the input order is preserved, so a pass that stops on
- * its budget resumes in the same order it left off.
+ * A clone whose parent is not in the event is a root: it is not waiting on
+ * anything here, and sinking it to the bottom would delay it behind work it
+ * does not depend on. A clone whose own ancestry comes back to it is a root
+ * rather than a loop — the database refuses a cycle
+ * (`trg_clones_parent_acyclic`), and this does not depend on the database
+ * having been right.
+ *
+ * Deterministic and stable: with no lineage in the pass the input order is
+ * returned unchanged, so a pass that stops on its budget resumes in the order
+ * it left off.
  */
-export function orderByLineageDepth<T extends { id: string; parent_clone_id: string | null }>(
-  rows: T[],
+export function orderByLineage<T extends { id: string; parent_clone_id: string | null }>(
+  rows: readonly T[],
 ): T[] {
   const byId = new Map(rows.map((r) => [r.id, r]));
+  const position = new Map(rows.map((r, i) => [r.id, i]));
 
-  const depthOf = (row: T): number => {
-    const seen = new Set<string>([row.id]);
-    let depth = 0;
-    let cursor = row.parent_clone_id;
-    while (cursor && byId.has(cursor) && !seen.has(cursor)) {
+  // The parent a row waits on: present in this pass, and not reached again by
+  // walking up from it. The walk is bounded by the rows present.
+  const parentOf = (row: T): string | null => {
+    const parent = row.parent_clone_id;
+    if (!parent || !byId.has(parent)) return null;
+    const seen = new Set<string>();
+    let cursor: string | null = parent;
+    while (cursor !== null && byId.has(cursor) && !seen.has(cursor)) {
+      if (cursor === row.id) return null;
       seen.add(cursor);
-      depth += 1;
       cursor = byId.get(cursor)!.parent_clone_id;
     }
-    return depth;
+    return parent;
   };
 
-  return rows
-    .map((row, index) => ({ row, index, depth: depthOf(row) }))
-    .sort((a, b) => (a.depth !== b.depth ? a.depth - b.depth : a.index - b.index))
-    .map((entry) => entry.row);
+  const children = new Map<string, T[]>();
+  const roots: T[] = [];
+  for (const row of rows) {
+    const parent = parentOf(row);
+    if (parent === null) roots.push(row);
+    else children.set(parent, [...(children.get(parent) ?? []), row]);
+  }
+
+  // The earliest round-robin position among a clone and its descendants.
+  // `parentOf` leaves no cycle, so this recursion ends.
+  const turn = new Map<string, number>();
+  const turnOf = (row: T): number => {
+    const known = turn.get(row.id);
+    if (known !== undefined) return known;
+    let earliest = position.get(row.id)!;
+    for (const child of children.get(row.id) ?? []) earliest = Math.min(earliest, turnOf(child));
+    turn.set(row.id, earliest);
+    return earliest;
+  };
+
+  const before = (a: T, b: T) => turnOf(a) - turnOf(b) || position.get(a.id)! - position.get(b.id)!;
+  const free = [...roots];
+  const out: T[] = [];
+  while (free.length > 0) {
+    free.sort(before);
+    const next = free.shift()!;
+    out.push(next);
+    free.push(...(children.get(next.id) ?? []));
+  }
+  return out;
 }

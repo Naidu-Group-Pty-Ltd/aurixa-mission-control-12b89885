@@ -44,7 +44,9 @@ describe("a pass is bounded", () => {
       was killed. Both options already existed on the snapshot; the lane had
       simply never used either.
     */
-    expect(lane).toMatch(/skipFunctionSlugs: [^\n]*\brefreshed\b/);
+    // What the clone already holds is skipped through `planSkip`, which the
+    // snapshot calls at the commit it read — see the generation tests below.
+    expect(lane).toContain("return [...planned.refreshed, ...planned.proven];");
     expect(lane).toContain("functionLimit: EDGE_DEPLOY_BATCH");
   });
 
@@ -70,7 +72,7 @@ describe("progress is read off the target", () => {
       clone is: a pass that deployed sixty bundles and then lost its
       invocation still counts on the next pass.
     */
-    const askAt = lane.indexOf("listProjectEdgeFunctionFreshness(");
+    const askAt = lane.indexOf("listProjectEdgeFunctionCopies(");
     const snapAt = lane.indexOf("fetchPrimeBackendSnapshot(");
     expect(askAt).toBeGreaterThan(-1);
     expect(snapAt).toBeGreaterThan(-1);
@@ -106,16 +108,19 @@ describe("progress is read off the target", () => {
     expect(lane).not.toMatch(/(deployed|landed|batch|refreshed)\s*=\s*[^;]*run\.result/);
   });
 
-  it("a failed freshness read presumes nothing fresh", () => {
+  it("a failed read of the clone presumes nothing fresh and proves nothing", () => {
     // Empty redeploys more than necessary; a full answer would skip bundles
     // that were never deployed, silently. Same asymmetry as the provisioning
-    // reader's own `.catch(() => [])`.
-    const fn = provisioning.slice(
-      provisioning.indexOf("export async function listProjectEdgeFunctionFreshness"),
-    );
+    // reader's own `.catch(() => [])` — and an empty reading also proves no
+    // ledger row current, which is the same direction.
+    const at = provisioning.indexOf("export async function listProjectEdgeFunctionCopies");
+    expect(at).toBeGreaterThan(-1);
+    const fn = provisioning.slice(at);
     const body = fn.slice(0, fn.indexOf("\n}\n"));
-    expect(body).toContain("if (!res.ok) return fresh;");
-    expect(body).toMatch(/catch \{\s*return fresh;/);
+    expect(body).toContain("if (!res.ok) return none;");
+    expect(body).toMatch(/catch \{\s*return none;/);
+    // The parsing rules are the pure module's, where they are tested.
+    expect(body).toContain("readProjectFunctionCopies(");
   });
 });
 
@@ -153,8 +158,13 @@ describe("a pass deploys the copies the clone has held longest first", () => {
     // One read decides both what is skipped and what goes first. A second
     // read could disagree with the first, and the run's own row is not a
     // reading of the clone at all.
-    expect(lane.match(/listProjectEdgeFunctionFreshness\(/g) ?? []).toHaveLength(1);
+    expect(lane.match(/listProjectEdgeFunctionCopies\(/g) ?? []).toHaveLength(1);
+    expect(lane).toContain("const freshness = freshnessOf(copies);");
     expect(lane).toContain("refreshedSince(freshness, generation.baselineAt)");
+    // The ledger's proof reads the same copies, not a second listing.
+    expect(lane).toContain(
+      "ledgerCurrentSlugs({ ledger: ledger.entries, digests: bundleDigests, copies })",
+    );
     expect(lane).not.toMatch(/stalestFirst\([^)]*run\.result/);
   });
 
@@ -476,22 +486,38 @@ describe("a run that spans a prime merge cannot report a mixed tree as deployed"
     was true, and a Supabase double handed the same wrong baseline would agree
     with the wrong code exactly as it agreed with the right one.
   */
+  /** The skip list's planning, which the snapshot calls at the commit it read. */
   const generationBlock = lane.slice(
-    lane.indexOf("const freshness ="),
-    lane.indexOf("const snapshot ="),
+    lane.indexOf("planSkip: ({ commitSha, bundleDigests }) => {"),
+    lane.indexOf("const generation = planned.generation;"),
   );
 
-  it("the revision is read BEFORE the baseline is computed", () => {
-    // Discovered afterwards it is too late: the skip list has already been
-    // sent to the snapshot and the pass has already decided what to leave out.
-    const headRead = generationBlock.indexOf("resolvePrimeHeadSha(");
-    const baseline = generationBlock.indexOf("refreshedSince(");
-    expect(headRead).toBeGreaterThan(-1);
-    expect(baseline).toBeGreaterThan(headRead);
+  it("anchors the planning block on something the source actually contains", () => {
+    // Sliced by string: an anchor that stops matching leaves an empty slice,
+    // and every `not.toContain` below would pass over nothing.
+    expect(lane.indexOf("planSkip: ({ commitSha, bundleDigests }) => {")).toBeGreaterThan(-1);
+    expect(lane.indexOf("const generation = planned.generation;")).toBeGreaterThan(
+      lane.indexOf("planSkip: ({ commitSha, bundleDigests }) => {"),
+    );
+    expect(generationBlock.length).toBeGreaterThan(300);
+  });
+
+  it("the revision judged is the revision deployed", () => {
+    /*
+      The generation used to be judged against a HEAD resolved a moment
+      before the snapshot read the tree. A merge between the two could judge
+      one commit and deploy another; planned inside the snapshot, the commit
+      judged is the commit read.
+    */
+    expect(generationBlock).toContain("observedSourceSha: commitSha,");
+    expect(lane).not.toContain("resolvePrimeHeadSha(");
   });
 
   it("the baseline comes from the generation, never from the run's start", () => {
-    expect(generationBlock).toContain("refreshedSince(freshness, generation.baselineAt)");
+    const decided = generationBlock.indexOf("planDeployGeneration({");
+    const baseline = generationBlock.indexOf("refreshedSince(freshness, generation.baselineAt)");
+    expect(decided).toBeGreaterThan(-1);
+    expect(baseline).toBeGreaterThan(decided);
     expect(lane).not.toContain("refreshedSince(freshness, run.started_at)");
   });
 
@@ -500,28 +526,124 @@ describe("a run that spans a prime merge cannot report a mixed tree as deployed"
     // directions and both failures are silent.
     expect(generationBlock).toContain("planDeployGeneration({");
     expect(generationBlock).toContain("lastSourceSha:");
-    expect(generationBlock).toContain("observedSourceSha,");
+    expect(generationBlock).toContain("observedSourceSha: commitSha,");
   });
 
-  it("a restarted generation reaches the resume decision", () => {
-    expect(resumeBlock).toContain("sourceMoved: generation.sourceMoved");
-  });
-
-  it("an empty batch may not succeed while the source has moved", () => {
+  it("the skip list is planned inside the snapshot, never handed in before it", () => {
     /*
-      The batch is empty because the skip list was computed against the
-      SUPERSEDED revision — the pass is empty for the wrong reason, and
-      succeeding here is exactly the mixed tree above.
+      Handed in through `skipFunctionSlugs`, the skip list is computed before
+      the read, against whatever the branch held a moment earlier — which is
+      how an empty batch came to be empty for the wrong reason.
     */
-    expect(lane).toContain("if (batch.length === 0 && !generation.sourceMoved) {");
+    const snapshotCall = lane.slice(
+      lane.indexOf("fetchPrimeBackendSnapshot("),
+      lane.indexOf("const generation = planned.generation;"),
+    );
+    expect(snapshotCall).toContain("planSkip: ({ commitSha, bundleDigests }) => {");
+    expect(snapshotCall).toContain("skipFunctionSlugs: lineWithheld,");
+    expect(snapshotCall).not.toMatch(/skipFunctionSlugs: [^\n]*(refreshed|proven)/);
+  });
+
+  it("a restarted generation reaches the resume decision unless the ledger carried it", () => {
+    expect(resumeBlock).toContain("sourceMoved: generation.sourceMoved && !ledgerCarries");
+  });
+
+  it("an empty batch completes, because its skip list was planned at the commit read", () => {
+    /*
+      A move restarts the generation BEFORE the skip list is taken, so what is
+      still skipped is only what the ledger proves is this tree's bundle —
+      and an empty batch means every bundle owed is on the clone. It still
+      records no revision; see `backendRevision.contract.test.ts`.
+    */
+    expect(lane).toContain("if (batch.length === 0) {");
+    expect(lane).not.toContain("if (batch.length === 0 && !generation.sourceMoved) {");
   });
 
   it("every exit records the revision AND the baseline the next pass reads", () => {
     // Either alone is unreadable: a sha with no baseline cannot say what was
     // already delivered, and a baseline with no sha cannot say what moved.
-    for (const exit of ["generation_at: generation.baselineAt"]) {
-      expect(lane.split(exit).length - 1).toBe(3);
+    expect(lane.split("generation_at: generation.baselineAt").length - 1).toBe(3);
+    // The snapshot's own commit, which is the one the generation was judged at.
+    expect(lane.split("source_sha: snapshot.sourceSha ?? null").length - 1).toBe(3);
+  });
+});
+
+describe("a pass says where its budget went", () => {
+  /*
+    On 12–13 Oct 2026 every clone's pass landed one bundle in 45 seconds and
+    nothing recorded which step took the rest, so the remedies that would
+    make a pass carry more could not be chosen between (F23).
+  */
+  it("times each phase that can spend the budget", () => {
+    for (const phase of ["clone", "ledger", "snapshot", "deploy", "record"]) {
+      expect(lane).toContain(`timed("${phase}", () =>`);
     }
-    expect(lane).toContain("source_sha: snapshot.sourceSha ?? observedSourceSha ?? null");
+  });
+
+  it("records the timings on every result the pass writes", () => {
+    // The empty batch, the requeue and the completion.
+    expect(lane.split("pass_ms: passTimings()").length - 1).toBe(3);
+  });
+
+  it("measures the total from lane entry, as the budget is", () => {
+    const entry = lane.slice(0, lane.indexOf('.from("clone_backends")'));
+    expect(entry).toContain("const laneEnteredMs = Date.now();");
+  });
+});
+
+describe("the deploy ledger carries a prime merge, and only where it can prove it", () => {
+  /*
+    Measured 20 Oct 2026 over the prime's 340 first-parent commits since
+    12 Oct, with the snapshot's own prune and digest: re-owing what each
+    commit changed costs 1,383 bundle deploys; restarting the generation on
+    every commit re-owed every bundle, 135,763. Every clone's run parked
+    on 12–13 Oct and no clone received a function after (F23).
+  */
+  it("reads the ledger before the snapshot plans its skip list", () => {
+    const readAt = lane.indexOf("readFunctionDeployLedger(run.clone_id)");
+    const snapAt = lane.indexOf("fetchPrimeBackendSnapshot(");
+    expect(readAt).toBeGreaterThan(-1);
+    expect(readAt).toBeLessThan(snapAt);
+  });
+
+  it("an unreadable ledger vouches for nothing", () => {
+    expect(lane).toMatch(
+      /planned\.proven =\s*ledger\.state === "read"\s*\?\s*ledgerCurrentSlugs\([^)]*\)\s*:\s*\[\];/,
+    );
+  });
+
+  it("records only what landed, with what was sent and the deploy it made", () => {
+    const record = lane.slice(
+      lane.indexOf("recordFunctionDeploys("),
+      lane.indexOf("const ledgerCarries"),
+    );
+    expect(record.length).toBeGreaterThan(200);
+    // A refused bundle is not on the clone, so it is never recorded.
+    expect(record).toContain(
+      "const digest = r.error ? undefined : snapshot.bundleDigests?.get(r.slug);",
+    );
+    expect(record).toContain("functionId: r.functionId ?? null");
+    expect(record).toContain("functionVersion: r.functionVersion ?? null");
+    expect(record).toContain("sourceSha: snapshot.sourceSha ?? null");
+  });
+
+  it("carries a move only where the ledger was read AND this pass's landings reached it", () => {
+    /*
+      A move is charged an attempt because it re-owes what the run had
+      delivered. Where either half failed, the next pass cannot prove this
+      pass's landings and they are re-owed, so the charge stays — it is what
+      bounds a run whose ledger never works.
+    */
+    expect(lane).toContain('const ledgerCarries = ledger.state === "read" && ledgerWrite.ok;');
+    expect(lane.indexOf("recordFunctionDeploys(")).toBeLessThan(
+      lane.indexOf("planEdgeDeployResume({"),
+    );
+  });
+
+  it("counts what the ledger proved as delivered, never as landed", () => {
+    // `landed` decides whether the pass is charged; a proof is not a deploy.
+    expect(lane).toContain("const delivered = new Set([...refreshed, ...proven]);");
+    expect(lane.split("deployed: delivered.size + landed").length - 1).toBe(2);
+    expect(lane).toContain("const landed = countLanded(results ?? []);");
   });
 });

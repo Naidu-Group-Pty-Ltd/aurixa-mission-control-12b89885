@@ -77,6 +77,26 @@
  * two holds fire on `withheld` — the prime-only functions the clone's tree
  * does not hold — and the same reconciles settle them. A clone still holding
  * the feature passes nothing and keeps today's behaviour exactly.
+ *
+ * ## "Withheld" is measured against the SOURCE, not the prime
+ *
+ * A clone routed by lineage copies its PARENT's tree, and the baseline that
+ * travels is the parent's. Read off the child's tree alone, `withheld` named
+ * the twenty-eight prime-only functions however the parent stood. So on
+ * 20 Oct 2026 NPC Test #228 and Preflight #227, children of
+ * npc-client-dashboard, each kept its own baseline while the pass delivered
+ * 1,042 and 1,109 files of the tree that baseline analyses, and both went red
+ * on `security` (F22 in the 19 Oct hand-over). The parent lacks the same
+ * twenty-eight, and its committed baseline is what the generator writes on
+ * each child's head, byte for byte: there was no difference to hold for.
+ *
+ * So the holds ask `withheldBySource`: which of those functions the tree this
+ * pass copies FROM actually holds. From the prime that is every one of them,
+ * and nothing changes. From a parent that withholds the same functions it is
+ * none, and the child takes its parent's baseline as a mirror takes the
+ * prime's. Removing DECLARATIONS still uses the clone's own reading, because
+ * a clone must never declare a function its tree does not hold, whoever it
+ * copies from.
  */
 
 import { withheldClause } from "../crmLineFeatures.pure";
@@ -103,6 +123,31 @@ export const SECURITY_INVENTORY_PATH = "docs/security/SECURITY_INVENTORY.json";
 export const FUNCTION_COUNT_RATCHET_PATH = "src/lib/security/auditRemediation.spec.ts";
 
 /**
+ * How a note names the tree the baseline travels FROM.
+ *
+ * "The label travels with the bytes" (`cloneCascadeSource.pure.ts`): a clone
+ * routed by lineage receives its PARENT's tree, so its baseline is the
+ * parent's, and a note that names the prime over a file the prime never wrote
+ * sends an operator to the wrong repository. `source` is the engine's own
+ * `sourceLabel`. Left out, or the engine's `"prime"`, every note reads exactly
+ * as it always has: an operator has read these sentences on every CRM pass.
+ */
+export function baselineSourceWords(source?: string): {
+  /** "the prime", or the parent's label. */
+  readonly name: string;
+  /** "the prime's", or the label's. */
+  readonly possessive: string;
+  /** The possessive where it opens a sentence. */
+  readonly possessiveOpening: string;
+} {
+  const label = source?.trim() ?? "";
+  if (label === "" || label === "prime") {
+    return { name: "the prime", possessive: "the prime's", possessiveOpening: "The prime's" };
+  }
+  return { name: label, possessive: `${label}'s`, possessiveOpening: `${label}'s` };
+}
+
+/**
  * How this clone's function set differs from the prime's, as one clause.
  *
  * Written once — for both holds and for the pull request body — so the three
@@ -114,10 +159,12 @@ export const FUNCTION_COUNT_RATCHET_PATH = "src/lib/security/auditRemediation.sp
 export function describeFunctionSetDifference(
   cloneOwnedFunctions: readonly string[],
   withheld: readonly string[],
+  source?: string,
 ): string {
   const owned = [...new Set(cloneOwnedFunctions)].sort();
   const lacks = [...new Set(withheld)].sort();
-  const owns = `owns ${owned.length} edge function(s) the prime does not (${owned.join(", ")})`;
+  const from = baselineSourceWords(source);
+  const owns = `owns ${owned.length} edge function(s) ${from.name} does not (${owned.join(", ")})`;
   const without = `does not carry ${withheldClause(lacks)}`;
   if (lacks.length === 0) return owns;
   if (owned.length === 0) return without;
@@ -136,17 +183,19 @@ export function describeFunctionSetDifference(
 export function securityInventoryHold(
   cloneOwnedFunctions: readonly string[],
   withheld: readonly string[] = [],
+  source?: string,
 ): HeldPath | null {
   const owned = [...new Set(cloneOwnedFunctions)].sort();
   const lacks = [...new Set(withheld)].sort();
   if (owned.length === 0 && lacks.length === 0) return null;
+  const from = baselineSourceWords(source);
   return {
     path: SECURITY_INVENTORY_PATH,
     pattern: "(content: describes a different function set)",
     reason: "manual_reconcile",
     note:
-      `This clone ${describeFunctionSetDifference(owned, lacks)}, ` +
-      `so the prime's security baseline is a static analysis of a different repository. The ` +
+      `This clone ${describeFunctionSetDifference(owned, lacks, source)}, ` +
+      `so ${from.possessive} security baseline is a static analysis of a different repository. The ` +
       `clone's own copy is kept. Where it later goes stale, \`npm run security:inventory\` ` +
       `regenerates it from this repository.`,
   };
@@ -174,11 +223,13 @@ export function securityInventoryHold(
 export function functionCountRatchetHold(
   cloneOwnedFunctions: readonly string[],
   withheld: readonly string[] = [],
+  source?: string,
 ): HeldPath | null {
   const owned = [...new Set(cloneOwnedFunctions)].sort();
   const lacks = [...new Set(withheld)].sort();
   if (owned.length === 0 && lacks.length === 0) return null;
-  const declares = `declares ${owned.length} the prime does not (${owned.join(", ")})`;
+  const from = baselineSourceWords(source);
+  const declares = `declares ${owned.length} ${from.name} does not (${owned.join(", ")})`;
   const omits = `omits the declarations of ${withheldClause(lacks)}`;
   const difference =
     lacks.length === 0 ? declares : owned.length === 0 ? omits : `${declares} and ${omits}`;
@@ -188,8 +239,8 @@ export function functionCountRatchetHold(
     reason: "manual_reconcile",
     note:
       `This spec asserts how many functions \`supabase/config.toml\` declares, and this clone ` +
-      `${difference}. The prime's copy ` +
-      `states the prime's count, so it is not brought across — the two differ by that one ` +
+      `${difference}. ${from.possessiveOpening} copy ` +
+      `states ${from.possessive} count, so it is not brought across — the two differ by that one ` +
       `number and nothing else. Where the merged config later declares more, the assertion ` +
       `is the number to update.`,
   };
@@ -245,4 +296,28 @@ export function cloneOnlyEdgeFunctions(args: {
   const prime = edgeFunctionNames(args.primePaths);
   const clone = edgeFunctionNames(args.clonePaths);
   return [...clone].filter((name) => !prime.has(name)).sort();
+}
+
+/**
+ * The withheld functions this delivery's SOURCE actually holds.
+ *
+ * `withheld` is read off the clone's tree: the functions a register says the
+ * clone does not carry, which its tree indeed lacks. The two baselines need a
+ * narrower question, because the baseline that travels is the SOURCE's: a
+ * function the source lacks too is not a difference between the two trees,
+ * and holding for it holds a baseline that already describes this clone.
+ *
+ * `null` source paths — a truncated listing, or a scope that never read the
+ * source — answer `withheld` unchanged. That is today's behaviour, and the one
+ * answer that cannot be newly wrong: an unread source is not a source that
+ * lacks everything.
+ */
+export function withheldBySource(args: {
+  readonly withheld: readonly string[];
+  readonly sourcePaths: Iterable<string> | null | undefined;
+}): string[] {
+  const withheld = [...new Set(args.withheld)].sort();
+  if (!args.sourcePaths) return withheld;
+  const source = edgeFunctionNames(args.sourcePaths);
+  return withheld.filter((name) => source.has(name));
 }

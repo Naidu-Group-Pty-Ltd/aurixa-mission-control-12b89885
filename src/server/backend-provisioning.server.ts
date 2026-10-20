@@ -52,6 +52,12 @@ import {
   primeOnlyFunctionsIn,
 } from "./primeOnlyFeatures.pure";
 import { crmLineCronJobsIn, crmLineCronReason, crmLineFunctionsIn } from "./crmLineFeatures.pure";
+import { deployedVerifyJwt } from "./anonymousFunctionSlugs.pure";
+import {
+  readDeployedCopy,
+  readProjectFunctionCopies,
+  type ProjectFunctionCopy,
+} from "./projectFunctionCopies.pure";
 
 const MGMT_API = "https://api.supabase.com/v1";
 
@@ -442,7 +448,7 @@ export async function readCloneMigrationLedger(
  * How many Edge Functions are deployed on a project right now.
  *
  * Kept beside `listProjectEdgeFunctionSlugs` rather than replacing it, for the
- * reason `listProjectEdgeFunctionFreshness` is: that reader answers `[]` on
+ * reason `listProjectEdgeFunctionCopies` is: that reader answers `[]` on
  * failure so parity can still compute the rest of a diff, which is right there
  * and wrong here — a page that printed "0 deployed" because a GET timed out
  * would report a catastrophe that had not happened. Null is "not measured".
@@ -568,7 +574,7 @@ export async function listProjectEdgeFunctionSlugs(projectRef: string): Promise<
  * a caller that decides from the answer whether a function is MISSING: there
  * `[]` reads as "none live", and a Management API hiccup would be taken for a
  * project that lost its functions. Kept beside that reader rather than
- * changing it, for the reason `listProjectEdgeFunctionFreshness` gives.
+ * changing it, for the reason `listProjectEdgeFunctionCopies` gives.
  */
 export async function readProjectEdgeFunctionSlugs(projectRef: string): Promise<string[] | null> {
   try {
@@ -595,7 +601,8 @@ export async function readProjectEdgeFunctionSlugs(projectRef: string): Promise<
 }
 
 /**
- * The clone's live functions, each with the moment it was last deployed.
+ * The clone's live functions, each with the moment it was last deployed and
+ * which deploy that was (`projectFunctionCopies.pure.ts`).
  *
  * `listProjectEdgeFunctionSlugs` answers "which of these does the target
  * have". A REDEPLOY needs a different question — "which has this pass
@@ -612,42 +619,21 @@ export async function readProjectEdgeFunctionSlugs(projectRef: string): Promise<
  * is known to be fresh", which redeploys more than strictly necessary. The
  * opposite mistake skips bundles that were never deployed, and does it
  * silently — the same asymmetry `skipFunctionSlugs`' own `.catch(() => [])`
- * is written for.
+ * is written for. An empty map also proves no ledger row current, which is
+ * the same direction.
  */
-export async function listProjectEdgeFunctionFreshness(
+export async function listProjectEdgeFunctionCopies(
   projectRef: string,
-): Promise<Map<string, number>> {
-  const fresh = new Map<string, number>();
+): Promise<Map<string, ProjectFunctionCopy>> {
+  const none = new Map<string, ProjectFunctionCopy>();
   try {
     const res = await fetch(`${MGMT_API}/projects/${projectRef}/functions`, {
       headers: headers(),
     });
-    if (!res.ok) return fresh;
-    const raw = (await res.json()) as unknown;
-    if (!Array.isArray(raw)) return fresh;
-    for (const r of raw) {
-      const o = r as Record<string, unknown>;
-      const slug =
-        typeof o.slug === "string" ? o.slug : typeof o.name === "string" ? (o.name as string) : "";
-      if (!slug) continue;
-      // The Management API reports epoch milliseconds. A seconds value or an
-      // ISO string is accepted rather than assumed away, and anything
-      // unreadable is left ABSENT — absent means "not known to be fresh",
-      // which redeploys, so a format change costs work rather than coverage.
-      const stamp = o.updated_at ?? o.created_at;
-      const ms =
-        typeof stamp === "number"
-          ? stamp < 1e12
-            ? stamp * 1000
-            : stamp
-          : typeof stamp === "string"
-            ? Date.parse(stamp)
-            : Number.NaN;
-      if (Number.isFinite(ms)) fresh.set(slug, ms);
-    }
-    return fresh;
+    if (!res.ok) return none;
+    return readProjectFunctionCopies((await res.json()) as unknown);
   } catch {
-    return fresh;
+    return none;
   }
 }
 
@@ -4428,34 +4414,19 @@ export type EdgeFunctionDeployResult = {
    *  did not redeploy it. The live project is the authority on what it holds
    *  (asked, never diaried), so the parity check still measures the truth. */
   skipped?: boolean;
+  /** The function id and version the project answered this deploy with —
+   *  which deploy it was, for the redeploy lane's ledger
+   *  (`edgeBundleLedger.pure.ts`). Absent where the answer carried neither. */
+  functionId?: string;
+  functionVersion?: number;
 };
 
 /**
- * Issue #15: Prime's `verify_jwt` flag is snapshot verbatim, but a clone's
- * JWT audience differs from the prime's — an edge function shipped with
- * `verify_jwt=true` on the prime will 401 external callers hitting the
- * clone's URL because their token was minted against a different project.
- *
- * Any function that is intended to be reached anonymously (webhooks,
- * public hooks, cron callbacks, health probes) MUST be deployed with
- * `verify_jwt=false` on every clone regardless of the prime's setting.
- * We detect those by slug convention: it is the same convention used by
- * `/api/public/*` server routes and by Supabase's own function templates.
+ * Issue #15 — which functions a clone serves anonymously whatever the prime
+ * declares. The rule lives in `anonymousFunctionSlugs.pure.ts`, because the
+ * deploy ledger's bundle digest has to agree with it about what is sent.
  */
-const ANON_FUNCTION_SLUG_PATTERNS: RegExp[] = [
-  /^hooks?[-_]/i, // hook-*, hooks-*
-  /^webhooks?[-_]?/i, // webhook*, webhooks-*
-  /[-_]webhooks?$/i, // *-webhook, *-webhooks
-  /^public[-_]/i, // public-*
-  /^cron[-_]/i, // cron-*
-  /^health(check)?$/i, // health, healthcheck
-  /^stripe[-_]webhook/i,
-  /^github[-_]webhook/i,
-];
-
-export function shouldForceAnonymousFunction(slug: string): boolean {
-  return ANON_FUNCTION_SLUG_PATTERNS.some((rx) => rx.test(slug));
-}
+export { shouldForceAnonymousFunction } from "./anonymousFunctionSlugs.pure";
 
 /**
  * Deploy one edge function bundle to a clone project via the Management API.
@@ -4471,15 +4442,18 @@ export async function deployEdgeFunction(
     verifyJwt: boolean;
     files: Array<{ path: string; contentBase64: string }>;
   },
-): Promise<{ verifyJwt: boolean; overrideReason: string | null }> {
+): Promise<{
+  verifyJwt: boolean;
+  overrideReason: string | null;
+  deployed: { id: string; version: number } | null;
+}> {
   // Issue #15: force anonymous for webhook-style slugs regardless of the
   // prime's flag, so external callers minted against the prime's audience
   // (or unauthenticated altogether) still reach the clone's endpoint.
-  const forceAnon = shouldForceAnonymousFunction(fn.slug) && fn.verifyJwt === true;
-  const effectiveVerifyJwt = forceAnon ? false : fn.verifyJwt;
-  const overrideReason = forceAnon
-    ? `slug "${fn.slug}" matches an anonymous-webhook pattern; prime had verify_jwt=true, deployed as false on this clone`
-    : null;
+  const { verifyJwt: effectiveVerifyJwt, overrideReason } = deployedVerifyJwt(
+    fn.slug,
+    fn.verifyJwt,
+  );
 
   const form = new FormData();
   form.append(
@@ -4508,7 +4482,11 @@ export async function deployEdgeFunction(
     const body = await res.text();
     throw new Error(`Deploy failed for ${fn.slug}: ${res.status} — ${body}`);
   }
-  return { verifyJwt: effectiveVerifyJwt, overrideReason };
+  // Which deploy this was. Read, never required: the deploy has succeeded
+  // whatever the body says, and an unreadable body only means the redeploy
+  // lane cannot prove this copy later and deploys it again.
+  const deployed = readDeployedCopy(await res.json().catch(() => null));
+  return { verifyJwt: effectiveVerifyJwt, overrideReason, deployed };
 }
 
 export async function deployEdgeFunctions(
@@ -4535,12 +4513,13 @@ export async function deployEdgeFunctions(
       `Deploying edge function ${i + 1}/${functions.length}: ${fn.slug}`,
     );
     try {
-      const { verifyJwt, overrideReason } = await deployEdgeFunction(projectRef, fn);
+      const { verifyJwt, overrideReason, deployed } = await deployEdgeFunction(projectRef, fn);
       results.push({
         slug: fn.slug,
         success: true,
         verifyJwt,
         ...(overrideReason ? { verifyJwtOverrideReason: overrideReason } : {}),
+        ...(deployed ? { functionId: deployed.id, functionVersion: deployed.version } : {}),
       });
     } catch (e) {
       // Non-fatal: record and continue so one broken function doesn't block the rest

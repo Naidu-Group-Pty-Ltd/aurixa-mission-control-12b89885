@@ -55,7 +55,7 @@ import {
 import {
   describeLineageHold,
   LINEAGE_HOLD_RETRY_MS,
-  orderByLineageDepth,
+  orderByLineage,
   resolveCascadeSource,
   type ParentCloneRow,
 } from "./cascade/cloneCascadeSource.pure";
@@ -180,9 +180,11 @@ import {
   FUNCTION_COUNT_RATCHET_PATH,
   SECURITY_INVENTORY_PATH,
   cloneOnlyEdgeFunctions,
+  baselineSourceWords,
   describeFunctionSetDifference,
   functionCountRatchetHold,
   securityInventoryHold,
+  withheldBySource,
 } from "./cascade/securityInventoryHold.pure";
 import {
   reconcileFunctionCountRatchet,
@@ -253,6 +255,15 @@ import {
   type HeldEvidenceEntry,
   type VariantEvidenceEntry,
 } from "./cascade/passProgress.pure";
+import { PROGRESS_COLUMN } from "./cascade/exhaustedEvents.pure";
+import {
+  endPass,
+  enterPhase,
+  settleTrace,
+  TRACE_FLUSH_MS,
+  type PassPhase,
+  type PassTrace,
+} from "./cascade/passTrace.pure";
 
 type CascadeResultUpdate = Database["public"]["Tables"]["cascade_results"]["Update"];
 
@@ -351,6 +362,49 @@ function directoryOf(path: string): string {
 
 function branchName(sourceSha: string) {
   return `aurixa/cascade-${shortSha(sourceSha)}-${Date.now().toString(36)}`;
+}
+
+/**
+ * A write refused because a column is not there yet: Postgres's spelling
+ * (42703) or PostgREST's schema cache's (PGRST204). The engine and its
+ * migrations ship separately, so a column the engine writes can reach the
+ * code before the database.
+ */
+function isMissingColumnError(error: { code?: string; message?: string }): boolean {
+  return (
+    error.code === "PGRST204" ||
+    error.code === "42703" ||
+    /column .* does not exist|could not find the .* column/i.test(error.message ?? "")
+  );
+}
+
+/**
+ * Takes a result row out of the queue for good, and says so where the drain
+ * looks for progress.
+ *
+ * A settled row is one clone fewer for its event — exactly what `drainOne`
+ * counts as progress for a pass that RETURNED (`done > 0`) — so it is stamped
+ * `PROGRESS_COLUMN` like a grown ledger is, and a pass the platform cut after
+ * settling a clone reads the same to the exhaustion judge as one that came
+ * back (F21). Every write in the clone loop that settles a row comes through
+ * here; nothing else stamps the column but the ledger flush.
+ *
+ * A database the column has not reached yet still settles the row: the stamp
+ * informs a judgement, the settlement is the work. The write's own error is
+ * returned, as the bare `update` it replaces returned it.
+ */
+async function writeSettlement(
+  supabase: SupabaseLike,
+  rowId: string,
+  patch: Database["public"]["Tables"]["cascade_results"]["Update"],
+): Promise<{ message: string } | null> {
+  const stamped = await supabase
+    .from("cascade_results")
+    .update({ ...patch, [PROGRESS_COLUMN]: new Date().toISOString() })
+    .eq("id", rowId);
+  if (!stamped.error || !isMissingColumnError(stamped.error)) return stamped.error;
+  const { error } = await supabase.from("cascade_results").update(patch).eq("id", rowId);
+  return error;
 }
 
 /**
@@ -849,16 +903,16 @@ export async function executeCascade(
 
   // The clone touched least recently first, so a clone that paused last tick
   // goes to the back and no clone waits behind another's long pass
-  // (`passOrder.pure.ts` carries the measurement). Then parents first, so a
-  // pass can deliver a parent and then its child in the same run rather than
-  // holding the child for the next tick — stable within a depth, so the round
-  // robin holds among clones at the same depth.
+  // (`passOrder.pure.ts` carries the measurement). Then parents before their
+  // children, so a pass can deliver a parent and then its child in the same
+  // run rather than holding the child for the next tick — and a child behind
+  // nothing it does not depend on (`orderByLineage`; F21).
   const roundRobin = leastRecentlyTouchedFirst(
     queuedRows,
     (r) => (r as { updated_at?: string | null }).updated_at ?? null,
   );
   const orderedRows = followsLineage
-    ? orderByLineageDepth(
+    ? orderByLineage(
         roundRobin.map((r) => {
           const c = (r as { clones: { id: string; parent_clone_id: string | null } | null }).clones;
           return { id: c?.id ?? "", parent_clone_id: c?.parent_clone_id ?? null, row: r };
@@ -893,31 +947,25 @@ export async function executeCascade(
     } | null;
 
     if (!clone) {
-      await supabase
-        .from("cascade_results")
-        .update({
-          status: "skipped",
-          error_message: "Clone not found",
-          completed_at: new Date().toISOString(),
-        })
-        .eq("id", r.id);
+      await writeSettlement(supabase, r.id, {
+        status: "skipped",
+        error_message: "Clone not found",
+        completed_at: new Date().toISOString(),
+      });
       skipped++;
       continue;
     }
 
     const pinErrors = blockedClones.get(clone.id);
     if (pinErrors && pinErrors.length > 0) {
-      await supabase
-        .from("cascade_results")
-        .update({
-          status: "failed",
-          error_message: stampFailedAgainst(
-            sourceSha,
-            `Pin validation failed: ${pinErrors.join("; ")}`,
-          ),
-          completed_at: new Date().toISOString(),
-        })
-        .eq("id", r.id);
+      await writeSettlement(supabase, r.id, {
+        status: "failed",
+        error_message: stampFailedAgainst(
+          sourceSha,
+          `Pin validation failed: ${pinErrors.join("; ")}`,
+        ),
+        completed_at: new Date().toISOString(),
+      });
       await supabase.from("clones").update({ sync_status: "failed" }).eq("id", clone.id);
       failed++;
       continue;
@@ -1019,6 +1067,30 @@ export async function executeCascade(
       .update({ status: "pushing", started_at: new Date().toISOString() })
       .eq("id", r.id);
 
+    // Where this pass is, written as it goes, for the pass the platform ends:
+    // its row otherwise says nothing past the `pushing` mark above (F21). In
+    // order, and never awaited — a trace that cost a live pass its window
+    // would be measuring itself — and dropped wherever a write fails or the
+    // column has not reached this database.
+    const traceStartedAt = new Date().toISOString();
+    const traceOrigin = Date.now();
+    let passTrace: PassTrace | null = null;
+    let traceAbsent = false;
+    let traceWrites: Promise<void> = Promise.resolve();
+    const writeTrace = (next: PassTrace): void => {
+      passTrace = next;
+      traceWrites = traceWrites
+        .then(async () => {
+          if (traceAbsent) return;
+          const { error: traceError } = await supabase
+            .from("cascade_results")
+            .update({ pass_trace: next as unknown as Json })
+            .eq("id", r.id);
+          if (traceError && isMissingColumnError(traceError)) traceAbsent = true;
+        })
+        .catch(() => undefined);
+    };
+
     try {
       // What an earlier pass already prepared, if the budget stopped it inside
       // this clone — or what the clone's LAST pass prepared, borrowed across
@@ -1056,10 +1128,31 @@ export async function executeCascade(
           progress: priorRecord,
           onProgress: async (progress) => {
             lastLedger = progress;
-            const { error: progressError } = await supabase
+            // Stamped only where this flush KEEPS an entry the pass did not
+            // start with — progress, as a settled row is (`writeSettlement`):
+            // it is what the drain judges an event at the attempt ceiling by,
+            // and the row's `updated_at` cannot say it — the `pushing` mark
+            // above moves that before any work (F21). Written in the same
+            // update as the ledger it describes, so a cut between two writes
+            // cannot stamp a ledger that never landed.
+            const grew = ledgerGrew(priorLedger, progress);
+            const ledgerWrite = { progress: progress as unknown as Json };
+            let { error: progressError } = await supabase
               .from("cascade_results")
-              .update({ progress: progress as unknown as Json })
+              .update(
+                grew
+                  ? { ...ledgerWrite, [PROGRESS_COLUMN]: new Date().toISOString() }
+                  : ledgerWrite,
+              )
               .eq("id", r.id);
+            // A database the column has not reached yet keeps the ledger: the
+            // stamp only informs a judgement, and the ledger is the work.
+            if (progressError && grew && isMissingColumnError(progressError)) {
+              ({ error: progressError } = await supabase
+                .from("cascade_results")
+                .update(ledgerWrite)
+                .eq("id", r.id));
+            }
             if (progressError) {
               throw new Error(
                 `cascade ${event.id}: could not record ${clone.name}'s progress: ${progressError.message}`,
@@ -1067,8 +1160,17 @@ export async function executeCascade(
             }
           },
           budget: opts?.budget,
+          onPhase: (phase, atMs) => writeTrace(enterPhase(passTrace, phase, atMs, traceStartedAt)),
         },
       });
+      writeTrace(
+        endPass(
+          passTrace,
+          patch.status === "queued" ? "paused" : patch.status === "failed" ? "failed" : "finished",
+          Date.now() - traceOrigin,
+          traceStartedAt,
+        ),
+      );
 
       if (patch.status === "queued") {
         // Paused inside this clone: the row keeps its list and its place in
@@ -1106,10 +1208,7 @@ export async function executeCascade(
       // Settled before it is written: a failure names the head it failed
       // against, which is what bounds the carrier's re-offer of it, and a
       // delivery drops the note an earlier hold or deferral left on the row.
-      await supabase
-        .from("cascade_results")
-        .update(settledRowPatch(patch, sourceSha))
-        .eq("id", r.id);
+      await writeSettlement(supabase, r.id, settledRowPatch(patch, sourceSha));
 
       // Read off the patch, not off `passRows`: those rows were fetched
       // before this loop and still carry the pre-run `diff_summary`.
@@ -1237,6 +1336,7 @@ export async function executeCascade(
       // reset GitHub named.
       const failure = classifyGitHubFailure(e);
       if (failure.kind === "rate_limited") {
+        writeTrace(endPass(passTrace, "deferred", Date.now() - traceOrigin, traceStartedAt));
         const { error: requeueError } = await supabase
           .from("cascade_results")
           .update({
@@ -1266,6 +1366,7 @@ export async function executeCascade(
         priorMessage: r.error_message,
       });
       if (server?.act === "defer") {
+        writeTrace(endPass(passTrace, "deferred", Date.now() - traceOrigin, traceStartedAt));
         const { error: requeueError } = await supabase
           .from("cascade_results")
           .update({ status: "queued", started_at: null, error_message: server.rowMessage })
@@ -1283,28 +1384,32 @@ export async function executeCascade(
           until: server.until,
         });
       } else {
+        writeTrace(endPass(passTrace, "failed", Date.now() - traceOrigin, traceStartedAt));
         failed++;
-        await supabase
-          .from("cascade_results")
-          .update({
-            status: "failed",
-            // The status and the route, never only `e.message`: that is empty
-            // for a GitHub 5xx with no body, and an empty failure is no record.
-            error_message: stampFailedAgainst(
-              sourceSha,
-              server ? server.rowMessage : describeGitHubFailure(e),
-            ),
-            completed_at: new Date().toISOString(),
-            // A tree write that names a blob GitHub no longer holds means the
-            // reuse list has outlived its objects (unreferenced blobs are
-            // eventually collected). The list caused the failure, so the list
-            // goes with it — the next pass re-prepares fresh instead of failing
-            // on the same stale SHA for ever.
-            ...(isStaleObjectError(e) ? { progress: null } : {}),
-          })
-          .eq("id", r.id);
+        await writeSettlement(supabase, r.id, {
+          status: "failed",
+          // The status and the route, never only `e.message`: that is empty
+          // for a GitHub 5xx with no body, and an empty failure is no record.
+          error_message: stampFailedAgainst(
+            sourceSha,
+            server ? server.rowMessage : describeGitHubFailure(e),
+          ),
+          completed_at: new Date().toISOString(),
+          // A tree write that names a blob GitHub no longer holds means the
+          // reuse list has outlived its objects (unreferenced blobs are
+          // eventually collected). The list caused the failure, so the list
+          // goes with it — the next pass re-prepares fresh instead of failing
+          // on the same stale SHA for ever.
+          ...(isStaleObjectError(e) ? { progress: null } : {}),
+        });
         await supabase.from("clones").update({ sync_status: "failed" }).eq("id", clone.id);
       }
+    } finally {
+      // Every way out of this clone — a delivery, a pause, a deferral, a
+      // failure, a throw — waits here for its trace's outcome to land, so a
+      // pass that returned never reads like one the platform ended. Bounded,
+      // and after the work: it costs the pass nothing it needed.
+      await settleTrace(traceWrites, TRACE_FLUSH_MS);
     }
     attempted++;
     slowestMs = Math.max(slowestMs, Date.now() - cloneStartedAt);
@@ -1773,6 +1878,12 @@ export async function processClone(args: {
     progress: unknown;
     onProgress: (progress: CascadeProgress) => Promise<void>;
     budget?: CascadeBudget;
+    /**
+     * Told each stage as the pass enters it, with the milliseconds since the
+     * pass began (`cascade/passTrace.pure.ts`). Never awaited: a trace is for
+     * the pass the platform kills, and it must not cost a live one anything.
+     */
+    onPhase?: (phase: PassPhase, atMs: number) => void;
   };
   /**
    * Set ONLY when this clone reads from its recorded parent rather than from
@@ -1812,6 +1923,16 @@ export async function processClone(args: {
   // A conversion is never merged by the platform, and never a drift notice.
   const mode: Database["public"]["Enums"]["cascade_mode"] = conversion ? "pr" : args.mode;
   const dryRun = args.dryRun === true;
+  /**
+   * Name the stage this pass is entering. Real path only — a rehearsal is
+   * given no `resume` — and never awaited: it is how a pass the platform ends
+   * says where it was (F21), and a live pass must not wait on it.
+   */
+  const passStartedAt = Date.now();
+  const markPhase = (phase: PassPhase): void => {
+    if (!dryRun) args.resume?.onPhase?.(phase, Date.now() - passStartedAt);
+  };
+  markPhase("listing");
 
   /** What a label names. `prime` unless this clone read from its parent. */
   const sourceLabel = args.provenance?.label ?? "prime";
@@ -2281,6 +2402,7 @@ export async function processClone(args: {
   // operator approved overwriting it), and at most `MAX_STRANDED_PROBES`
   // walks a pass — each settled answer goes into the same `held_evidence`
   // ledger the hold releases use, so the next pass continues from it.
+  markPhase("functions");
   const strandedVerdicts: StrandedVerdict[] = [];
   /**
    * What this block settled about a stranded file's history, for the hold
@@ -2508,6 +2630,7 @@ export async function processClone(args: {
     };
     importClosure = closeOver;
 
+    markPhase("closure");
     const closureAdded = await closeOver(candidatePaths, new Set(candidatePaths));
     if (closureAdded.length > 0) {
       candidatePaths = [...candidatePaths, ...closureAdded];
@@ -2535,6 +2658,7 @@ export async function processClone(args: {
   // content holds — `judgingWorkflowHold` and `backendIdentityHold` still run
   // on it like any other write. `protected` paths never reach this step:
   // `decideHoldRelease` refuses them whatever the evidence or the table says.
+  markPhase("held");
   const holdReleases: HoldRelease[] = [];
   {
     // Through `approvableHeld` rather than an inline filter: this set and the
@@ -2613,6 +2737,7 @@ export async function processClone(args: {
   // window on them, prepared four files of 368, and was retired after three
   // attempts with the verdicts thrown away — four events in a row, and every
   // clone queued behind it with them.
+  markPhase("variants");
   const variantMerges = new Map<
     string,
     {
@@ -2869,6 +2994,7 @@ export async function processClone(args: {
   //
   // Provisional here. A deletion still has to survive the reference check
   // below, which cannot run until the held files have been read.
+  markPhase("deletions");
   const deletionPartition = partitionCascadePaths(
     deletionCandidates.map((c) => c.path),
     exclusions,
@@ -3440,10 +3566,12 @@ export async function processClone(args: {
   // the ledger already holds as a blob is reused without a read, so it is not
   // asked. Paced on the pass's budget — text is never ledgered, so a batch
   // read past the point where the loop can use it would be thrown away.
+  markPhase("prefetch");
   await prefetchPrimeText(
     primeFiles.filter((path) => isSpecPath(path) || !known.has(path)),
     resume?.budget ? (reserveMs) => resume.budget!.isPastDeadline(reserveMs) : undefined,
   );
+  markPhase("prepare");
   const { results: prepared, stopped: preparePaused } = await mapWithConcurrencyUntil<
     string,
     Prepared | null
@@ -3465,6 +3593,7 @@ export async function processClone(args: {
       progress: progress as unknown as Json,
     };
   }
+  markPhase("deliver");
   const deliveredSource: Record<string, string> = {};
 
   /**
@@ -3855,8 +3984,25 @@ export async function processClone(args: {
   // half: a clone that does NOT hold what the prime keeps for itself
   // (`withheldFunctions`) differs from prime's function set by subtraction,
   // and prime's two numbers count what it does not have.
-  const inventoryHold = securityInventoryHold(cloneOwnedFunctions, withheldFunctions);
-  const ratchetHold = functionCountRatchetHold(cloneOwnedFunctions, withheldFunctions);
+  //
+  // `withheldFunctions` is read off the clone's tree, and the baseline that
+  // travels is the SOURCE's. A clone routed by lineage copies its parent, and
+  // a function the parent lacks too is no difference between the two trees:
+  // holding for it held npc-client-dashboard's children on a baseline that
+  // already described them (F22). From the prime this is every withheld
+  // function, so nothing changes off the lineage edge. The notes name the
+  // source for the same reason the commit message does: the baseline they
+  // describe is the one the bytes came with.
+  const withheldFromSource = withheldBySource({
+    withheld: withheldFunctions,
+    sourcePaths: primeShaByPath?.keys(),
+  });
+  const inventoryHold = securityInventoryHold(cloneOwnedFunctions, withheldFromSource, sourceLabel);
+  const ratchetHold = functionCountRatchetHold(
+    cloneOwnedFunctions,
+    withheldFromSource,
+    sourceLabel,
+  );
   /**
    * What the baseline was reconciled FROM, kept for the one recount this pass
    * owes it once the delivery is final (below the deletion plan). Set only
@@ -3988,7 +4134,7 @@ export async function processClone(args: {
               mergedRegistryJson,
               mergedTreePaths,
               deliveredPaths,
-              withheld: withheldFunctions,
+              withheld: withheldFromSource,
               primeTree: primeShaByPath,
               cloneTree: cloneShaByPath,
               rewrittenPaths: reconciledPaths,
@@ -4023,7 +4169,8 @@ export async function processClone(args: {
               primeSpec: primeRatchetSpec,
               mergedToml,
               cloneOwnedFunctions,
-              withheld: withheldFunctions,
+              withheld: withheldFromSource,
+              source: sourceLabel,
             })
           : null,
       );
@@ -5264,7 +5411,7 @@ export async function processClone(args: {
       mergedRegistryJson: inventoryRecount.mergedRegistryJson,
       mergedTreePaths: finalTree,
       deliveredPaths: finalDelivered,
-      withheld: withheldFunctions,
+      withheld: withheldFromSource,
       primeTree: inventoryRecount.primeTree,
       cloneTree: inventoryRecount.cloneTree,
       rewrittenPaths: reconciledPaths,
@@ -5743,6 +5890,7 @@ export async function processClone(args: {
   // (`sha: null`) composes over `base_tree` exactly as it did in one call.
   // A rate limit mid-chain throws to the per-clone classifier and the clone
   // defers; the part-built trees are unreachable objects GitHub collects.
+  markPhase("tree");
   let chainedTreeSha = cloneCommit.tree.sha;
   for (const chunk of chunkTreeEntries(treeEntries)) {
     const { data: chunkTree } = await octokit.git.createTree({
@@ -5754,6 +5902,7 @@ export async function processClone(args: {
     chainedTreeSha = chunkTree.sha;
   }
   const newTree = { sha: chainedTreeSha };
+  markPhase("proposal");
 
   // A removal is marked in the commit body. The subject line's shape is
   // unchanged and deliberately so: `isEngineOnlyBranch` recognises an
@@ -5829,8 +5978,16 @@ export async function processClone(args: {
         (baselineNotes.length
           ? `\n\n### The security baselines were recomputed, not copied\n\n` +
             `\`${SECURITY_INVENTORY_PATH}\` and \`${FUNCTION_COUNT_RATCHET_PATH}\` each state how ` +
-            `many edge functions a repository has, so prime's copies state PRIME'S count. This ` +
-            `deployment ${describeFunctionSetDifference(cloneOwnedFunctions, withheldFunctions)}, ` +
+            `many edge functions a repository has, so ${
+              baselineSourceWords(sourceLabel).name === "the prime"
+                ? "prime's copies state PRIME'S count"
+                : `${baselineSourceWords(sourceLabel).possessive} copies state its own count`
+            }. This ` +
+            `deployment ${describeFunctionSetDifference(
+              cloneOwnedFunctions,
+              withheldFromSource,
+              sourceLabel,
+            )}, ` +
             `so both were computed from the \`config.toml\` and ` +
             `security registry this same pass reconciled — the numbers describe the tree this ` +
             `proposal creates rather than either side's.\n\n` +

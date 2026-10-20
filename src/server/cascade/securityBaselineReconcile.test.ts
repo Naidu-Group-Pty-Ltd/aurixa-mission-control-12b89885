@@ -682,16 +682,83 @@ describe("the ratchet note, for a clone that holds less than the prime", () => {
     }) as { merged: string };
     expect(twice.merged).toBe(once.merged);
   });
+
+  it("names the parent where the spec came from the parent", () => {
+    // A clone routed by lineage receives its parent's spec, so "the prime's
+    // number" would be a sentence about a file the prime never wrote.
+    const out = reconcileFunctionCountRatchet({
+      primeSpec: SPEC,
+      mergedToml: CLONE_TOML,
+      cloneOwnedFunctions: ["crm-send-message"],
+      source: "npc-client-dashboard",
+    }) as { merged: string };
+    expect(note(out.merged)).toBe(
+      "Reconciled by the cascade. This deployment declares 1 edge function(s) " +
+        "npc-client-dashboard does not — crm-send-message — so npc-client-dashboard's number " +
+        "counts a different repository. The count below is this one's, taken from the config " +
+        "this same pass composed.",
+    );
+  });
+
+  it("writes the prime's sentence, byte for byte, where the source is the prime", () => {
+    for (const source of [undefined, "prime", "", "  "]) {
+      const out = reconcileFunctionCountRatchet({
+        primeSpec: SPEC,
+        mergedToml: CLONE_TOML,
+        cloneOwnedFunctions: ["crm-send-message"],
+        source,
+      }) as { merged: string };
+      const plain = reconcileFunctionCountRatchet({
+        primeSpec: SPEC,
+        mergedToml: CLONE_TOML,
+        cloneOwnedFunctions: ["crm-send-message"],
+      }) as { merged: string };
+      expect(out.merged).toBe(plain.merged);
+    }
+  });
+
+  it("replaces the parent's own note rather than stacking a second", () => {
+    // The parent's spec may carry the note ITS reconcile wrote against the
+    // prime; the child's pass strips it by its marker before writing its own.
+    const parents = reconcileFunctionCountRatchet({
+      primeSpec: SPEC,
+      mergedToml: PRIME_TOML,
+      cloneOwnedFunctions: [],
+      withheld: ALL_28,
+    }) as { merged: string };
+    const childs = reconcileFunctionCountRatchet({
+      primeSpec: parents.merged,
+      mergedToml: CLONE_TOML,
+      cloneOwnedFunctions: ["crm-send-message"],
+      source: "npc-client-dashboard",
+    }) as { merged: string };
+    const text = note(childs.merged);
+    expect(text.match(/Reconciled by the cascade\./g)).toHaveLength(1);
+    expect(text).toContain("npc-client-dashboard does not — crm-send-message —");
+    expect(text).not.toContain("the prime keeps for itself, so the prime's number");
+  });
 });
 
 describe("the engine hands the withheld set to both baselines", () => {
   const engine = readFileSync(join(process.cwd(), "src/server/cascade-engine.server.ts"), "utf8");
 
-  it("passes it to the inventory and to the ratchet", () => {
+  it("passes it to the inventory and to the ratchet, measured against the source", () => {
+    // `withheldFromSource`, never the clone's own `withheldFunctions`: the
+    // baseline that travels is the SOURCE's, so a function the source lacks
+    // too is no difference to reconcile (F22). Asserted present first, so a
+    // renamed call cannot pass this by finding nothing.
     const inv = engine.indexOf("reconcileSecurityInventory({");
-    expect(engine.slice(inv, engine.indexOf("})", inv))).toContain("withheld: withheldFunctions");
+    expect(inv).toBeGreaterThan(-1);
+    const invCall = engine.slice(inv, engine.indexOf("})", inv));
+    expect(invCall).toContain("withheld: withheldFromSource");
+    expect(invCall).not.toContain("withheld: withheldFunctions");
     const rat = engine.indexOf("reconcileFunctionCountRatchet({");
-    expect(engine.slice(rat, engine.indexOf("})", rat))).toContain("withheld: withheldFunctions");
+    expect(rat).toBeGreaterThan(-1);
+    const ratCall = engine.slice(rat, engine.indexOf("})", rat));
+    expect(ratCall).toContain("withheld: withheldFromSource");
+    expect(ratCall).not.toContain("withheld: withheldFunctions");
+    // And the ratchet's note names where its spec came from.
+    expect(ratCall).toContain("source: sourceLabel");
   });
 
   it("counts the inventory only over a tree it could read", () => {
@@ -714,7 +781,8 @@ describe("the engine hands the withheld set to both baselines", () => {
     expect(typeBaseline).toBeGreaterThan(recount);
     const block = engine.slice(recount, typeBaseline);
     expect(block).toContain("for (const removed of deletesCrossing) finalTree.delete(removed);");
-    expect(block).toContain("withheld: withheldFunctions");
+    expect(block).toContain("withheld: withheldFromSource");
+    expect(block).not.toContain("withheld: withheldFunctions");
     expect(block).not.toContain("pendingDeletes");
   });
 });

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   resolveCascadeSource,
-  orderByLineageDepth,
+  orderByLineage,
   describeLineageHold,
   LINEAGE_HOLD_RETRY_MS,
   type ParentCloneRow,
@@ -123,11 +123,11 @@ describe("resolveCascadeSource", () => {
   });
 });
 
-describe("orderByLineageDepth", () => {
+describe("orderByLineage", () => {
   const row = (id: string, parent: string | null) => ({ id, parent_clone_id: parent });
 
   it("puts parents before their children", () => {
-    const ordered = orderByLineageDepth([
+    const ordered = orderByLineage([
       row("preflight", "client-dashboard"),
       row("crm-independent", null),
       row("npc-test", "client-dashboard"),
@@ -140,7 +140,7 @@ describe("orderByLineageDepth", () => {
   });
 
   it("orders a three-level chain root-first", () => {
-    const ordered = orderByLineageDepth([
+    const ordered = orderByLineage([
       row("grandchild", "child"),
       row("child", "root"),
       row("root", null),
@@ -152,19 +152,92 @@ describe("orderByLineageDepth", () => {
   it("treats a clone whose parent is not in this pass as a root", () => {
     // It is not waiting on anything HERE, so sinking it behind work it does
     // not depend on would delay it for nothing.
-    const ordered = orderByLineageDepth([row("orphan", "absent-parent"), row("root", null)]);
+    const ordered = orderByLineage([row("orphan", "absent-parent"), row("root", null)]);
 
     expect(ordered.map((r) => r.id)).toEqual(["orphan", "root"]);
   });
 
   it("keeps input order within a depth, so a budgeted pass resumes where it stopped", () => {
-    const ordered = orderByLineageDepth([row("a", null), row("b", null), row("c", null)]);
+    const ordered = orderByLineage([row("a", null), row("b", null), row("c", null)]);
     expect(ordered.map((r) => r.id)).toEqual(["a", "b", "c"]);
   });
 
   it("does not loop on a cycle the database should have refused", () => {
-    const ordered = orderByLineageDepth([row("a", "b"), row("b", "a")]);
+    const ordered = orderByLineage([row("a", "b"), row("b", "a")]);
     expect(ordered.map((r) => r.id).sort()).toEqual(["a", "b"]);
+  });
+
+  it("still follows a parent that sits in a cycle above it", () => {
+    // The cycle's members are roots; the clone hanging off one still waits for it.
+    const ordered = orderByLineage([row("c", "a"), row("a", "b"), row("b", "a")]);
+    const ids = ordered.map((r) => r.id);
+    expect(ids.sort()).toEqual(["a", "b", "c"]);
+    const again = orderByLineage([row("c", "a"), row("a", "b"), row("b", "a")]).map((r) => r.id);
+    expect(again.indexOf("a")).toBeLessThan(again.indexOf("c"));
+  });
+
+  it("puts a child behind nothing it does not depend on (F21)", () => {
+    // 20 Oct 2026: the depth sort put every root ahead of every child, so the
+    // CRM line — a root whose pass could not finish inside a tick — sat ahead
+    // of NPC Test and Preflight although their parent had already gone.
+    const ordered = orderByLineage([
+      row("client-dashboard", null),
+      row("npc-test", "client-dashboard"),
+      row("preflight", "client-dashboard"),
+      row("crm-independent", null),
+    ]);
+    expect(ordered.map((r) => r.id)).toEqual([
+      "client-dashboard",
+      "npc-test",
+      "preflight",
+      "crm-independent",
+    ]);
+  });
+
+  it("lets a waiting child bring its parent forward, never past the parent", () => {
+    // The child waited longest, and it cannot be served before its parent: its
+    // turn is the parent's turn.
+    const ordered = orderByLineage([
+      row("preflight", "client-dashboard"),
+      row("crm-independent", null),
+      row("client-dashboard", null),
+    ]);
+    expect(ordered.map((r) => r.id)).toEqual(["client-dashboard", "preflight", "crm-independent"]);
+  });
+
+  it("leaves the round robin's order among roots that nothing waits on", () => {
+    const ordered = orderByLineage([
+      row("crm-independent", null),
+      row("client-dashboard", null),
+      row("npc-test", "client-dashboard"),
+    ]);
+    expect(ordered.map((r) => r.id)).toEqual(["crm-independent", "client-dashboard", "npc-test"]);
+  });
+
+  it("never puts any clone ahead of one of its ancestors", () => {
+    // Every permutation of a small forest, including a grandchild.
+    const forest = [
+      row("root-a", null),
+      row("child-a1", "root-a"),
+      row("grand-a1", "child-a1"),
+      row("child-a2", "root-a"),
+      row("root-b", null),
+    ];
+    const permutations = (xs: typeof forest): (typeof forest)[] =>
+      xs.length <= 1
+        ? [xs]
+        : xs.flatMap((x, i) =>
+            permutations([...xs.slice(0, i), ...xs.slice(i + 1)]).map((p) => [x, ...p]),
+          );
+    for (const input of permutations(forest)) {
+      const ids = orderByLineage(input).map((r) => r.id);
+      expect(ids.slice().sort()).toEqual(forest.map((r) => r.id).sort());
+      for (const r of forest) {
+        if (r.parent_clone_id) {
+          expect(ids.indexOf(r.parent_clone_id)).toBeLessThan(ids.indexOf(r.id));
+        }
+      }
+    }
   });
 
   it("returns every row it was given, whatever the shape", () => {
@@ -174,7 +247,7 @@ describe("orderByLineageDepth", () => {
       row("orphan", "gone"),
       row("loop", "loop"),
     ];
-    expect(orderByLineageDepth(rows)).toHaveLength(rows.length);
+    expect(orderByLineage(rows)).toHaveLength(rows.length);
   });
 });
 

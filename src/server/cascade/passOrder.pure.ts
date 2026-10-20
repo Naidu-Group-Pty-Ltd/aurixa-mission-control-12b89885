@@ -4,9 +4,9 @@
  * A pass works its queued clones in one loop inside one hook invocation, and
  * a clone that cannot finish inside the window PAUSES — its row goes back to
  * `queued` with its ledger, and the event is handed back for the next tick.
- * The order used to be the query's, and `orderByLineageDepth` keeps it within
- * a depth, so the clone that paused was the clone offered FIRST on the next
- * tick, and on the one after that. Measured 11–12 Oct 2026: the CRM line's
+ * The order used to be the query's, and the lineage order kept it among
+ * clones free to go, so the clone that paused was the clone offered FIRST on
+ * the next tick, and on the one after that. Measured 11–12 Oct 2026: the CRM line's
  * row paused on every pass of four consecutive events (re-merging the same
  * held variants each time), and the other line's three clones — the
  * client-dashboard parent and its two children — were never reached once.
@@ -19,9 +19,9 @@
  * successive ticks that is a round robin: every queued clone gets a turn
  * before any clone gets a second one, whatever any one of them costs.
  *
- * Lineage still wins. This runs BEFORE `orderByLineageDepth`, which is stable
- * within a depth, so a parent still precedes its children and the round robin
- * applies among clones at the same depth.
+ * Lineage still wins. This runs BEFORE `orderByLineage`, so a parent still
+ * precedes its children, and the round robin decides among everything free to
+ * go — a parent taking the turn of its longest-waiting child.
  *
  * A row with no readable timestamp sorts first — it has never been touched,
  * which is exactly the row that has waited longest — and ties keep the input

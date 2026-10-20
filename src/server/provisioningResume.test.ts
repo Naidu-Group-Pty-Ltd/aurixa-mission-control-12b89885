@@ -839,12 +839,18 @@ describe("the edge-function fetch is budgeted like everything else", () => {
     expect(src).toMatch(/skipFunctionSlugs\?: readonly string\[\]/);
     /* Skipping decides what is DEPLOYED, and it decides it before the deploy
        set is built — the expensive half of the economy, the Management API
-       calls, is what it exists to save. It deliberately no longer narrows the
-       fetch, because the fetch is what the secret scan reads (next test). */
+       calls, is what it exists to save. It deliberately does not narrow the
+       fetch, because the fetch is what the secret scan reads (next test). It
+       runs AFTER the fetch now, because the redeploy lane plans part of its
+       skip list from the bundles' contents at the commit read (`planSkip`). */
     const skipAt = src.indexOf("allBundles.filter((b) => !skip.has(b.slug))");
     const fetchAt = src.indexOf("fetchBlobTextsForCommit(octokit, ref, commitSha, neededEntries)");
+    const assembleAt = src.indexOf("const functions: PrimeEdgeFunction[] = selected.map(");
     expect(skipAt).toBeGreaterThan(-1);
-    expect(skipAt).toBeLessThan(fetchAt);
+    expect(fetchAt).toBeGreaterThan(-1);
+    expect(skipAt).toBeLessThan(assembleAt);
+    // The fetch is never sized by the skip list — it reads `allBundles`.
+    expect(src.slice(fetchAt - 1500, fetchAt)).toMatch(/for \(const bundle of allBundles\) \{/);
   });
 
   it("scans EVERY bundle the prime defines, and assembles only the selected ones", () => {

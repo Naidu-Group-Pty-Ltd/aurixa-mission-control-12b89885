@@ -1011,9 +1011,11 @@ export type Database = {
           error_message: string | null
           files_changed: number
           id: string
+          pass_trace: Json | null
           pr_url: string | null
           previous_sha: string | null
           progress: Json | null
+          progressed_at: string | null
           started_at: string | null
           status: Database["public"]["Enums"]["cascade_result_status"]
           updated_at: string
@@ -1029,9 +1031,11 @@ export type Database = {
           error_message?: string | null
           files_changed?: number
           id?: string
+          pass_trace?: Json | null
           pr_url?: string | null
           previous_sha?: string | null
           progress?: Json | null
+          progressed_at?: string | null
           started_at?: string | null
           status?: Database["public"]["Enums"]["cascade_result_status"]
           updated_at?: string
@@ -1047,9 +1051,11 @@ export type Database = {
           error_message?: string | null
           files_changed?: number
           id?: string
+          pass_trace?: Json | null
           pr_url?: string | null
           previous_sha?: string | null
           progress?: Json | null
+          progressed_at?: string | null
           started_at?: string | null
           status?: Database["public"]["Enums"]["cascade_result_status"]
           updated_at?: string
@@ -2993,6 +2999,57 @@ export type Database = {
           },
           {
             foreignKeyName: "clone_entitlement_reconciliations_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones_missing_isolated_backend"
+            referencedColumns: ["clone_id"]
+          },
+        ]
+      }
+      clone_function_deploys: {
+        Row: {
+          clone_id: string
+          deployed_from: string
+          deployed_to: string
+          digest: string
+          function_id: string | null
+          function_version: number | null
+          recorded_at: string
+          slug: string
+          source_sha: string | null
+        }
+        Insert: {
+          clone_id: string
+          deployed_from: string
+          deployed_to: string
+          digest: string
+          function_id?: string | null
+          function_version?: number | null
+          recorded_at?: string
+          slug: string
+          source_sha?: string | null
+        }
+        Update: {
+          clone_id?: string
+          deployed_from?: string
+          deployed_to?: string
+          digest?: string
+          function_id?: string | null
+          function_version?: number | null
+          recorded_at?: string
+          slug?: string
+          source_sha?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clone_function_deploys_clone_id_fkey"
+            columns: ["clone_id"]
+            isOneToOne: false
+            referencedRelation: "clones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clone_function_deploys_clone_id_fkey"
             columns: ["clone_id"]
             isOneToOne: false
             referencedRelation: "clones_missing_isolated_backend"

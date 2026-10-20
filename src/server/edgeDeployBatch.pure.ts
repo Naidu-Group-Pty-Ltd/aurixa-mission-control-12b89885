@@ -45,6 +45,12 @@ export type EdgeDeployPass = {
    * documented for, applied to a named list too.
    */
   readonly moreRemain: boolean;
+  /**
+   * How many bundles the run owes before this pass deploys anything: every
+   * one not skipped, whether this pass carries it or not. Recorded on the run
+   * so an operator can see a long run converging rather than infer it.
+   */
+  readonly owed: number;
 };
 
 /**
@@ -141,7 +147,7 @@ export function refreshedSince(
  * deployable set. Reordering that set changes neither its size nor its
  * members.
  *
- * `listProjectEdgeFunctionFreshness` answers an empty map when the read
+ * `listProjectEdgeFunctionCopies` answers an empty map when the read
  * fails. Every key is then equal, and equal keys keep the snapshot's
  * alphabetical order, which is the order the lane used before.
  */
@@ -264,13 +270,29 @@ export function planEdgeDeployPass(input: {
   readonly fetched: readonly string[];
   readonly truncated: boolean;
   readonly batchLimit: number;
+  /**
+   * How many bundles the snapshot found deployable before its cap — the
+   * snapshot's `deployableCount`. Read for the whole fleet only, where the
+   * fetch is capped and so cannot count what it left behind. Absent, a capped
+   * fetch counts as one more than it returned, which is all it proves.
+   */
+  readonly deployableCount?: number;
 }): EdgeDeployPass {
   const wholeFleet = input.wanted === null;
 
   if (wholeFleet) {
     // The fetch was capped, so everything it returned is this pass's work and
     // the snapshot alone knows whether more was left behind.
-    return { wholeFleet, batch: [...input.fetched], moreRemain: input.truncated };
+    const counted =
+      typeof input.deployableCount === "number" && Number.isFinite(input.deployableCount)
+        ? input.deployableCount
+        : input.fetched.length + (input.truncated ? 1 : 0);
+    return {
+      wholeFleet,
+      batch: [...input.fetched],
+      moreRemain: input.truncated,
+      owed: Math.max(counted, input.fetched.length),
+    };
   }
 
   const want = new Set(input.wanted ?? []);
@@ -279,7 +301,12 @@ export function planEdgeDeployPass(input: {
   // remaining for ever, so the batch is never empty while candidates exist.
   const limit = Math.max(1, input.batchLimit);
   const batch = candidates.slice(0, limit);
-  return { wholeFleet, batch, moreRemain: candidates.length > batch.length };
+  return {
+    wholeFleet,
+    batch,
+    moreRemain: candidates.length > batch.length,
+    owed: candidates.length,
+  };
 }
 
 /** What the lane does with a run once its pass has finished deploying. */
@@ -321,6 +348,20 @@ export type EdgeDeployResume =
  * `attempts` is the count from BEFORE this pass incremented it, which is what
  * lets the caller undo exactly this pass's increment rather than resetting a
  * counter that may be carrying a real earlier failure.
+ *
+ * ## A move the ledger carries is not a restart
+ *
+ * Where the lane can read the clone's deploy ledger (`edgeBundleLedger.pure.ts`),
+ * a prime merge re-owes only the bundles whose digest it changed, and the lane
+ * passes `sourceMoved: false`: nothing delivered was lost, so nothing grew back
+ * to the whole fleet and there is nothing for the charge to bound. Such a pass
+ * is judged like any other. That gives up one property on purpose. A run the
+ * prime keeps changing faster than passes land is no longer sent to a person;
+ * it keeps deploying the newest bundles, stalest first, and finishes when the
+ * prime holds still long enough. Sending it to a person is what stopped every
+ * clone's deploys on 12–13 Oct 2026 (F23), and there was nothing for the
+ * person to decide. A pass that lands NOTHING is still charged, so a bundle
+ * that fails every time still reaches a person when it is all that is left.
  */
 export function planEdgeDeployResume(input: {
   /** Bundles this pass successfully deployed. */
@@ -332,9 +373,11 @@ export function planEdgeDeployResume(input: {
   readonly attempts: number;
   readonly maxAttempts: number;
   /**
-   * True when the prime moved under this run — `planDeployGeneration`'s
-   * answer. Everything already deployed came from a different tree, so the
-   * run owes the whole set again however finished this pass looked.
+   * True when the prime moved under this run and nothing could carry what it
+   * had delivered across the move — `planDeployGeneration`'s answer where no
+   * ledger was readable. Everything already deployed came from a different
+   * tree, so the run owes the whole set again however finished this pass
+   * looked.
    */
   readonly sourceMoved?: boolean;
 }): EdgeDeployResume {

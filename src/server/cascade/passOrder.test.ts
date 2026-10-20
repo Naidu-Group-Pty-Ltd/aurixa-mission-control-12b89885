@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { orderByLineageDepth } from "./cloneCascadeSource.pure";
+import { orderByLineage } from "./cloneCascadeSource.pure";
 import { leastRecentlyTouchedFirst } from "./passOrder.pure";
 
 type Row = { id: string; updated_at?: string | null };
@@ -69,9 +69,37 @@ describe("leastRecentlyTouchedFirst", () => {
       { id: "cd", parent_clone_id: null, updated_at: "2026-10-12T05:00:00Z" },
       { id: "crm", parent_clone_id: null, updated_at: "2026-10-12T06:00:00Z" },
     ];
-    const ordered = orderByLineageDepth(leastRecentlyTouchedFirst<Clone>(rows, at));
+    const ordered = orderByLineage(leastRecentlyTouchedFirst<Clone>(rows, at));
     // The child waited longest but its parent is in the pass, so it follows
-    // the parent; among the roots the round robin decides.
-    expect(ordered.map((r) => r.id)).toEqual(["cd", "crm", "child"]);
+    // the parent — immediately, never behind a root it does not depend on.
+    // This pinned ["cd", "crm", "child"] until 20 Oct 2026, which is the order
+    // that kept NPC Test and Preflight behind the CRM line's pass (F21).
+    expect(ordered.map((r) => r.id)).toEqual(["cd", "child", "crm"]);
+  });
+
+  it("keeps the CRM line behind the line it does not feed, tick after tick", () => {
+    /* The F21 cycle: the CRM line's pass dies inside every tick that reaches
+       it, and its row is touched when the pass starts. The client-dashboard
+       line gets its turn — parent and both children — on the tick after. */
+    type Clone = Row & { parent_clone_id: string | null };
+    let rows: Clone[] = [
+      { id: "crm", parent_clone_id: null, updated_at: "2026-10-20T04:00:00Z" },
+      { id: "cd", parent_clone_id: null, updated_at: "2026-10-20T04:01:00Z" },
+      { id: "npc-test", parent_clone_id: "cd", updated_at: "2026-10-20T04:02:00Z" },
+      { id: "preflight", parent_clone_id: "cd", updated_at: "2026-10-20T04:03:00Z" },
+    ];
+    const served: string[][] = [];
+    for (let tick = 0; tick < 3 && rows.length > 0; tick += 1) {
+      const order = orderByLineage(leastRecentlyTouchedFirst<Clone>(rows, at)).map((r) => r.id);
+      // Every clone before the CRM line finishes; the CRM line's pass dies.
+      const reached = order.slice(0, order.indexOf("crm") + 1);
+      served.push(reached);
+      const now = `2026-10-20T05:0${tick}:00Z`;
+      rows = rows
+        .filter((r) => r.id === "crm" || !reached.includes(r.id))
+        .map((r) => (r.id === "crm" ? { ...r, updated_at: now } : r));
+    }
+    expect(served[0]).toEqual(["crm"]);
+    expect(served[1]).toEqual(["cd", "npc-test", "preflight", "crm"]);
   });
 });

@@ -32,6 +32,54 @@ deletion became npc-crm-independent-6505dc#124. Its first `CI` run could not
 start, so it also carries #123's `ci.yml` (Step E). All three are green now.
 Rows marked ◊ were re-read at 03:40.
 
+**Updated a third time at 04:54 UTC.** The owner said to proceed with merging
+and publishing directly. So this session squash-merged MC #346 (`e117f94c`)
+and published MC. It merged Prime #3343 (`f99219bb`) and #3341 (`adb6bc5e`)
+with merge commits, then npc-crm-independent #124 (`b11f3de4`) and #123
+(`2a26ddce`). MC's drain merged #379 itself at 04:36:47 UTC (`ba5efc24`).
+The confidential report and the stray render are off the tip of Prime,
+npc-client-dashboard and npc-crm-independent. NPC Test and Preflight still
+hold them on `main`. Their cascade pull requests, NPC Test #228 and
+Preflight #227, opened at 04:51 and 04:53 UTC. Each deletes both files, and
+MC's drain lands them when green. They had waited since 16 Oct behind the
+CRM line's cascade, which cannot finish a pass (F21, §3). Rows marked ※
+were re-read at 04:54.
+
+**Updated a fourth time at 05:20 UTC.** Between the third update and this
+one, nothing was merged, pushed or published except this document. It
+re-read NPC Test #228, Preflight #227 and the clones' backends, and found
+two things (F22, F23, §3). First, both pull requests are green on every job
+but `security`, which stopped at its first step. The engine kept each
+clone's own `SECURITY_INVENTORY.json` for a person while delivering the
+files it describes, so the copy it kept is stale. Regenerated from each
+pull request's own tree, it is npc-client-dashboard's committed copy byte
+for byte (blob `b6c0612a`). One commit on each branch settles it, and that
+waits on the owner's word, because the branches are the engine's and both
+repositories were attached read-only (Step I). Second, and larger: no
+clone's backend has received an edge function since 12–13 Oct. Mission
+Control's deploy lane has parked every clone's run for a person. So #3341's
+`listings-cache` is in npc-client-dashboard's repository and not on its
+Supabase project, and Step F's condition is about four backends, not four
+repositories (Step J). Rows marked ¤ were re-read by 05:20, and again at
+05:24, when both pull requests, all four parked runs and
+npc-client-dashboard's `listings-cache` (version 4159, deployed 11 Oct
+00:36:55 UTC) were unchanged.
+
+**Updated a fifth time at 08:05 UTC.** On the owner's word to keep working
+the pending tasks, this session wrote Mission Control's fix for each of F23,
+F22 and F21: three commits on its own branch,
+`claude/confidential-report-cleanup-at2jfw` (`05ab074e`, `108d02bd`,
+`d4a3854c`), on top of the fourth update. Nothing was merged, published or
+opened as a pull request. The branch carries three additive migrations,
+which apply when it reaches `main`, so landing it is the owner's word (§5,
+item 8). What each fix is, and how it was checked, is in §4. What each
+changes once live is in Steps H, I and J. Rows marked ✦ were re-read at
+08:00 UTC. The five F21 events still cycle, the four deploy runs are still
+parked, Prime's head is still `adb6bc5e`, and #228 and #227 are unchanged
+at their heads. Step I still waits on the owner's word: the repositories
+are attached to this session read-only, so it could not make those two
+commits.
+
 **Merges need the owner.** This session merged Prime #3342 (step 1 of the plan).
 The session's safety controls then refused the next merge-related action as
 "merge without review", so no other merge was attempted. Every remaining merge
@@ -39,20 +87,24 @@ below is the owner's to approve, or to make.
 
 ---
 
-## 1. State at hand-over (15:35 UTC, 19 Oct 2026; rows marked † re-read at 16:05, ‡ at 02:45 UTC on 20 Oct, and ◊ at 03:40 UTC)
+## 1. State at hand-over (15:35 UTC, 19 Oct 2026; rows marked † re-read at 16:05, ‡ at 02:45 UTC on 20 Oct, ◊ at 03:40 UTC, ※ at 04:54 UTC, ¤ at 05:20 UTC, and ✦ at 08:00 UTC)
 
 | Piece | Where | State |
 |---|---|---|
 | Prime: actions pinned, Deno and the Supabase CLI from their releases | npc-property-dashbord#3342 | **Merged** 14:39:50 UTC as `66290065` (merge commit, `--match-head` `f2eef880`). On `main`: CI 9085 green; Deploy Supabase functions 1124 green, but it deployed nothing (§3, F17); PDF Import Release Gate 4438 green. Deploy the PDF-import sidecar (run 3) and Deploy the render container (run 5) `startup_failure`: they name `google-github-actions/*`, the owner's allow-list item. |
-| ◊ Prime: `listings-cache` memory fix | npc-property-dashbord#3341, head `efeead42` | Open, unchanged. Green on its own CI 9082. `mergeable_state: unstable` only for the old `static-and-fast`. Its three pin commits are cherry-picks of #3342's, so they merge as no-ops. **Merging it redeploys every Edge Function** (it changes `supabase/functions/_shared/listingsCache.pure.ts`, and a `_shared/` change deploys all), which is also the CLI step's first production run. ◊ Still at that head, and still `unstable` on the old `static-and-fast` alone. |
-| †‡◊ Prime: the `pdf-extraction-v3-gates` fix (the handoff's step 3) | npc-property-dashbord#3343, branch `claude/sweet-tesla-pdemno`, head **`6546c389`** (5 commits) | **`static-and-fast` passed on `60495442`** — run 39275041962, job 118137024278, 15:06–15:08 UTC, the first green run of that check since it was created. On the runner Playwright installed Chromium v1248 `--with-deps`, the detector found it, the pure suites ran 50 tests and the e2e passed 2, giving `releaseReady: true` with 7 required checks: 0 failed, 0 skipped, 0 unavailable. **Then Codex's review (15:26) found the first cut too narrow (P1) and too lenient on expired signatures (P2), and applying its rule found F19.** Both accepted: `e86bec0a` removes `report.pdf` and `final.png`, and `9563070a` bans media anywhere but named asset directories and makes every complete signature a finding. Both threads were answered and resolved. Locally on `9563070a`: release-gate specs 53 passed, CI's Template Builder step 345 files and 4,394 tests passed, the static and fast gates PASS, and the tracked scan reads 0. ‡ **CI on `9563070a` finished green but for one check.** `verify`, `security`, all three shards, `template-geometry`, `static-and-fast` and `pdf-import-regression` passed, and the rest were skipped by scope. `pdf-import-release-gate` (run 39281399479, job 118156219877) failed at 50/100 on exactly the two files `e86bec0a` deletes (F20). The fix is `6546c389`, whose parent is `9563070a`. ◊ **#3343 was fast-forwarded onto it at 02:49 UTC.** On `6546c389`, `pdf-import-release-gate` passed (run 39360974034, job 118426828417), as did `static-and-fast`, `pdf-import-regression` and `security`; `template-geometry` and all three `verify` shards passed too, and `verify` went green at 03:13 UTC (CI run 39360973961), with `abs-register-liveness`, `render-container` and `supply-chain` skipped by scope. **It is green, `mergeable_state: clean`, and waits only on the owner's merge.** The description now covers the fifth commit. |
-| †‡◊ MC: a refresh over hand commits proceeds where both sides agree or merge cleanly | aurixa-mission-control-12b89885#346, branch `claude/sweet-tesla-pdemno`, head `da38d5c6` | ‡ **Ready** (marked at 16:08), `mergeable_state: clean`. **New since 14:05, and now a prerequisite for #379** (§3, F15). Tests 448 files / 9,061 passed locally. CI green on `228064c6` (run 39282801101: Typecheck · Lint · Build, and the Lovable install check). Codex reviewed `228064c6` and found nothing. Needs a Lovable publish after merge. ◊ Fast-forwarded onto `da38d5c6` (the 02:45 update) at 02:49 UTC, and CI is green on it (run 935). The description now names F20 and #124. This second update is one commit on top of it, on `claude/confidential-report-cleanup-at2jfw`. |
-| MC: forwarded configuration follows MC's value | aurixa-mission-control-12b89885#345 | Unchanged; held on purpose until #3341 is on all four clones (F4). |
-| †‡◊ Clone `npc-client-dashboard` cascade | npc-client-dashboard#379, head `06d2d096` | Unchanged and still held on `static-and-fast` (run 62, 13:03 UTC). The 15:00 pass deferred its refresh (F15); the 15:03 pass found the statement for prime `66290065` equal to its head ("carries this exact tree"). Every pass since has deferred the same way, the latest at 15:59:00 (events `0aa71083`, `58333aed`, `d9fd07ee`, `0b329741`). Its tree holds both F19 files. ‡ Unchanged on 20 Oct: the passes at 02:35 and 02:37 UTC deferred its refresh in the same words. ◊ So did the pass at 03:39 UTC (event `0b329741`). |
-| ‡◊ Clone `npc-crm-independent`: pins | npc-crm-independent-6505dc#123, head `86a9fa5b` | Unchanged on 20 Oct. Every check green except `static-and-fast` (the V2 scanner, not required). It is not a cascade PR, so MC's drain does not hold it; it merges when a person merges it. ◊ Still at that head. #124 carries its `ci.yml` byte for byte, so the two merge in either order (Step E). |
-| †‡◊ Clone `npc-crm-independent`: cascade | npc-crm-independent-6505dc#121, head `25acc6eb` | Unchanged since 17 Oct. Its last run failed `verify` and `security` on F10's held files, and never ran `static-and-fast`. The engine is still working it: four `pushing` rows (events `0aa71083`, `58333aed`, `d9fd07ee`, `0b329741`), each at `attempts` 3, last touched 15:50–15:59, with no `pr_url` yet. Its tree holds both F19 files, and the cascade cannot remove them there (Step E). ‡ On 20 Oct its rows still cycle from `queued` to `pushing` about once a minute, the latest at 02:37 UTC (events `58333aed`, `d9fd07ee`, `0b329741`), with no `pr_url` and no `error_message`. ◊ The same at 03:40 UTC, the latest cycle at 03:39 (event `0b329741`), and its head is still `25acc6eb`. |
-| ‡◊ Clone `npc-crm-independent`: the F19 deletion | npc-crm-independent-6505dc#124, branch `claude/confidential-report-cleanup-at2jfw`, head `6ebc853c` | **Opened at 02:49 UTC on 20 Oct.** `6ba9451d` removes `report.pdf` and `final.png` (Prime's blobs) on top of `main` `6322c63e`, and Codex reviewed it and found nothing. Its first `CI` run (631) ended in `startup_failure`, because a pull request's workflow is read from `main`, where every action is named by a tag. So `6ebc853c` carries #123's `ci.yml` byte for byte (blob `e92dbf46`), the only workflow the pull request triggers. Run 632 on `6ebc853c` then passed all six of its jobs by 03:38 UTC (`verify`, `security`, `supply-chain`, `render-container`, `template-geometry` and `abs-register-liveness`), and the Vercel preview built. **It is green and waits only on the owner's merge.** Step E says how it may land. |
-| †‡◊ `clones` | MC database | Unchanged at 16:05, at 02:45 UTC on 20 Oct, and ◊ at 03:40: CD `cascading` (596 behind); CRM `cascading` (928); NPC Test `cascading` (635); Preflight `behind` (635). The two children wait on lineage for #379 ("Parent NPC Client Dashboard carries prime@881e7e0; this pass delivers prime@6629006"). |
+| ◊ Prime: `listings-cache` memory fix | npc-property-dashbord#3341, head `efeead42` | Open, unchanged. Green on its own CI 9082. `mergeable_state: unstable` only for the old `static-and-fast`. Its three pin commits are cherry-picks of #3342's, so they merge as no-ops. **Merging it redeploys every Edge Function** (it changes `supabase/functions/_shared/listingsCache.pure.ts`, and a `_shared/` change deploys all), which is also the CLI step's first production run. ◊ Still at that head, and still `unstable` on the old `static-and-fast` alone. ※ **Merged** at 04:05:51 UTC as `adb6bc5e` (merge commit), Prime's head now. Its acceptance was observed on `main`. CI 9092 is green. Deploy Supabase functions run 1125 printed CLI `2.121.0`, deployed 428 functions and verified CORS on 360. It held back `aml-reliance`, which is listed in `.github/deploy/held-functions.txt` and ships only through the administrator's release workflow (§5). Prime's `listings-cache` answered 546 up to 04:00 and 200 from 04:15. It synced 692 live records from `tblumTIRYBn92B2ST`, reconciled them, and read retention as effective. ¤ It reached npc-client-dashboard's repository with #379 and no clone's backend. On `plisdzywzleljorrphxv`, `listings-cache` is the copy deployed at 00:36:55 UTC on 11 Oct (F23). |
+| †‡◊ Prime: the `pdf-extraction-v3-gates` fix (the handoff's step 3) | npc-property-dashbord#3343, branch `claude/sweet-tesla-pdemno`, head **`6546c389`** (5 commits) | **`static-and-fast` passed on `60495442`** — run 39275041962, job 118137024278, 15:06–15:08 UTC, the first green run of that check since it was created. On the runner Playwright installed Chromium v1248 `--with-deps`, the detector found it, the pure suites ran 50 tests and the e2e passed 2, giving `releaseReady: true` with 7 required checks: 0 failed, 0 skipped, 0 unavailable. **Then Codex's review (15:26) found the first cut too narrow (P1) and too lenient on expired signatures (P2), and applying its rule found F19.** Both accepted: `e86bec0a` removes `report.pdf` and `final.png`, and `9563070a` bans media anywhere but named asset directories and makes every complete signature a finding. Both threads were answered and resolved. Locally on `9563070a`: release-gate specs 53 passed, CI's Template Builder step 345 files and 4,394 tests passed, the static and fast gates PASS, and the tracked scan reads 0. ‡ **CI on `9563070a` finished green but for one check.** `verify`, `security`, all three shards, `template-geometry`, `static-and-fast` and `pdf-import-regression` passed, and the rest were skipped by scope. `pdf-import-release-gate` (run 39281399479, job 118156219877) failed at 50/100 on exactly the two files `e86bec0a` deletes (F20). The fix is `6546c389`, whose parent is `9563070a`. ◊ **#3343 was fast-forwarded onto it at 02:49 UTC.** On `6546c389`, `pdf-import-release-gate` passed (run 39360974034, job 118426828417), as did `static-and-fast`, `pdf-import-regression` and `security`; `template-geometry` and all three `verify` shards passed too, and `verify` went green at 03:13 UTC (CI run 39360973961), with `abs-register-liveness`, `render-container` and `supply-chain` skipped by scope. **It is green, `mergeable_state: clean`, and waits only on the owner's merge.** The description now covers the fifth commit. ※ **Merged** at 04:05:44 UTC as `f99219bb`. Its merge ran `pdf-extraction-v3-gates` on `main` (run 104). In `generated-full`, the private-artifact scan and the generated-full gate both passed, where the two scheduled runs before it on `main` (102 and 93) failed. PDF Import Release Gate 4442 on `main` is green. |
+| †‡◊ MC: a refresh over hand commits proceeds where both sides agree or merge cleanly | aurixa-mission-control-12b89885#346, branch `claude/sweet-tesla-pdemno`, head `da38d5c6` | ‡ **Ready** (marked at 16:08), `mergeable_state: clean`. **New since 14:05, and now a prerequisite for #379** (§3, F15). Tests 448 files / 9,061 passed locally. CI green on `228064c6` (run 39282801101: Typecheck · Lint · Build, and the Lovable install check). Codex reviewed `228064c6` and found nothing. Needs a Lovable publish after merge. ◊ Fast-forwarded onto `da38d5c6` (the 02:45 update) at 02:49 UTC, and CI is green on it (run 935). The description now names F20 and #124. This second update is one commit on top of it, on `claude/confidential-report-cleanup-at2jfw`. ※ **Squash-merged** as `e117f94c` and **published** from Lovable. The live engine's first act on #379 was the preserving merge (`f0784bee`, 04:13:16 UTC). |
+| MC: forwarded configuration follows MC's value | aurixa-mission-control-12b89885#345 | Unchanged; held on purpose until #3341 is on all four clones (F4). ※ Still held. #3341 is on npc-client-dashboard (through #379) and on no other clone (F21). ¤ Still held, and the condition is stricter than it read: #3341 has to be on each clone's **backend**, and it is on none (F23, Step J). ✦ Unchanged. |
+| †‡◊ Clone `npc-client-dashboard` cascade | npc-client-dashboard#379, head `06d2d096` | Unchanged and still held on `static-and-fast` (run 62, 13:03 UTC). The 15:00 pass deferred its refresh (F15); the 15:03 pass found the statement for prime `66290065` equal to its head ("carries this exact tree"). Every pass since has deferred the same way, the latest at 15:59:00 (events `0aa71083`, `58333aed`, `d9fd07ee`, `0b329741`). Its tree holds both F19 files. ‡ Unchanged on 20 Oct: the passes at 02:35 and 02:37 UTC deferred its refresh in the same words. ◊ So did the pass at 03:39 UTC (event `0b329741`). ※ **Merged** by MC's drain at 04:36:47 UTC as `ba5efc24`. The live engine refreshed it at 04:13:16 with a preserving merge: `f0784bee` over `786f235c`, which carried 1,011 files from prime@`adb6bc5`. That refresh deleted both F19 files, and neither is on `main` now. Every check on `f0784bee` passed by 04:36:39, `verify` included. On `main`, Deploy Supabase functions 239 and PDF Import Release Gate 981 are green, as is pdf-extraction-v3-gates 65; CI 1309 was still running. The two container deploys hit `startup_failure` (the §5 allow-list). The passes since read *"Nothing to cascade: all 65 differing path(s) are withheld by this clone's exclusion policy"*. Eight of those 65 paths are the oversized seed migrations. ¤ CI 1309 on `ba5efc24` finished green at 04:55:28 UTC. Deploy Supabase functions 239 is green because it stands down on a clone (*"Supabase functions deployed by Mission Control"*), so it deployed nothing (F23). |
+| ‡◊ Clone `npc-crm-independent`: pins | npc-crm-independent-6505dc#123, head `86a9fa5b` | Unchanged on 20 Oct. Every check green except `static-and-fast` (the V2 scanner, not required). It is not a cascade PR, so MC's drain does not hold it; it merges when a person merges it. ◊ Still at that head. #124 carries its `ci.yml` byte for byte, so the two merge in either order (Step E). ※ **Merged** at 03:48 UTC as `2a26ddce`, after #124. On `main`, CI 634 is green on every job, and PDF Import Release Gate 475 and Deploy Supabase functions 80 are green too. Deploy the PDF-import sidecar and Deploy the render container (run 2 each) hit `startup_failure` (the §5 allow-list). |
+| †‡◊ Clone `npc-crm-independent`: cascade | npc-crm-independent-6505dc#121, head `25acc6eb` | Unchanged since 17 Oct. Its last run failed `verify` and `security` on F10's held files, and never ran `static-and-fast`. The engine is still working it: four `pushing` rows (events `0aa71083`, `58333aed`, `d9fd07ee`, `0b329741`), each at `attempts` 3, last touched 15:50–15:59, with no `pr_url` yet. Its tree holds both F19 files, and the cascade cannot remove them there (Step E). ‡ On 20 Oct its rows still cycle from `queued` to `pushing` about once a minute, the latest at 02:37 UTC (events `58333aed`, `d9fd07ee`, `0b329741`), with no `pr_url` and no `error_message`. ◊ The same at 03:40 UTC, the latest cycle at 03:39 (event `0b329741`), and its head is still `25acc6eb`. ※ MC's drain restated it over `2a26ddc` at 04:10:56 UTC. That commit is `f0248243`, and its message reads *"the proposal's side stands for every path it states (939 restated, 6 deleted)"*. It still carries prime@`0da692c` across 945 files. It is still red on `verify` (F10's held files) and on `security`, whose regenerated `SECURITY_INVENTORY.json` disagrees with the committed copy. The engine has pushed nothing to it since, and cannot (F21). ✦ Still at `f0248243`. The five events still cycle: between 07:48 and 07:55 UTC each was claimed in turn (`58333aed` 07:48, `85347b61` 07:50, `0b329741` 07:53, `d9fd07ee` 07:54, `cc61ed81` 07:55), and each CRM row was back at `pushing` or `queued`. In `58333aed`, NPC Test's and Preflight's rows are `pr_opened` (#228, #227). In `d9fd07ee`, Preflight's row was `pushing` at 07:54. In the other three, both children's rows are `skipped`. |
+| ‡◊ Clone `npc-crm-independent`: the F19 deletion | npc-crm-independent-6505dc#124, branch `claude/confidential-report-cleanup-at2jfw`, head `6ebc853c` | **Opened at 02:49 UTC on 20 Oct.** `6ba9451d` removes `report.pdf` and `final.png` (Prime's blobs) on top of `main` `6322c63e`, and Codex reviewed it and found nothing. Its first `CI` run (631) ended in `startup_failure`, because a pull request's workflow is read from `main`, where every action is named by a tag. So `6ebc853c` carries #123's `ci.yml` byte for byte (blob `e92dbf46`), the only workflow the pull request triggers. Run 632 on `6ebc853c` then passed all six of its jobs by 03:38 UTC (`verify`, `security`, `supply-chain`, `render-container`, `template-geometry` and `abs-register-liveness`), and the Vercel preview built. **It is green and waits only on the owner's merge.** Step E says how it may land. ※ **Merged** first, at 03:47 UTC, as `b11f3de4`. Its `main` run (CI 633) was cancelled by #123's push a minute later. PDF Import Release Gate 474 could not start, because that workflow was not yet pinned on that commit. Both F19 files are off `main`. |
+| †‡◊ `clones` | MC database | Unchanged at 16:05, at 02:45 UTC on 20 Oct, and ◊ at 03:40: CD `cascading` (596 behind); CRM `cascading` (928); NPC Test `cascading` (635); Preflight `behind` (635). The two children wait on lineage for #379 ("Parent NPC Client Dashboard carries prime@881e7e0; this pass delivers prime@6629006"). ※ At 04:44 UTC: CD `in_sync` at `adb6bc5e` (0 behind). CRM `cascading`, 939 behind, last cascade 17 Oct 04:00. NPC Test `cascading` and Preflight `behind`, 646 behind each, last cascade 16 Oct. NPC Test #228 and Preflight #227 opened at 04:51 and 04:53 UTC; their checks were running. ¤ Both children's pull requests are red on `security` alone (F22). ✦ At 08:00: CD `in_sync` at `adb6bc5e`, 0 behind. CRM `cascading`, 939 behind, last cascade 17 Oct 04:00. NPC Test and Preflight `cascading`, 646 behind each, last cascade at 04:51 and 04:53 UTC on 20 Oct. Prime's head is still `adb6bc5e`, so no new event has been made since 04:09. |
+| ¤ Clone NPC Test: cascade | npc-test-76b3b3#228, branch `aurixa/cascade-ba5efc2-mvg7gwco`, head `d203fa37` | Carries 1,042 files from npc-client-dashboard@`ba5efc2` (prime@`adb6bc5`), including the deletion of `report.pdf` and `final.png`. CI run 39371757583 finished at 05:14 UTC. `verify` and its three shards, `template-geometry`, `render-container`, `abs-register-liveness` and `supply-chain` are green. `security` is red at its first step, the inventory diff, and every later step was skipped. The committed `SECURITY_INVENTORY.json` is blob `6d71ffda`; the generator run on this head writes `b6c0612a` (F22). ✦ Unchanged at `d203fa37`, `mergeable_state: unstable`. |
+| ¤ Clone Preflight: cascade | preflight-property-group#227, branch `aurixa/cascade-ba5efc2-mvg7jo1k`, head `e254d163` | Carries 1,109 files and the same deletion. CI run 39371948120 finished at 05:15 UTC with the same result: everything green but `security`, red on the inventory diff. Committed blob `73bab274`; regenerated `b6c0612a` (F22). ✦ Unchanged at `e254d163`, `mergeable_state: unstable`. |
+| ¤ Clone backends: edge functions | MC `remediation_runs`, `edge_function_deploy` | Each clone's latest run is parked `awaiting_validation`, the fourth of a chain whose first three the planner retired itself: npc-client-dashboard `28ddbe05` (parked 12 Oct 16:20 UTC), npc-crm-independent `12cce521` (12 Oct 16:34), Preflight `6b905563` (12 Oct 15:48) and NPC Test `10638fbc` (13 Oct 16:24). Each reads *"1 bundle(s) deployed over 30 passes and more remain"*. On `plisdzywzleljorrphxv` the last function the lane deployed is `generate-investment-report`, at 16:20:48 UTC on 12 Oct (F23). ✦ All four unchanged: `awaiting_validation`, 31 of 30 attempts, none rejected. |
+| ✦ MC: the engine fixes for F21, F22 and F23 | aurixa-mission-control-12b89885, branch `claude/confidential-report-cleanup-at2jfw`, head `d4a3854c` | Three commits on top of the fourth update (§4), no pull request. Three additive migrations: `20261020090000_clone_function_deploys`, `20261020100000_cascade_results_progressed_at` and `20261020100500_cascade_results_pass_trace`. Checked locally on `d4a3854c`: 469 test files and 9,441 tests passed, along with `tsc --noEmit`, the seventeen repository checks, Prettier and ESLint (one warning, also on `main`). MC runs no CI on a branch without a pull request, so CI has not seen it. |
 | `clone_backend_secrets.AIRTABLE_TABLE_NAME` | all four clones | `inherited`, last set in September; `AIRTABLE_TOKEN` and `AIRTABLE_BASE_ID` `withheld`. Unchanged until #345 is published. |
 
 ---
@@ -63,6 +115,9 @@ below is the owner's to approve, or to make.
 
 Every step below that merges needs the owner's go-ahead, or the owner's own
 hands. Nothing else in this list is blocked.
+
+※ **Given** on 20 Oct, before 03:45 UTC: proceed with merging and publishing
+directly.
 
 ### Step B — merge MC #346 and publish it
 
@@ -80,6 +135,10 @@ way through short of a hand commit on the cascade branch.
 Acceptance: the next pass's row for npc-client-dashboard reads
 `pr_opened`/`skipped` with a preserving merge on #379, not `Proposal #379
 carries this clone's own commits; its refresh was deferred`.
+
+※ **Done.** #346 was squash-merged as `e117f94c` and published. The
+acceptance was observed: the preserving merge `f0784bee` landed on #379 at
+04:13:16 UTC.
 
 ### Step C — merge #3343, now on its fix, and #3341 (in either order)
 
@@ -119,6 +178,11 @@ about 680 records. Acceptance for #3343: its merge triggers
 `pdf-extraction-v3-gates / generated-full` on `main` (the paths filter matches
 the new spec), its first chance to pass there.
 
+※ **Done.** #3343 merged as `f99219bb` (04:05:44 UTC) and #3341 as
+`adb6bc5e` (04:05:51), both with merge commits. Both acceptances were
+observed: the CLI `2.121.0`, 428 functions deployed, and `listings-cache`
+at 200 with 692 records; `generated-full` green in run 104 (§1).
+
 ### Step D — let MC carry it to #379 and the children
 
 Nothing to do by hand once B and C are done. The engine refreshes #379 with a
@@ -135,7 +199,20 @@ exactly those two findings and nothing else (§3 F16), so the refreshed head
 scans clean. Confirm the deletion in the refresh's diff: if the probe comes
 back `unsettled`, the file is kept and `static-and-fast` holds the PR on it.
 Preflight Property Group and NPC Test follow by lineage; confirm the deletion
-on their pull requests too. Watch:
+on their pull requests too.
+
+※ **npc-client-dashboard is done**: #379 merged as `ba5efc24`, both files
+deleted, every check green. **NPC Test and Preflight are not.** From the
+first pass after #379 merged, their lineage hold is satisfied, because CD
+carries prime@`adb6bc5`, which is prime's head. But in any event whose CD
+row is still queued, they sort behind the CRM row (both CD and the CRM are
+roots), and the CRM row's pass never returns (F21). In an event whose CD
+row is done, they are roots too, and the round robin puts them first. That
+is how they moved. NPC Test #228 opened at 04:51:21 UTC (1,042 files) and
+Preflight #227 at 04:53:29, each from prime@`adb6bc5` through CD's branch.
+Neither file is at the root of either head (`d203fa37`, `e254d163`), and
+both are still on each `main`. MC's drain lands them when their checks are
+green. Watch:
 
 ```sql
 select c.name, r.status, r.pr_url, r.updated_at, left(r.diff_summary, 200)
@@ -149,6 +226,11 @@ As the handoff's step 5, with two additions. Merge #123 (`--match-head-commit
 86a9fa5b86bca6995e6ed6bc7d9bb3b4bebc6db6`). Then wait until the engine has
 finished re-pushing #121 (the four `pushing` rows above complete). Only then
 make F10's held-file reconcile on its branch, naming `prime@<sha>` exactly once.
+
+※ **#124 and #123 are merged**: `b11f3de4`, then `2a26ddce`. The two files
+are off the line's `main`. The rest of this step is stuck. It waits for the
+engine to finish re-pushing #121, and F21 shows that cannot happen as the
+engine stands. Step H says what can.
 
 1. **Delete `report.pdf` and `final.png`, by #124 or in the reconcile.** The line is
    `sync_scope: modules`. It receives the files of its 135 installed modules
@@ -190,6 +272,13 @@ make F10's held-file reconcile on its branch, naming `prime@<sha>` exactly once.
 ### Step F — MC #345, only after #3341 is on all four clones
 
 Unchanged (F4). The SQL to verify it needs the real columns (§3, F17).
+※ Still waiting: #3341 is on one clone of four. It needs NPC Test and
+Preflight to land (Step D) and the CRM line to move (Step H).
+¤ And "on a clone" means on its backend. A cascade's merge deploys no
+function on a clone (F23), so #3341 is on no clone yet. Read it from each
+clone's project: the Management API's
+`GET /v1/projects/<ref>/functions/listings-cache` has to report an
+`updated_at` later than the merge that carried #3341 (Step J).
 
 ```sql
 select c.name, s.name, s.status, s.set_by, s.last_set_at, s.last_error
@@ -200,6 +289,131 @@ where s.name = 'AIRTABLE_TABLE_NAME' order by c.name;
 ### Step G — verify each clone's `listings-cache`, and update these documents
 
 As the handoff's steps 7–8.
+
+### Step H — get the CRM line's cascade moving again (F21)
+
+Nothing is lost by waiting. No write reaches the line while it is stuck.
+But nothing reaches it at all, and each stuck event spends a 60-second
+invocation every time it is claimed. There are two ways, and they can be
+combined:
+
+1. **Make the pass keep what it reads** (in MC; F21's remedy). This is the
+   class. A clone whose pass cannot finish in one invocation never
+   finishes, and every pass it misses makes the next one larger.
+2. **Or shrink the pass** by landing #121. That means F10's reconcile on its
+   branch, plus the regenerated security inventory, so it goes green and the
+   drain merges it. The CRM's standing diff then drops by roughly what #121
+   carries. Step E's "wait for the engine" condition cannot be met, and
+   since #346 it is no longer what made a hand commit safe there. A refresh
+   of a proposal carrying hand commits now merges where both sides agree or
+   merge cleanly, and defers otherwise. It never overwrites them. Whether
+   the drain should land 945 files of a five-day-old prime on the line is
+   still the owner's call.
+
+Retire the stuck events only after one of these. Retirement skips every row
+an event never reached, NPC Test's and Preflight's included, so it must not
+come before they land.
+
+✦ **Remedies 2 and 3 are written, and so is the measurement remedy 1
+needs:** `d4a3854c` on this session's MC branch (§4). Once it is merged
+and its migration has run:
+
+- **The five events retire.** No row yet carries `progressed_at`, so each
+  retires at its first judgement after a reclaim. The exception is an
+  event whose last attempt settled a clone after the deploy: that one
+  retires one claim later. It is marked failed with a notification, and
+  its `queued` and `pushing` rows become `skipped`. The caution above no
+  longer bites. The rows behind #228 and #227 are `pr_opened` (event
+  `58333aed`), and retirement touches only `queued` and `pushing` rows. If
+  Preflight's row in `d9fd07ee` is still in flight then, it is skipped too,
+  which costs nothing: #227 already carries that delivery.
+- **The line still receives nothing.** That waits on remedy 1, or on #121.
+  But an event that reaches it now retires, visibly, after three cuts,
+  instead of cycling for ever. And its row's `pass_trace` names the stage
+  each pass was in when the platform ended it, with the time.
+- **Design remedy 1 from that reading,** not from the two candidates in F21.
+  Read it with:
+
+  ```sql
+  select e.id, c.name, r.status, r.pass_trace
+  from cascade_results r
+  join cascade_events e on e.id = r.cascade_event_id
+  join clones c on c.id = r.clone_id
+  where r.pass_trace is not null
+  order by r.updated_at desc limit 20;
+  ```
+
+  `describePassTrace` (`src/server/cascade/passTrace.pure.ts`) turns one
+  trace into a sentence. A trace with no `outcome` is a pass that was ended
+  in its last stage.
+
+### Step I — land NPC Test #228 and Preflight #227 (F22)
+
+Both are green on every job but `security`, and that job stops at the
+inventory diff. The engine held `docs/security/SECURITY_INVENTORY.json` for
+a person, and its own note names the remedy: `npm run security:inventory`
+regenerates it from the repository. On each head the generator writes blob
+`b6c0612a`, npc-client-dashboard's committed copy. Every other node step of
+the job then passes as CI runs it. So one mechanical commit on each branch,
+naming no prime commit, turns it green, and MC's drain merges it. That takes
+F19's two files off the last two tips. This session did not make those
+commits. The branches are the engine's, and both repositories were attached
+to it read-only, so the commit waits on the owner's word. On each branch:
+
+```sh
+git clone --depth 1 --branch aurixa/cascade-ba5efc2-mvg7gwco \
+  https://github.com/Naidu-Group-Pty-Ltd/npc-test-76b3b3
+cd npc-test-76b3b3
+node scripts/security/security-inventory.mjs --write
+git hash-object docs/security/SECURITY_INVENTORY.json   # b6c0612a…
+git commit -am "Regenerate the security inventory the cascade held back"
+git push origin HEAD
+```
+
+Then the same in preflight-property-group on
+`aurixa/cascade-ba5efc2-mvg7jo1k`. If the engine refreshes a branch first,
+regenerate on the new head rather than reuse the blob: the hash is a fact
+about that tree. A refresh after the commit merges over it (#346) rather
+than overwriting it.
+
+✦ `108d02bd` (F22) makes a lineage child take its parent's baseline. The
+holds now count only the prime-only functions the source tree holds. Once
+it is live, the next pass to reach NPC Test and Preflight should refresh
+#228 and #227 with `b6c0612a` and turn `security` green, with no hand
+commit. That is expected from the rule, not shown: no pass has run it yet.
+It also needs an event that reaches them, which takes a Prime merge or
+"Cascade now". The one commit above is still the fast route, and it still
+waits on the owner's word.
+
+### Step J — get the clones' backends deploying again (F23)
+
+1. **Now, in MC, by an administrator.** Reject the four parked runs
+   (`28ddbe05`, `12cce521`, `6b905563`, `10638fbc`), from /support/tickets
+   or the clone's backend deploy card. Do not approve them. Each already
+   stands at 31 of 30 attempts, so an approved run parks again at the next
+   prime merge. Rejecting frees the clone's one open slot. The next cascade
+   merge or catch-up sweep then plans a fresh run, with a fresh chain. At
+   the 12 Oct pace that is one bundle per clone every six to eight minutes,
+   stalest first. `listings-cache` is about 41st in that order on
+   npc-client-dashboard, so about five hours.
+2. **The class, in MC's engine.** One of F23's remedies, or more. Until
+   one lands, every chain ends parked again. The last ones took between
+   two and a half and four and a half days.
+
+   ✦ Remedy 3 is written: `05ab074e` on this session's MC branch (§4).
+   Each bundle the lane lands is recorded in `clone_function_deploys`,
+   with the digest of what it sent and the version the Management API
+   answered with. A Prime merge then re-owes only the bundles whose
+   source changed. Every pass also records `pass_ms`, where it spent its
+   window, which is the measurement remedy 2 asks for. It unparks nothing,
+   so item 1 is still the first act. The ledger starts empty, so a fresh
+   run's first generation still owes every bundle once.
+   `docs/EDGE_DEPLOY_LEDGER.md` models it at two deploys a pass and a
+   merge every nine passes. On that model a whole-fleet run completes at
+   about pass 215, where before it parked at about pass 279. Measured over
+   Prime's 340 first-parent commits since 12 Oct with the lane's own
+   modules: 1,383 bundle deploys re-owed under the ledger, against 135,763
+   when every commit restarts the generation.
 
 ---
 
@@ -377,6 +591,215 @@ its blockers are F10's.
   Confirm it in that cascade's diff. Without it the spec fails to load
   there.
 
+### F21. The CRM line's cascade cannot finish a pass, and nothing retires it
+
+- **What production shows.** Five events are `running` at once:
+  - `d9fd07ee`, created 19 Oct 05:32;
+  - `58333aed`, created 19 Oct 07:09;
+  - `0b329741`;
+  - `85347b61` and `cc61ed81`, created 20 Oct 04:05 and 04:09.
+
+  Each holds a row for the line. The line has not completed a pass since
+  17 Oct 04:00 (`clones.last_cascade_at`). Its standing diff was 390 files on
+  26 Sep, 985 on 16–17 Oct, and is 1,360 now. pg_net keeps six hours of
+  answers. In the six hours to 04:46 UTC on 20 Oct, 117 calls timed out at
+  exactly 60,000 ms, 6 `hooks/cascade-drain` ticks claimed work and answered
+  200 (`{"held":"resuming"}`), and 238 found nothing to claim. Every claim
+  recorded on the five events from 04:23 to 04:49 falls in a tick that timed
+  out. A pass the caller abandons can still finish: #379's refresh took about
+  70 s, NPC Test's #228 76 s and Preflight's #227 77 s, and all three
+  landed. No pass on the line has. After a cut its row is never written
+  again: `updated_at` stays within a second of `started_at`, so the pass
+  dies before its first ledger write and its pause never lands.
+- **Why one pass cannot fit.** [`CASCADE_ONE_TICK.md`](./CASCADE_ONE_TICK.md)
+  made the 26 Sep pass of 409 files fit by batching prime's text, at about
+  35 s of the drain's 45-second budget. It also names what it does not change:
+  "One clone that cannot fit still blocks the clones queued behind it."
+  - **A pause keeps nothing.** Text is never ledgered; only binaries are. So
+    the next pass starts from nothing, and every pause reads "4 of 1360
+    file(s) prepared". The four are the line's binaries, and nothing else can
+    ever count.
+  - **When the line goes first, it pauses and repeats.** `cc61ed81`'s pass
+    paused at about 46 s (04:22:02 to 04:22:48), and the next pass made the
+    same reads again.
+  - **When it does not go first, it is cut.** Its pass then reaches a stage
+    no budget gates, and runs past pg_cron's wait. The database cannot say
+    which stage. The two candidates are the import closure, whose prefetch
+    is "Never cut short by the budget", and the tree write, which the
+    budget does not gate. The children's passes (1,038 and 1,102 files)
+    finished late; the line's (1,360 files and 35 held variants) has not.
+- **Why nothing retires them.** `judgeExhaustedEvents` refunds an event at the
+  attempt ceiling when its newest `cascade_results.updated_at` is under 15
+  minutes old, reading that as "the last pass grew the ledger before it was
+  cut". But the engine writes `status: 'pushing', started_at` to the row
+  before any work (the update just before `processClone` in
+  `cascade-engine.server.ts`), and a trigger stamps `updated_at` on every
+  write. So a pass cut before it learned anything still reads as converging,
+  and is refunded. All five events sit at `attempts` 3 and cycle:
+  - the claim;
+  - the cut at 60 s;
+  - the stall reclaim ten minutes later;
+  - the refund;
+  - the next claim.
+
+  The six-hour log shows a refund at 00:35, 03:50, 04:03, 04:15 and 04:37.
+  Refunds made in ticks that timed out cannot report themselves.
+- **What it held back, and what it did not.** NPC Test and Preflight waited
+  four days, but the line was not the main reason.
+  - **The lineage hold.** It kept them from moving until #379 merged:
+    "Parent NPC Client Dashboard carries prime@881e7e0; this pass delivers
+    prime@adb6bc5". #379 was itself stuck (F15) until #346 went live. So
+    their last cascade was 16 Oct, 646 commits ago, and they still hold
+    F19's files on `main`.
+  - **The ordering.** A pass offers its clones least recently touched first,
+    then `orderByLineageDepth` puts every root before every child. CD and
+    the line are both roots. So in an event whose CD row is still queued,
+    the children come after the line's row, which never returns, and they
+    wait for the event's next claim after the ten-minute stall reclaim. By
+    then CD's row is done, so they are roots too and the round robin puts
+    them first. It costs a claim, not a day.
+  - **Moving again.** Once CD carried prime's head, they moved. NPC Test's
+    #228 opened at 04:51:21 UTC, carrying 1,042 files from prime@`adb6bc5`,
+    and Preflight's #227 at 04:53:29. Neither file is at the root of either
+    head (`d203fa37`, `e254d163`); both are still on each `main`.
+  - **The pinned order.** `passOrder.test.ts` pins `["cd", "crm", "child"]`
+    as the intended order, which is the order that starved them.
+- **Five events for one commit.** Each running event delivers prime's head at
+  run time, so all five deliver `adb6bc5` now and each repeats the others'
+  work. The fold absorbs only queued events, never one that has started.
+- **The remedy, in MC's engine.** None of this is made here; this finding is
+  the measurement.
+  1. **A pass keeps what it reads.** Ledger prepared text as clone blobs, the
+     way binaries already are, at least once a pass has paused in `prepare`.
+     Then a resumed pass reads only what is new. The import closure's answer
+     must resume too, or be budgeted.
+  2. **An exhausted event is judged by its ledger.** For example, `onProgress`
+     stamps a time into `progress`, or the judge compares the ledger's size
+     between passes. Never by `updated_at`, which the claim itself bumps.
+  3. **A child follows its own parent, not every root.** Use a stable
+     topological order over the round robin, so a child never waits behind
+     a clone it does not depend on. The smallest of the three: it saves
+     the children one claim each time CD needs a pass.
+
+  ✦ **Status.** Remedies 2 and 3 are written (`d4a3854c`; Step H), with a
+  trace of each pass's stages. One change from the text above: the judge
+  counts a settled row as progress, as well as a grown ledger. That is what
+  `drainOne` already counts for a pass that returns (`done > 0` or
+  `progressed`). On the ledger alone, a pass the platform cut after it
+  finished a clone would have read as one that learned nothing. Remedy 1 is
+  not attempted. The trace is the measurement it needs, and there is none
+  until the fix is live.
+
+### F22. The children's cascades are red on the baseline the engine kept for them
+
+- **What CI shows.** NPC Test #228 (run 39371757583) and Preflight #227
+  (run 39371948120) passed every job but `security` by 05:15 UTC on
+  20 Oct. `security` failed at its first step,
+  `npm run security:inventory && git diff --exit-code -- docs/security/SECURITY_INVENTORY.json`,
+  and skipped every step after it.
+- **Why.** The engine held the file for a person on both: *"This clone does
+  not carry the GoHighLevel account migration (all 28 functions), which the
+  prime keeps for itself, so the prime's security baseline is a static
+  analysis of a different repository. The clone's own copy is kept. … Not
+  reconciled here: `get-portal-client-data` takes source files from both
+  the prime and this clone…"*. So each clone kept its own copy (`6d71ffda`
+  on NPC Test, `73bab274` on Preflight), while the pass delivered the
+  1,042 and 1,109 files that copy describes, new edge-function test files
+  among them. Kept, it is stale.
+- **Here the hold protects nothing.** Its trigger counts the prime-only
+  functions a clone's tree lacks. Both children lack them, so it fires. But
+  these passes deliver from npc-client-dashboard, which lacks the same 28.
+  Its committed baseline, `b6c0612a`, regenerated by hand on #379
+  (`5b6cf760`), is an analysis of the same function set. Run on each pull
+  request's own head, the generator writes `b6c0612a` byte for byte. The
+  engine cannot know that without running the generator, and it cannot run
+  one: it composes trees over the API.
+- **The rest of the job would pass.** On each head, every node step after
+  the inventory was run here as CI runs it, with
+  `BACKEND_DEPLOYED_BY=mission-control` (the scope job prints that both
+  repositories set it). Each one passed: the registry, the static scan, the
+  policies, every migration and index check, error disclosure, mass
+  assignment, column names, cron callers, the baseline invariants, public
+  validation, the negative tests and the launch-gate aggregator. The Deno
+  steps and gitleaks were not run here. They were green on #379, and by
+  the baseline's own measure these trees hold the same functions, so they
+  are expected to pass, not shown to.
+- **The remedy** is Step I, one commit per branch. In the engine, the hold
+  could compare a lineage child with its source rather than with the
+  prime. A child whose parent withholds the same functions would then take
+  the parent's baseline, as a mirror takes the prime's.
+- ✦ **The engine half is written** (`108d02bd`; Step I).
+
+### F23. No clone's backend has received a function since 12–13 Oct
+
+- **What the clone shows.** On npc-client-dashboard's project
+  (`plisdzywzleljorrphxv`), apart from one `street-view` write on 16 Oct,
+  the last function deployed is `generate-investment-report`, at
+  16:20:48 UTC on 12 Oct. That afternoon's deploys landed one bundle every
+  six to eight minutes (15:10, 15:18, 15:26 … 16:14, 16:20). Its
+  `listings-cache` is the copy deployed at 00:36:55 on 11 Oct, so #3341's
+  fix, merged into the repository at 04:36 on 20 Oct, is not running there.
+  `estimate-property-value` and `bulk-import-clients` are in the repository
+  and not on the project at all.
+- **Why a merge deployed nothing.** On a clone, `Deploy Supabase functions`
+  stands down (*"Supabase functions deployed by Mission Control"*) and is
+  green for that reason. MC's `edge_function_deploy` lane deploys a clone's
+  functions, through one open run per clone, and every clone's run is
+  parked `awaiting_validation`:
+
+  | Clone | Run | Parked (UTC) |
+  |---|---|---|
+  | npc-client-dashboard | `28ddbe05` | 12 Oct 16:20 |
+  | npc-crm-independent | `12cce521` | 12 Oct 16:34 |
+  | Preflight | `6b905563` | 12 Oct 15:48 |
+  | NPC Test | `10638fbc` | 13 Oct 16:24 |
+
+  Each reads *"1 bundle(s) deployed over 30 passes and more remain"*. Each
+  is the fourth of a chain whose first three the planner retired itself
+  (`supersessionVerdict`, `MAX_CONSECUTIVE_SUPERSESSIONS = 3`), so it stays
+  in front of a person. Every later plan folds into it and says
+  `— BLOCKED`. Each park sent a notification to /support/tickets. The
+  seven sent from 12 Oct 15:48 to 13 Oct 16:24 UTC are all unread.
+- **Why every run parks.** These are whole-fleet runs (`slugs: null`),
+  about 400 bundles each. On 12 Oct a pass landed one bundle. The parked
+  run's last pass reads `in_flight: {done: 1, of: 60}` and
+  `paused_at_budget: true`. A clone got a pass every six to eight
+  minutes, so a whole generation needs about two days with the prime
+  still. But `planDeployGeneration` restarts the generation on every prime
+  merge (the parked run says `source_moved: true`), the prime merges about
+  twenty times a day, and `planEdgeDeployResume` charges a restart an
+  attempt. So a run never completes. It parks after about thirty prime
+  merges, three such parks are retired, and the fourth waits. While a
+  chain runs, the stalest-first order (#317) keeps the bundles turning
+  over: 368 of the 427 functions on that project date from 11–12 Oct.
+  Once it parks, nothing turns over.
+- **What it costs.** Every function change merged to Prime since 12 Oct is
+  in the clones' repositories and not on their backends. F4's precondition
+  for MC #345 is about the backend, and no cascade alone can meet it.
+  npc-client-dashboard's own cache shows the wait. `listings-cache`
+  answers 200 there, two to four calls an hour. But `listings_cache` holds
+  one table, `tblWIg5cs85O30pcY`, with 171 rows, 19 live, the newest first
+  seen on 8 Sep, and nothing verified since 16:00 UTC on 8 Oct.
+- **The remedies.** Step J's first act is an administrator's, now. The
+  class is MC's engine, and none of this is made here. Smallest first:
+  1. **A cascade's named deploys are not folded into a parked whole-fleet
+     run.** `planFunctionDeploy` folds every plan into the clone's one open
+     run, parked or not. A named run for what a merge changed would land
+     in a pass or two.
+  2. **A pass carries more than one bundle.** Measure first where a pass
+     spends its 45 seconds. Before its first deploy it lists the clone's
+     functions, reads the prime's head, and fetches a snapshot of sixty
+     functions over the GitHub API. Then it deploys, and
+     `generate-investment-report` was the last bundle landed. Not measured
+     here.
+  3. **A merge re-owes only what it changed.** A restart re-owes all ~400
+     bundles because the prime moved, and that is what makes a whole-fleet
+     run unfinishable. If each bundle recorded the source it was built
+     from, a merge would re-owe only the bundles whose sources moved.
+
+  ✦ Remedy 3 is written (`05ab074e`; Step J), and it records each pass's
+  timing, which remedy 2 needs measured first. Remedy 1 is not attempted.
+
 ---
 
 ## 4. What shipped in this session
@@ -428,10 +851,84 @@ its blockers are F10's.
 Until the owner's word it opened no pull request and pushed to no other
 session's branch.
 
+### And from 03:45 UTC on 20 Oct, on the owner's word
+
+- npc-crm-independent #124 merged as `b11f3de4` (03:47), then #123 as
+  `2a26ddce` (03:48), both with merge commits.
+- MC #346 squash-merged as `e117f94c`, carrying the 03:40 update, and
+  published from Lovable. This session's MC branch was then reset onto it,
+  since it held only merged history.
+- Prime #3343 merged as `f99219bb` (04:05:44) and #3341 as `adb6bc5e`
+  (04:05:51), both with merge commits.
+- Not this session's acts: MC's drain merged npc-client-dashboard #379 as
+  `ba5efc24` (04:36:47), and the engine opened NPC Test #228 (04:51:21)
+  and Preflight #227 (04:53:29).
+- MC, `claude/confidential-report-cleanup-at2jfw`: this third update, with
+  F21. It is one commit on top of MC's `main` and no pull request.
+- MC, the same branch: the fourth update, with F22 and F23, one commit on
+  top of the third. Nothing else was merged, pushed or published.
+
+### And from 05:30 UTC on 20 Oct, on the owner's word to keep working
+
+On MC's `claude/confidential-report-cleanup-at2jfw`, in this order, on top
+of the fourth update:
+
+- `05ab074e` — **F23: a Prime merge re-owes only the bundles it changed.**
+  - `clone_function_deploys` (migration `20261020090000`) records each
+    bundle the lane lands: the digest of exactly what it sent
+    (`functionBundleDigest.pure.ts`), and the function id and version the
+    Management API answered with.
+  - A copy counts as current only where Prime's digest is unchanged AND
+    the clone still lists that very deploy. Every doubt resolves to owed,
+    and a ledger that cannot be read leaves the lane as it was.
+  - The generation and its skip list are planned at the commit the
+    snapshot read, so the revision judged is the revision deployed.
+  - A move is charged an attempt only where the ledger could not carry it.
+  - Every result records what was owed, the ledger's reading, and
+    `pass_ms`.
+  - `docs/EDGE_DEPLOY_LEDGER.md` has the measurement and the model.
+- `108d02bd` — **F22: a lineage child's security baselines are measured
+  against its parent.**
+  - `withheldBySource` keeps only the withheld functions the source tree
+    holds. From the prime that is all of them, so nothing changes off the
+    lineage edge.
+  - The hold notes and the pull request body name the source rather than
+    the prime. With the prime as source, every sentence is byte-identical.
+- `d4a3854c` — **F21: an exhausted event is judged by kept progress.**
+  - `progressed_at` (migration `20261020100000`) is stamped in exactly two
+    places. One is a ledger flush holding an entry the pass did not start
+    with. The other is a row's settlement, and all four settlements in the
+    clone loop go through `writeSettlement`. The judge reads it, and never
+    `updated_at`.
+  - A child follows its own parent (`orderByLineage`, a stable topological
+    order). It no longer waits behind every root.
+  - Each pass's stages are written to `pass_trace` (migration
+    `20261020100500`; `passTrace.pure.ts`) without waiting on the write.
+    Each clone then waits, bounded at two seconds, for its outcome to
+    land. A rate-limited or server-deferred clone records `deferred`.
+  - Every new guard was shown to fail on the defect it names, by planting
+    it: a settlement written around the helper, a stamp on the `pushing`
+    mark, the flush removed, a deferral recorded as a failure.
+- This fifth update.
+
+All three engine changes read their new columns defensively. Every writer
+carries on without its column: the ledger flush and the settlement retry
+without the stamp, the trace stops writing, and the deploy ledger reports
+the failure and moves on. Every reader takes a failed read as no verdict.
+So the publish and the migrations may land in either order. Until
+the migrations run, the five events are left at the ceiling rather than
+refunded, and nothing claims them. Checked locally on `d4a3854c`: 469 test
+files and 9,441 tests passed, along with `tsc --noEmit`, the seventeen
+repository checks, Prettier and ESLint. Nothing was merged, published or
+opened as a pull request.
+
 ---
 
 ## 5. Only the owner can do these
 
+0. ※ Done at 04:54 UTC: every merge in item 1 except MC #345, and MC is
+   published. What is left of it is #345 and its publish, which still wait
+   on Step F.
 1. Approve, or make, the merges in §2: MC #346, Prime #3343 and #3341, CRM
    #123, and later MC #345. Then publish MC after #346 and again after #345.
    Add npc-crm-independent-6505dc#124, in either order with #123 (Step E).
@@ -442,11 +939,30 @@ session's branch.
    history of all five repositories; whether the exposure needs any notice
    (the client, the regulator); and the one-line `curl -sI` check of whether
    any deployment or preview ever served the file.
-3. Everything in §6 of the 14:05 document still stands:
+3. ※ Release `aml-reliance` to production. #3341's deploy held it back:
+   it is listed in `.github/deploy/held-functions.txt`, and only the
+   "Release a held Supabase function" workflow, dispatched by a repository
+   administrator, ships it (Prime's `HELD_FUNCTION_RELEASE.md`).
+4. ※ F21's decision (Step H): the engine fix, or landing #121, or both.
+   Until one is made, the CRM line receives nothing and Step F waits.
+   ✦ The engine fix's first half is written (`d4a3854c`), and landing it is
+   item 8. It retires the cycling events and measures the line's passes.
+   The line still needs remedy 1, or #121, before it receives anything.
+5. ¤ Step I's word: commit the regenerated inventory onto NPC Test #228
+   and Preflight #227, or say who should. It is all that stands between
+   F19's two files and the last two tips.
+6. ¤ Step J: an administrator rejects the four parked deploy runs in MC,
+   and the owner chooses F23's engine remedy. Until a run is moving, no
+   clone runs any function merged since 12 Oct, and Step F cannot be met.
+7. Everything in §6 of the 14:05 document still stands:
    - the Actions allow-list for `google-github-actions/*` and `superfly/*`;
    - a workspace-scoped Anthropic key for MC's autofix;
    - the rotations;
    - the eight oversized template-seed migrations.
+8. ✦ Whether to land this session's MC branch: open a pull request from
+   `claude/confidential-report-cleanup-at2jfw`, squash-merge it as MC does,
+   and publish. The merge applies three additive migrations. The fourth
+   and fifth updates of this document ride along.
 
 ---
 
@@ -474,3 +990,32 @@ session's branch.
 - **A deletion is the remedy, never the finding.** A check that judges
   files by path has to list only what a branch adds, changes or renames, or
   it fails the pull request doing what the check asks for (F20).
+- **A pass that keeps nothing between ticks grows until it never fits.**
+  The line's standing diff went 390, 985, 1,360 while every pass started
+  from nothing, and the longer it stood still the larger it became (F21).
+- **Judge progress by the ledger, never by `updated_at`.** Every claim
+  writes `pushing`, which the trigger stamps, so a pass cut before it
+  learned anything reads as one that converged, and is refunded for ever.
+- **A child waits for its parent, not for every root.** Ordering by depth
+  puts every child behind every root, so a root that never returns costs
+  every child a claim.
+- **A merged cascade is not a deployed backend.** On a clone the deploy
+  workflow stands down and is green for it. Read the function's deploy
+  time on the clone's own project (F23).
+- **A copy kept for a person goes stale the moment the pass lands.** A
+  baseline held while the pass delivers what it describes is wrong after
+  the merge. The hold's note names the command; somebody has to run it
+  (F22).
+- **Work folded into a parked run is queued behind nobody.** A park that
+  absorbs every later plan turns one stopped run into a stopped lane.
+- **Judge a cut pass as a returned one is judged.** The drain refunds a
+  returned pass that settled a clone or grew its ledger. So the judge of a
+  cut pass counts exactly those two. Counting the ledger alone retires a
+  convergence that finishes a clone each pass.
+- **An instrument that can drop its last word reads like the failure it
+  measures.** A trace written without waiting can lose its outcome when
+  the invocation returns, and a trace with no outcome is what a killed pass
+  looks like. So the outcome is waited for, bounded, once the work is done.
+- **A lineage child's baselines are its parent's.** Count the functions a
+  clone withholds against the tree its bytes come from, never against the
+  prime.
