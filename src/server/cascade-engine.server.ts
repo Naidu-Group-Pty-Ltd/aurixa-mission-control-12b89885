@@ -264,6 +264,7 @@ import {
   type PassPhase,
   type PassTrace,
 } from "./cascade/passTrace.pure";
+import { carrierSettledMessage } from "./cascade/carrierSettlement.pure";
 
 type CascadeResultUpdate = Database["public"]["Tables"]["cascade_results"]["Update"];
 
@@ -468,17 +469,22 @@ export type { CascadeBudget, CascadeRunResult };
  * as a record instead of a mystery. Never throws: the event's own fate is
  * already written and correct, and orphaned rows are ledger debt, not a
  * reason to report the settle itself as failed.
+ *
+ * `fate` finishes the sentence the message begins ("Skipped: the carrier
+ * event …"), and the beginning is composed here, never at a call site: it is
+ * how the merge drain's recount tells a clone the event never reached from a
+ * clone the engine skipped on purpose (`carrierSettlement.pure.ts`, F24).
  */
 export async function terminaliseOrphanedRows(
   supabase: SupabaseLike,
   eventId: string,
-  why: string,
+  fate: string,
 ): Promise<number> {
   const { data, error } = await supabase
     .from("cascade_results")
     .update({
       status: "skipped",
-      error_message: why,
+      error_message: carrierSettledMessage(fate),
       completed_at: new Date().toISOString(),
     })
     .eq("cascade_event_id", eventId)
@@ -611,7 +617,7 @@ export async function executeCascade(
     await terminaliseOrphanedRows(
       supabase,
       event.id,
-      "Skipped: the carrier event failed before any clone was processed (GitHub App not configured).",
+      "failed before any clone was processed (GitHub App not configured).",
     );
     return { ok: false, error: msg };
   }
@@ -686,7 +692,7 @@ export async function executeCascade(
     await terminaliseOrphanedRows(
       supabase,
       event.id,
-      "Skipped: the carrier event failed reading prime before any clone was processed.",
+      "failed reading prime before any clone was processed.",
     );
     return { ok: false, error: msg };
   }

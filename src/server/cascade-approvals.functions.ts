@@ -140,7 +140,7 @@ export const rejectCascade = createServerFn({ method: "POST" })
     await terminaliseOrphanedRows(
       supabase,
       data.cascadeEventId,
-      `Skipped: the carrier event was rejected by a reviewer${data.reason ? ` — ${data.reason}` : ""}.`,
+      `was rejected by a reviewer${data.reason ? ` — ${data.reason}` : ""}.`,
     );
 
     await supabase.from("audit_log").insert({
