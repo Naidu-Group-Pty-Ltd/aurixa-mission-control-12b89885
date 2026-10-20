@@ -1119,13 +1119,17 @@ its blockers are F10's.
     sentence. `carries_prime` keeps its cadence. The tests replay the
     model's answers and the notice metadata production wrote, and fail
     when the old rule is put back.
-  - **The root of the bundle notice is in Prime, and is not made here.**
-    The CRM line's `buildVersionManifest(env)` is the change: it resolves
-    the target with `resolveSupabaseTarget` over Vite's own `loadEnv`, and
-    writes `supabase: { projectRef, source }`. Ported to Prime, it reaches
-    the mirrors by cascade, each clone's next build declares
-    `carries_own`, and the check stops inferring. It needs the owner's word
-    for a Prime pull request (§5).
+  - **The root of the bundle notice is in each clone's build, and is not
+    made here.** The CRM line's `buildVersionManifest(env)` is the change:
+    it resolves the target with `resolveSupabaseTarget` over Vite's own
+    `loadEnv`, and writes `supabase: { projectRef, source }`. But
+    `vite.config.ts` is `protected` on all four clones
+    (`clone_sync_exclusions`, seeded from `DEFAULT_MIRROR_EXCLUSIONS`), so
+    no cascade carries it. It has to be made in each mirror's own
+    repository, as the CRM line made it in its own, and in Prime, so that a
+    clone provisioned from now on starts with it. Each clone's next build
+    then declares `carries_own`, and the check stops inferring. That is
+    four pull requests, each the owner's word (§5).
 
 ---
 
@@ -1341,10 +1345,12 @@ it pushed only to two of the engine's, on the owner's word.
    along. Once it is live, the CRM line's next pass names where it dies
    (Step H), each deploy pass should land three or four bundles, a retired
    event stays failed, and the inbox stops repeating itself.
-10. ♦ The root of F28's bundle notice, in Prime. Port the CRM line's
-    `buildVersionManifest(env)` from its `vite.config.ts` in a Prime pull
-    request, and the cascade carries it to the three mirrors. Until then
-    #349 keeps that notice to one per artefact.
+10. ♦ The root of F28's bundle notice. Add the CRM line's
+    `buildVersionManifest(env)` to `vite.config.ts` in npc-client-dashboard,
+    npc-test-76b3b3 and preflight-property-group, and in Prime. The file is
+    `protected` on every clone, so no cascade carries it, and each is a pull
+    request in its own repository. Until then #349 keeps that notice to one
+    per artefact.
 
 ---
 
@@ -1418,7 +1424,8 @@ it pushed only to two of the engine's, on the owner's word.
   unchanged state every fifteen minutes buries the alarm that matters: 95%
   of the inbox was two such kinds, beside the park notices nobody read
   (F28).
-- **A fix made on one line belongs at the prime too.** The CRM line's
-  `version.json` declaration settled its bundle check by 20 Sep. The prime
-  never got it, so neither did its three mirrors, and they drew 913 such
-  notices between 19 Sep and 20 Oct (F28).
+- **A protected file is fixed once in every repository that protects it.**
+  The CRM line added its `version.json` declaration to its own
+  `vite.config.ts`, which every clone protects, so no cascade could carry
+  it anywhere. The prime and its three mirrors never got it, and the
+  mirrors drew 913 such notices between 19 Sep and 20 Oct (F28).

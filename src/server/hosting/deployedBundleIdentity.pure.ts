@@ -446,12 +446,13 @@ export function shouldRequestResync(input: {
  * `carries_both` is the scan reading bytes, and the same bytes give the same
  * reading, so a re-probe of an artefact nobody has changed cannot tell a
  * person anything the last notice did not. Measured 20 Oct 2026: 917 unread
- * "Wrong backend in the bundle" notices on three clones, every one
- * `carries_both`. Every correctly configured clone names the prime's ref (it
- * is how a build recognises the prime), and no build in the fleet publishes
- * the `supabase` block in `/version.json` that would settle it, so each probe
- * of the same bytes said the same thing again: on every deploy, every six
- * hours, and after every re-sync rebuild.
+ * "Wrong backend in the bundle" notices, every one `carries_both`, and all
+ * but four of them on the prime's three mirrors. Every correctly configured
+ * clone names the prime's ref (it is how a build recognises the prime), and
+ * none of the three publishes the `supabase` block in `/version.json` that
+ * would settle it (the CRM line's build does, and has drawn none since
+ * 20 Sep). So each probe of the same bytes said the same thing again: on
+ * every deploy, every six hours, and after every re-sync rebuild.
  *
  * So it is reported as a missing billing identity is, once per artefact, plus
  * once more when the re-sync asked for that artefact is seen to have changed
