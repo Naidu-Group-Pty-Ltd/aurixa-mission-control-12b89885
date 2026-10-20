@@ -1,10 +1,16 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { stripComments } from "../sourceComments.pure";
+import { resolutionCommitMessage } from "./conflictMerge.pure";
 import { ENGINE_COMMIT_PREFIX, isEngineOnlyBranch } from "./proposalRepair.pure";
 import {
   carriesHumanWork,
   completeRefreshPlan,
   decideRefreshTextMerge,
+  isResolutionMerge,
   lastStatement,
+  mergeAddsNothing,
   MAX_REFRESH_MERGE_CHARS,
   MAX_REFRESH_TEXT_MERGES,
   planRefreshOverHumanWork,
@@ -36,6 +42,126 @@ describe("whose work is on the branch", () => {
     expect(carriesHumanWork([statement])).toBe(false);
     expect(carriesHumanWork([statement, reconcile])).toBe(true);
     expect(lastStatement([statement, reconcile])).toBe(statement);
+  });
+
+  describe("the merge drain's own resolution", () => {
+    // npc-crm-independent-6505dc #121 on 20 Oct 2026: one statement, then the
+    // drain's `f024824`, and the line's refresh deferred on it as a stranger's.
+    const resolution: BranchCommit = {
+      sha: "f0248243",
+      message: resolutionCommitMessage({
+        prNumber: 121,
+        baseShort: "2a26ddc",
+        restated: 939,
+        deleted: 6,
+      }),
+      parents: 2,
+      parentShas: ["25acc6eb", "2a26ddce"],
+    };
+    const proven = new Set([resolution.sha]);
+
+    it("is the engine's work on a branch of statements once proven, so the branch moves", () => {
+      expect(isResolutionMerge(resolution)).toBe(true);
+      expect(carriesHumanWork([statement, resolution], proven)).toBe(false);
+      expect(
+        planRefreshOverHumanWork({
+          commits: [statement, resolution],
+          provenResolutions: proven,
+          statement: null,
+          head: null,
+          next: null,
+        }),
+      ).toEqual({ kind: "replace" });
+    });
+
+    it("is somebody's merge until proven: its message is a claim an amend keeps", () => {
+      expect(carriesHumanWork([statement, resolution])).toBe(true);
+      const before = listing({ "a.ts": "A0" });
+      expect(
+        planRefreshOverHumanWork({
+          commits: [statement, resolution],
+          statement: before,
+          head: listing({ "a.ts": "A1" }),
+          next: listing({ "a.ts": "A2" }),
+        }),
+      ).toEqual({ kind: "defer", why: expect.stringContaining("f024824") });
+    });
+
+    it("still defers beside a hand commit, where its base paths would read as hand edits", () => {
+      const before = listing({ "a.ts": "A0" });
+      const head = listing({ "a.ts": "A1" });
+      const next = listing({ "a.ts": "A2" });
+      for (const commits of [
+        [statement, reconcile, resolution],
+        [statement, resolution, reconcile],
+      ]) {
+        expect(carriesHumanWork(commits, proven)).toBe(true);
+        const plan = planRefreshOverHumanWork({
+          commits,
+          provenResolutions: proven,
+          statement: before,
+          head,
+          next,
+        });
+        expect(plan).toEqual({ kind: "defer", why: expect.stringContaining("f024824") });
+      }
+    });
+
+    it("is claimed only by a two-parent merge wearing the drain's message", () => {
+      expect(isResolutionMerge({ ...resolution, parents: 1 })).toBe(false);
+      expect(carriesHumanWork([statement, { ...resolution, parents: 1 }], proven)).toBe(true);
+      const mergeMain: BranchCommit = {
+        sha: "mm",
+        message: "Merge remote-tracking branch 'origin/main' into recon",
+        parents: 2,
+      };
+      expect(isResolutionMerge(mergeMain)).toBe(false);
+      expect(carriesHumanWork([statement, mergeMain], new Set(["mm"]))).toBe(true);
+    });
+  });
+
+  describe("proving a resolution adds nothing of its own", () => {
+    // The proposal's side (first parent) and the base (second), as the drain
+    // reads them: `p.ts` is the statement's, `b.ts` moved on the base, and
+    // `old.ts` is a file the statement removed and the base still holds.
+    const first = listing({ "p.ts": "P1", "b.ts": "B0", "same.ts": "S" });
+    const second = listing({ "p.ts": "P0", "b.ts": "B1", "same.ts": "S", "old.ts": "O" });
+    const resolved = listing({ "p.ts": "P1", "b.ts": "B1", "same.ts": "S" });
+
+    it("proves the drain's resolution: every path taken whole from one side", () => {
+      expect(mergeAddsNothing({ merge: resolved, first, second })).toBe(true);
+    });
+
+    it("refuses an amend that folded in a fix, a changed mode, or a lost file", () => {
+      const amended = listing({ "p.ts": "P1", "b.ts": "B1", "same.ts": "S", "fix.ts": "F" });
+      expect(mergeAddsNothing({ merge: amended, first, second })).toBe(false);
+      const edited = listing({ "p.ts": "P1-fixed", "b.ts": "B1", "same.ts": "S" });
+      expect(mergeAddsNothing({ merge: edited, first, second })).toBe(false);
+      const moded: Listing = {
+        ...resolved,
+        modes: new Map([...resolved.modes, ["p.ts", "100755"]]),
+      };
+      expect(mergeAddsNothing({ merge: moded, first, second })).toBe(false);
+      const lost = listing({ "p.ts": "P1", "b.ts": "B1" });
+      expect(mergeAddsNothing({ merge: lost, first, second })).toBe(false);
+    });
+
+    it("proves nothing from a truncated listing", () => {
+      expect(mergeAddsNothing({ merge: listing({ "p.ts": "P1" }, true), first, second })).toBe(
+        false,
+      );
+    });
+
+    it("is what the engine asks before reading a resolution as its own", () => {
+      const engine = stripComments(
+        readFileSync(join(process.cwd(), "src/server/cascade-engine.server.ts"), "utf8"),
+      );
+      expect(engine).toMatch(
+        /mergeAddsNothing\(\{ merge, first: firstListing, second: secondListing \}\)/,
+      );
+      expect(engine).toMatch(/carriesHumanWork\(commits, provenResolutions\)/);
+      expect(engine).toMatch(/planRefreshOverHumanWork\(\{\s*commits,\s*provenResolutions,/);
+    });
   });
 
   it("never lets a preserving merge make a worked branch read as pristine", () => {

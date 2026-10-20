@@ -5,6 +5,7 @@ import { ENGINE_COMMIT_PREFIX } from "./proposalRepair.pure";
 import {
   MAX_RESOLUTIONS,
   planResolutionMerge,
+  RESOLUTION_MERGE_PREFIX,
   resolutionCommitMessage,
   type PrFile,
   type TreeEntry,
@@ -142,6 +143,16 @@ describe("the resolution commit", () => {
     expect(message.startsWith(ENGINE_COMMIT_PREFIX)).toBe(false);
     expect(message).toContain("#98");
     expect(message).toContain("375");
+  });
+
+  it("wears the prefix a refresh recognises it by", () => {
+    const message = resolutionCommitMessage({
+      prNumber: 121,
+      baseShort: "2a26ddc",
+      restated: 939,
+      deleted: 6,
+    });
+    expect(message.startsWith(`${RESOLUTION_MERGE_PREFIX}121 over 2a26ddc`)).toBe(true);
   });
 
   it("bounds the loop", () => {

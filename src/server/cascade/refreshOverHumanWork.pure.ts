@@ -78,14 +78,46 @@
  * not start with `ENGINE_COMMIT_PREFIX`, so `isEngineOnlyBranch` still reads
  * the branch as carrying human work, which it does.
  *
+ * ## The merge drain's own resolution is not human work
+ *
+ * A conflicted proposal is resolved by the merge drain in one merge commit
+ * (`conflictMerge.pure.ts`): the base branch's tree with the proposal's own
+ * paths restated, parents `[head, base]`. Its tree is two things the next
+ * statement regenerates — the base branch, and the statement's paths — so
+ * where every other commit on the branch is a statement, the branch carries
+ * nothing but the engine's work and is moved as an engine-only branch.
+ * Measured on npc-crm-independent-6505dc #121, 20 Oct 2026: its commits were
+ * one statement and the drain's `f024824`, and the first pass to deliver the
+ * line's 1,375 files since 17 Oct deferred on that merge as somebody else's,
+ * so no later pass could have refreshed the proposal either.
+ *
+ * The message is not the proof. Somebody who amends the branch head — the
+ * resolution, on #121 — to fold in a fix keeps its message and its parents,
+ * and moving that branch would discard the fix. So a resolution counts only
+ * once the engine has read its tree and its parents' and found it adds
+ * nothing of its own (`mergeAddsNothing`), and it passes those proven SHAs
+ * in. An unproven one is somebody's merge, and defers as any other does.
+ *
+ * Beside a hand commit even a proven one is still a merge of the base branch,
+ * and reading its base paths as hand edits could restore an older `main`, so
+ * it defers there as before.
+ *
  * Pure: the engine supplies the listings, and the texts a merge needs.
  */
+import { RESOLUTION_MERGE_PREFIX } from "./conflictMerge.pure";
 import { ENGINE_COMMIT_PREFIX } from "./proposalRepair.pure";
 import { threeWayMerge } from "./variantMerge.pure";
 
 /** The message every preserving merge starts with. Never `ENGINE_COMMIT_PREFIX`. */
 export const PRESERVING_MERGE_PREFIX =
   "Merge the refreshed cascade onto this proposal's own commits";
+
+/**
+ * Resolutions a refresh will read to prove (three tree listings each). The
+ * drain resolves a proposal at most `MAX_RESOLUTIONS` times a window, and one
+ * past this stays unproven, so the refresh defers rather than guessing.
+ */
+export const MAX_PROVEN_RESOLUTIONS = 3;
 
 /** Past this, the branch is a rebuild, not a reconcile, and is not overlaid. */
 export const MAX_PRESERVED_PATHS = 400;
@@ -104,7 +136,13 @@ export const MAX_REFRESH_MERGE_CHARS = 1_000_000;
 /** The two modes a text file can carry. A link or a submodule is never merged as text. */
 const TEXT_MODES = new Set(["100644", "100755"]);
 
-export type BranchCommit = { sha: string; message: string; parents: number };
+export type BranchCommit = {
+  sha: string;
+  message: string;
+  parents: number;
+  /** The parents' SHAs, oldest-first as git records them. Read to prove a resolution. */
+  parentShas?: readonly string[];
+};
 
 /** A flattened tree: blob SHA and mode by path. */
 export type Listing = {
@@ -158,16 +196,60 @@ export function lastStatement(commits: readonly BranchCommit[]): BranchCommit | 
   return null;
 }
 
-/** Whether anything on the branch is not the engine's statement or its own preserving merge. */
-export function carriesHumanWork(commits: readonly BranchCommit[]): boolean {
-  return commits.some(
-    (c) =>
-      !c.message.startsWith(ENGINE_COMMIT_PREFIX) && !c.message.startsWith(PRESERVING_MERGE_PREFIX),
-  );
+/**
+ * What claims to be the merge drain's conflict resolution: a two-parent merge
+ * wearing its message (`conflictMerge.pure.ts`). A claim only — see
+ * `mergeAddsNothing` for the proof.
+ */
+export function isResolutionMerge(c: BranchCommit): boolean {
+  return c.parents === 2 && c.message.startsWith(RESOLUTION_MERGE_PREFIX);
+}
+
+/**
+ * Whether a merge's tree adds nothing of its own: every path it holds carries
+ * one of its two parents' entries for that path, blob and mode, and it lacks
+ * no path both parents hold. The drain's resolution always does — it takes
+ * each path whole from one side — and an amended one carrying a fix does not.
+ * A truncated listing proves nothing.
+ */
+export function mergeAddsNothing(input: {
+  merge: Listing;
+  first: Listing;
+  second: Listing;
+}): boolean {
+  const { merge, first, second } = input;
+  if (merge.truncated || first.truncated || second.truncated) return false;
+  const takenFrom = (side: Listing, path: string) =>
+    side.entries.get(path) === merge.entries.get(path) &&
+    side.modes.get(path) === merge.modes.get(path);
+  for (const path of merge.entries.keys()) {
+    if (!takenFrom(first, path) && !takenFrom(second, path)) return false;
+  }
+  for (const path of first.entries.keys()) {
+    if (!merge.entries.has(path) && second.entries.has(path)) return false;
+  }
+  return true;
+}
+
+/**
+ * Whether anything on the branch is not the engine's statement or its own
+ * preserving merge. A resolution counts as the engine's only where the engine
+ * proved it (`provenResolutions`, by `mergeAddsNothing`), and only where
+ * nothing else on the branch is somebody's (see the module header).
+ */
+export function carriesHumanWork(
+  commits: readonly BranchCommit[],
+  provenResolutions: ReadonlySet<string> = new Set(),
+): boolean {
+  const human = (c: BranchCommit) =>
+    !c.message.startsWith(ENGINE_COMMIT_PREFIX) && !c.message.startsWith(PRESERVING_MERGE_PREFIX);
+  return commits.some((c) => human(c) && !(isResolutionMerge(c) && provenResolutions.has(c.sha)));
 }
 
 export function planRefreshOverHumanWork(input: {
   commits: readonly BranchCommit[];
+  /** Resolutions on the branch the engine read and found to add nothing. */
+  provenResolutions?: ReadonlySet<string>;
   /** The tree of the branch's last engine statement. */
   statement: Listing | null;
   /** The tree of the branch head. */
@@ -175,7 +257,7 @@ export function planRefreshOverHumanWork(input: {
   /** The tree of the NEW statement this refresh would propose. */
   next: Listing | null;
 }): RefreshPlan {
-  if (!carriesHumanWork(input.commits)) return { kind: "replace" };
+  if (!carriesHumanWork(input.commits, input.provenResolutions)) return { kind: "replace" };
 
   const foreignMerge = input.commits.find(
     (c) => c.parents > 1 && !c.message.startsWith(PRESERVING_MERGE_PREFIX),

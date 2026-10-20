@@ -140,7 +140,10 @@ import {
   carriesHumanWork,
   completeRefreshPlan,
   decideRefreshTextMerge,
+  isResolutionMerge,
   lastStatement,
+  MAX_PROVEN_RESOLUTIONS,
+  mergeAddsNothing,
   planRefreshOverHumanWork,
   PRESERVING_MERGE_PREFIX,
   type BranchCommit,
@@ -6402,9 +6405,39 @@ export async function processClone(args: {
           sha: c.sha,
           message: c.commit.message,
           parents: c.parents.length,
+          parentShas: c.parents.map((p) => p.sha),
         }));
       } catch {
         commits = null;
+      }
+      // The merge drain's resolutions on the branch that the engine has read
+      // and found to add nothing of their own. A message is a claim, and an
+      // amended resolution keeps it (`refreshOverHumanWork.pure.ts`).
+      const provenResolutions = new Set<string>();
+      if (commits !== null && commits.length < 100) {
+        const treeOf = async (sha: string) =>
+          (
+            await octokit.git.getCommit({
+              owner: cloneRef.owner,
+              repo: cloneRef.repo,
+              commit_sha: sha,
+            })
+          ).data.tree.sha;
+        for (const c of commits.filter(isResolutionMerge).slice(0, MAX_PROVEN_RESOLUTIONS)) {
+          const [first, second] = c.parentShas ?? [];
+          if (!first || !second) continue;
+          try {
+            const trees = await Promise.all([treeOf(c.sha), treeOf(first), treeOf(second)]);
+            const [merge, firstListing, secondListing] = await Promise.all(
+              trees.map((tree) => listTreeAt(octokit, cloneRef, tree)),
+            );
+            if (mergeAddsNothing({ merge, first: firstListing, second: secondListing })) {
+              provenResolutions.add(c.sha);
+            }
+          } catch {
+            // Unread is unproven: the merge stays somebody's, and defers.
+          }
+        }
       }
       const deferred = (why: string) => ({
         status: "skipped" as const,
@@ -6420,7 +6453,7 @@ export async function processClone(args: {
         if (commits === null || carriesHumanWork(commits)) {
           return deferred("its commits could not be read in full");
         }
-      } else if (carriesHumanWork(commits)) {
+      } else if (carriesHumanWork(commits, provenResolutions)) {
         const statementCommit = lastStatement(commits);
         let statementTree: string | null = null;
         if (statementCommit) {
@@ -6455,6 +6488,7 @@ export async function processClone(args: {
         ]);
         let plan = planRefreshOverHumanWork({
           commits,
+          provenResolutions,
           statement: statementListing,
           head: headListing,
           next: nextListing,
