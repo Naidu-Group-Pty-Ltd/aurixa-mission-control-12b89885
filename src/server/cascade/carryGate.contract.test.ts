@@ -158,9 +158,13 @@ describe("the belt stops the carry, not the loop", () => {
     // thousands of rounds later, each re-scanning the whole delivery.
     const loop = carryLoop();
     expect(loop).toContain("if (plan.carry.length === 0) carryingAllowed = false;");
-    expect(loop).toMatch(
-      /if \(stopped\) \{\s*carryStoppedOnBudget = true;\s*carryingAllowed = false;\s*\}/,
-    );
+    // And never because the clock ran out: a carry the budget stopped held
+    // the specs still waiting on it, so what a pass delivered depended on
+    // when it reached the loop, and a kept tree chain — which resumes only
+    // the very delivery it was started for — started again (F27's second
+    // reading, 20 Oct 2026). The plan's ceiling bounds the carry instead.
+    expect(loop).not.toContain("carryStoppedOnBudget");
+    expect(loop).not.toMatch(/if \(stopped\) \{/);
   });
 
   it("still ends, because with carrying off every round holds a spec", () => {
@@ -234,13 +238,15 @@ describe("a spec is told which of the two things happened to it", () => {
     // saying "we ran out of time" over a list of reasons we did not, and an
     // operator waited for a next tick to finish something no tick can.
     expect(carryLoop()).toMatch(
-      /cutShort:\s*refused\.length === stranded\.length\s*\?\s*null\s*:\s*carryStoppedOnBudget/,
+      /cutShort:\s*refused\.length === stranded\.length\s*\?\s*null\s*:\s*carryHitCeiling\s*\?\s*"ceiling"\s*:\s*null/,
     );
   });
 
-  it("keeps both words available for the specs that earned them", () => {
+  it("keeps the word the carry can still earn, and no longer claims the clock", () => {
+    // The carry stops at its ceiling, never at the budget, so "we ran out of
+    // time" is a sentence no spec held here can be told truthfully.
     const loop = carryLoop();
-    expect(loop).toContain('"budget"');
     expect(loop).toContain('"ceiling"');
+    expect(loop).not.toContain('"budget"');
   });
 });

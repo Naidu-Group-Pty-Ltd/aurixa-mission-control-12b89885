@@ -24,7 +24,7 @@ import {
 import { readInstalledGlobs } from "./cascade/installedGlobs.server";
 import {
   getAppOctokit,
-  listFilesMatchingGlobs,
+  pathsMatchingGlobs,
   listTreeAt,
   listTreeEntries,
   getFileContent,
@@ -77,6 +77,7 @@ import {
   leftBehindSpecHold,
   MAX_LEFT_BEHIND_PROBES,
   MAX_SHIM_HOPS,
+  memoSourceReadings,
   pathsTheDeliveryChanges,
   steadyStatePumpPaths,
   specsBothSidesHoldDifferently,
@@ -2142,6 +2143,13 @@ export async function processClone(args: {
    */
   let widenedScope: ReadonlySet<string> | null = null;
   let primeModeByPath: ReadonlyMap<string, string> | null = null;
+  /**
+   * The clone's blob size and git mode per path, from its listing: what lets
+   * the clone's text be read a batch at a time by blob id, as prime's is.
+   * `null` exactly when `cloneShaByPath` is.
+   */
+  let cloneSizeByPath: ReadonlyMap<string, number> | null = null;
+  let cloneModeByPath: ReadonlyMap<string, string> | null = null;
   if (isMirror) {
     const [primeTree, cloneTree] = await Promise.all([
       listTreeEntries(octokit, primeRef),
@@ -2164,6 +2172,8 @@ export async function processClone(args: {
     primeShaByPath = primeTree.entries;
     primeSizeByPath = primeTree.sizes;
     primeModeByPath = primeTree.modes;
+    cloneSizeByPath = cloneTree.sizes;
+    cloneModeByPath = cloneTree.modes;
     for (const [path, sha] of cloneTree.entries) {
       if (!primeTree.entries.has(path)) {
         onlyInClone++;
@@ -2193,19 +2203,51 @@ export async function processClone(args: {
       See `repositoryInvariants.pure.ts` for the list and the reason attached
       to each entry.
 
-      ONE listing, not two. The widened set is fetched and the module's own
-      section is then recovered from it locally, because the narrow set is
-      still what decides DELETIONS and the two must not be confused.
+      ONE listing, not two. The widened set is selected from prime's listing
+      and the module's own section is then recovered from it locally, because
+      the narrow set is still what decides DELETIONS and the two must not be
+      confused.
     */
     const { REPOSITORY_INVARIANTS, globsForModuleScopedClone } =
       await import("@/server/cascade/repositoryInvariants.pure");
-    candidatePaths = await listFilesMatchingGlobs(
-      octokit,
-      primeRef,
+    scopeLabel = `installed modules + ${REPOSITORY_INVARIANTS.length} repository invariant(s)`;
+
+    // Both trees, read once. The mirror branch above diffs the two trees and
+    // reads content only for paths whose blob SHAs differ; this branch used to
+    // list the module's section on prime and then read the PRIME copy and the
+    // CLONE copy of every file in it, unchanged ones included, before deciding
+    // anything. Measured 2 Sep 2026 on `preflight-property-group`: 7,923 files
+    // in the clone, thousands inside its modules, two content reads each — the
+    // pass died every time and the event burned its three claims without a
+    // result row ever starting. A tree listing is one request; the SHAs in it
+    // are hashes of the bytes, so a path whose SHA matches needs no read.
+    //
+    // And prime's tree is listed ONCE. The widened set used to come from
+    // `listFilesMatchingGlobs`, which reads the branch and the same recursive
+    // tree a second time — measured 20 Oct 2026 on `npc-crm-independent-6505dc`
+    // as two requests and 11,712 entries, about three seconds of every pass,
+    // for an answer this listing already holds. A prime listing that fails is
+    // raised as that call raised it, unwrapped, so a rate limit keeps its
+    // headers for `classifyGitHubFailure`; a clone listing that fails is
+    // wrapped as it always was.
+    const [primeRead, cloneRead] = await Promise.allSettled([
+      listTreeEntries(octokit, primeRef),
+      listTreeEntries(octokit, cloneRef),
+    ]);
+    if (primeRead.status === "rejected") throw primeRead.reason;
+    if (cloneRead.status === "rejected") {
+      const e = cloneRead.reason;
+      throw new Error(
+        `Cannot read the prime or clone tree for ${cloneRef.owner}/${cloneRef.repo}: ${e instanceof Error ? e.message : "unknown"}`,
+      );
+    }
+    const primeTree = primeRead.value;
+    const cloneTree = cloneRead.value;
+    candidatePaths = await pathsMatchingGlobs(
+      primeTree.entries.keys(),
       globsForModuleScopedClone(installedGlobs),
     );
     widenedScope = new Set(candidatePaths);
-    scopeLabel = `installed modules + ${REPOSITORY_INVARIANTS.length} repository invariant(s)`;
     /*
       Every prime path inside the INSTALLED globs — the module's whole section,
       and deliberately NOT the widened set.
@@ -2217,33 +2259,10 @@ export async function processClone(args: {
       inside the destructive half of a pass that was only ever asked to add.
       Invariants widen what is SENT; they never widen what is REMOVED.
     */
-    const primeInScope = await (async () => {
-      const { validateModuleGlobs: v, globToRegex: g } = await import("@/lib/module-globs");
-      const matchers = v(installedGlobs).valid.map(g);
-      return new Set(candidatePaths.filter((path) => matchers.some((m) => m.test(path))));
-    })();
-
-    // Both trees, read once. The mirror branch above diffs the two trees and
-    // reads content only for paths whose blob SHAs differ; this branch used to
-    // list the module's section on prime and then read the PRIME copy and the
-    // CLONE copy of every file in it, unchanged ones included, before deciding
-    // anything. Measured 2 Sep 2026 on `preflight-property-group`: 7,923 files
-    // in the clone, thousands inside its modules, two content reads each — the
-    // pass died every time and the event burned its three claims without a
-    // result row ever starting. A tree listing is one request; the SHAs in it
-    // are hashes of the bytes, so a path whose SHA matches needs no read.
-    let primeTree: Awaited<ReturnType<typeof listTreeEntries>>;
-    let cloneTree: Awaited<ReturnType<typeof listTreeEntries>>;
-    try {
-      [primeTree, cloneTree] = await Promise.all([
-        listTreeEntries(octokit, primeRef),
-        listTreeEntries(octokit, cloneRef),
-      ]);
-    } catch (e) {
-      throw new Error(
-        `Cannot read the prime or clone tree for ${cloneRef.owner}/${cloneRef.repo}: ${e instanceof Error ? e.message : "unknown"}`,
-      );
-    }
+    const { validateModuleGlobs, globsMatcher } = await import("@/lib/module-globs");
+    const { valid } = validateModuleGlobs(installedGlobs);
+    const inInstalledGlobs = globsMatcher(valid);
+    const primeInScope = new Set(candidatePaths.filter(inInstalledGlobs));
     // A truncated tree cannot say a file is unchanged — it may simply not have
     // been listed — so the narrowing is skipped and every path is read, as
     // before. The safe direction costs requests; the other loses a file.
@@ -2256,30 +2275,28 @@ export async function processClone(args: {
       primeShaByPath = primeTree.entries;
       primeSizeByPath = primeTree.sizes;
       primeModeByPath = primeTree.modes;
+      cloneSizeByPath = cloneTree.sizes;
+      cloneModeByPath = cloneTree.modes;
     }
 
     // The clone's own tree, read for one more reason: a module-scoped cascade
     // otherwise only ever learns what prime HAS, so a file prime removed from
     // an installed module stays on the clone for ever.
     //
-    // The glob set is re-validated here rather than trusted. `listFilesMatching
-    // Globs` validates its own copy before building matchers, and a deletion
-    // decided by an unvalidated pattern could reach outside the module in the
-    // one direction that destroys something. The deletion question is asked
-    // against the module's WHOLE section on prime (`primeInScope`), never the
-    // narrowed candidate list: a file prime holds unchanged is not one prime
-    // removed.
-    const { validateModuleGlobs, globToRegex } = await import("@/lib/module-globs");
-    const { valid } = validateModuleGlobs(installedGlobs);
+    // The glob set is the validated one above rather than trusted raw. A
+    // deletion decided by an unvalidated pattern could reach outside the
+    // module in the one direction that destroys something. The deletion
+    // question is asked against the module's WHOLE section on prime
+    // (`primeInScope`), never the narrowed candidate list: a file prime holds
+    // unchanged is not one prime removed.
     if (valid.length > 0) {
-      const matchers = valid.map(globToRegex);
       // A truncated tree read looks exactly like a clone holding fewer files
       // than it does, which here means silently missing every deletion past the
       // cut. Refusing the deletion pass is the safe half of that.
       if (!cloneTree.truncated) {
         for (const [path, sha] of cloneTree.entries) {
           if (primeInScope.has(path)) continue;
-          if (!matchers.some((rx) => rx.test(path))) continue;
+          if (!inInstalledGlobs(path)) continue;
           onlyInClone++;
           deletionCandidates.push({ path, cloneSha: sha });
         }
@@ -4445,6 +4462,39 @@ export async function processClone(args: {
   /** The clone's text of each file this pass has read, or null where it holds none. */
   const cloneTexts = new Map<string, string | null>();
   /**
+   * The clone's copy of every path in `paths`, read ahead by blob id and a
+   * batch at a time, for the questions below that ask `readCloneText` one
+   * path after another.
+   *
+   * Replayed 20 Oct 2026 against `npc-crm-independent-6505dc` at prime@adb6bc5
+   * (F27's second reading): the clone reads of one pass were 51 contents
+   * requests here, 35 in the recount and the held copies again in the
+   * reference check — and 25 of the recount's answered 404, for paths the
+   * clone's own listing does not hold. So a path the complete listing does not
+   * hold is answered by it, with no request, and the rest are read eighty to a
+   * request. A text is taken only where its blob id is the listing's
+   * (`readBlobTextsBatched`), which proves it is the file; anything a batch
+   * does not answer is read per file below, exactly as before.
+   */
+  const prefetchCloneText = async (paths: Iterable<string>): Promise<void> => {
+    if (cloneShaByPath === null || cloneSizeByPath === null || cloneModeByPath === null) return;
+    const wants: TextWant[] = [];
+    for (const path of new Set(paths)) {
+      if (cloneTexts.has(path)) continue;
+      const sha = cloneShaByPath.get(path);
+      if (sha === undefined) {
+        cloneTexts.set(path, null);
+        continue;
+      }
+      if (!isBatchableTextMode(cloneModeByPath.get(path))) continue;
+      wants.push({ path, sha, size: cloneSizeByPath.get(path) });
+    }
+    if (wants.length === 0) return;
+    for (const [path, text] of await readBlobTextsBatched(octokit, cloneRef, wants)) {
+      cloneTexts.set(path, text);
+    }
+  };
+  /**
    * The clone's copy of a file, read once per pass for every question asked
    * of it. Null where the clone holds none or it is binary. A read that FAILS
    * throws and is not remembered: a read that failed is not a file with no
@@ -4453,6 +4503,12 @@ export async function processClone(args: {
   const readCloneText = async (path: string): Promise<string | null> => {
     const known = cloneTexts.get(path);
     if (known !== undefined) return known;
+    // A complete listing that holds no such path is the answer: the clone
+    // holds none, and asking GitHub only to be told 404 spends a request.
+    if (cloneShaByPath !== null && !cloneShaByPath.has(path)) {
+      cloneTexts.set(path, null);
+      return null;
+    }
     const f = await getFileContent(octokit, cloneRef, path);
     const text = f && !f.binary ? f.content : null;
     cloneTexts.set(path, text);
@@ -4477,8 +4533,10 @@ export async function processClone(args: {
       .sort()
       .slice(0, 60);
     const surviving: Record<string, string> = Object.fromEntries(also);
+    const reading = [...new Set([...heldSources, ...cloneOnlySources])];
+    await prefetchCloneText(reading);
     await Promise.all(
-      [...new Set([...heldSources, ...cloneOnlySources])].map(async (path) => {
+      reading.map(async (path) => {
         try {
           const text = await readCloneText(path);
           if (text !== null) surviving[path] = text;
@@ -4508,6 +4566,7 @@ export async function processClone(args: {
         .map((v) => v.path)
         .filter((p) => !(p in surviving) && !unreadableSurvivors.has(p));
       if (unread.length === 0) break;
+      await prefetchCloneText(unread);
       await Promise.all(
         unread.map(async (path) => {
           try {
@@ -4542,6 +4601,52 @@ export async function processClone(args: {
   let deletesCrossing: ReadonlySet<string> = new Set(deletionPlan.deletes);
 
   markPhase("specs");
+  /**
+   * What each text the channel asks about says, read once for the pass: it
+   * asks every delivered spec again on every carry round and every kept spec
+   * again on every shim hop (`memoSourceReadings`).
+   */
+  const readings = memoSourceReadings();
+  /**
+   * THE BUDGET NEVER DECIDES WHAT THIS CHANNEL DELIVERS.
+   *
+   * It used to: a bridge whose text the clock left unread was not owed, a
+   * left-behind spec or an outside-root file the clock left unasked was held,
+   * and a carry the clock stopped held every spec still waiting on it. That
+   * is right for a pass that ships inside its window, and wrong for one whose
+   * tree is written across several (F25): a kept tree chain resumes only the
+   * very delivery it was started for, so a delivery the clock shapes restarts
+   * it whenever two passes reach this channel at different moments. Replayed
+   * 20 Oct 2026 against `npc-crm-independent-6505dc` (F27's second reading),
+   * seven consecutive passes reached the channel within half a second of
+   * each other, the second carry round finished in some and not in others,
+   * the delivery went 1,324 files, 1,342, 1,324, and the chain started again
+   * twice.
+   *
+   * So each question here is bounded by its own ceiling (`MAX_SUBJECTS_CARRIED`,
+   * `MAX_LEFT_BEHIND_PROBES`, `MAX_OUTSIDE_ROOT_PROBES`, `MAX_VARIANT_MERGES`),
+   * whose answers ride the ledger and only ever grow, and never by the clock.
+   * The clock still stops the pass — at the tree, a chunk at a time, where
+   * stopping keeps what was written.
+   */
+  /**
+   * What the channel pays GitHub for — the left-behind and outside-root
+   * probes, the kept specs' variant merges — lands on the ledger in memory,
+   * and the next write of it used to be the tree's pause. `keepLedger` writes
+   * it where it holds something the last write did not: once the channel is
+   * done, and, on a pass already past its window, as each answer arrives,
+   * because that pass may be ended at any moment.
+   */
+  let ledgerKept: CascadeProgress | null = resume
+    ? (JSON.parse(JSON.stringify(progress)) as CascadeProgress)
+    : null;
+  const keepLedger = async (only?: "past the window"): Promise<void> => {
+    if (!resume || ledgerKept === null) return;
+    if (only === "past the window" && !resume.budget?.isPastDeadline(0)) return;
+    if (!ledgerGrew(ledgerKept, progress)) return;
+    await resume.onProgress(progress);
+    ledgerKept = JSON.parse(JSON.stringify(progress)) as CascadeProgress;
+  };
   // ── The membrane's spec channel, over the FINISHED delivery ────────────
   //
   // Here rather than in the prepare loop, and the difference is a defect
@@ -4577,9 +4682,10 @@ export async function processClone(args: {
   // `planSubjectCarry` returns those refusals and the spec stays stranded
   // with them, now saying which rule stopped which subject.
   //
-  // And it answers to the same clock. `shouldStop` is the pass's own budget,
-  // so a carry that runs out of window leaves the remaining specs held
-  // exactly as they were before this existed, and the next tick resumes.
+  // And it answers to its own ceiling, not to the clock. It used to stop at
+  // the pass's budget and hold the specs still waiting, which made what a
+  // pass delivered depend on when it got here — see the rule at the top of
+  // the channel for what that cost a delivery written across passes.
   //
   // Iterated to a fixed point. Each round either carries at least one subject
   // that was not carried before — a strictly growing subset of prime's paths —
@@ -4588,7 +4694,6 @@ export async function processClone(args: {
   // to a hold must not be re-attempted for ever.
   const attemptedSubjects = new Set<string>();
   const carriedSubjects: string[] = [];
-  let carryStoppedOnBudget = false;
   let carryHitCeiling = false;
   // Fixed before the loop rather than inside it: `deliveredSource` shrinks as
   // specs are held, so a bound computed per round would move under its own
@@ -4713,6 +4818,7 @@ export async function processClone(args: {
               onUnread: (side, path) => {
                 if (!unreadable[side].has(path)) unread[side].add(path);
               },
+              readings,
             });
           }
           if (unread.prime.size === 0 && unread.clone.size === 0) break;
@@ -4744,7 +4850,7 @@ export async function processClone(args: {
           }
         }
         for (const spec of kept) {
-          const subjects = subjectsOfKeptSpec({ specPath: spec, sides: sidesOf(spec) });
+          const subjects = subjectsOfKeptSpec({ specPath: spec, sides: sidesOf(spec), readings });
           if (subjects.length > 0) keptSpecSubjects.set(spec, subjects);
         }
         for (const [spec, text] of primeSpecs) primeKeptText.set(spec, text);
@@ -4815,7 +4921,8 @@ export async function processClone(args: {
       }
       asking.push({ path, cloneSha });
     }
-    if (asking.length === 0 || shouldStop()) return;
+    // Within the ceiling, never the clock: see the rule at the top.
+    if (asking.length === 0) return;
     const room = Math.max(0, MAX_OUTSIDE_ROOT_PROBES - outsideProbes);
     const batch = asking.slice(0, room);
     if (batch.length === 0) return;
@@ -4835,6 +4942,7 @@ export async function processClone(args: {
         decideHoldRelease({ held: outsideHeld(path), cloneSha, evidence: answer, approved: false }),
       );
     }
+    await keepLedger("past the window");
   };
   /** Every spec seen left behind this pass: the crossing files it asserts about, and which go. */
   const leftBehind = new Map<string, LeftBehindSpec>();
@@ -4917,17 +5025,12 @@ export async function processClone(args: {
           clone: cloneShaByPath,
         })
       : [];
-  // Paced on the pass's budget, like the main pass's read and unlike the
-  // import closure's: a bridge whose text was not read is simply not owed
-  // this pass, which is yesterday's behaviour, and the next pass asks again.
+  // Read whole, like the import closure's and unlike the main pass's: a
+  // bridge whose text is not read is not owed, so a read the clock cut short
+  // would decide the delivery (see the rule at the top of the channel).
   // Measured on the independent at prime@cdff4f2 the pool was 18 files and
   // 36 KB — one batch.
-  if (bridgePool.length > 0) {
-    await prefetchPrimeText(
-      bridgePool,
-      resume?.budget ? (reserveMs) => resume.budget!.isPastDeadline(reserveMs) : undefined,
-    );
-  }
+  if (bridgePool.length > 0) await prefetchPrimeText(bridgePool);
   /** Bridges this pass carried, by path, with the modules each re-exports. */
   const bridgesCarried = new Map<string, OwedBridge>();
   let bridgesOwedNow: OwedBridge[] = [];
@@ -4940,13 +5043,20 @@ export async function processClone(args: {
     const strandedBySpec = new Map<string, string[]>();
     const outsideNamedBy = new Map<string, string[]>();
     for (const [specPath, specText] of Object.entries(deliveredSource)) {
+      // Only a spec has subjects (`strandedSubjects` answers nothing else),
+      // so only a spec's imports are read: every round asked all of them of
+      // every delivered file, ~1,300 on the CRM line, and then threw them
+      // away for all but its specs.
       const stranded = strandedSubjects({
         specPath,
         specText,
         primeSha: primeShaByPath,
         cloneSha: cloneShaByPath,
         crossing: deliveredPaths,
-        imported: primeShaByPath ? subjectsImportedBy(specText, specPath, primeShaByPath) : [],
+        imported:
+          primeShaByPath && isSpecPath(specPath)
+            ? subjectsImportedBy(specText, specPath, primeShaByPath, readings.importsOf)
+            : [],
       });
       if (stranded.length > 0) strandedBySpec.set(specPath, stranded);
       if (primeShaByPath !== null && cloneShaByPath !== null) {
@@ -4956,6 +5066,7 @@ export async function processClone(args: {
           primeSha: primeShaByPath,
           cloneSha: cloneShaByPath,
           crossing: deliveredPaths,
+          readNamed: readings.namedOutsideRoots,
         });
         if (outside.length > 0) outsideNamedBy.set(specPath, outside);
       }
@@ -5023,27 +5134,25 @@ export async function processClone(args: {
       // Asked only while something can still be carried: a verdict nobody can
       // act on this pass is a request spent for nothing.
       let evidence = new Map<string, HeldPathEvidence>();
+      // Within the ceiling, never the clock: see the rule at the top.
       if (carryingAllowed && unjudged.length > 0) {
-        if (shouldStop()) {
-          for (const u of unjudged) leftBehindCut.set(u.path, "budget");
-        } else {
-          const room = Math.max(0, MAX_LEFT_BEHIND_PROBES - leftBehindProbes);
-          const asking = unjudged.slice(0, room);
-          for (const u of unjudged.slice(room)) leftBehindCut.set(u.path, "probes");
-          if (asking.length > 0) {
-            leftBehindProbes += asking.length;
-            evidence = await probeHeldPaths({
-              octokit,
-              primeRef,
-              candidates: asking,
-              maxProbes: asking.length,
-            });
-            for (const [path, answer] of evidence) {
-              if (answer.kind === "unsettled") continue;
-              const clone = cloneShaByPath?.get(path);
-              if (clone) heldLedger[path] = { clone, evidence: answer };
-            }
+        const room = Math.max(0, MAX_LEFT_BEHIND_PROBES - leftBehindProbes);
+        const asking = unjudged.slice(0, room);
+        for (const u of unjudged.slice(room)) leftBehindCut.set(u.path, "probes");
+        if (asking.length > 0) {
+          leftBehindProbes += asking.length;
+          evidence = await probeHeldPaths({
+            octokit,
+            primeRef,
+            candidates: asking,
+            maxProbes: asking.length,
+          });
+          for (const [path, answer] of evidence) {
+            if (answer.kind === "unsettled") continue;
+            const clone = cloneShaByPath?.get(path);
+            if (clone) heldLedger[path] = { clone, evidence: answer };
           }
+          await keepLedger("past the window");
         }
       }
       const releasing: string[] = [];
@@ -5069,6 +5178,7 @@ export async function processClone(args: {
             // spec, as the merge (`prepareOne`); current, it is held and owes
             // nothing; anything else is held for a person as before.
             const mergedAs = carryingAllowed ? await tryVariantMerge(lb.spec) : "hold";
+            await keepLedger("past the window");
             if (mergedAs === "write") {
               // Its verdict stays the evidence's `hold`: the spec is reported
               // with the merges (`describeVariantMerges`), not as a release.
@@ -5118,6 +5228,7 @@ export async function processClone(args: {
                   primeSha: primeShaByPath,
                   cloneSha: cloneShaByPath,
                   crossing: deliveredPaths,
+                  readNamed: readings.namedOutsideRoots,
                 })
               : [],
           );
@@ -5127,7 +5238,7 @@ export async function processClone(args: {
         }
         for (const spec of releasing) {
           if ((outsideOf.get(spec) ?? []).some((path) => !outsideVerdicts.has(path))) {
-            leftBehindCut.set(spec, shouldStop() ? "budget" : "outside_probes");
+            leftBehindCut.set(spec, "outside_probes");
             continue;
           }
           leftBehindCut.delete(spec);
@@ -5230,31 +5341,21 @@ export async function processClone(args: {
     // before, so it has no earlier hold to be recognised by.
     needsReconcile.push(...reportableHeld(gated.held));
 
-    if (carryingAllowed && gated.write.length > 0 && !carryStoppedOnBudget) {
+    if (carryingAllowed && gated.write.length > 0) {
       for (const subject of plan.carry) attemptedSubjects.add(subject);
+      // The read ahead is paced on the budget, because a text it leaves
+      // unread is read per file by `prepareOne`: the clock decides how long
+      // the carry takes, never what it carries.
       await prefetchPrimeText(
         gated.write.filter((path) => isSpecPath(path) || !known.has(path)),
         resume?.budget ? (reserveMs) => resume.budget!.isPastDeadline(reserveMs) : undefined,
       );
-      const { results: carried, stopped } = await mapWithConcurrencyUntil<string, Prepared | null>(
-        gated.write,
-        8,
-        prepareOne,
-        shouldStop,
-      );
-      // Deliberately NOT the `preparePaused` treatment. That one hands the
-      // event back because half a module's diff is worse than none; this one
-      // leaves a delivery that is already coherent — every spec whose subject
-      // did not arrive is held with it — so it ships, and the next tick
-      // carries the rest. The specs say they were cut short rather than
-      // refused.
-      // The budget stopped the carry, so stop attempting it — for the same
-      // reason as above, and because "we ran out of window" and "we will try
-      // again in a moment" are the same sentence.
-      if (stopped) {
-        carryStoppedOnBudget = true;
-        carryingAllowed = false;
-      }
+      // Every subject the plan admitted is prepared: the plan's own ceiling
+      // bounds the carry, the clock does not (the rule at the top of the
+      // channel). A carry the clock stopped held every spec still waiting on
+      // it, so two passes reaching here a moment apart delivered different
+      // trees, and a kept tree chain started again.
+      const carried = await mapWithConcurrency<string, Prepared | null>(gated.write, 8, prepareOne);
       // Through the same absorber the main pass uses, so a carried subject
       // reaches `deliveredSource` and is itself re-read for stranded
       // subjects — a spec can carry a spec. A subject that met a rule of its
@@ -5307,20 +5408,14 @@ export async function processClone(args: {
         // not" and "we did not get to" send an operator to opposite places —
         // which is why the word is decided per SPEC rather than per pass.
         //
-        // `carryStoppedOnBudget` and `carryHitCeiling` are set once for the
-        // whole pass and were then stamped on every spec held in every later
-        // round, including one whose subjects were each permanently refused
-        // by a rule. That note reads "we ran out of time" over a list of
-        // reasons we did not, and the operator waits for a next tick to
-        // finish something no tick can.
-        cutShort:
-          refused.length === stranded.length
-            ? null
-            : carryStoppedOnBudget
-              ? "budget"
-              : carryHitCeiling
-                ? "ceiling"
-                : null,
+        // `carryHitCeiling` is set once for the whole pass and was then
+        // stamped on every spec held in every later round, including one
+        // whose subjects were each permanently refused by a rule. That note
+        // reads "we did not get to it" over a list of reasons we did not, and
+        // the operator waits for a next tick to finish something no tick can.
+        // The carry no longer stops on the clock, so "budget" is not a word
+        // it can earn.
+        cutShort: refused.length === stranded.length ? null : carryHitCeiling ? "ceiling" : null,
       });
       // Brought in only because the clone's older copy was being left behind:
       // that older copy is what stays, and the hold says so.
@@ -5355,16 +5450,15 @@ export async function processClone(args: {
 
   // Every kept spec still left behind once the delivery is final, that no
   // rule already holds, is held here — never shipped past. Two ways to reach
-  // this: prime's history cleared it and the carry stopped before it (the
-  // budget or a ceiling), or it was never judged at all (the budget, or the
-  // probe ceiling). Both clear on a later pass, and the note says which.
+  // this: prime's history cleared it and the carry stopped before it (a
+  // ceiling), or it was never judged at all (the probe ceiling). Both clear
+  // on a later pass, and the note says which.
   if (keptSpecSubjects.size > 0) {
     const heldNow = new Set(partition.held.map((h) => h.path));
     for (const lb of keptLeftBehind()) {
       leftBehind.set(lb.spec, lb);
       if (heldNow.has(lb.spec)) continue;
-      const cutShort: LeftBehindCutShort =
-        leftBehindCut.get(lb.spec) ?? (carryStoppedOnBudget ? "budget" : "ceiling");
+      const cutShort: LeftBehindCutShort = leftBehindCut.get(lb.spec) ?? "ceiling";
       const held = leftBehindSpecHold({
         membrane,
         spec: lb.spec,
@@ -5383,6 +5477,20 @@ export async function processClone(args: {
       });
     }
   }
+
+  // ── What the channel paid for, kept before anything else can be lost ────
+  //
+  // Its probe answers and variant verdicts went onto the ledger in memory,
+  // and the next write of the ledger was the tree's pause — so a pass the
+  // platform ended between here and there kept none of them, and the next
+  // pass asked GitHub the same questions again. Measured 20 Oct 2026 (F27's
+  // second reading): the CRM line's pass entered `specs` at 40.8 s, spent
+  // 27.9 s there and was ended after entering `recount`, every pass; replayed
+  // against the same trees, the channel's probes and merges were 99 of its
+  // 111 requests, and a pass that KEPT them spent 11 s in the channel rather
+  // than 21. Written only where the channel learned something, so a pass
+  // that asked nothing writes nothing.
+  await keepLedger();
 
   markPhase("recount");
   // ── …and the removals, once the specs that stay are known ───────────────
@@ -5725,6 +5833,13 @@ export async function processClone(args: {
     // reference check has usually read them already.
     const heldFiles: Record<string, string> = {};
     const heldFilesPrime: Record<string, string> = {};
+    // Both sides read ahead a batch at a time, by the blob ids the listings
+    // gave: replayed on `npc-crm-independent-6505dc` (20 Oct 2026), prime's
+    // copies alone were 70 contents requests, all at once. A path prime's
+    // complete listing does not hold is one prime has no copy of, and is not
+    // asked for; whatever a batch does not answer is read per file, as before.
+    await Promise.all([prefetchCloneText(heldSourcePaths), prefetchPrimeText(heldSourcePaths)]);
+    const primeHolds = (path: string) => primeShaByPath === null || primeShaByPath.has(path);
     await Promise.all(
       heldSourcePaths.flatMap((path) => [
         // A read that fails is not a file with no imports. Skipping it loses a
@@ -5742,6 +5857,12 @@ export async function processClone(args: {
         // purpose, which is what "held" means — but comparing what each imports
         // from a module this run is delivering is not.
         (async () => {
+          const batched = exactPrimeText.get(path);
+          if (batched !== undefined) {
+            heldFilesPrime[path] = batched.text;
+            return;
+          }
+          if (!primeHolds(path)) return;
           try {
             const f = await getFileContent(octokit, primeRef, path);
             if (f) heldFilesPrime[path] = f.content;

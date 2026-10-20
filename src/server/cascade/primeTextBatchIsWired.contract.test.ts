@@ -33,7 +33,9 @@ const prepareStart = engine.indexOf("const prepareOne = async (path: string)");
 const mainPool = engine.indexOf(">(primeFiles, 8, prepareOne, shouldStop);", prepareStart);
 const prepare = engine.slice(prepareStart, mainPool);
 
-const carryPool = engine.indexOf("gated.write,\n        8,\n        prepareOne,");
+const carryPool = engine.indexOf(
+  "await mapWithConcurrency<string, Prepared | null>(gated.write, 8, prepareOne);",
+);
 
 describe("the slices this file reads exist", () => {
   it("finds the cache, the closure's reader, the prepare step and both pools", () => {

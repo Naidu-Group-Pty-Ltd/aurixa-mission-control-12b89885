@@ -111,17 +111,8 @@ export async function listFilesMatchingGlobs(
   globs: string[],
 ): Promise<string[]> {
   if (globs.length === 0) return [];
-  // Defence in depth: even if a caller forgets to run validateModuleGlobs,
-  // never build a matcher for a pattern that could escape the module scope.
-  const { validateModuleGlobs, isSafeRepoPath, globToRegex } = await import("@/lib/module-globs");
-  const { valid, invalid } = validateModuleGlobs(globs);
-  if (invalid.length > 0) {
-    console.warn(
-      `[github-app] rejected ${invalid.length} unsafe glob(s):`,
-      invalid.map((i) => `${i.glob} (${i.reason})`).join(", "),
-    );
-  }
-  if (valid.length === 0) return [];
+  const matches = await safeGlobsMatcher(globs);
+  if (matches === null) return [];
   // Get the commit SHA of the branch
   const { data: branch } = await octokit.repos.getBranch({
     owner: ref.owner,
@@ -135,11 +126,47 @@ export async function listFilesMatchingGlobs(
     tree_sha: treeSha,
     recursive: "true",
   });
-  const matchers = valid.map(globToRegex);
   return (tree.tree ?? [])
     .filter((n) => n.type === "blob" && typeof n.path === "string")
     .map((n) => n.path as string)
-    .filter((p) => isSafeRepoPath(p) && matchers.some((rx) => rx.test(p)));
+    .filter(matches);
+}
+
+/**
+ * The paths among `paths` that `globs` select, in their order — the matching
+ * half of `listFilesMatchingGlobs`, for a caller that has already listed the
+ * tree. The cascade lists prime's tree once and asks this of the listing,
+ * where it used to list the same tree a second time to ask it.
+ */
+export async function pathsMatchingGlobs(
+  paths: Iterable<string>,
+  globs: readonly string[],
+): Promise<string[]> {
+  if (globs.length === 0) return [];
+  const matches = await safeGlobsMatcher(globs);
+  return matches === null ? [] : [...paths].filter(matches);
+}
+
+/**
+ * The test both of the above apply: a safe repository path that one of the
+ * VALID globs selects. Null where no glob survives validation.
+ */
+async function safeGlobsMatcher(
+  globs: readonly string[],
+): Promise<((path: string) => boolean) | null> {
+  // Defence in depth: even if a caller forgets to run validateModuleGlobs,
+  // never build a matcher for a pattern that could escape the module scope.
+  const { validateModuleGlobs, isSafeRepoPath, globsMatcher } = await import("@/lib/module-globs");
+  const { valid, invalid } = validateModuleGlobs(globs);
+  if (invalid.length > 0) {
+    console.warn(
+      `[github-app] rejected ${invalid.length} unsafe glob(s):`,
+      invalid.map((i) => `${i.glob} (${i.reason})`).join(", "),
+    );
+  }
+  if (valid.length === 0) return null;
+  const selected = globsMatcher(valid);
+  return (p) => isSafeRepoPath(p) && selected(p);
 }
 
 /**

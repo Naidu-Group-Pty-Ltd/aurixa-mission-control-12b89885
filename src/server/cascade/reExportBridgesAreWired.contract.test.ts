@@ -28,10 +28,12 @@ describe("the pool is read once, before the carry loop", () => {
     const block = engine.slice(pool, loopStart);
     expect(block).toMatch(/widenedScope !== null &&/);
     expect(block).toContain("bridgeCandidates({");
-    // Paced on the pass's clock: an unread bridge is merely not owed this pass.
-    expect(block).toMatch(
-      /if \(bridgePool\.length > 0\) \{\s*await prefetchPrimeText\(\s*bridgePool,\s*resume\?\.budget \? \(reserveMs\) => resume\.budget!\.isPastDeadline\(reserveMs\) : undefined,\s*\);\s*\}/,
-    );
+    // Read whole, never cut by the clock: an unread bridge is not owed, so a
+    // read the clock stopped would decide what the pass delivers, and a kept
+    // tree chain resumes only the very delivery it was started for (F27's
+    // second reading, 20 Oct 2026).
+    expect(block).toMatch(/if \(bridgePool\.length > 0\) await prefetchPrimeText\(bridgePool\);/);
+    expect(block).not.toContain("isPastDeadline");
   });
 });
 

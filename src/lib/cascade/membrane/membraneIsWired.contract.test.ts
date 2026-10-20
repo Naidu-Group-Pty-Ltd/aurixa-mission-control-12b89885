@@ -194,7 +194,7 @@ describe("the engine asks the membrane", () => {
     // being the same function, not by a second implementation agreeing.
     const block = carryLoop();
     expect(block).toMatch(
-      /mapWithConcurrencyUntil<[\s\S]{0,120}>\(\s*gated\.write\s*,\s*8\s*,\s*prepareOne/,
+      /mapWithConcurrency<[\s\S]{0,120}>\(\s*gated\.write\s*,\s*8\s*,\s*prepareOne/,
     );
     // And there is exactly one such judgement to be the same as.
     expect(engine.match(/const prepareOne = async/g) ?? []).toHaveLength(1);
@@ -226,7 +226,7 @@ describe("the engine asks the membrane", () => {
       /partitionCascadePaths\(\s*plan\.carry\s*,\s*exclusions\s*(?:,\s*(?:\{[^}]*\}|lineOpts)\s*)?\)/,
     );
     // And what it carries is the WRITE half, never the whole plan.
-    expect(block).toMatch(/mapWithConcurrencyUntil<[\s\S]{0,120}>\(\s*gated\.write\s*,/);
+    expect(block).toMatch(/mapWithConcurrency<[\s\S]{0,120}>\(\s*gated\.write\s*,/);
     // The same exclusions the first partition used, not a second list.
     expect(engine).toMatch(
       /partitionCascadePaths\(candidatePaths,\s*exclusions(?:,\s*(?:\{[^}]*\}|lineOpts))?\)/,
@@ -257,9 +257,23 @@ describe("the engine asks the membrane", () => {
     expect(ledger).toBeGreaterThan(carry);
   });
 
-  it("answers to the pass's own clock, so carrying cannot overrun a budget", () => {
+  it("answers to its own ceiling and never to the clock, so a delivery does not depend on when it was judged", () => {
+    // A kept tree chain resumes only the delivery it was started for (F25).
+    // While the carry stopped at the pass's budget, two passes reaching the
+    // channel a moment apart delivered different trees — replayed on the CRM
+    // line (20 Oct 2026, F27's second reading), 1,324 files, then 1,342, then
+    // 1,324, and the chain started again twice in eight passes.
     const block = carryLoop();
-    expect(block).toContain("shouldStop");
+    expect(block).not.toContain("shouldStop");
+    expect(block).not.toContain("mapWithConcurrencyUntil");
+    expect(block).toMatch(/limit: Math\.max\(0, MAX_SUBJECTS_CARRIED - carriedSubjects\.length\)/);
+    // The one reading of the clock left is the read ahead's pace, which
+    // decides how long the carry takes and never what it carries: a text it
+    // leaves unread is read per file by `prepareOne`.
+    expect(block.match(/isPastDeadline/g) ?? []).toHaveLength(1);
+    expect(block).toMatch(
+      /await prefetchPrimeText\(\s*gated\.write\.filter\([\s\S]{0,120}?\),\s*resume\?\.budget \? \(reserveMs\) => resume\.budget!\.isPastDeadline\(reserveMs\) : undefined,\s*\);/,
+    );
   });
 
   it("holds the spec rather than dropping it silently", () => {
@@ -566,21 +580,24 @@ describe("the engine looks for the specs a delivery leaves behind", () => {
     expect(unasked).toBeGreaterThan(ask);
     expect(push).toBeGreaterThan(unasked);
     expect(branch).toMatch(
-      /\.some\(\(path\) => !outsideVerdicts\.has\(path\)\)\) \{\s*leftBehindCut\.set\(spec, shouldStop\(\) \? "budget" : "outside_probes"\);\s*continue;/,
+      /\.some\(\(path\) => !outsideVerdicts\.has\(path\)\)\) \{\s*leftBehindCut\.set\(spec, "outside_probes"\);\s*continue;/,
     );
   });
 
-  it("asks prime's history within a ceiling and never past the pass's own clock", () => {
+  it("asks prime's history within a ceiling, never by the clock, and keeps each answer", () => {
     const block = reverseHalf();
     // The spec's own question, not the one about files outside the roots.
     const from = block.indexOf("if (carryingAllowed && unjudged.length > 0) {");
     expect(from).toBeGreaterThan(-1);
     const branch = block.slice(from, block.indexOf("const releasing: string[] = [];", from));
     expect(branch).toContain("MAX_LEFT_BEHIND_PROBES - leftBehindProbes");
-    const clock = branch.indexOf("if (shouldStop()) {");
+    // The clock decides nothing here: an unasked spec would be held, and the
+    // delivery would depend on when the pass reached this line.
+    expect(branch).not.toContain("shouldStop");
     const probe = branch.indexOf("await probeHeldPaths({");
-    expect(clock).toBeGreaterThan(-1);
-    expect(probe).toBeGreaterThan(clock);
+    const kept = branch.indexOf('await keepLedger("past the window");');
+    expect(probe).toBeGreaterThan(-1);
+    expect(kept).toBeGreaterThan(probe);
   });
 
   it("holds a spec the evidence refused, for a person, rather than dropping it", () => {
@@ -704,13 +721,14 @@ describe("a spec's subject outside the content roots travels only on evidence", 
     );
   });
 
-  it("asks within its own ceiling, never past the clock, and never takes a failed read for a verdict", () => {
+  it("asks within its own ceiling, never by the clock, and never takes a failed read for a verdict", () => {
     const block = judge();
     expect(block).toContain("MAX_OUTSIDE_ROOT_PROBES - outsideProbes");
-    const clock = block.indexOf("shouldStop()");
+    expect(block).not.toContain("shouldStop");
     const probe = block.indexOf("await probeHeldPaths({");
-    expect(clock).toBeGreaterThan(-1);
-    expect(probe).toBeGreaterThan(clock);
+    const kept = block.indexOf('await keepLedger("past the window");');
+    expect(probe).toBeGreaterThan(-1);
+    expect(kept).toBeGreaterThan(probe);
     expect(block).toMatch(/if \(answer\.kind === "unsettled"\) continue;/);
     // The verdict is the held-path rule's, word for word: nothing of the
     // clone's may be lost, or a person approved losing it.

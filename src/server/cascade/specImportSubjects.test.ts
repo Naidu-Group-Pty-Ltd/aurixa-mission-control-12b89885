@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { strandedSubjects, subjectsNamedBy } from "@/lib/cascade/membrane/membrane.pure";
 import { subjectsImportedBy } from "./specImportSubjects.pure";
+import { importsOf } from "./importClosure.pure";
 import { stripComments } from "../sourceComments.pure";
 
 describe("a subject the spec imports rather than names", () => {
@@ -30,6 +31,18 @@ describe("a subject the spec imports rather than names", () => {
       "src/lib/secureInvoke.ts",
       "supabase/functions/_shared/aml/regulatedActs.pure.ts",
     ]);
+  });
+
+  it("reads the specifiers through a caller's kept answers, and resolves them the same way", () => {
+    const seen: string[] = [];
+    const readImports = (source: string) => {
+      seen.push(source);
+      return importsOf(source);
+    };
+    expect(subjectsImportedBy(SPEC, specPath, prime, readImports)).toEqual(
+      subjectsImportedBy(SPEC, specPath, prime),
+    );
+    expect(seen).toEqual([SPEC]);
   });
 
   it("finds what no literal rule reads, which is why it exists", () => {
@@ -87,8 +100,11 @@ describe("both server callers hand the membrane what a spec imports", () => {
     const engine = stripComments(readFileSync("src/server/cascade-engine.server.ts", "utf8"));
     const at = engine.indexOf("strandedSubjects({");
     expect(at).toBeGreaterThan(-1);
-    expect(engine.slice(at, at + 400)).toContain(
-      "imported: primeShaByPath ? subjectsImportedBy(specText, specPath, primeShaByPath) : []",
+    // Only for a spec, which is the only file `strandedSubjects` reads it
+    // for, and through the pass's kept readings: every round asked it of
+    // every delivered file and threw the answer away for all but the specs.
+    expect(engine.slice(at, at + 400)).toMatch(
+      /imported:\s*primeShaByPath && isSpecPath\(specPath\)\s*\?\s*subjectsImportedBy\(specText, specPath, primeShaByPath, readings\.importsOf\)\s*:\s*\[\]/,
     );
   });
 

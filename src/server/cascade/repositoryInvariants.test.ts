@@ -239,12 +239,15 @@ describe("invariants widen what is SENT, never what is REMOVED", () => {
     const src = engine();
     expect(src).toMatch(/const \{ valid \} = validateModuleGlobs\(installedGlobs\);/);
 
-    // From the module branch's own `primeInScope` forward to ITS deletion
-    // push — the mirror branch has one of those too, earlier in the file.
-    const after = src.slice(src.indexOf("const primeInScope"));
+    // From the narrow set's validation forward to the module branch's own
+    // deletion push — the mirror branch has one of those too, earlier in the
+    // file. One matcher of the INSTALLED globs answers both questions.
+    const after = src.slice(src.indexOf("const { valid } = validateModuleGlobs(installedGlobs);"));
     const scoped = after.slice(0, after.indexOf("deletionCandidates.push"));
     expect(scoped.length).toBeGreaterThan(0);
-    expect(scoped).toContain("installedGlobs");
+    expect(scoped).toContain("const inInstalledGlobs = globsMatcher(valid);");
+    expect(scoped).toContain("new Set(candidatePaths.filter(inInstalledGlobs))");
+    expect(scoped).toContain("if (!inInstalledGlobs(path)) continue;");
     expect(scoped).not.toMatch(/primeInScope\s*=\s*new Set\(candidatePaths\)/);
   });
 

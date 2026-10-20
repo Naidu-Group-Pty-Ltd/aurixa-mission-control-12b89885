@@ -185,4 +185,24 @@ describe("outsideRootCandidates — the only files worth a question to prime's h
     expect(MAX_OUTSIDE_ROOT_PROBES).toBeGreaterThan(0);
     expect(MAX_OUTSIDE_ROOT_PROBES).toBeLessThanOrEqual(32);
   });
+
+  it("takes the names from a caller that kept them, and answers as a fresh reading does", () => {
+    const asked: string[] = [];
+    const readNamed = (t: string, path: string) => {
+      asked.push(path);
+      return subjectsNamedOutsideRoots(t, path);
+    };
+    const args = {
+      specPath: SPEC,
+      specText: text,
+      primeSha,
+      cloneSha,
+      crossing: new Set<string>(),
+    };
+    expect(outsideRootCandidates({ ...args, readNamed })).toEqual(outsideRootCandidates(args));
+    expect(asked).toEqual([SPEC]);
+    // And a file that is not a spec is not read at all.
+    outsideRootCandidates({ ...args, specPath: "src/lib/a.pure.ts", readNamed });
+    expect(asked).toEqual([SPEC]);
+  });
 });
