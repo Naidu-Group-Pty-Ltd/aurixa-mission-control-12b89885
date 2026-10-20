@@ -18,6 +18,14 @@ This session's GitHub identity is `lavan96`. Its branches are
 `claude/sweet-tesla-pdemno` in Prime and in Mission Control (MC). Every state
 below is something you can re-read, and every step is a command you can run.
 
+**Updated 20 Oct 2026, 02:50 UTC, by the session that continued this one.** It
+re-read every row of §1 (marked ‡), found F20 (§3), and pushed only to its own
+branches, `claude/confidential-report-cleanup-at2jfw`, in Prime, MC and
+npc-crm-independent. In Prime and MC that branch is the open pull request's
+head plus one commit, so carrying it into #3343 or #346 is a fast-forward. It
+pushed to no other session's branch and opened no pull request: both wait on
+the owner's word (Step C, §5).
+
 **Merges need the owner.** This session merged Prime #3342 (step 1 of the plan).
 The session's safety controls then refused the next merge-related action as
 "merge without review", so no other merge was attempted. Every remaining merge
@@ -25,19 +33,20 @@ below is the owner's to approve, or to make.
 
 ---
 
-## 1. State at hand-over (15:35 UTC, 19 Oct 2026; rows marked † re-read at 16:05)
+## 1. State at hand-over (15:35 UTC, 19 Oct 2026; rows marked † re-read at 16:05, and ‡ at 02:45 UTC on 20 Oct)
 
 | Piece | Where | State |
 |---|---|---|
 | Prime: actions pinned, Deno and the Supabase CLI from their releases | npc-property-dashbord#3342 | **Merged** 14:39:50 UTC as `66290065` (merge commit, `--match-head` `f2eef880`). On `main`: CI 9085 green; Deploy Supabase functions 1124 green, but it deployed nothing (§3, F17); PDF Import Release Gate 4438 green. Deploy the PDF-import sidecar (run 3) and Deploy the render container (run 5) `startup_failure`: they name `google-github-actions/*`, the owner's allow-list item. |
 | Prime: `listings-cache` memory fix | npc-property-dashbord#3341, head `efeead42` | Open, unchanged. Green on its own CI 9082. `mergeable_state: unstable` only for the old `static-and-fast`. Its three pin commits are cherry-picks of #3342's, so they merge as no-ops. **Merging it redeploys every Edge Function** (it changes `supabase/functions/_shared/listingsCache.pure.ts`, and a `_shared/` change deploys all), which is also the CLI step's first production run. |
-| † Prime: the `pdf-extraction-v3-gates` fix (the handoff's step 3) | npc-property-dashbord#3343, branch `claude/sweet-tesla-pdemno`, head **`9563070a`** (4 commits) | **`static-and-fast` passed on `60495442`** — run 39275041962, job 118137024278, 15:06–15:08 UTC, the first green run of that check since it was created. On the runner Playwright installed Chromium v1248 `--with-deps`, the detector found it, the pure suites ran 50 tests and the e2e passed 2, giving `releaseReady: true` with 7 required checks: 0 failed, 0 skipped, 0 unavailable. **Then Codex's review (15:26) found the first cut too narrow (P1) and too lenient on expired signatures (P2), and applying its rule found F19.** Both accepted: `e86bec0a` removes `report.pdf` and `final.png`, and `9563070a` bans media anywhere but named asset directories and makes every complete signature a finding. Both threads were answered and resolved. Locally on `9563070a`: release-gate specs 53 passed, CI's Template Builder step 345 files and 4,394 tests passed, the static and fast gates PASS, and the tracked scan reads 0. CI on `9563070a` was queued at 16:05 behind a runner backlog (see the MC #346 row). |
-| † MC: a refresh over hand commits proceeds where both sides agree or merge cleanly | aurixa-mission-control-12b89885#346, branch `claude/sweet-tesla-pdemno` | Draft. **New since 14:05, and now a prerequisite for #379** (§3, F15). Tests 448 files / 9,061 passed locally. MC CI run 39278874959 on `971e773e`: every step passed by 15:36:55 (typecheck, lint, test, build). At 16:05 GitHub still showed the job as in progress — the same lag Prime's runs showed then. Needs a Lovable publish after merge. |
+| †‡ Prime: the `pdf-extraction-v3-gates` fix (the handoff's step 3) | npc-property-dashbord#3343, branch `claude/sweet-tesla-pdemno`, head **`9563070a`** (4 commits) | **`static-and-fast` passed on `60495442`** — run 39275041962, job 118137024278, 15:06–15:08 UTC, the first green run of that check since it was created. On the runner Playwright installed Chromium v1248 `--with-deps`, the detector found it, the pure suites ran 50 tests and the e2e passed 2, giving `releaseReady: true` with 7 required checks: 0 failed, 0 skipped, 0 unavailable. **Then Codex's review (15:26) found the first cut too narrow (P1) and too lenient on expired signatures (P2), and applying its rule found F19.** Both accepted: `e86bec0a` removes `report.pdf` and `final.png`, and `9563070a` bans media anywhere but named asset directories and makes every complete signature a finding. Both threads were answered and resolved. Locally on `9563070a`: release-gate specs 53 passed, CI's Template Builder step 345 files and 4,394 tests passed, the static and fast gates PASS, and the tracked scan reads 0. ‡ **CI on `9563070a` finished green but for one check.** `verify`, `security`, all three shards, `template-geometry`, `static-and-fast` and `pdf-import-regression` passed, and the rest were skipped by scope. `pdf-import-release-gate` (run 39281399479, job 118156219877) failed at 50/100 on exactly the two files `e86bec0a` deletes (F20). The fix is `6546c389` on `claude/confidential-report-cleanup-at2jfw`, whose parent is `9563070a`. #3343's own branch has not moved (Step C). |
+| †‡ MC: a refresh over hand commits proceeds where both sides agree or merge cleanly | aurixa-mission-control-12b89885#346, branch `claude/sweet-tesla-pdemno`, head `228064c6` | ‡ **Ready** (marked at 16:08), `mergeable_state: clean`. **New since 14:05, and now a prerequisite for #379** (§3, F15). Tests 448 files / 9,061 passed locally. CI green on `228064c6` (run 39282801101: Typecheck · Lint · Build, and the Lovable install check). Codex reviewed `228064c6` and found nothing. Needs a Lovable publish after merge. This update is one commit on top of it, on `claude/confidential-report-cleanup-at2jfw`. |
 | MC: forwarded configuration follows MC's value | aurixa-mission-control-12b89885#345 | Unchanged; held on purpose until #3341 is on all four clones (F4). |
-| † Clone `npc-client-dashboard` cascade | npc-client-dashboard#379, head `06d2d096` | Unchanged and still held on `static-and-fast` (run 62, 13:03 UTC). The 15:00 pass deferred its refresh (F15); the 15:03 pass found the statement for prime `66290065` equal to its head ("carries this exact tree"). Every pass since has deferred the same way, the latest at 15:59:00 (events `0aa71083`, `58333aed`, `d9fd07ee`, `0b329741`). Its tree holds both F19 files. |
-| Clone `npc-crm-independent`: pins | npc-crm-independent-6505dc#123, head `86a9fa5b` | Unchanged. Every check green except `static-and-fast` (the V2 scanner, not required). It is not a cascade PR, so MC's drain does not hold it; it merges when a person merges it. |
-| † Clone `npc-crm-independent`: cascade | npc-crm-independent-6505dc#121, head `25acc6eb` | Unchanged since 17 Oct. Its last run failed `verify` and `security` on F10's held files, and never ran `static-and-fast`. The engine is still working it: four `pushing` rows (events `0aa71083`, `58333aed`, `d9fd07ee`, `0b329741`), each at `attempts` 3, last touched 15:50–15:59, with no `pr_url` yet. Its tree holds both F19 files, and the cascade cannot remove them there (Step E). |
-| † `clones` | MC database | Unchanged: CD `cascading` (596 behind); CRM `cascading` (928); NPC Test `cascading` (635); Preflight `behind` (635). The two children wait on lineage for #379 ("Parent NPC Client Dashboard carries prime@881e7e0; this pass delivers prime@6629006"). |
+| †‡ Clone `npc-client-dashboard` cascade | npc-client-dashboard#379, head `06d2d096` | Unchanged and still held on `static-and-fast` (run 62, 13:03 UTC). The 15:00 pass deferred its refresh (F15); the 15:03 pass found the statement for prime `66290065` equal to its head ("carries this exact tree"). Every pass since has deferred the same way, the latest at 15:59:00 (events `0aa71083`, `58333aed`, `d9fd07ee`, `0b329741`). Its tree holds both F19 files. ‡ Unchanged on 20 Oct: the passes at 02:35 and 02:37 UTC deferred its refresh in the same words. |
+| ‡ Clone `npc-crm-independent`: pins | npc-crm-independent-6505dc#123, head `86a9fa5b` | Unchanged on 20 Oct. Every check green except `static-and-fast` (the V2 scanner, not required). It is not a cascade PR, so MC's drain does not hold it; it merges when a person merges it. |
+| †‡ Clone `npc-crm-independent`: cascade | npc-crm-independent-6505dc#121, head `25acc6eb` | Unchanged since 17 Oct. Its last run failed `verify` and `security` on F10's held files, and never ran `static-and-fast`. The engine is still working it: four `pushing` rows (events `0aa71083`, `58333aed`, `d9fd07ee`, `0b329741`), each at `attempts` 3, last touched 15:50–15:59, with no `pr_url` yet. Its tree holds both F19 files, and the cascade cannot remove them there (Step E). ‡ On 20 Oct its rows still cycle from `queued` to `pushing` about once a minute, the latest at 02:37 UTC (events `58333aed`, `d9fd07ee`, `0b329741`), with no `pr_url` and no `error_message`. |
+| ‡ Clone `npc-crm-independent`: the F19 deletion | branch `claude/confidential-report-cleanup-at2jfw`, commit `6ba9451d` | **New on 20 Oct.** Removes `report.pdf` and `final.png` (Prime's blobs) on top of `main` `6322c63e`. Pushed, with no pull request yet. Step E says how it may land. |
+| †‡ `clones` | MC database | Unchanged at 16:05, and again at 02:45 UTC on 20 Oct: CD `cascading` (596 behind); CRM `cascading` (928); NPC Test `cascading` (635); Preflight `behind` (635). The two children wait on lineage for #379 ("Parent NPC Client Dashboard carries prime@881e7e0; this pass delivers prime@6629006"). |
 | `clone_backend_secrets.AIRTABLE_TABLE_NAME` | all four clones | `inherited`, last set in September; `AIRTABLE_TOKEN` and `AIRTABLE_BASE_ID` `withheld`. Unchanged until #345 is published. |
 
 ---
@@ -66,18 +75,33 @@ Acceptance: the next pass's row for npc-client-dashboard reads
 `pr_opened`/`skipped` with a preserving merge on #379, not `Proposal #379
 carries this clone's own commits; its refresh was deferred`.
 
-### Step C — merge Prime #3343, then #3341 (or the other way round)
+### Step C — move #3343 onto its fix, then merge it and #3341 (in either order)
+
+**First, #3343's fix.** `pdf-import-release-gate` fails #3343's head on the two
+files it deletes (§3, F20). The fix is one commit, `6546c389`, on Prime's
+`claude/confidential-report-cleanup-at2jfw`, and its parent is #3343's head, so
+moving the pull request onto it is a fast-forward (the push refuses anything
+else):
+
+```sh
+git fetch origin claude/confidential-report-cleanup-at2jfw
+git push origin 6546c389d5a0e117867d0d61fb8b8bbc1419857c:refs/heads/claude/sweet-tesla-pdemno
+```
+
+Then wait for #3343's full gate on `6546c389`, `pdf-import-release-gate`
+included, before merging:
 
 ```sh
 gh api -X PUT repos/Naidu-Group-Pty-Ltd/npc-property-dashbord/pulls/3343/merge \
-  -f merge_method=merge -f sha=9563070ae38f3d809b4b6530b3a06141f93de109   # or the head its full gate passed on
+  -f merge_method=merge -f sha=6546c389d5a0e117867d0d61fb8b8bbc1419857c   # or the head its full gate passed on
 gh api -X PUT repos/Naidu-Group-Pty-Ltd/npc-property-dashbord/pulls/3341/merge \
   -f merge_method=merge -f sha=efeead420b6046ae8585d4a5822253473d78dcb9
 ```
 
 Use merge commits, never squash (Prime's steward convention). Merge #3343
 whole: its commit `e86bec0a` (the F19 removal) is a separate commit so the
-history reads plainly, but `9563070a`'s scanner fails without it.
+history reads plainly, but `9563070a`'s scanner fails without it, and only
+`6546c389` lets the release gate pass with it.
 
 With #346 live the order does not matter. If #346 is published first, the
 refresh after #3341 moves #379 onto prime's pins with no merge at all. The
@@ -103,7 +127,9 @@ the new spec), its first chance to pass there.
 Nothing to do by hand once B and C are done. The engine refreshes #379 with a
 preserving merge, `static-and-fast` runs on the refreshed head with the V3
 scanner, and the drain lands it (`merge_method: "merge"`). The same refresh
-should delete `report.pdf` and `final.png` from the clone.
+should delete `report.pdf` and `final.png` from the clone, and it carries
+`6546c389`'s release gate with them, so `pdf-import-release-gate` on #379 reads
+the deletion as a deletion (F20).
 `deletionPropagation.pure.ts` delivers a deletion where the clone's copy is
 byte-identical to a version Prime held at that path, and the clone's blobs
 (`2672038f…`, `f67340e2…`) are Prime's. Neither file is imported and two is far
@@ -136,6 +162,18 @@ make F10's held-file reconcile on its branch, naming `prime@<sha>` exactly once.
    else — and MC's drain holds the PR on them until a person deletes the
    files. That is the correct verdict. A deletion is the clone's own change,
    not a held file, so it needs no `prime@` token.
+
+   The deletion is ready as a commit: `6ba9451d` on npc-crm-independent's
+   `claude/confidential-report-cleanup-at2jfw`, on top of `main` `6322c63e`.
+   Cherry-pick it into the reconcile (`git cherry-pick 6ba9451d`), or open a
+   pull request from that branch and merge it after #123. If it goes in on
+   its own, mind the order. The line's `pdf-import-release-gate.yml` runs on
+   every push to `main` with no paths filter, and until a cascade carries
+   `6546c389`'s script there (`scripts/**` is an invariant), that run reads
+   the two deletions as two critical findings. It goes red on `main` and
+   holds nothing, but say so if it happens. The pull request itself does not
+   run that workflow, because its `pull_request` paths filter names no root
+   file.
 2. **Watch the fast tier there.** `pdf-extraction-v3-gates.yml` is a judging
    workflow, so on a module-scoped clone it is held, and the line keeps its
    own copy. That copy runs `npx playwright install chromium` without
@@ -162,7 +200,7 @@ As the handoff's steps 7–8.
 
 ---
 
-## 3. Findings since 14:05 (F15–F19)
+## 3. Findings since 14:05 (F15–F20)
 
 ### F15. The refresh deadlocked on the hand commits' own bytes
 
@@ -291,6 +329,41 @@ its blockers are F10's.
     preview. A `text/html` answer is the single-page-app fallback. An
     `application/pdf` answer means the file is being served.
 
+### F20. The release gate read the removal as the leak
+
+- **What.** On #3343's head `9563070a`, `pdf-import-release-gate` (run
+  39281399479, job 118156219877) failed at 50/100 with
+  `[critical] no_private_pdfs_staged` (`report.pdf`) and
+  `[critical] no_generated_images_staged` (`final.png`), the two files
+  `e86bec0a` deletes. Every other check on that head passed or was skipped by
+  scope.
+- **Why.** `pdf-import-release-gate.mjs` listed its candidates (the committed
+  range, the staged files and the unstaged files) with `git diff --name-only`,
+  which lists a deleted path like any other, and `classifyArtifact` judges by
+  path alone. So the pull request removing the report read as staging it.
+- **The fix.** `6546c389`, one commit on top of `9563070a` on Prime's
+  `claude/confidential-report-cleanup-at2jfw`, passes `--diff-filter=d` to all
+  three listings. The lowercase filter drops deletions alone: a file that is
+  added, modified, copied or renamed is still listed, a rename under its new
+  path. `pdfImportReleaseGateDiffRange.spec.ts` pins the filter on all three
+  and runs the script's own command in a real repository, with the unfiltered
+  command as the control.
+- **Measured locally, on the same commits.** The static gate with its Phase
+  11D specs reads FAIL 50/100 before and PASS 100/100 after. CI's Template
+  Builder step passes 345 files and 4,396 tests, and the V3 scanner reads 0.
+  The build was not run here: `npm install` cannot fetch `xlsx` from
+  `cdn.sheetjs.com`, which this session's network policy refuses. The commit
+  touches no file the build reads, and #3343's CI built the tree before it.
+- **Why it rides in #3343.** Every mirror clone's cascade PR that carries the
+  deletion would fail the same check, and MC's drain reads every check on a
+  cascade PR, so #379 would trade one hold for another. Carried together, the
+  cascade delivers the fixed script with the deletion. npc-client-dashboard
+  and npc-crm-independent both hold Prime's current script byte for byte
+  (`d64804cf`), so it arrives there as a plain update.
+- **The CRM line.** Its `pdf-import-release-gate.yml` runs on every push to
+  `main` with no paths filter, so a deletion merged there is judged by
+  whichever script the line holds at that moment (Step E).
+
 ---
 
 ## 4. What shipped in this session
@@ -322,12 +395,28 @@ its blockers are F10's.
     and `CASCADE_MEMBRANES.md`;
   - this document.
 
+### And on 20 Oct, by the session that continued this one
+
+- Prime, `claude/confidential-report-cleanup-at2jfw` (#3343's four commits
+  plus one): `6546c389`, the release gate lists no deleted file (F20).
+- npc-crm-independent, `claude/confidential-report-cleanup-at2jfw`:
+  `6ba9451d` removes `report.pdf` and `final.png` (F19), on `main`
+  `6322c63e`.
+- MC, `claude/confidential-report-cleanup-at2jfw` (#346's three commits plus
+  one): this update.
+
+It opened no pull request and pushed to no other session's branch.
+
 ---
 
 ## 5. Only the owner can do these
 
 1. Approve, or make, the merges in §2: MC #346, Prime #3343 and #3341, CRM
    #123, and later MC #345. Then publish MC after #346 and again after #345.
+   Before #3343 merges, say whether it may be moved onto `6546c389`
+   (Step C). The same goes for #346 and this update, one commit on top of
+   it: carry it in before the squash, or merge #346 first and open a pull
+   request for this commit alone.
 2. F19's three decisions: whether to purge the confidential report from the
    history of all five repositories; whether the exposure needs any notice
    (the client, the regulator); and the one-line `curl -sI` check of whether
@@ -361,3 +450,6 @@ its blockers are F10's.
 - **A reviewer's objection about scope is a measurement waiting to be run.**
   "This could let a private export through" was answered by running the
   wider rule over six trees, and it found one.
+- **A deletion is the remedy, never the finding.** A check that judges
+  files by path has to list only what a branch adds, changes or renames, or
+  it fails the pull request doing what the check asks for (F20).
