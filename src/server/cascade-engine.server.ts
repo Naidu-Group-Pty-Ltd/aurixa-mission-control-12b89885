@@ -3872,6 +3872,7 @@ export async function processClone(args: {
     }
   }
 
+  markPhase("registry");
   // ── the security registry: prime's entries, plus the clone's own ─────────
   //
   // `supabase/functions-registry/**` is a repository invariant, so prime's
@@ -3953,6 +3954,7 @@ export async function processClone(args: {
     }
   }
 
+  markPhase("baselines");
   // ── prime's security baseline cannot describe a repository it is not ─────
   //
   // Decided AFTER both reconciles, because what they carried forward is the
@@ -4193,6 +4195,7 @@ export async function processClone(args: {
     }
   }
 
+  markPhase("surface");
   // ── the mobile API surface: generated from the two files just reconciled ─
   //
   // `mobile/api-surface.json` is written by `npm run mobile:api` from the
@@ -4320,6 +4323,7 @@ export async function processClone(args: {
     }
   }
 
+  markPhase("workflow");
   // ── the deploy workflow: the same shape, found the same way ────────────
   //
   // `.github/workflows/deploy-supabase-functions.yml` is excluded for a reason
@@ -4405,6 +4409,7 @@ export async function processClone(args: {
     }
   }
 
+  markPhase("survivors");
   // ── Which of prime's deletions this delivery makes ──────────────────────
   //
   // Decided HERE, before the spec channel, and the order is the fix. The

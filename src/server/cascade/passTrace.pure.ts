@@ -39,11 +39,26 @@ export const PASS_PHASES = [
   /** Each file judged and prepared. */
   "prepare",
   /**
-   * The delivery's reconciled files: config, the security registry and
-   * baselines, the mobile surface, the deploy workflow, and which of prime's
-   * deletions it makes.
+   * The prepared files absorbed into the delivery, `supabase/config.toml`,
+   * the merged line variants, and what the prime keeps for itself. Split
+   * further on 20 Oct 2026, into the five stages below: the CRM line's first
+   * traced pass entered `deliver` at 25.3 s and recorded nothing after it,
+   * and every one of them reads the clone over the API.
    */
   "deliver",
+  /** The security registry: prime's entries, plus the clone's own. */
+  "registry",
+  /** The security baselines, held or regenerated against the source. */
+  "baselines",
+  /** The mobile API surface, generated from the files just reconciled. */
+  "surface",
+  /** The deploy workflow, reconciled the same way. */
+  "workflow",
+  /**
+   * Which of prime's deletions this delivery makes: the clone's held and
+   * clone-only sources read for anything that still imports a deleted file.
+   */
+  "survivors",
   /**
    * The membrane's spec channel over the finished delivery, and the subjects
    * and bridges it carries, round after round. Split from `deliver` on
