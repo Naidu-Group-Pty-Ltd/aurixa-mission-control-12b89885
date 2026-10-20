@@ -45,7 +45,7 @@ MC's drain lands them when green. They had waited since 16 Oct behind the
 CRM line's cascade, which cannot finish a pass (F21, §3). Rows marked ※
 were re-read at 04:54.
 
-**Updated a fourth time at 05:25 UTC.** Between the third update and this
+**Updated a fourth time at 05:20 UTC.** Between the third update and this
 one, nothing was merged, pushed or published except this document. It
 re-read NPC Test #228, Preflight #227 and the clones' backends, and found
 two things (F22, F23, §3). First, both pull requests are green on every job
@@ -60,7 +60,10 @@ clone's backend has received an edge function since 12–13 Oct. Mission
 Control's deploy lane has parked every clone's run for a person. So #3341's
 `listings-cache` is in npc-client-dashboard's repository and not on its
 Supabase project, and Step F's condition is about four backends, not four
-repositories (Step J). Rows marked ¤ were re-read at 05:25.
+repositories (Step J). Rows marked ¤ were re-read by 05:20, and again at
+05:24, when both pull requests, all four parked runs and
+npc-client-dashboard's `listings-cache` (version 4159, deployed 11 Oct
+00:36:55 UTC) were unchanged.
 
 **Merges need the owner.** This session merged Prime #3342 (step 1 of the plan).
 The session's safety controls then refused the next merge-related action as
@@ -69,7 +72,7 @@ below is the owner's to approve, or to make.
 
 ---
 
-## 1. State at hand-over (15:35 UTC, 19 Oct 2026; rows marked † re-read at 16:05, ‡ at 02:45 UTC on 20 Oct, ◊ at 03:40 UTC, ※ at 04:54 UTC, and ¤ at 05:25 UTC)
+## 1. State at hand-over (15:35 UTC, 19 Oct 2026; rows marked † re-read at 16:05, ‡ at 02:45 UTC on 20 Oct, ◊ at 03:40 UTC, ※ at 04:54 UTC, and ¤ at 05:20 UTC)
 
 | Piece | Where | State |
 |---|---|---|
