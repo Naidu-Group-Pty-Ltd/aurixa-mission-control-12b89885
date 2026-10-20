@@ -18,13 +18,19 @@ This session's GitHub identity is `lavan96`. Its branches are
 `claude/sweet-tesla-pdemno` in Prime and in Mission Control (MC). Every state
 below is something you can re-read, and every step is a command you can run.
 
-**Updated 20 Oct 2026, 02:50 UTC, by the session that continued this one.** It
+**Updated 20 Oct 2026, 02:45 UTC, by the session that continued this one.** It
 re-read every row of §1 (marked ‡), found F20 (§3), and pushed only to its own
 branches, `claude/confidential-report-cleanup-at2jfw`, in Prime, MC and
 npc-crm-independent. In Prime and MC that branch is the open pull request's
 head plus one commit, so carrying it into #3343 or #346 is a fast-forward. It
 pushed to no other session's branch and opened no pull request: both wait on
 the owner's word (Step C, §5).
+
+**Updated again at 03:40 UTC.** On the owner's word, #3343 and #346 were
+fast-forwarded at 02:49 UTC onto `6546c389` and `da38d5c6`, and the CRM
+deletion became npc-crm-independent-6505dc#124. Its first `CI` run could not
+start, so it also carries #123's `ci.yml` (Step E). All three are green now.
+Rows marked ◊ were re-read at 03:40.
 
 **Merges need the owner.** This session merged Prime #3342 (step 1 of the plan).
 The session's safety controls then refused the next merge-related action as
@@ -33,20 +39,20 @@ below is the owner's to approve, or to make.
 
 ---
 
-## 1. State at hand-over (15:35 UTC, 19 Oct 2026; rows marked † re-read at 16:05, and ‡ at 02:45 UTC on 20 Oct)
+## 1. State at hand-over (15:35 UTC, 19 Oct 2026; rows marked † re-read at 16:05, ‡ at 02:45 UTC on 20 Oct, and ◊ at 03:40 UTC)
 
 | Piece | Where | State |
 |---|---|---|
 | Prime: actions pinned, Deno and the Supabase CLI from their releases | npc-property-dashbord#3342 | **Merged** 14:39:50 UTC as `66290065` (merge commit, `--match-head` `f2eef880`). On `main`: CI 9085 green; Deploy Supabase functions 1124 green, but it deployed nothing (§3, F17); PDF Import Release Gate 4438 green. Deploy the PDF-import sidecar (run 3) and Deploy the render container (run 5) `startup_failure`: they name `google-github-actions/*`, the owner's allow-list item. |
-| Prime: `listings-cache` memory fix | npc-property-dashbord#3341, head `efeead42` | Open, unchanged. Green on its own CI 9082. `mergeable_state: unstable` only for the old `static-and-fast`. Its three pin commits are cherry-picks of #3342's, so they merge as no-ops. **Merging it redeploys every Edge Function** (it changes `supabase/functions/_shared/listingsCache.pure.ts`, and a `_shared/` change deploys all), which is also the CLI step's first production run. |
-| †‡ Prime: the `pdf-extraction-v3-gates` fix (the handoff's step 3) | npc-property-dashbord#3343, branch `claude/sweet-tesla-pdemno`, head **`9563070a`** (4 commits) | **`static-and-fast` passed on `60495442`** — run 39275041962, job 118137024278, 15:06–15:08 UTC, the first green run of that check since it was created. On the runner Playwright installed Chromium v1248 `--with-deps`, the detector found it, the pure suites ran 50 tests and the e2e passed 2, giving `releaseReady: true` with 7 required checks: 0 failed, 0 skipped, 0 unavailable. **Then Codex's review (15:26) found the first cut too narrow (P1) and too lenient on expired signatures (P2), and applying its rule found F19.** Both accepted: `e86bec0a` removes `report.pdf` and `final.png`, and `9563070a` bans media anywhere but named asset directories and makes every complete signature a finding. Both threads were answered and resolved. Locally on `9563070a`: release-gate specs 53 passed, CI's Template Builder step 345 files and 4,394 tests passed, the static and fast gates PASS, and the tracked scan reads 0. ‡ **CI on `9563070a` finished green but for one check.** `verify`, `security`, all three shards, `template-geometry`, `static-and-fast` and `pdf-import-regression` passed, and the rest were skipped by scope. `pdf-import-release-gate` (run 39281399479, job 118156219877) failed at 50/100 on exactly the two files `e86bec0a` deletes (F20). The fix is `6546c389` on `claude/confidential-report-cleanup-at2jfw`, whose parent is `9563070a`. #3343's own branch has not moved (Step C). |
-| †‡ MC: a refresh over hand commits proceeds where both sides agree or merge cleanly | aurixa-mission-control-12b89885#346, branch `claude/sweet-tesla-pdemno`, head `228064c6` | ‡ **Ready** (marked at 16:08), `mergeable_state: clean`. **New since 14:05, and now a prerequisite for #379** (§3, F15). Tests 448 files / 9,061 passed locally. CI green on `228064c6` (run 39282801101: Typecheck · Lint · Build, and the Lovable install check). Codex reviewed `228064c6` and found nothing. Needs a Lovable publish after merge. This update is one commit on top of it, on `claude/confidential-report-cleanup-at2jfw`. |
+| ◊ Prime: `listings-cache` memory fix | npc-property-dashbord#3341, head `efeead42` | Open, unchanged. Green on its own CI 9082. `mergeable_state: unstable` only for the old `static-and-fast`. Its three pin commits are cherry-picks of #3342's, so they merge as no-ops. **Merging it redeploys every Edge Function** (it changes `supabase/functions/_shared/listingsCache.pure.ts`, and a `_shared/` change deploys all), which is also the CLI step's first production run. ◊ Still at that head, and still `unstable` on the old `static-and-fast` alone. |
+| †‡◊ Prime: the `pdf-extraction-v3-gates` fix (the handoff's step 3) | npc-property-dashbord#3343, branch `claude/sweet-tesla-pdemno`, head **`6546c389`** (5 commits) | **`static-and-fast` passed on `60495442`** — run 39275041962, job 118137024278, 15:06–15:08 UTC, the first green run of that check since it was created. On the runner Playwright installed Chromium v1248 `--with-deps`, the detector found it, the pure suites ran 50 tests and the e2e passed 2, giving `releaseReady: true` with 7 required checks: 0 failed, 0 skipped, 0 unavailable. **Then Codex's review (15:26) found the first cut too narrow (P1) and too lenient on expired signatures (P2), and applying its rule found F19.** Both accepted: `e86bec0a` removes `report.pdf` and `final.png`, and `9563070a` bans media anywhere but named asset directories and makes every complete signature a finding. Both threads were answered and resolved. Locally on `9563070a`: release-gate specs 53 passed, CI's Template Builder step 345 files and 4,394 tests passed, the static and fast gates PASS, and the tracked scan reads 0. ‡ **CI on `9563070a` finished green but for one check.** `verify`, `security`, all three shards, `template-geometry`, `static-and-fast` and `pdf-import-regression` passed, and the rest were skipped by scope. `pdf-import-release-gate` (run 39281399479, job 118156219877) failed at 50/100 on exactly the two files `e86bec0a` deletes (F20). The fix is `6546c389`, whose parent is `9563070a`. ◊ **#3343 was fast-forwarded onto it at 02:49 UTC.** On `6546c389`, `pdf-import-release-gate` passed (run 39360974034, job 118426828417), as did `static-and-fast`, `pdf-import-regression` and `security`; `template-geometry` and all three `verify` shards passed too, and `verify` went green at 03:13 UTC (CI run 39360973961), with `abs-register-liveness`, `render-container` and `supply-chain` skipped by scope. **It is green, `mergeable_state: clean`, and waits only on the owner's merge.** The description now covers the fifth commit. |
+| †‡◊ MC: a refresh over hand commits proceeds where both sides agree or merge cleanly | aurixa-mission-control-12b89885#346, branch `claude/sweet-tesla-pdemno`, head `da38d5c6` | ‡ **Ready** (marked at 16:08), `mergeable_state: clean`. **New since 14:05, and now a prerequisite for #379** (§3, F15). Tests 448 files / 9,061 passed locally. CI green on `228064c6` (run 39282801101: Typecheck · Lint · Build, and the Lovable install check). Codex reviewed `228064c6` and found nothing. Needs a Lovable publish after merge. ◊ Fast-forwarded onto `da38d5c6` (the 02:45 update) at 02:49 UTC, and CI is green on it (run 935). The description now names F20 and #124. This second update is one commit on top of it, on `claude/confidential-report-cleanup-at2jfw`. |
 | MC: forwarded configuration follows MC's value | aurixa-mission-control-12b89885#345 | Unchanged; held on purpose until #3341 is on all four clones (F4). |
-| †‡ Clone `npc-client-dashboard` cascade | npc-client-dashboard#379, head `06d2d096` | Unchanged and still held on `static-and-fast` (run 62, 13:03 UTC). The 15:00 pass deferred its refresh (F15); the 15:03 pass found the statement for prime `66290065` equal to its head ("carries this exact tree"). Every pass since has deferred the same way, the latest at 15:59:00 (events `0aa71083`, `58333aed`, `d9fd07ee`, `0b329741`). Its tree holds both F19 files. ‡ Unchanged on 20 Oct: the passes at 02:35 and 02:37 UTC deferred its refresh in the same words. |
-| ‡ Clone `npc-crm-independent`: pins | npc-crm-independent-6505dc#123, head `86a9fa5b` | Unchanged on 20 Oct. Every check green except `static-and-fast` (the V2 scanner, not required). It is not a cascade PR, so MC's drain does not hold it; it merges when a person merges it. |
-| †‡ Clone `npc-crm-independent`: cascade | npc-crm-independent-6505dc#121, head `25acc6eb` | Unchanged since 17 Oct. Its last run failed `verify` and `security` on F10's held files, and never ran `static-and-fast`. The engine is still working it: four `pushing` rows (events `0aa71083`, `58333aed`, `d9fd07ee`, `0b329741`), each at `attempts` 3, last touched 15:50–15:59, with no `pr_url` yet. Its tree holds both F19 files, and the cascade cannot remove them there (Step E). ‡ On 20 Oct its rows still cycle from `queued` to `pushing` about once a minute, the latest at 02:37 UTC (events `58333aed`, `d9fd07ee`, `0b329741`), with no `pr_url` and no `error_message`. |
-| ‡ Clone `npc-crm-independent`: the F19 deletion | branch `claude/confidential-report-cleanup-at2jfw`, commit `6ba9451d` | **New on 20 Oct.** Removes `report.pdf` and `final.png` (Prime's blobs) on top of `main` `6322c63e`. Pushed, with no pull request yet. Step E says how it may land. |
-| †‡ `clones` | MC database | Unchanged at 16:05, and again at 02:45 UTC on 20 Oct: CD `cascading` (596 behind); CRM `cascading` (928); NPC Test `cascading` (635); Preflight `behind` (635). The two children wait on lineage for #379 ("Parent NPC Client Dashboard carries prime@881e7e0; this pass delivers prime@6629006"). |
+| †‡◊ Clone `npc-client-dashboard` cascade | npc-client-dashboard#379, head `06d2d096` | Unchanged and still held on `static-and-fast` (run 62, 13:03 UTC). The 15:00 pass deferred its refresh (F15); the 15:03 pass found the statement for prime `66290065` equal to its head ("carries this exact tree"). Every pass since has deferred the same way, the latest at 15:59:00 (events `0aa71083`, `58333aed`, `d9fd07ee`, `0b329741`). Its tree holds both F19 files. ‡ Unchanged on 20 Oct: the passes at 02:35 and 02:37 UTC deferred its refresh in the same words. ◊ So did the pass at 03:39 UTC (event `0b329741`). |
+| ‡◊ Clone `npc-crm-independent`: pins | npc-crm-independent-6505dc#123, head `86a9fa5b` | Unchanged on 20 Oct. Every check green except `static-and-fast` (the V2 scanner, not required). It is not a cascade PR, so MC's drain does not hold it; it merges when a person merges it. ◊ Still at that head. #124 carries its `ci.yml` byte for byte, so the two merge in either order (Step E). |
+| †‡◊ Clone `npc-crm-independent`: cascade | npc-crm-independent-6505dc#121, head `25acc6eb` | Unchanged since 17 Oct. Its last run failed `verify` and `security` on F10's held files, and never ran `static-and-fast`. The engine is still working it: four `pushing` rows (events `0aa71083`, `58333aed`, `d9fd07ee`, `0b329741`), each at `attempts` 3, last touched 15:50–15:59, with no `pr_url` yet. Its tree holds both F19 files, and the cascade cannot remove them there (Step E). ‡ On 20 Oct its rows still cycle from `queued` to `pushing` about once a minute, the latest at 02:37 UTC (events `58333aed`, `d9fd07ee`, `0b329741`), with no `pr_url` and no `error_message`. ◊ The same at 03:40 UTC, the latest cycle at 03:39 (event `0b329741`), and its head is still `25acc6eb`. |
+| ‡◊ Clone `npc-crm-independent`: the F19 deletion | npc-crm-independent-6505dc#124, branch `claude/confidential-report-cleanup-at2jfw`, head `6ebc853c` | **Opened at 02:49 UTC on 20 Oct.** `6ba9451d` removes `report.pdf` and `final.png` (Prime's blobs) on top of `main` `6322c63e`, and Codex reviewed it and found nothing. Its first `CI` run (631) ended in `startup_failure`, because a pull request's workflow is read from `main`, where every action is named by a tag. So `6ebc853c` carries #123's `ci.yml` byte for byte (blob `e92dbf46`), the only workflow the pull request triggers. Run 632 on `6ebc853c` then passed all six of its jobs by 03:38 UTC (`verify`, `security`, `supply-chain`, `render-container`, `template-geometry` and `abs-register-liveness`), and the Vercel preview built. **It is green and waits only on the owner's merge.** Step E says how it may land. |
+| †‡◊ `clones` | MC database | Unchanged at 16:05, at 02:45 UTC on 20 Oct, and ◊ at 03:40: CD `cascading` (596 behind); CRM `cascading` (928); NPC Test `cascading` (635); Preflight `behind` (635). The two children wait on lineage for #379 ("Parent NPC Client Dashboard carries prime@881e7e0; this pass delivers prime@6629006"). |
 | `clone_backend_secrets.AIRTABLE_TABLE_NAME` | all four clones | `inherited`, last set in September; `AIRTABLE_TOKEN` and `AIRTABLE_BASE_ID` `withheld`. Unchanged until #345 is published. |
 
 ---
@@ -75,21 +81,12 @@ Acceptance: the next pass's row for npc-client-dashboard reads
 `pr_opened`/`skipped` with a preserving merge on #379, not `Proposal #379
 carries this clone's own commits; its refresh was deferred`.
 
-### Step C — move #3343 onto its fix, then merge it and #3341 (in either order)
+### Step C — merge #3343, now on its fix, and #3341 (in either order)
 
-**First, #3343's fix.** `pdf-import-release-gate` fails #3343's head on the two
-files it deletes (§3, F20). The fix is one commit, `6546c389`, on Prime's
-`claude/confidential-report-cleanup-at2jfw`, and its parent is #3343's head, so
-moving the pull request onto it is a fast-forward (the push refuses anything
-else):
-
-```sh
-git fetch origin claude/confidential-report-cleanup-at2jfw
-git push origin 6546c389d5a0e117867d0d61fb8b8bbc1419857c:refs/heads/claude/sweet-tesla-pdemno
-```
-
-Then wait for #3343's full gate on `6546c389`, `pdf-import-release-gate`
-included, before merging:
+**#3343 is on its fix.** `pdf-import-release-gate` failed #3343's previous head
+on the two files it deletes (§3, F20). On the owner's word the pull request
+was fast-forwarded onto the fix, `6546c389`, at 02:49 UTC on 20 Oct. Merge it
+once its full gate there is green (§1):
 
 ```sh
 gh api -X PUT repos/Naidu-Group-Pty-Ltd/npc-property-dashbord/pulls/3343/merge \
@@ -153,7 +150,7 @@ As the handoff's step 5, with two additions. Merge #123 (`--match-head-commit
 finished re-pushing #121 (the four `pushing` rows above complete). Only then
 make F10's held-file reconcile on its branch, naming `prime@<sha>` exactly once.
 
-1. **Delete `report.pdf` and `final.png` in the same reconcile.** The line is
+1. **Delete `report.pdf` and `final.png`, by #124 or in the reconcile.** The line is
    `sync_scope: modules`. It receives the files of its 135 installed modules
    plus the repository invariants, and a root file is neither, so no cascade
    will ever delete them there. The scanner still arrives, because `scripts/**`
@@ -163,17 +160,23 @@ make F10's held-file reconcile on its branch, naming `prime@<sha>` exactly once.
    files. That is the correct verdict. A deletion is the clone's own change,
    not a held file, so it needs no `prime@` token.
 
-   The deletion is ready as a commit: `6ba9451d` on npc-crm-independent's
-   `claude/confidential-report-cleanup-at2jfw`, on top of `main` `6322c63e`.
-   Cherry-pick it into the reconcile (`git cherry-pick 6ba9451d`), or open a
-   pull request from that branch and merge it after #123. If it goes in on
-   its own, mind the order. The line's `pdf-import-release-gate.yml` runs on
-   every push to `main` with no paths filter, and until a cascade carries
-   `6546c389`'s script there (`scripts/**` is an invariant), that run reads
-   the two deletions as two critical findings. It goes red on `main` and
-   holds nothing, but say so if it happens. The pull request itself does not
-   run that workflow, because its `pull_request` paths filter names no root
-   file.
+   The deletion is npc-crm-independent-6505dc#124: `6ba9451d` on top of
+   `main` `6322c63e`, and `6ebc853c`, which carries #123's `ci.yml` byte for
+   byte so its checks can start. It merges in either order with #123: both
+   carry the same `ci.yml`, so whichever lands second merges cleanly and
+   that file drops out of its diff. Landed before the reconcile, it leaves
+   the reconcile nothing to delete. (Or cherry-pick `6ba9451d` into the
+   reconcile and close #124.)
+
+   Either way, mind the run on `main`. The line's
+   `pdf-import-release-gate.yml` runs on every push to `main` with no paths
+   filter. Merged before #123, that run fails at startup like every
+   unpinned workflow. Merged after #123 and before a cascade carries
+   `6546c389`'s script there (`scripts/**` is an invariant), it reads the
+   two deletions as two critical findings. Either way it goes red on `main`
+   once and holds nothing, but say so if it happens. The pull request itself
+   does not run that workflow, because its `pull_request` paths filter names
+   no root file.
 2. **Watch the fast tier there.** `pdf-extraction-v3-gates.yml` is a judging
    workflow, so on a module-scoped clone it is held, and the line keeps its
    own copy. That copy runs `npx playwright install chromium` without
@@ -363,6 +366,16 @@ its blockers are F10's.
 - **The CRM line.** Its `pdf-import-release-gate.yml` runs on every push to
   `main` with no paths filter, so a deletion merged there is judged by
   whichever script the line holds at that moment (Step E).
+- ◊ **On CI.** On `6546c389` the gate passed (run 39360974034, job
+  118426828417): the same two deletions, now read as deletions.
+- **The spec's import.** The new test imports
+  `src/lib/deploy/__tests__/workflowHarness.ts`, which npc-crm-independent's
+  `main` lacks, and that line's CI runs every spec under
+  `src/lib/reportTemplate`. The cascade's import closure
+  (`importClosure.pure.ts`) walks every `.ts` it writes, specs included, and
+  carries what the clone lacks, so the harness should travel with the spec.
+  Confirm it in that cascade's diff. Without it the spec fails to load
+  there.
 
 ---
 
@@ -403,9 +416,17 @@ its blockers are F10's.
   `6ba9451d` removes `report.pdf` and `final.png` (F19), on `main`
   `6322c63e`.
 - MC, `claude/confidential-report-cleanup-at2jfw` (#346's three commits plus
-  one): this update.
+  one): the 02:45 update.
+- On the owner's word, at 02:49 UTC: #3343 fast-forwarded onto `6546c389`,
+  #346 onto `da38d5c6`, and npc-crm-independent-6505dc#124 opened from the
+  CRM branch. `6ebc853c` on that branch carries #123's `ci.yml` (Step E),
+  and #124 has one comment saying why its first CI run could not start. The
+  three descriptions were rewritten to match.
+- MC, `claude/confidential-report-cleanup-at2jfw` (#346's four commits plus
+  one): this second update.
 
-It opened no pull request and pushed to no other session's branch.
+Until the owner's word it opened no pull request and pushed to no other
+session's branch.
 
 ---
 
@@ -413,10 +434,10 @@ It opened no pull request and pushed to no other session's branch.
 
 1. Approve, or make, the merges in §2: MC #346, Prime #3343 and #3341, CRM
    #123, and later MC #345. Then publish MC after #346 and again after #345.
-   Before #3343 merges, say whether it may be moved onto `6546c389`
-   (Step C). The same goes for #346 and this update, one commit on top of
-   it: carry it in before the squash, or merge #346 first and open a pull
-   request for this commit alone.
+   Add npc-crm-independent-6505dc#124, in either order with #123 (Step E).
+   #3343 and #346 now sit on `6546c389` and `da38d5c6`. This second update
+   is one commit on top of #346: carry it in before the squash, or merge
+   #346 first and open a pull request for this commit alone.
 2. F19's three decisions: whether to purge the confidential report from the
    history of all five repositories; whether the exposure needs any notice
    (the client, the regulator); and the one-line `curl -sI` check of whether
