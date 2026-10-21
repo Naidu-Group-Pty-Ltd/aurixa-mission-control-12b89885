@@ -207,9 +207,10 @@ export const SUBJECT_ROOTS: readonly string[] = ["src", "supabase", "docs", "scr
 export function subjectsNamedBy(text: string, specPath?: string): string[] {
   const found = new Set<string>();
 
-  // One quoted literal: `readFileSync("src/lib/a.ts")`.
+  // One quoted literal: `readFileSync("src/lib/a.ts")` — but not where every
+  // mention of it supplies a fixture's content (`suppliesFixtureContent`).
   const whole = /['"`]((?:src|supabase|docs|scripts|public)\/[A-Za-z0-9_./-]+\.[A-Za-z0-9]+)['"`]/g;
-  for (const m of text.matchAll(whole)) found.add(m[1]);
+  for (const path of literalsNotOnlyFixtures(text, whole)) found.add(path);
 
   // The SEGMENT form: `readFileSync(join(ROOT, "docs", "reports", "X.md"))`.
   //
@@ -284,6 +285,87 @@ export function subjectsNamedBy(text: string, specPath?: string): string[] {
 
   return [...found].filter((path) => !path.split("/").includes("..")).sort();
 }
+
+/**
+ * The paths a literal pattern captures, less those whose every mention in the
+ * spec supplies a fixture's content rather than naming a file the spec reads.
+ *
+ * Shared by both subject readers — this module's content roots and
+ * `subjectsNamedOutsideRoots`' infrastructure — so the two cannot come to
+ * disagree about what a fixture looks like. `pattern` must be global and
+ * capture the path as its first group, with the quote on each side matched
+ * as part of the whole.
+ */
+export function literalsNotOnlyFixtures(text: string, pattern: RegExp): Set<string> {
+  const read = new Set<string>();
+  for (const m of text.matchAll(pattern)) {
+    const start = m.index ?? 0;
+    if (!suppliesFixtureContent(text, start, start + m[0].length)) read.add(m[1]);
+  }
+  return read;
+}
+
+/**
+ * Whether the quoted literal spanning `start`–`end` (both quotes included)
+ * supplies a fixture's content rather than naming a file the spec reads.
+ *
+ * A spec that builds a scratch repository names the files it WRITES there in
+ * the same spelling as the files it reads here. `deployWorkflowScenarios
+ * .spec.ts` is the live case: `fixtureRepo({ 'src/App.tsx': 'export default
+ * 1;\n', … })` and `repo.write('src/App.tsx', 'export default 2;\n')` write a
+ * stand-in into a temporary directory, and the spec reads the real
+ * `src/App.tsx` nowhere. Read as a subject, it held the spec on cascade
+ * `59b34c5` to `npc-client-dashboard` (#381) — `src/App.tsx` is held there
+ * for a person to reconcile — while the subject the spec does assert about,
+ * the deploy workflow, crossed without it, and `verify` failed on the
+ * clone's older spec reading the newer workflow.
+ *
+ * Two positions, each measured over the prime's 2,796 spec files on 21 Oct
+ * 2026, and each conservative where they could be wrong:
+ *
+ * 1. The first argument of `.write(path, …)` — 25 occurrences, all a fixture.
+ * 2. An object KEY whose value is a string literal holding a line break —
+ *    the content of a file. Of the 60 keys measured, a value that is source
+ *    text carries `\n`; a value that is NOT is how a spec pins a real file
+ *    (`marketplaceHeroParity.spec.ts` maps each path to its digest,
+ *    `property-fields.test.ts` to the fields it selects), so a one-line value
+ *    keeps its key a subject. A fixture with one-line content is therefore
+ *    still read as one — the status quo, and the safe way round: a subject
+ *    wrongly dropped lets a spec cross without what it asserts about, which
+ *    is the failure this channel exists to refuse.
+ *
+ * Only the key position of an object literal counts — after `{` or `,` — so
+ * the branch of a ternary choosing between two strings is never one.
+ */
+export function suppliesFixtureContent(text: string, start: number, end: number): boolean {
+  const before = text.slice(Math.max(0, start - 48), start);
+  if (/\.write\(\s*$/.test(before)) {
+    return /^\s*,/.test(text.slice(end, end + 32));
+  }
+  let i = start - 1;
+  while (i >= 0 && /\s/.test(text[i])) i--;
+  if (i >= 0 && text[i] !== "{" && text[i] !== ",") return false;
+  FIXTURE_KEY_COLON.lastIndex = end;
+  const colon = FIXTURE_KEY_COLON.exec(text);
+  if (!colon) return false;
+  const body = FIXTURE_VALUE[colon[1]];
+  body.lastIndex = end + colon[0].length - 1;
+  const value = body.exec(text);
+  return value !== null && /\\n|\n/.test(value[1]);
+}
+
+/** `: '`, `: "` or `: \`` after a key, the value allowed to start on the next line. */
+const FIXTURE_KEY_COLON = /\s*:\s*(['"`])/y;
+
+/**
+ * A string literal's body by its quote. A quoted string ends at the end of
+ * its line; only a template literal spans lines.
+ */
+const FIXTURE_VALUE: Record<string, RegExp> = {
+  "'": /'((?:\\.|[^'\\\n])*)'/y,
+  '"': /"((?:\\.|[^"\\\n])*)"/y,
+  "`": /`((?:\\[\s\S]|[^`\\])*)`/y,
+};
 
 /**
  * A run of literal segments after the spec's own directory:

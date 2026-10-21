@@ -32,11 +32,15 @@
  *
  * ## What counts as a subject here
  *
- * Four kinds, each read from the spec's own text:
+ * Five kinds, each read from the spec's own text:
  *
  *   · a path it NAMES — `subjectsNamedBy`, the forward half's rule, and
  *     `subjectsNamedOutsideRoots` for a file outside the content roots, so
  *     both directions agree on what a named subject is;
+ *   · a file in a directory outside the content roots that it LISTS —
+ *     `directoriesListedOutsideRoots`, the forward half's rule too. A spec
+ *     that reads every workflow asserts about each, so one crossing leaves
+ *     the clone's copy of the spec behind it;
  *   · a module it IMPORTS, in either specifier form (`importsOf`,
  *     `resolveSpecifier` — the import closure's own reader);
  *   · behind an imported module that does nothing but re-export, the module it
@@ -126,7 +130,12 @@
 import { isSpecPath } from "@/lib/cascade/membrane/ionSpecies.pure";
 import { subjectsNamedBy, type Membrane } from "@/lib/cascade/membrane/membrane.pure";
 import { importsOf, resolveSpecifier, stripComments, type TreeIndex } from "./importClosure.pure";
-import { MAX_OUTSIDE_ROOT_PROBES, subjectsNamedOutsideRoots } from "./outsideRootSubjects.pure";
+import {
+  directoriesListedOutsideRoots,
+  listedMembers,
+  MAX_OUTSIDE_ROOT_PROBES,
+  subjectsNamedOutsideRoots,
+} from "./outsideRootSubjects.pure";
 import type { HeldPath } from "./syncExclusions.pure";
 
 /** Source a spec's subjects can be read from. A fixture is data, not a spec. */
@@ -191,6 +200,8 @@ export type SourceReadings = {
   reExportSpecifiers: (source: string) => readonly string[] | null;
   namedBy: (text: string, path: string) => readonly string[];
   namedOutsideRoots: (text: string, path: string) => readonly string[];
+  /** The directories outside the content roots it lists (`directoriesListedOutsideRoots`). */
+  listedOutsideRoots: (text: string, path: string) => readonly string[];
 };
 
 /** Every answer taken afresh: what a caller with no readings object asks. */
@@ -199,6 +210,7 @@ const FRESH_READINGS: SourceReadings = {
   reExportSpecifiers,
   namedBy: subjectsNamedBy,
   namedOutsideRoots: subjectsNamedOutsideRoots,
+  listedOutsideRoots: directoriesListedOutsideRoots,
 };
 
 /** A readings object that answers each text once. See `SourceReadings`. */
@@ -231,6 +243,7 @@ export function memoSourceReadings(): SourceReadings {
     reExportSpecifiers: byText(reExportSpecifiers),
     namedBy: byPathAndText(subjectsNamedBy),
     namedOutsideRoots: byPathAndText(subjectsNamedOutsideRoots),
+    listedOutsideRoots: byPathAndText(directoriesListedOutsideRoots),
   };
 }
 
@@ -283,6 +296,9 @@ export function specSubjects(args: {
   const found = new Set<string>([
     ...readings.namedBy(specText, specPath),
     ...readings.namedOutsideRoots(specText, specPath),
+    // What a directory it lists holds in THIS tree: a crossing workflow is a
+    // subject of the spec that reads every workflow.
+    ...listedMembers(readings.listedOutsideRoots(specText, specPath), tree),
   ]);
 
   const direct = resolvedImports(specText, specPath, tree, readings);

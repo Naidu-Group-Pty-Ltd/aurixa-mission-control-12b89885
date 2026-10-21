@@ -317,10 +317,11 @@ this codebase already takes in a dozen places.
 | file                               | what it pins                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `membrane.test.ts`                 | permeation, the routing rule's reach, the glob scoping, the orphan-spec rule and the project-ref detector — over verbatim breached source from `ClientConversationsTab.tsx`, and against the shipped `backendRefsIn` itself rather than a restatement of it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `membraneIsWired.contract.test.ts` | that the engine resolves a membrane from `primeRef.repo`, asks it per file, ACTS on a refusal, judges specs against the finished delivery rather than the candidates, and takes a held spec back out of it; for the other half, that a kept spec is judged against what the delivery CHANGES on the clone (a pump's merge only where it writes, a removal only from the finished plan, settled before the channel and narrowed after it), with each copy read against its own tree, is replaced only on a release verdict with its files outside the content roots judged first, is held for a person otherwise, and is named in the pull request; and that a file outside the roots joins a spec's subjects only on a release verdict, within its probe ceiling |
+| `fixtureSubjects.test.ts`         | that a path a spec only WRITES to a scratch repository is not a subject (`.write(path, …)`, a key whose value is multi-line content), over the verbatim `deployWorkflowScenarios.spec.ts` fixtures; and that a one-line value, an array, a ternary branch or a second mention that reads the file keeps it one |
+| `membraneIsWired.contract.test.ts` | that the engine resolves a membrane from `primeRef.repo`, asks it per file, ACTS on a refusal, judges specs against the finished delivery rather than the candidates, and takes a held spec back out of it; for the other half, that a kept spec is judged against what the delivery CHANGES on the clone (a pump's merge only where it writes, a removal only from the finished plan, settled before the channel and narrowed after it), with each copy read against its own tree, is replaced only on a release verdict with its files outside the content roots judged first, is held for a person otherwise, and is named in the pull request; that a file outside the roots joins a spec's subjects only on a release verdict, within its probe ceiling; and that one an exclusion holds, named or listed, holds the spec without a probe and is never fetched |
 | `carryGate.contract.test.ts`       | what the subject carry may do and may not undo — that its refusals meet `reportableHeld`, that a carried subject owes its import closure, that the loop is bounded above its own worst case (including the specs the other half brings), and that the stranded list it hands back includes the specs it still owes                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `specsLeftBehind.test.ts`          | what counts as a kept spec's subject (a path it names inside or outside the content roots, a module it imports, a module a barrel re-exports, never the transitive graph), each copy against its own tree; what counts as crossing (a pump's merge only where it writes, a removal only from the finished plan); which kept specs a crossing file leaves behind (never one that is itself crossing); the hold, removal, withheld and cut-short wording; and the lines the pull request prints for what this half moved                                                                                                                                                                                                                                           |
-| `outsideRootSubjects.test.ts`      | what the reader outside the content roots reads, over the verbatim `reportTypography.spec.ts` lines, and what it refuses (a bare root file, a comment, a directory, a `..` climb, an absolute path); that it and `subjectsNamedBy` split the tree at `SUBJECT_ROOTS` with no path read by both or by neither; and which files are worth a question to prime's history                                                                                                                                                                                                                                                                                                                                                                                            |
+| `outsideRootSubjects.test.ts`      | what the reader outside the content roots reads, over the verbatim `reportTypography.spec.ts` lines, and what it refuses (a bare root file, a comment, a directory, a `..` climb, an absolute path); that it and `subjectsNamedBy` split the tree at `SUBJECT_ROOTS` with no path read by both or by neither; and which files are worth a question to prime's history; which directories a spec lists and what a listing returns on either side, over the verbatim `productionCredentialScope.spec.ts` lines; and which files the delivery leaves as the clone has them (#381)                                                                                                                                                                                                                                                                                                                                                                                            |
 | `membraneGeometry.test.ts`         | the band's placement, against an independent evaluation of the drawn cubic                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `membraneBandRenders.test.ts`      | what the component actually EMITS — the placement survives, and no animated transform shares its element                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `membraneIsDrawn.contract.test.ts` | that the band and the panel are rendered, in the right layer, keyed on the edge                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
@@ -1508,6 +1509,67 @@ which is why every reconcile went to a second pull request instead.
 - **The guard:** they are fed to the subject carry as owed imports, so the
   partition still applies. A withheld CRM-line function is still withheld;
   only a MISSING one is carried.
+
+## A spec that reads every workflow, and the files a spec only writes
+
+Measured on cascade `59b34c5` to `npc-client-dashboard` (#381, 21 Oct 2026):
+`verify` failed in two specs, for two opposite reasons, and the channel
+judged both wrongly.
+
+**It read a fixture as a subject.** `deployWorkflowScenarios.spec.ts` builds a
+scratch repository — `fixtureRepo({ 'src/App.tsx': 'export default 1;\n', … })`,
+`repo.write('src/App.tsx', 'export default 2;\n')` — and reads the real
+`src/App.tsx` nowhere. `subjectsNamedBy` took every one of those keys for a
+subject, and `src/App.tsx` and `supabase/config.toml` are held on that clone,
+so the spec was held. Its real subject, the deploy workflow, crossed anyway,
+because the reconcile pump carries it; the clone's older spec then read the
+newer workflow and failed. A path whose every mention supplies a fixture's
+content is no longer a subject (`suppliesFixtureContent`, in both readers):
+the first argument of `.write(path, …)`, or an object key whose value is a
+string literal holding a line break. A one-line value keeps its key a subject,
+because that is how a spec pins a real file — `marketplaceHeroParity.spec.ts`
+maps paths to digests, `property-fields.test.ts` to the columns a page selects.
+Across prime's 2,800 specs at prime@49248ea, the rule drops 10 paths that exist
+in the tree, every one a fixture in `deployWorkflowScenarios.spec.ts`,
+`deployScope.spec.ts` or `releaseHeldFunction.spec.ts`.
+
+**It could not see a subject the spec reads by listing.**
+`productionCredentialScope.spec.ts` lists `.github/workflows` with
+`readdirSync` and requires a production environment on every job that reads a
+production credential. It names no workflow, so neither reader saw one. The
+clone protects `apply-migration.yml` (its own copy, matching none of the nine
+versions prime ever held), `rotate-internal-edge-secret.yml` (prime's previous
+version) and two builder-stock workflows prime no longer has; the spec crossed,
+those four did not, and all four failed it. `directoriesListedOutsideRoots`
+reads a directory outside the content roots that a spec lists (a listing call
+in its code, and a directory literal, template head or segments), and its
+subjects are the files a tree holds directly in it (`listedMembers`). Four
+prime specs list one: `productionCredentialScope` and `networkGuard`
+(`.github/workflows`), `scriptProjectRef` (`.github/scripts`) and `ciScope`
+(`weasyprint-service/fonts`, which it names as data). A listed member is a
+subject on exactly the terms a named one is, in both halves: put to prime's
+history and carried on evidence, and a crossing member leaves a kept copy of
+the spec behind.
+
+**A subject an exclusion holds holds the spec.** Evidence could not have
+caught #381: prime's history shows `apply-migration.yml` is the clone's own,
+which by the rule above means the spec is judged against it, and it fails.
+A file outside the content roots that a rule of the clone's holds — named or
+listed, at a version prime does not hold, and neither written nor removed by
+the delivery — is one prime's copy may never replace, so the spec is held,
+naming it and the rule (`outsideRootSubjectsLeftAsTheCloneHasThem`). No probe
+is spent on it. A clone-only file counts too: the builder-stock workflows had
+no version of prime's to carry, which is exactly why the clone's copy is the
+one the spec would meet. The hold is a person's to lift: approving the spec in
+the dry run lets it cross whatever its subjects say.
+
+The cost is a spec held while a protected file it reads differs from prime,
+whether or not the file would have passed. Every clone protects the same five
+workflows, so `productionCredentialScope.spec.ts` and `networkGuard.spec.ts`
+are held wherever one of those differs and prime changes the spec, until a
+person reconciles the workflow or approves the spec. That is the trade the
+owner chose on 21 Oct 2026: a hold is a line in the pull request, and a red
+`verify` stops the whole cascade.
 
 ## What this deliberately does not do
 
