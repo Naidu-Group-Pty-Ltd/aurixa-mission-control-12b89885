@@ -5088,6 +5088,9 @@ export async function processClone(args: {
           primeShaByPath && isSpecPath(specPath)
             ? subjectsImportedBy(specText, specPath, primeShaByPath, readings.importsOf)
             : [],
+        // A held variant the merge above found current is not behind, so it
+        // strands no spec (`strandedSubjects`, #381 into npc-client-dashboard).
+        current: variantCurrent,
       });
       if (stranded.length > 0) strandedBySpec.set(specPath, stranded);
       if (primeShaByPath !== null && cloneShaByPath !== null) {

@@ -108,6 +108,19 @@ describe("both server callers hand the membrane what a spec imports", () => {
     );
   });
 
+  it("the vertical carry loop tells it which held variants the merge found current", () => {
+    // Without it a current `src/App.tsx` held four specs on #381 into
+    // npc-client-dashboard while the code they test crossed without them.
+    const engine = stripComments(readFileSync("src/server/cascade-engine.server.ts", "utf8"));
+    const at = engine.indexOf("strandedSubjects({");
+    const call = engine.slice(at, engine.indexOf("});", at));
+    expect(call).toMatch(/\bcurrent:\s*variantCurrent\b/);
+    // Settled before the carry loop asks, never after it.
+    expect(engine.indexOf("const variantCurrent = new Set<string>()")).toBeGreaterThan(-1);
+    expect(engine.indexOf("const variantCurrent = new Set<string>()")).toBeLessThan(at);
+    expect(engine.indexOf('markPhase("variants")')).toBeLessThan(at);
+  });
+
   it("the lateral lane resolves against the origin's tree", () => {
     const lateral = stripComments(
       readFileSync("src/server/cascade/lateralExchange.pure.ts", "utf8"),

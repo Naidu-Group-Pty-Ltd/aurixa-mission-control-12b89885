@@ -1574,6 +1574,39 @@ person reconciles the workflow or approves the spec. That is the trade the
 owner chose on 21 Oct 2026: a hold is a line in the pull request, and a red
 `verify` stops the whole cascade.
 
+## A held copy the merge found current strands no spec
+
+Measured on #381 into `npc-client-dashboard` (prime@49248ea, 21 Oct 2026),
+once its protected workflows had been reconciled by hand (#382 there). The pass's own account said
+`src/App.tsx` was "current: holds everything prime changed since
+prime@6bd6e86; nothing owed". The same pass held four agent specs
+(`agentProtocol`, `ghlSync`, `marketIntelligence`, `phase2uSafeguards`)
+because each names `src/App.tsx`, "which needs a person to reconcile it".
+The code those specs test (`marketIntelligenceAsk.pure.ts`,
+`metaResults.pure.ts`, `agentViews`, `agentReceipt`, `ClientTracker.tsx`)
+crossed without them. The clone's old copies then failed 9 tests in 3 files
+of `verify (platform, build and agent)`. Prime's copies, run against the
+same tree and the clone's own `App.tsx`, passed all 175 files and 5,266 tests
+of that step.
+
+The two halves of the engine disagreed about one file. `needsReconcile` already
+leaves a current variant out, because a deliberate variant is not owed work.
+`strandedSubjects` strands a spec only where the clone's copy "is genuinely
+behind", and a current verdict is the evidence that it is not. The spec channel
+simply never asked for that verdict. It does now: the carry loop passes
+`current: variantCurrent`, and a held subject the merge found current strands
+nothing.
+
+Two bounds:
+
+- **Only a current verdict counts.** A held file the merge wrote travels
+  anyway. A file it held for a person (a conflict, no named base, a failed read)
+  still strands its spec, as before. A protected or oversize path is never
+  offered to the merge, so the exclusion hold above is untouched.
+- **The line's own work can still contradict a spec.** Then CI names a real
+  conflict for a person. The stale spec, running against code it no longer
+  describes, failed with certainty.
+
 ## What this deliberately does not do
 
 - **It does not widen a clone's scope to a file the clone does not have.**

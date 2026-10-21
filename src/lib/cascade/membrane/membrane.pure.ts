@@ -575,8 +575,27 @@ export function strandedSubjects(args: {
    * every caller decides.
    */
   imported: readonly string[];
+  /**
+   * Held line variants whose three-way merge this pass found CURRENT
+   * (`src/server/cascade/variantMerge.pure.ts`): the clone's copy already
+   * holds every change prime made since the base its own history names, and
+   * differs only by the line's own work.
+   *
+   * Such a copy is not behind, so it strands nothing. Cascade #381 into
+   * `npc-client-dashboard` (prime@49248ea, 21 Oct 2026) is the case: its own
+   * account said `src/App.tsx` was "current … nothing owed", and the same
+   * pass held four agent specs because they name it, while the code those
+   * specs test crossed without them. The clone's old copies then failed
+   * 9 tests in 3 files; prime's copies passed 175 files, 5,266 tests,
+   * against that same `App.tsx`.
+   *
+   * The line's own work can still contradict a spec. That is a real conflict
+   * and CI names it; the stale spec failed with certainty. Absent, nothing is
+   * current, which is every caller with no merge to ask (the lateral lane).
+   */
+  current?: ReadonlySet<string>;
 }): string[] {
-  const { specPath, specText, primeSha, cloneSha, crossing, imported } = args;
+  const { specPath, specText, primeSha, cloneSha, crossing, imported, current } = args;
   if (!isSpecPath(specPath)) return [];
   // A tree that could not be listed is not a tree with nothing in it. With no
   // evidence about what differs, the conservative answer is to change nothing.
@@ -590,6 +609,9 @@ export function strandedSubjects(args: {
   return [...subjects].sort().filter((subject) => {
     // Crossing beside it. Nothing is stranded.
     if (crossing.has(subject)) return false;
+
+    // Held, and already holding everything prime changed. Not behind.
+    if (current?.has(subject)) return false;
 
     // NOT on the clone at all — out of its module scope, and deliberately not
     // stranded. The 20 Sep evidence is the stale case in its own words: "Both
