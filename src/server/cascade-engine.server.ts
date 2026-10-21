@@ -17,6 +17,7 @@ import {
   type StaleHeldReference,
 } from "./cascade/heldFileStaleness.pure";
 import {
+  canonicalDeliveryOrder,
   chunkTreeEntries,
   toGitTreeParam,
   type DeliveryTreeEntry,
@@ -2934,9 +2935,13 @@ export async function processClone(args: {
     const settledPaths = candidates
       .filter((h) => knownVariantEvidence.has(h.path))
       .map((h) => h.path);
+    //    Read eight at a time, so the reads FINISH in whatever order GitHub
+    //    answers; their outcomes are taken in the candidates' own order, from
+    //    the results, never as each one lands (F31).
+    const settledActs = await mapWithConcurrency(settledPaths, 8, (path) => reuseVariant(path));
     const reread: string[] = [];
-    await mapWithConcurrency(settledPaths, 8, async (path) => {
-      const act = await reuseVariant(path);
+    settledPaths.forEach((path, i) => {
+      const act = settledActs[i];
       if (act === null) reread.push(path);
       else outcomeOf.set(path, act);
     });
@@ -2959,7 +2964,9 @@ export async function processClone(args: {
       freshAsked += 1;
       outcomeOf.set(path, await askVariant(path));
     }
-    for (const [path, act] of outcomeOf) if (act === "write") merged.add(path);
+    // In the candidates' order, so a merge joins the delivery at the same
+    // place on every pass, however its answer arrived (F31).
+    for (const h of candidates) if (outcomeOf.get(h.path) === "write") merged.add(h.path);
     if (merged.size > 0) {
       partition.write = [...partition.write, ...merged];
       partition.held = partition.held.filter((h) => !merged.has(h.path));
@@ -6050,8 +6057,13 @@ export async function processClone(args: {
   // some of it and has no window left for the commit stops there too, with
   // the whole chain kept — and one that wrote none of it never stops, so every
   // pass moves the delivery forward.
+  //
+  // CUT FROM ONE ORDER (F31). The stages above append in the order their
+  // reads finish, and a chain is resumed only by the same chunks, so the
+  // chunks are cut from the delivery sorted by path (`canonicalDeliveryOrder`)
+  // and two passes that will write the same tree cut the same chain.
   markPhase("tree");
-  const chunks = chunkTreeEntries(treeEntries);
+  const chunks = chunkTreeEntries(canonicalDeliveryOrder(treeEntries));
   const chainKey = treeChainKey(cloneCommit.tree.sha, chunks);
   const chain = await writeTreeChain({
     chunks,

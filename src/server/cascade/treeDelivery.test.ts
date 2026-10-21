@@ -14,6 +14,7 @@ import { describe, expect, it } from "vitest";
 import {
   TREE_CHUNK_MAX_CONTENT_BYTES,
   TREE_CHUNK_MAX_ENTRIES,
+  canonicalDeliveryOrder,
   chunkTreeEntries,
   toGitTreeParam,
   type DeliveryTreeEntry,
@@ -81,6 +82,53 @@ describe("chunkTreeEntries", () => {
   });
 });
 
+describe("canonicalDeliveryOrder", () => {
+  it("sorts by path, compared as code units rather than by locale", () => {
+    const entries = [
+      text("src/b.ts", "b"),
+      text("src/B.ts", "B"),
+      blob("mobile/api.json", "a".repeat(40)),
+      text("src/a.ts", "a"),
+      text(".github/x.yml", "x"),
+    ];
+    expect(canonicalDeliveryOrder(entries).map((e) => e.path)).toEqual([
+      ".github/x.yml",
+      "mobile/api.json",
+      "src/B.ts",
+      "src/a.ts",
+      "src/b.ts",
+    ]);
+  });
+
+  it("is stable, so two entries for one path keep the order they were written in", () => {
+    const first = text("src/a.ts", "first");
+    const second = text("src/a.ts", "second");
+    const ordered = canonicalDeliveryOrder([text("src/z.ts", "z"), first, second]);
+    expect(ordered.slice(0, 2)).toEqual([first, second]);
+  });
+
+  it("leaves the delivery it was handed as it was", () => {
+    const entries = [text("b.ts", "b"), text("a.ts", "a")];
+    canonicalDeliveryOrder(entries);
+    expect(entries.map((e) => e.path)).toEqual(["b.ts", "a.ts"]);
+  });
+
+  it("puts a removed file before anything written beneath its path", () => {
+    const ordered = canonicalDeliveryOrder([text("docs/x/y.md", "y"), blob("docs/x", null)]);
+    expect(ordered.map((e) => e.path)).toEqual(["docs/x", "docs/x/y.md"]);
+  });
+
+  it("cuts the same chunks from any order of the same delivery", () => {
+    const entries = Array.from({ length: 301 }, (_, i) =>
+      text(`src/f${String(i).padStart(3, "0")}.ts`, "x"),
+    );
+    const reversed = [...entries].reverse();
+    expect(chunkTreeEntries(canonicalDeliveryOrder(reversed))).toEqual(
+      chunkTreeEntries(canonicalDeliveryOrder(entries)),
+    );
+  });
+});
+
 describe("toGitTreeParam", () => {
   it("never carries both sha and content, and a deletion stays sha: null", () => {
     expect(toGitTreeParam(text("a.ts", "hi"))).toEqual({
@@ -134,7 +182,9 @@ describe("the engine delivers text inline and chains the tree", () => {
     // each chunk over the previous call's tree and is held to that, and to
     // ending where one uninterrupted chain ends, in treeChain.test.ts. The
     // engine supplies the chunks and the call.
-    const at = engine.indexOf("const chunks = chunkTreeEntries(treeEntries);");
+    const at = engine.indexOf(
+      "const chunks = chunkTreeEntries(canonicalDeliveryOrder(treeEntries));",
+    );
     expect(at).toBeGreaterThan(-1);
     const chain = engine.slice(at, at + 1_200);
     expect(chain).toContain("baseTreeSha: cloneCommit.tree.sha,");

@@ -84,6 +84,31 @@ export function chunkTreeEntries(
 }
 
 /**
+ * The delivery in the one order a chain is cut from: by path, compared as
+ * code units so no locale decides it, and stable, so two entries for one
+ * path keep the order they were written in.
+ *
+ * A kept chain is resumed only by a pass that cuts the SAME chunks
+ * (`treeChainKey`), and the engine assembles its entries in stages, some of
+ * which finish in whatever order GitHub answers concurrent reads. Measured
+ * 20–21 Oct 2026 on the CRM line: two line-variant merges entered the
+ * delivery in the order their stored blobs read back, so passes alternated
+ * between two orders of one 1,417-file delivery, keys `0c13d2fa…` and
+ * `b057bab4…`, and each restarted the other's chain at chunk 1. Its event
+ * was retired after twelve hours with two of fifteen chunks written.
+ *
+ * Order does not change the tree: paths are unique across a delivery, so
+ * layering the same entries over `base_tree` composes to the same tree
+ * whatever the boundaries (the rule at the top of this file). Cutting from
+ * this order makes the chain a function of what the tree will hold, not of
+ * how the pass came to know it. Sorted, a removed file also comes before
+ * anything written beneath its path.
+ */
+export function canonicalDeliveryOrder(entries: readonly DeliveryTreeEntry[]): DeliveryTreeEntry[] {
+  return [...entries].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+}
+
+/**
  * The API-shaped entry: never both `sha` and `content`, and `sha` present
  * only when it means something (a reuse or a deletion).
  */
