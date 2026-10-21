@@ -9,7 +9,11 @@ import {
   writeTreeChain,
   type TreeChainProgress,
 } from "./treeChain.pure";
-import { chunkTreeEntries, type DeliveryTreeEntry } from "./treeDelivery.pure";
+import {
+  canonicalDeliveryOrder,
+  chunkTreeEntries,
+  type DeliveryTreeEntry,
+} from "./treeDelivery.pure";
 import { ledgerGrew, readProgress, type CascadeProgress } from "./passProgress.pure";
 
 const BASE = "a".repeat(40);
@@ -55,6 +59,46 @@ describe("what a chain is of", () => {
     deleted[0] = { path: deleted[0].path, mode: "100644", type: "blob", sha: null };
     expect(treeChainKey(BASE, chunkTreeEntries(deleted))).not.toBe(key);
     expect(treeChainKey(BASE, chunkTreeEntries(delivery(300), 100))).not.toBe(key);
+  });
+});
+
+describe("a chain is cut from one order of the delivery (F31)", () => {
+  // The CRM line, 20–21 Oct 2026: two line-variant merges entered a
+  // 1,417-file delivery in the order their stored blobs read back. The same
+  // files in two orders were two keys, and each pass restarted the other's
+  // chain at chunk 1.
+  const raceAt = (files: number, at: number): DeliveryTreeEntry[] => {
+    const d = delivery(files);
+    [d[at], d[at + 1]] = [d[at + 1], d[at]];
+    return d;
+  };
+
+  it("is two chains when the same files arrive in two orders, cut as they arrive", () => {
+    expect(treeChainKey(BASE, chunkTreeEntries(raceAt(1417, 1362)))).not.toBe(
+      treeChainKey(BASE, chunkTreeEntries(delivery(1417))),
+    );
+  });
+
+  it("is one chain when both are cut from the canonical order", () => {
+    const key = (d: DeliveryTreeEntry[]) =>
+      treeChainKey(BASE, chunkTreeEntries(canonicalDeliveryOrder(d)));
+    expect(key(raceAt(1417, 1362))).toBe(key(delivery(1417)));
+    expect(key([...delivery(1417)].reverse())).toBe(key(delivery(1417)));
+  });
+
+  it("so a pass that saw the other order resumes the chain rather than restarting it", () => {
+    const first = chunkTreeEntries(canonicalDeliveryOrder(delivery(1417)));
+    const kept: TreeChainProgress = {
+      key: treeChainKey(BASE, first),
+      done: 2,
+      of: first.length,
+      sha: "e".repeat(40),
+    };
+    const next = chunkTreeEntries(canonicalDeliveryOrder(raceAt(1417, 1362)));
+    expect(resumableTreeChain(kept, treeChainKey(BASE, next), next.length)).toEqual({
+      done: 2,
+      sha: "e".repeat(40),
+    });
   });
 });
 
@@ -268,6 +312,11 @@ describe("the wiring", () => {
   it("writes the delivery through the chain, resuming only the same chain", () => {
     expect(at).toBeGreaterThan(-1);
     expect(block).toContain("const chainKey = treeChainKey(cloneCommit.tree.sha, chunks);");
+    // F31: the chunks are cut from the canonical order, never as assembled.
+    expect(block).toContain(
+      "const chunks = chunkTreeEntries(canonicalDeliveryOrder(treeEntries));",
+    );
+    expect(block).not.toContain("const chunks = chunkTreeEntries(treeEntries);");
     expect(block).toContain("await writeTreeChain({");
     expect(block).toContain(
       "resumableTreeChain(priorProgress?.tree_chain ?? null, chainKey, chunks.length)",

@@ -659,6 +659,21 @@ describe("a held line variant is merged once, across passes", () => {
     );
   });
 
+  it("takes concurrent answers in the candidates' order, never as each read lands (F31)", () => {
+    // The CRM line, 20–21 Oct 2026: two settled merges joined the delivery
+    // in the order their stored blobs read back, so passes cut two orders of
+    // one delivery and restarted each other's tree chain.
+    expect(phase).toContain(
+      "const settledActs = await mapWithConcurrency(settledPaths, 8, (path) => reuseVariant(path));",
+    );
+    expect(phase).toContain("settledPaths.forEach((path, i) => {");
+    expect(phase).toContain(
+      'for (const h of candidates) if (outcomeOf.get(h.path) === "write") merged.add(h.path);',
+    );
+    expect(phase).not.toContain("for (const [path, act] of outcomeOf)");
+    expect(phase).not.toMatch(/mapWithConcurrency\(settledPaths, 8, async \(path\) => \{/);
+  });
+
   it("saves the ledger before it pauses", () => {
     const save = phase.indexOf("await resume.onProgress(progress);");
     const pause = phase.indexOf("if (resume && unasked.length > 0) {");

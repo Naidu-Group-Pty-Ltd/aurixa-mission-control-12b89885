@@ -1403,6 +1403,55 @@ its blockers are F10's.
   has already done, would cut that to two or three. That is larger, and it
   should be designed from the first production passes on this fix.
 
+### F30. A finished chain was not delivered, because the refresh read the merge drain's own commit as a person's
+
+- **What production shows.** On 20 Oct at 19:46 the CRM line's chain
+  finished, and the refresh of #121 deferred. The branch carried
+  `f024824`, `chore(aurixa): restate proposal #121 over 2a26ddc`: the merge
+  drain's own conflict resolution. `carriesHumanWork` counted every commit
+  without the engine's statement prefix as a person's, so the engine
+  refused to replace a branch only Mission Control had written to.
+- **The remedy** is #352. A resolution merge counts as the engine's only
+  where its tree proves it: every path carries one parent's entry, blob and
+  mode, and no path both parents hold is missing (`mergeAddsNothing`). The
+  message alone is not proof, because an amended resolution keeps it. An
+  unread tree is unproven, and at most `MAX_PROVEN_RESOLUTIONS` are read a
+  refresh.
+
+### F31. The same delivery in two orders was two chains, so no chain on the CRM line could finish
+
+- **What production shows.** From prime@49248ea (20 Oct, 20:15) the CRM
+  line's kept chain alternated between keys `0c13d2fa…` and `b057bab4…`.
+  Both were 15 chunks of 1,417 files, both reached the same tree after
+  chunk 1, and the ledger's evidence was identical across passes. Each pass
+  restarted the other's chain. None got past chunk 3 of 15, and the event
+  was retired at 01:03 on 21 Oct.
+- **The measurement.** The replay could not produce `b057` unpaced, nor at
+  production's pace under a 45 s budget (30 and 20 s never reached the
+  tree), so the clock was ruled out. A dump of the chunks behind
+  `treeChainKey` showed the first 1,276 entries sorted and the rest appended
+  stage by stage. Swapping two of them,
+  `supabase/functions/manage-automation-settings/index.ts` and
+  `src/components/marketing/LeadAttributionPanel.tsx`, gives `b057bab4…`
+  exactly. They are the line-variant merges a settled verdict reads back
+  from stored blobs, eight at a time. Their outcomes were recorded as each
+  read landed, so they joined the delivery in the order GitHub answered.
+  Delaying one read in the replay turns `0c13` into `b057` on the deployed
+  engine.
+- **The remedy**, in two layers:
+  - The variant stage takes its concurrent answers from the results, in the
+    candidates' own order, and a merge joins the delivery in that order.
+  - Chunks are cut from the delivery sorted by path
+    (`canonicalDeliveryOrder`). Paths are unique, so order never changed
+    the tree. Now it does not change the chain either, whatever a later
+    stage appends in whatever order.
+- **What it was shown to do,** on the replay: the fixed engine cuts one key,
+  `f1c27ca7…`, from both read orders, over the same 1,417 entries. Every
+  kept chain starts once more under the new order.
+- **What it is not.** A stored merge that cannot be read back is still
+  merged again only while the clock allows, after the first. That decides
+  the delivery by the clock, against F29's rule, but only on a failed read.
+
 ---
 
 ## 4. What shipped in this session
@@ -1777,6 +1826,10 @@ or opened as a pull request.
   computes the same one, and a decision the clock makes differs between
   passes that reach it a moment apart. Bound such work by a ceiling whose
   answers ride the ledger instead (F29).
+- **A chain is a function of the tree, never of how the pass learnt it.**
+  Concurrent reads finish in GitHub's order, and a key over the order is a
+  key over that race. Cut from one canonical order, and take concurrent
+  answers from the results, in input order (F31).
 - **A cut pass keeps only what it wrote.** Every answer a pass pays for has
   to reach the ledger before the next stage that can be cut, and on a pass
   already past its window, as soon as it arrives (F29).
