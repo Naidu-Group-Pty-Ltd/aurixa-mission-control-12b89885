@@ -1,5 +1,10 @@
 # Handoff, continued — the gate passes, and the refresh that could not carry it
 
+> **For the state on 21 Oct, read
+> [`HANDOFF_2026-10-21_PRIME_CI_AND_RECONCILES.md`](./HANDOFF_2026-10-21_PRIME_CI_AND_RECONCILES.md)
+> first.** This document stays the record of the cascade engine's findings
+> F15–F31.
+
 **Written 19 Oct 2026, from 15:30 UTC, and updated at 16:10 UTC, by the session
 that continued
 [`HANDOFF_2026-10-19_AIRTABLE_CASCADE_AND_CI_GATES.md`](./HANDOFF_2026-10-19_AIRTABLE_CASCADE_AND_CI_GATES.md)
