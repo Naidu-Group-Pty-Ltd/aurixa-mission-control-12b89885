@@ -227,6 +227,26 @@ describe("a spec travels with its subject or not at all", () => {
     expect(stranded).toEqual([]);
   });
 
+  it("says nothing about a held variant the merge found current, and strands on one it did not", () => {
+    // #381 into npc-client-dashboard (21 Oct 2026): `src/App.tsx` was held,
+    // differed from prime, and its three-way merge reported it current. Four
+    // specs were held for it anyway, and the code they test crossed without
+    // them. A current copy is not behind; a copy the merge did not settle is.
+    const subject = "supabase/functions/market-sales-ingest/index.ts";
+    const args = {
+      imported: [],
+      specPath,
+      specText: SPEC,
+      primeSha: new Map([[subject, "new"]]),
+      cloneSha: new Map([[subject, "line-variant"]]),
+      crossing: new Set([specPath]),
+    };
+    expect(strandedSubjects({ ...args, current: new Set([subject]) })).toEqual([]);
+    expect(strandedSubjects({ ...args, current: new Set(["src/App.tsx"]) })).toEqual([subject]);
+    expect(strandedSubjects({ ...args, current: new Set() })).toEqual([subject]);
+    expect(strandedSubjects(args)).toEqual([subject]);
+  });
+
   it("says nothing when the subject did not change upstream", () => {
     // An unchanged subject cannot contradict an updated spec.
     const stranded = strandedSubjects({

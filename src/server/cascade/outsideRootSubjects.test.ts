@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { SUBJECT_ROOTS, subjectsNamedBy } from "@/lib/cascade/membrane/membrane.pure";
 import {
+  directoriesListedOutsideRoots,
+  listedMembers,
   MAX_OUTSIDE_ROOT_PROBES,
   outsideRootCandidates,
+  outsideRootSubjectsLeftAsTheCloneHasThem,
   subjectsNamedOutsideRoots,
 } from "./outsideRootSubjects.pure";
 
@@ -204,5 +207,186 @@ describe("outsideRootCandidates — the only files worth a question to prime's h
     // And a file that is not a spec is not read at all.
     outsideRootCandidates({ ...args, specPath: "src/lib/a.pure.ts", readNamed });
     expect(asked).toEqual([SPEC]);
+  });
+});
+
+/**
+ * `productionCredentialScope.spec.ts` (prime@49248ea), the case this was
+ * written for: it names no workflow and asserts about every one.
+ */
+const CREDENTIAL_SPEC = "src/lib/deploy/__tests__/productionCredentialScope.spec.ts";
+const CREDENTIAL_TEXT = [
+  "import { readdirSync } from 'node:fs';",
+  "import { readWorkflow, REPO_ROOT, runStep, stepScript } from './workflowHarness';",
+  "const WORKFLOWS = readdirSync(join(REPO_ROOT, '.github/workflows')).filter((f) => f.endsWith('.yml')).sort();",
+  "  const text = readWorkflow(`.github/workflows/${workflow}`);",
+  "      const r = runStep(guard, REPO_ROOT, { REF: 'refs/heads/main' });",
+].join("\n");
+
+describe("directoriesListedOutsideRoots — what a spec reads by listing, not by name", () => {
+  it("reads the workflows directory productionCredentialScope.spec.ts lists", () => {
+    expect(subjectsNamedOutsideRoots(CREDENTIAL_TEXT, CREDENTIAL_SPEC)).toEqual([]);
+    // `refs/heads/main` is directory-shaped too; only a tree holding files in
+    // it makes one a subject (`listedMembers`).
+    expect(directoriesListedOutsideRoots(CREDENTIAL_TEXT)).toEqual([
+      ".github/workflows",
+      "refs/heads/main",
+    ]);
+  });
+
+  it("reads the forms networkGuard.spec.ts and scriptProjectRef.spec.ts use", () => {
+    expect(
+      directoriesListedOutsideRoots(
+        "const dir = '.github/workflows';\nconst a = readdirSync(dir);",
+      ),
+    ).toEqual([".github/workflows"]);
+    expect(
+      directoriesListedOutsideRoots(
+        "readdirSync('.github/scripts').map((name) => readFileSync(`.github/scripts/${name}`, 'utf8'));",
+      ),
+    ).toEqual([".github/scripts"]);
+    expect(directoriesListedOutsideRoots("globSync(join(ROOT, '.github', 'workflows'))")).toEqual([
+      ".github/workflows",
+    ]);
+  });
+
+  it("reads nothing where nothing is listed: a directory mentioned is not a directory read", () => {
+    // deployWorkflowScenarios.spec.ts: `expect(on).not.toContain('.github/deploy')`.
+    expect(directoriesListedOutsideRoots("expect(on).not.toContain('.github/deploy');")).toEqual(
+      [],
+    );
+  });
+
+  it("never reads a content root, a single segment, a file, a climb, or a comment", () => {
+    const text = [
+      "readdirSync(x);",
+      "'src/lib/aml'; 'supabase/functions'; '.github'; '.github/workflows/ci.yml';",
+      "'.github/../etc'; 'weasyprint-service//fonts';",
+      "// '.claude/skills'",
+    ].join("\n");
+    expect(directoriesListedOutsideRoots(text)).toEqual([]);
+  });
+});
+
+describe("listedMembers — what a listing returns, on either side", () => {
+  const prime = new Map([
+    [".github/workflows/ci.yml", "a"],
+    [".github/workflows/apply-migration.yml", "b"],
+    [".github/workflows/nested/x.yml", "c"],
+    [".github/dependabot.yml", "d"],
+  ]);
+  const clone = new Map([
+    [".github/workflows/ci.yml", "a"],
+    [".github/workflows/set-builder-stock-link-secrets.yml", "e"],
+  ]);
+
+  it("is every file directly in the directory, in either tree, once", () => {
+    expect(listedMembers([".github/workflows"], prime, clone)).toEqual([
+      ".github/workflows/apply-migration.yml",
+      ".github/workflows/ci.yml",
+      ".github/workflows/set-builder-stock-link-secrets.yml",
+    ]);
+  });
+
+  it("is nothing for a directory no tree holds files in", () => {
+    expect(listedMembers(["refs/heads"], prime, clone)).toEqual([]);
+    expect(listedMembers([], prime, clone)).toEqual([]);
+  });
+});
+
+describe("a listed member is a subject on the same terms as a named one", () => {
+  const primeSha = new Map([
+    [".github/workflows/ci.yml", "ci"],
+    [".github/workflows/apply-migration.yml", "apply-prime"],
+    [".github/workflows/rotate-internal-edge-secret.yml", "rotate-prime"],
+    [".github/workflows/deploy-supabase-functions.yml", "deploy-prime"],
+  ]);
+  const cloneSha = new Map([
+    [".github/workflows/ci.yml", "ci"],
+    [".github/workflows/apply-migration.yml", "apply-clone"],
+    [".github/workflows/rotate-internal-edge-secret.yml", "rotate-clone"],
+    [".github/workflows/deploy-supabase-functions.yml", "deploy-clone"],
+    [".github/workflows/set-builder-stock-link-secrets.yml", "stock-clone"],
+    [".github/workflows/vcr-prune.yml", "vcr"],
+  ]);
+  const args = {
+    specPath: CREDENTIAL_SPEC,
+    specText: CREDENTIAL_TEXT,
+    primeSha,
+    cloneSha,
+    // The deploy workflow is pumped: it crosses, reconciled.
+    crossing: new Set([".github/workflows/deploy-supabase-functions.yml"]),
+  };
+
+  it("asks prime's history only about members both sides hold at different versions", () => {
+    expect(outsideRootCandidates(args)).toEqual([
+      ".github/workflows/apply-migration.yml",
+      ".github/workflows/rotate-internal-edge-secret.yml",
+    ]);
+  });
+
+  it("names every member the delivery leaves as the clone has it, prime's or not (#381)", () => {
+    expect(
+      outsideRootSubjectsLeftAsTheCloneHasThem({
+        ...args,
+        removing: new Set([".github/workflows/vcr-prune.yml"]),
+      }),
+    ).toEqual([
+      ".github/workflows/apply-migration.yml",
+      ".github/workflows/rotate-internal-edge-secret.yml",
+      ".github/workflows/set-builder-stock-link-secrets.yml",
+    ]);
+  });
+
+  it("never names a member that is identical, crossing, being removed, or the clone does not hold", () => {
+    expect(
+      outsideRootSubjectsLeftAsTheCloneHasThem({
+        ...args,
+        crossing: new Set([...cloneSha.keys()]),
+        removing: new Set(),
+      }),
+    ).toEqual([]);
+    expect(
+      outsideRootSubjectsLeftAsTheCloneHasThem({
+        ...args,
+        cloneSha: new Map([[".github/workflows/ci.yml", "ci"]]),
+        removing: new Set(),
+      }),
+    ).toEqual([]);
+  });
+
+  it("is nothing for a file that is not a spec", () => {
+    expect(
+      outsideRootSubjectsLeftAsTheCloneHasThem({
+        ...args,
+        specPath: "src/lib/deploy/deployScope.pure.ts",
+        removing: new Set(),
+      }),
+    ).toEqual([]);
+  });
+
+  it("takes the listing from a caller that kept it, and answers as a fresh reading does", () => {
+    const asked: string[] = [];
+    const readListed = (t: string, path: string) => {
+      asked.push(path);
+      return directoriesListedOutsideRoots(t);
+    };
+    expect(outsideRootCandidates({ ...args, readListed })).toEqual(outsideRootCandidates(args));
+    expect(asked).toEqual([CREDENTIAL_SPEC]);
+  });
+});
+
+describe("a fixture written outside the content roots is not a file the spec reads", () => {
+  it("drops a path only ever WRITTEN, and keeps one the spec also reads", () => {
+    // deployWorkflowScenarios.spec.ts (prime@49248ea), lines 21 and 136-137.
+    const written = [
+      "repo.write('.github/workflows/deploy-supabase-functions.yml', 'name: x\\n');",
+      "repo.write('.github/deploy/held-functions.txt', 'aml-reliance\\nother-fn\\n');",
+    ].join("\n");
+    expect(subjectsNamedOutsideRoots(written)).toEqual([]);
+    const read = "const WORKFLOW = '.github/workflows/deploy-supabase-functions.yml';\n" + written;
+    expect(subjectsNamedOutsideRoots(read)).toEqual([
+      ".github/workflows/deploy-supabase-functions.yml",
+    ]);
   });
 });

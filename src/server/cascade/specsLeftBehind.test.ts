@@ -281,6 +281,41 @@ describe("specSubjects — what a spec asserts about, from its own text", () => 
   });
 });
 
+describe("specSubjects — a spec that lists a directory asserts about what it holds", () => {
+  // productionCredentialScope.spec.ts (prime@49248ea) names no workflow.
+  const SPEC = "src/lib/deploy/__tests__/productionCredentialScope.spec.ts";
+  const TEXT =
+    `import { readdirSync } from 'node:fs';\n` +
+    `const WORKFLOWS = readdirSync(join(REPO_ROOT, '.github/workflows')).filter((f) => f.endsWith('.yml'));\n`;
+
+  it("is every file this tree holds directly in the directory", () => {
+    expect(
+      specSubjects({
+        specPath: SPEC,
+        specText: TEXT,
+        tree: tree(
+          SPEC,
+          ".github/workflows/ci.yml",
+          ".github/workflows/apply-migration.yml",
+          ".github/dependabot.yml",
+        ),
+        readText: () => undefined,
+      }),
+    ).toEqual([".github/workflows/apply-migration.yml", ".github/workflows/ci.yml"]);
+  });
+
+  it("is nothing where nothing is listed", () => {
+    expect(
+      specSubjects({
+        specPath: SPEC,
+        specText: `expect(on).not.toContain('.github/workflows');`,
+        tree: tree(SPEC, ".github/workflows/ci.yml"),
+        readText: () => undefined,
+      }),
+    ).toEqual([]);
+  });
+});
+
 describe("subjectsOfKeptSpec — each copy read against its own tree", () => {
   const SPEC = "src/lib/crm/__tests__/crmInbox.spec.ts";
   const CLONE_ONLY = "src/lib/crm/crmInboxClone.ts";
@@ -932,6 +967,7 @@ describe("memoSourceReadings — a text read once, however often a pass asks", (
     expect(r.reExportSpecifiers(SHIM_TEXT)).toBe(r.reExportSpecifiers(SHIM_TEXT));
     expect(r.namedBy(SPEC_TEXT, SPEC)).toBe(r.namedBy(SPEC_TEXT, SPEC));
     expect(r.namedOutsideRoots(SPEC_TEXT, SPEC)).toBe(r.namedOutsideRoots(SPEC_TEXT, SPEC));
+    expect(r.listedOutsideRoots(SPEC_TEXT, SPEC)).toBe(r.listedOutsideRoots(SPEC_TEXT, SPEC));
     // A null — "not a shim" — is an answer too, and is kept like one.
     const notShim = `import a from "./a";\nexport default a;`;
     expect(r.reExportSpecifiers(notShim)).toBeNull();

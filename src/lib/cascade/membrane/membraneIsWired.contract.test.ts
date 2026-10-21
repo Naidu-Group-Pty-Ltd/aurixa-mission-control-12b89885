@@ -734,6 +734,45 @@ describe("a spec's subject outside the content roots travels only on evidence", 
     expect(block).toContain("decideHoldRelease({");
     expect(block).toContain("overwriteApproved.has(path)");
   });
+
+  it("reads what a spec LISTS as well as what it names, on both halves", () => {
+    // `productionCredentialScope.spec.ts` names no workflow and asserts about
+    // every one (#381 on npc-client-dashboard).
+    const top = roundTop();
+    const at = top.indexOf("outsideRootCandidates({");
+    expect(top.slice(at, at + 400)).toContain("readListed: readings.listedOutsideRoots");
+    expect(engine.match(/readListed: readings\.listedOutsideRoots/g)?.length).toBe(3);
+  });
+
+  it("holds a spec whose outside-root subject an exclusion holds, without asking prime's history", () => {
+    const top = roundTop();
+    expect(top).toContain("outsideRootSubjectsLeftAsTheCloneHasThem({");
+    const at = top.indexOf("outsideRootSubjectsLeftAsTheCloneHasThem({");
+    const call = top.slice(at, at + 500);
+    // Against what the delivery writes AND what it removes: a workflow the
+    // delivery deletes is not one the spec will meet.
+    expect(call).toContain("crossing: deliveredPaths");
+    expect(call).toContain("removing: deletesCrossing");
+    expect(call).toContain(".filter((path) => heldByExclusion(path) !== null)");
+    // A person who approved the spec has looked; the hold is theirs to lift.
+    expect(top).toMatch(/overwriteApproved\.has\(specPath\)\s*\?\s*\[\]/);
+    // And no probe is spent on a file a rule will hold whatever it says.
+    expect(top).toMatch(
+      /\}\)\.filter\(\(path\) => heldByExclusion\(path\) === null\);\s*if \(outside\.length > 0\)/,
+    );
+    // The rule is the path rules' own, over the same exclusions.
+    expect(engine).toMatch(
+      /const heldByExclusion = [\s\S]{0,200}?partitionCascadePaths\(\[path\], exclusions, lineOpts\)/,
+    );
+  });
+
+  it("never fetches such a file, and names its rule on the hold", () => {
+    const block = engine.slice(engine.indexOf("for (let round = 0; ; round += 1) {"));
+    expect(block).toContain("attempted: new Set([...attemptedSubjects, ...outsideRefused.keys()])");
+    expect(block).toMatch(
+      /for \(const \[subject, reason\] of outsideRefused\)\s*refusedBySubject\.set\(subject, \{ subject, reason \}\);/,
+    );
+  });
 });
 
 /**

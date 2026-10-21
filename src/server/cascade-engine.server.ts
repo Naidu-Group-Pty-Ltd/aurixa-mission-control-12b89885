@@ -109,7 +109,11 @@ import {
   describeBridges,
   type OwedBridge,
 } from "./cascade/reExportBridges.pure";
-import { MAX_OUTSIDE_ROOT_PROBES, outsideRootCandidates } from "./cascade/outsideRootSubjects.pure";
+import {
+  MAX_OUTSIDE_ROOT_PROBES,
+  outsideRootCandidates,
+  outsideRootSubjectsLeftAsTheCloneHasThem,
+} from "./cascade/outsideRootSubjects.pure";
 import { decodeBase64Utf8, fetchBlobTextsBatched } from "./prime-backend.server";
 import {
   decideHoldRelease,
@@ -4902,6 +4906,23 @@ export async function processClone(args: {
   const outsideVerdicts = new Map<string, HoldRelease>();
   /** Files outside the content roots carried beside a spec, and the specs that named them. */
   const outsideCarriedFor = new Map<string, Set<string>>();
+  // A file outside the content roots that a rule of the clone's own holds —
+  // an exclusion — is one prime's copy may never replace, so a spec reading it
+  // runs against the clone's copy for as long as the rule stands, whatever
+  // prime's history says. Such a spec is held naming it, rather than shipped
+  // to fail (`outsideRootSubjectsLeftAsTheCloneHasThem`); no probe is spent on
+  // it. An operator who approves the SPEC lets it cross anyway: the hold is
+  // for a person, and they have looked.
+  const exclusionHoldOf = new Map<string, ExclusionReason | null>();
+  const heldByExclusion = (path: string): ExclusionReason | null => {
+    if (!exclusionHoldOf.has(path)) {
+      const held = partitionCascadePaths([path], exclusions, lineOpts).held[0];
+      exclusionHoldOf.set(path, held ? held.reason : null);
+    }
+    return exclusionHoldOf.get(path) ?? null;
+  };
+  /** Those files this pass has held a spec for, and the rule that holds each. */
+  const outsideRefused = new Map<string, ExclusionReason>();
   let outsideProbes = 0;
   const outsideHeld = (path: string): HeldPath => ({
     path,
@@ -5067,9 +5088,28 @@ export async function processClone(args: {
           primeShaByPath && isSpecPath(specPath)
             ? subjectsImportedBy(specText, specPath, primeShaByPath, readings.importsOf)
             : [],
+        // A held variant the merge above found current is not behind, so it
+        // strands no spec (`strandedSubjects`, #381 into npc-client-dashboard).
+        current: variantCurrent,
       });
       if (stranded.length > 0) strandedBySpec.set(specPath, stranded);
       if (primeShaByPath !== null && cloneShaByPath !== null) {
+        const held = overwriteApproved.has(specPath)
+          ? []
+          : outsideRootSubjectsLeftAsTheCloneHasThem({
+              specPath,
+              specText,
+              primeSha: primeShaByPath,
+              cloneSha: cloneShaByPath,
+              crossing: deliveredPaths,
+              removing: deletesCrossing,
+              readNamed: readings.namedOutsideRoots,
+              readListed: readings.listedOutsideRoots,
+            }).filter((path) => heldByExclusion(path) !== null);
+        for (const path of held) outsideRefused.set(path, heldByExclusion(path) as ExclusionReason);
+        if (held.length > 0) {
+          strandedBySpec.set(specPath, [...(strandedBySpec.get(specPath) ?? []), ...held]);
+        }
         const outside = outsideRootCandidates({
           specPath,
           specText,
@@ -5077,7 +5117,8 @@ export async function processClone(args: {
           cloneSha: cloneShaByPath,
           crossing: deliveredPaths,
           readNamed: readings.namedOutsideRoots,
-        });
+          readListed: readings.listedOutsideRoots,
+        }).filter((path) => heldByExclusion(path) === null);
         if (outside.length > 0) outsideNamedBy.set(specPath, outside);
       }
     }
@@ -5239,7 +5280,8 @@ export async function processClone(args: {
                   cloneSha: cloneShaByPath,
                   crossing: deliveredPaths,
                   readNamed: readings.namedOutsideRoots,
-                })
+                  readListed: readings.listedOutsideRoots,
+                }).filter((path) => heldByExclusion(path) === null)
               : [],
           );
         }
@@ -5300,7 +5342,9 @@ export async function processClone(args: {
         ...artefactsOwedNow,
       ],
       held: partition.held,
-      attempted: attemptedSubjects,
+      // A file a rule holds outside the content roots is the clone's to keep,
+      // never a subject to fetch: it is refused below, by that rule.
+      attempted: new Set([...attemptedSubjects, ...outsideRefused.keys()]),
       limit: Math.max(0, MAX_SUBJECTS_CARRIED - carriedSubjects.length),
     });
     if (plan.atCeiling) carryHitCeiling = true;
@@ -5399,6 +5443,8 @@ export async function processClone(args: {
     // lines ago and the plan predates all of them. Using the plan would print
     // the generic instruction on exactly the case that has a specific answer.
     const refusedBySubject = new Map<string, { subject: string; reason: ExclusionReason }>();
+    for (const [subject, reason] of outsideRefused)
+      refusedBySubject.set(subject, { subject, reason });
     for (const r of carryRefusals) refusedBySubject.set(r.subject, r);
     for (const h of partition.held) {
       if (!refusedBySubject.has(h.path))

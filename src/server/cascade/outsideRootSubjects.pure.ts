@@ -70,6 +70,7 @@
 
 import { isSpecPath } from "@/lib/cascade/membrane/ionSpecies.pure";
 import {
+  literalsNotOnlyFixtures,
   resolveFromSpec,
   specDirectorySegmentPaths,
   SUBJECT_ROOTS,
@@ -118,8 +119,10 @@ export function subjectsNamedOutsideRoots(text: string, specPath?: string): stri
   const code = stripComments(text);
   const found = new Set<string>();
 
-  for (const m of code.matchAll(WHOLE)) {
-    if (isOutsideRootPath(m[1])) found.add(m[1]);
+  // A path a fixture is written to is not a file the spec reads
+  // (`suppliesFixtureContent`): `repo.write('.github/workflows/x.yml', …)`.
+  for (const path of literalsNotOnlyFixtures(code, WHOLE)) {
+    if (isOutsideRootPath(path)) found.add(path);
   }
 
   for (const m of code.matchAll(SEGMENTED)) {
@@ -142,7 +145,104 @@ export function subjectsNamedOutsideRoots(text: string, specPath?: string): stri
 }
 
 /**
- * The files outside the content roots that a spec names and that would stay
+ * A call that reads what a directory HOLDS rather than one file by name.
+ *
+ * `readdirSync(join(REPO_ROOT, '.github/workflows'))` is how
+ * `productionCredentialScope.spec.ts` reads every workflow: it names none of
+ * them, so neither rule above sees a single subject, and it asserts about
+ * all of them.
+ */
+const LISTING = /\b(?:readdirSync|readdir|opendirSync|opendir|globSync|glob)\s*\(/;
+
+/** `".github/workflows"`, `'.github/scripts/'` — a directory: no extension on any segment past the first. */
+const DIRECTORY = new RegExp(String.raw`['"\`](${SEGMENT}(?:/[A-Za-z0-9_-]+)+)/?['"\`]`, "g");
+
+/** `` `.github/workflows/${workflow}` `` — a member chosen while the spec runs. */
+const TEMPLATE_HEAD = new RegExp(String.raw`\`(${SEGMENT}(?:/[A-Za-z0-9_-]+)+)/\$\{`, "g");
+
+/** A directory this rule reads: two segments or more, outside the content roots. */
+function isOutsideRootDirectory(path: string): boolean {
+  const segments = path.split("/");
+  if (segments.length < 2) return false;
+  if (ROOTS.has(segments[0])) return false;
+  if (segments.some((s) => s === "" || s === "." || s === "..")) return false;
+  return segments.slice(1).every((s) => !s.includes("."));
+}
+
+/**
+ * The directories outside the content roots a spec LISTS. Sorted.
+ *
+ * Only a spec whose code makes a listing call lists anything; in one that
+ * does, every directory-shaped literal outside the content roots is read —
+ * whole (`'.github/workflows'`), as the head of a template
+ * (`` `.github/workflows/${name}` ``), or as segments
+ * (`join(ROOT, '.github', 'workflows')`). Most such literals in a spec are not
+ * directories at all (`'refs/heads/main'`, `'application/json'`): what makes
+ * one a subject is that a tree holds files directly in it
+ * (`listedMembers`), so the noise costs nothing.
+ *
+ * Measured over the prime's 2,796 spec files on 21 Oct 2026: four list a
+ * directory a tree holds — `.github/workflows` twice
+ * (`productionCredentialScope.spec.ts`, `networkGuard.spec.ts`),
+ * `.github/scripts` once and `weasyprint-service/fonts` once.
+ */
+export function directoriesListedOutsideRoots(text: string): string[] {
+  const code = stripComments(text);
+  if (!LISTING.test(code)) return [];
+  const found = new Set<string>();
+  for (const pattern of [DIRECTORY, TEMPLATE_HEAD]) {
+    for (const m of code.matchAll(pattern)) {
+      if (isOutsideRootDirectory(m[1])) found.add(m[1]);
+    }
+  }
+  for (const m of code.matchAll(SEGMENTED)) {
+    const tail = [...m[2].matchAll(/['"`]([A-Za-z0-9_.-]+)['"`]/g)].map((x) => x[1]);
+    const path = [m[1], ...tail].join("/");
+    if (isOutsideRootDirectory(path)) found.add(path);
+  }
+  return [...found].sort();
+}
+
+/**
+ * The files held DIRECTLY in each directory by any of the trees — what a
+ * listing call returns, one level deep, on either side. Sorted.
+ */
+export function listedMembers(
+  directories: readonly string[],
+  ...trees: ReadonlyArray<ReadonlyMap<string, string>>
+): string[] {
+  if (directories.length === 0) return [];
+  const wanted = new Set(directories);
+  const found = new Set<string>();
+  for (const tree of trees) {
+    for (const path of tree.keys()) {
+      const slash = path.lastIndexOf("/");
+      if (slash > 0 && wanted.has(path.slice(0, slash))) found.add(path);
+    }
+  }
+  return [...found].sort();
+}
+
+/**
+ * Every file outside the content roots a spec reads: the ones it names, and
+ * the members of the directories it lists, on either side.
+ */
+function outsideRootReads(args: {
+  specPath: string;
+  specText: string;
+  primeSha: ReadonlyMap<string, string>;
+  cloneSha: ReadonlyMap<string, string>;
+  readNamed?: (text: string, path: string) => readonly string[];
+  readListed?: (text: string, path: string) => readonly string[];
+}): string[] {
+  const { specPath, specText, primeSha, cloneSha } = args;
+  const named = (args.readNamed ?? subjectsNamedOutsideRoots)(specText, specPath);
+  const listed = (args.readListed ?? directoriesListedOutsideRoots)(specText, specPath);
+  return [...new Set([...named, ...listedMembers(listed, primeSha, cloneSha)])].sort();
+}
+
+/**
+ * The files outside the content roots that a spec reads and that would stay
  * behind it: on both sides, at different versions, and not in the delivery.
  *
  * These are the only ones worth a question to prime's history. A file only
@@ -161,15 +261,59 @@ export function outsideRootCandidates(args: {
    * answers between questions (`memoSourceReadings`). Read afresh otherwise.
    */
   readNamed?: (text: string, path: string) => readonly string[];
+  /** `directoriesListedOutsideRoots`, kept the same way. */
+  readListed?: (text: string, path: string) => readonly string[];
 }): string[] {
-  const { specPath, specText, primeSha, cloneSha, crossing } = args;
+  const { specPath, crossing, primeSha, cloneSha } = args;
   if (!isSpecPath(specPath)) return [];
-  const named = (args.readNamed ?? subjectsNamedOutsideRoots)(specText, specPath);
-  return named.filter((path) => {
+  return outsideRootReads(args).filter((path) => {
     if (crossing.has(path)) return false;
     const onPrime = primeSha.get(path);
     const onClone = cloneSha.get(path);
     return onPrime !== undefined && onClone !== undefined && onPrime !== onClone;
+  });
+}
+
+/**
+ * The files outside the content roots a spec reads that this delivery leaves
+ * EXACTLY as the clone has them, where prime's copy differs or prime has
+ * none: the clone holds it, nothing crossing writes or removes it. Sorted.
+ *
+ * The question the engine asks of these is whether a rule of the clone's own
+ * holds them — an exclusion. A file an exclusion holds is one prime's copy
+ * may never replace, so the spec would run against the clone's copy for as
+ * long as the rule stands, and nothing about prime's history changes that.
+ * Measured on cascade `59b34c5` to `npc-client-dashboard` (#381):
+ * `productionCredentialScope.spec.ts` lists every workflow and requires a
+ * production environment on each job that reads a production credential; the
+ * clone protects `apply-migration.yml` (its own copy, matching none of the
+ * nine versions prime ever held), `rotate-internal-edge-secret.yml` (prime's
+ * previous version) and two workflows prime no longer has. The spec crossed,
+ * the four did not, and `verify` failed on all four. Such a spec is held,
+ * naming them, rather than shipped to fail.
+ *
+ * A file prime does not hold at all is included, unlike in
+ * `outsideRootCandidates`: there is no version of prime's to carry, which is
+ * exactly why the clone's copy is the one the spec will meet.
+ */
+export function outsideRootSubjectsLeftAsTheCloneHasThem(args: {
+  specPath: string;
+  specText: string;
+  primeSha: ReadonlyMap<string, string>;
+  cloneSha: ReadonlyMap<string, string>;
+  /** Every path the delivery covers. */
+  crossing: ReadonlySet<string>;
+  /** Every path the delivery removes from the clone. */
+  removing: ReadonlySet<string>;
+  readNamed?: (text: string, path: string) => readonly string[];
+  readListed?: (text: string, path: string) => readonly string[];
+}): string[] {
+  const { specPath, crossing, removing, primeSha, cloneSha } = args;
+  if (!isSpecPath(specPath)) return [];
+  return outsideRootReads(args).filter((path) => {
+    if (crossing.has(path) || removing.has(path)) return false;
+    const onClone = cloneSha.get(path);
+    return onClone !== undefined && primeSha.get(path) !== onClone;
   });
 }
 
