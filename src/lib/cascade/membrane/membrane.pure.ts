@@ -298,9 +298,12 @@ export function subjectsNamedBy(text: string, specPath?: string): string[] {
  */
 export function literalsNotOnlyFixtures(text: string, pattern: RegExp): Set<string> {
   const read = new Set<string>();
+  let spans: ReadonlyArray<readonly [number, number]> | null = null;
   for (const m of text.matchAll(pattern)) {
     const start = m.index ?? 0;
-    if (!suppliesFixtureContent(text, start, start + m[0].length)) read.add(m[1]);
+    // Found once per text, and only for a text that has a literal to judge.
+    spans ??= fixtureArgumentSpans(text);
+    if (!suppliesFixtureContent(text, start, start + m[0].length, spans)) read.add(m[1]);
   }
   return read;
 }
@@ -335,13 +338,26 @@ export function literalsNotOnlyFixtures(text: string, pattern: RegExp): Set<stri
  *    is the failure this channel exists to refuse.
  *
  * Only the key position of an object literal counts — after `{` or `,` — so
- * the branch of a ternary choosing between two strings is never one.
+ * the branch of a ternary choosing between two strings is never one. And only
+ * inside an object literal handed STRAIGHT to a call
+ * (`fixtureRepo({ … })`, `tree({ … })`), which is how every fixture measured
+ * is built: a golden map a spec keeps to compare real files against —
+ * `const expected = { 'docs/a.md': '# A\n' }` — names its subjects as keys
+ * with multi-line values too, and is never a call's argument
+ * (`fixtureArgumentSpans`). The review of this change named that case;
+ * nothing in prime has it yet, and the rule would have dropped its subject.
  */
-export function suppliesFixtureContent(text: string, start: number, end: number): boolean {
+export function suppliesFixtureContent(
+  text: string,
+  start: number,
+  end: number,
+  spans: ReadonlyArray<readonly [number, number]> = fixtureArgumentSpans(text),
+): boolean {
   const before = text.slice(Math.max(0, start - 48), start);
   if (/\.write\(\s*$/.test(before)) {
     return /^\s*,/.test(text.slice(end, end + 32));
   }
+  if (!spans.some(([open, close]) => open < start && end <= close)) return false;
   let i = start - 1;
   while (i >= 0 && /\s/.test(text[i])) i--;
   if (i >= 0 && text[i] !== "{" && text[i] !== ",") return false;
@@ -352,6 +368,78 @@ export function suppliesFixtureContent(text: string, start: number, end: number)
   body.lastIndex = end + colon[0].length - 1;
   const value = body.exec(text);
   return value !== null && /\\n|\n/.test(value[1]);
+}
+
+/**
+ * The object literals handed straight to a call as its first argument —
+ * `name({ … })` — from the opening brace to its match, quotes, templates and
+ * comments skipped. An assertion is not a builder:
+ * `expect(read()).toEqual({ 'docs/a.md': '# A\n' })` compares real files, so
+ * `expect`, `objectContaining` and every `to…` matcher are left out. A brace
+ * with no match (text cut short) yields no span, which keeps its keys
+ * subjects: the safe way round.
+ */
+export function fixtureArgumentSpans(text: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  for (const m of text.matchAll(/\b([A-Za-z_$][\w$]*)\s*\(\s*\{/g)) {
+    if (/^(?:expect|objectContaining|to[A-Z]\w*)$/.test(m[1])) continue;
+    const open = (m.index ?? 0) + m[0].length - 1;
+    const close = matchingBrace(text, open);
+    if (close !== -1) spans.push([open, close]);
+  }
+  return spans;
+}
+
+/** The index of the `}` that closes the `{` at `open`, or -1. */
+function matchingBrace(text: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < text.length; i += 1) {
+    const c = text[i];
+    if (c === "'" || c === '"' || c === "`") {
+      i = endOfString(text, i);
+      if (i === -1) return -1;
+      continue;
+    }
+    if (c === "/" && text[i + 1] === "/") {
+      i = text.indexOf("\n", i);
+      if (i === -1) return -1;
+      continue;
+    }
+    if (c === "/" && text[i + 1] === "*") {
+      const close = text.indexOf("*/", i + 2);
+      if (close === -1) return -1;
+      i = close + 1;
+      continue;
+    }
+    if (c === "{") depth += 1;
+    else if (c === "}") {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * The index of the quote that closes the string opening at `at`, or -1. A
+ * quoted string ends at its line; a template's `${…}` is skipped as a brace.
+ */
+function endOfString(text: string, at: number): number {
+  const quote = text[at];
+  for (let i = at + 1; i < text.length; i += 1) {
+    const c = text[i];
+    if (c === "\\") {
+      i += 1;
+      continue;
+    }
+    if (c === quote) return i;
+    if (quote !== "`" && c === "\n") return i;
+    if (quote === "`" && c === "$" && text[i + 1] === "{") {
+      i = matchingBrace(text, i + 1);
+      if (i === -1) return -1;
+    }
+  }
+  return -1;
 }
 
 /** `: '`, `: "` or `: \`` after a key, the value allowed to start on the next line. */

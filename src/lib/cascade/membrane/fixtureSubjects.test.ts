@@ -62,6 +62,34 @@ describe("subjectsNamedBy — a fixture's path is not a subject", () => {
     ]);
   });
 
+  it("keeps a golden map: multi-line values a spec compares REAL files against", () => {
+    // The case the review of this change named. Nothing in prime has it yet;
+    // the first cut of the rule would have dropped its subject.
+    const text = [
+      "const expected = { 'docs/a.md': '# A\\n', 'docs/b.md': '# B\\n' };",
+      "for (const [file, body] of Object.entries(expected)) {",
+      "  expect(readFileSync(join(ROOT, file), 'utf8')).toBe(body);",
+      "}",
+    ].join("\n");
+    expect(subjectsNamedBy(text)).toEqual(["docs/a.md", "docs/b.md"]);
+  });
+
+  it("keeps a map handed to an assertion, which compares rather than builds", () => {
+    const text = "expect(readDocs()).toEqual({ 'docs/a.md': '# A\\n' });";
+    expect(subjectsNamedBy(text)).toEqual(["docs/a.md"]);
+  });
+
+  it("finds a key deep in a fixture literal, past braces and quotes inside its values", () => {
+    const text = [
+      "const repo = fixtureRepo({",
+      "  'supabase/functions/a/index.ts': 'export const x = { a: \"}\" };\\n',",
+      "  'supabase/functions/b/index.ts': `const y = ${'{'};\\n`,",
+      "  'src/App.tsx': 'export default 1;\\n', // a } in a comment",
+      "});",
+    ].join("\n");
+    expect(subjectsNamedBy(text)).toEqual([]);
+  });
+
   it("never reads the branch of a ternary as a key", () => {
     const text = "const path = flag ? 'src/lib/a.ts' : 'export const a = 1;\\n';";
     expect(subjectsNamedBy(text)).toEqual(["src/lib/a.ts"]);
@@ -85,10 +113,17 @@ describe("suppliesFixtureContent — the two positions, and nothing else", () =>
   });
 
   it("is a key whose value holds a line break, in any quote, starting on the next line or not", () => {
-    expect(at("{ 'a/b.ts': 'x\\n' }", "'a/b.ts'")).toBe(true);
-    expect(at('{ "a/b.ts":\n    "x\\n" }', '"a/b.ts"')).toBe(true);
-    expect(at("{ 'a/b.ts': `line one\nline two` }", "'a/b.ts'")).toBe(true);
-    expect(at("{ 'a/b.ts': `project_id = \"${REF}\"\\n` }", "'a/b.ts'")).toBe(true);
+    expect(at("tree({ 'a/b.ts': 'x\\n' })", "'a/b.ts'")).toBe(true);
+    expect(at('tree({ "a/b.ts":\n    "x\\n" })', '"a/b.ts"')).toBe(true);
+    expect(at("tree({ 'a/b.ts': `line one\nline two` })", "'a/b.ts'")).toBe(true);
+    expect(at("tree({ 'a/b.ts': `project_id = \"${REF}\"\\n` })", "'a/b.ts'")).toBe(true);
+  });
+
+  it("is a key only in an object literal handed straight to a call", () => {
+    expect(at("const files = { 'a/b.ts': 'x\\n' };", "'a/b.ts'")).toBe(false);
+    expect(at("expect(x).toEqual({ 'a/b.ts': 'x\\n' })", "'a/b.ts'")).toBe(false);
+    // A literal whose brace never closes (text cut short) holds nothing.
+    expect(at("tree({ 'a/b.ts': 'x\\n'", "'a/b.ts'")).toBe(false);
   });
 
   it("is not a key whose value is one line, an array, or not a string", () => {
