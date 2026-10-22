@@ -12,9 +12,12 @@ import { describe, expect, it } from "vitest";
 import {
   EXHAUSTED_PROGRESS_WINDOW_MS,
   PROGRESS_COLUMN,
+  composeRetirementSummary,
   decideExhaustedEvent,
   retirementSummary,
+  type RetiringRow,
 } from "./exhaustedEvents.pure";
+import { isReviewerRejection, isSupersededSummary } from "./headRedelivery.pure";
 import { stripComments } from "../sourceComments.pure";
 import { STALL_MINUTES } from "./drainLimits.pure";
 
@@ -70,6 +73,155 @@ describe("decideExhaustedEvent", () => {
   it("the retirement names the lever, not just the mystery", () => {
     expect(retirementSummary(3)).toContain("Cascade now");
     expect(retirementSummary(3)).toContain("3 attempts");
+  });
+});
+
+/*
+  The two events retired on 21 Oct 2026, as their rows stood when the drain
+  retired them — before the terminaliser settled the unreached ones. Both had
+  delivered, and both said "the last one kept nothing".
+*/
+describe("composeRetirementSummary", () => {
+  const row = (
+    clone_name: string | null,
+    status: string,
+    extra: Partial<Pick<RetiringRow, "delivered_sha" | "pr_url">> = {},
+  ): RetiringRow => ({
+    clone_name,
+    status,
+    delivered_sha: extra.delivered_sha ?? null,
+    pr_url: extra.pr_url ?? null,
+  });
+  const HEAD = "d59560fe";
+  const LEVER = `The queue will not claim this event again; "Cascade now" runs prime's head fresh.`;
+
+  it("302d58ff: the client dashboard was delivered, the clones behind the CRM were never reached", () => {
+    const rows = [
+      row("NPC Client Dashboard", "succeeded", {
+        delivered_sha: HEAD,
+        pr_url: "https://github.com/Naidu-Group-Pty-Ltd/npc-client-dashboard/pull/395",
+      }),
+      row("NPC CRM Independent", "pushing"),
+      row("NPC Test", "queued"),
+      row("Preflight Property Group", "queued"),
+    ];
+    expect(composeRetirementSummary({ maxAttempts: 3, rows })).toBe(
+      "Retired after 3 attempts, part-way through. " +
+        "Delivered: NPC Client Dashboard. " +
+        "Not finished: NPC CRM Independent, NPC Test and Preflight Property Group. " +
+        LEVER,
+    );
+  });
+
+  it("fb302fd5: two delivered, one already in sync, the CRM never reached", () => {
+    const rows = [
+      row("NPC Client Dashboard", "skipped", { delivered_sha: HEAD }),
+      row("NPC Test", "succeeded", {
+        delivered_sha: HEAD,
+        pr_url: "https://github.com/Naidu-Group-Pty-Ltd/npc-test-76b3b3/pull/238",
+      }),
+      row("Preflight Property Group", "succeeded", {
+        delivered_sha: HEAD,
+        pr_url: "https://github.com/Naidu-Group-Pty-Ltd/preflight-property-group/pull/238",
+      }),
+      row("NPC CRM Independent", "queued"),
+    ];
+    expect(composeRetirementSummary({ maxAttempts: 3, rows })).toBe(
+      "Retired after 3 attempts, part-way through. " +
+        "Delivered: NPC Test and Preflight Property Group. " +
+        "Already in sync: NPC Client Dashboard. " +
+        "Not finished: NPC CRM Independent. " +
+        LEVER,
+    );
+  });
+
+  it("read after the terminaliser, the unreached clones would look like skips somebody chose", () => {
+    /* Why the drain composes BEFORE `terminaliseOrphanedRows`: the same
+       302d58ff rows once settled read as a complete event. */
+    const settled = [
+      row("NPC Client Dashboard", "succeeded", { delivered_sha: HEAD }),
+      row("NPC CRM Independent", "skipped"),
+      row("NPC Test", "skipped"),
+      row("Preflight Property Group", "skipped"),
+    ];
+    const text = composeRetirementSummary({ maxAttempts: 3, rows: settled });
+    expect(text).toContain("with every clone's row settled");
+    expect(text).toContain("Skipped: NPC CRM Independent, NPC Test and Preflight Property Group.");
+    expect(text).not.toContain("Not finished");
+  });
+
+  it("keeps the fixed sentence where the rows could not be read, or there are none", () => {
+    expect(composeRetirementSummary({ maxAttempts: 3, rows: null })).toBe(retirementSummary(3));
+    expect(composeRetirementSummary({ maxAttempts: 3, rows: [] })).toBe(retirementSummary(3));
+  });
+
+  it("an event no pass reached at all still leads with nothing kept, and names who is owed", () => {
+    const text = composeRetirementSummary({
+      maxAttempts: 3,
+      rows: [row("NPC CRM Independent", "pushing"), row("NPC Test", "queued")],
+    });
+    expect(
+      text.startsWith("No pass completed within 3 attempts and the last one kept nothing"),
+    ).toBe(true);
+    expect(text).toContain("Not finished: NPC CRM Independent and NPC Test.");
+    expect(text.endsWith(LEVER)).toBe(true);
+  });
+
+  it("a status this build has never heard of is not finished, never delivered", () => {
+    const text = composeRetirementSummary({
+      maxAttempts: 3,
+      rows: [row("NPC Test", "landed", { delivered_sha: HEAD })],
+    });
+    expect(text).toContain("Not finished: NPC Test.");
+    expect(text).not.toContain("Delivered");
+  });
+
+  it("a row naming a pull request is a proposal, whether it is open or the engine's skip", () => {
+    const text = composeRetirementSummary({
+      maxAttempts: 3,
+      rows: [
+        row("NPC Test", "pr_opened", { pr_url: "https://github.com/o/r/pull/1" }),
+        row("Preflight Property Group", "skipped", {
+          delivered_sha: HEAD,
+          pr_url: "https://github.com/o/r/pull/2",
+        }),
+      ],
+    });
+    expect(text).toContain("Proposed: NPC Test and Preflight Property Group.");
+    expect(text).not.toContain("Already in sync");
+    expect(text).toContain("with every clone's row settled");
+  });
+
+  it("a failed row is named as failed, and a bare skip as skipped", () => {
+    const text = composeRetirementSummary({
+      maxAttempts: 3,
+      rows: [row("NPC Test", "failed"), row("Preflight Property Group", "skipped")],
+    });
+    expect(text).toContain("Skipped: Preflight Property Group.");
+    expect(text).toContain("Failed: NPC Test.");
+  });
+
+  it("a clone whose name did not come back is counted, not dropped", () => {
+    const one = composeRetirementSummary({
+      maxAttempts: 3,
+      rows: [row(null, "queued"), row("NPC Test", "queued")],
+    });
+    expect(one).toContain("Not finished: NPC Test and an unnamed clone.");
+    const two = composeRetirementSummary({
+      maxAttempts: 3,
+      rows: [row(null, "queued"), row("  ", "queued")],
+    });
+    expect(two).toContain("Not finished: 2 unnamed clones.");
+  });
+
+  it("never reads as a rejection or a supersession, which redelivery treats differently", () => {
+    for (const rows of [null, [row("NPC Test", "succeeded", { delivered_sha: HEAD })]]) {
+      const text = composeRetirementSummary({ maxAttempts: 3, rows });
+      expect(isReviewerRejection(text)).toBe(false);
+      expect(isSupersededSummary(text)).toBe(false);
+      expect(text).toContain("3 attempts");
+      expect(text).toContain("Cascade now");
+    }
   });
 });
 
@@ -195,6 +347,30 @@ describe("the drain wires the judgement with guarded writes", () => {
 
   it("read failures throw — a silent judgement is the zombie with extra steps", () => {
     expect(fn).toMatch(/could not read exhausted events/);
+  });
+
+  it("a retirement says what its rows hold, composed once and before the terminaliser", () => {
+    const code = stripComments(fn);
+    const composed = code.indexOf("const summary = composeRetirementSummary({");
+    expect(composed).toBeGreaterThan(-1);
+    expect(code).toContain("rows: await retiringRowsOf(event.id),");
+    // Before: settled by the terminaliser, every unreached clone reads as a skip.
+    expect(composed).toBeLessThan(code.indexOf("terminaliseOrphanedRows("));
+    // The event and its notification carry the same sentence.
+    expect(code).toContain('.update({ status: "failed", worker_finished_at: now, summary })');
+    expect(code).toContain("body: summary,");
+    // The fixed sentence is only ever the composer's fallback.
+    expect(code).not.toContain("retirementSummary(");
+  });
+
+  it("the rows are read with their clone's name, and a failed read falls back rather than throws", () => {
+    const at = drain.indexOf("async function retiringRowsOf(");
+    expect(at).toBeGreaterThan(-1);
+    const body = stripComments(drain.slice(at, drain.indexOf("\n}\n", at)));
+    expect(body).toContain('.select("status, delivered_sha, pr_url, clones(name)")');
+    expect(body).toContain('.eq("cascade_event_id", eventId)');
+    expect(body).toContain("return null;");
+    expect(body).not.toContain("throw");
   });
 });
 

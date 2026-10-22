@@ -51,6 +51,38 @@
  *    notification — a row sitting quiet is the September freeze's shape.
  *  - **Nothing to read → leave it alone.** A failed read is not a verdict,
  *    here as everywhere; the next tick looks again.
+ *
+ * ## A retirement says what the passes delivered, not what they did not
+ *
+ * The summary was one fixed sentence — "No pass completed within 3 attempts
+ * and the last one kept nothing" — written whatever the rows held. Measured
+ * 21 Oct 2026: two retired events had DELIVERED. 302d58ff had opened the
+ * client dashboard's pull request (#395, merged green) before its CRM pass was
+ * cut every tick and the clones queued behind it starved; fb302fd5 had
+ * delivered NPC Test #238 and Preflight #238 and found the client dashboard
+ * already in sync, and never reached the CRM. Both read "failed" with a
+ * sentence saying nothing had happened, so the operator was told to re-run
+ * work that had already landed.
+ *
+ * The status stays `failed`, deliberately — this changes the sentence, not the
+ * verdict. The head redelivery re-asks a head that failed automatically
+ * (`failed` or `partial`, never a reviewer's rejection), and the blockage
+ * taxonomy names a clone's part `attempts_exhausted` only on a `failed` event
+ * at the ceiling: an event with a clone still owed IS unfinished. Nor is the
+ * sentence the last word. When a row moves after the retirement — a proposal
+ * the passes opened merges — the merge drain's recount rewrites the summary as
+ * its counts line, and the carrier settlement keeps that line honest (`never
+ * reached`, never `completed`): the recount says how many, this says which.
+ * `composeRetirementSummary` is read from the rows as the passes
+ * left them, before the terminaliser settles the ones no pass reached, and it
+ * groups them by what each row asserts: only `succeeded` asserts content on
+ * the clone's branch (`syncPointer.pure.ts`), a `skipped` row carrying a
+ * delivered head and no pull request is the engine's verified no-op, and a row
+ * naming a pull request is a proposal. Anything still `queued`, `pushing`, or
+ * spelled in a way this build has never heard of is "not finished" — the
+ * conservative reading, because a row cannot be claimed delivered by a word
+ * nobody wrote. Where the rows cannot be read, or there are none, the fixed
+ * sentence stands: a failed read is not a verdict here either.
  */
 
 export type ExhaustedEventVerdict =
@@ -113,11 +145,105 @@ export function decideExhaustedEvent(input: {
   return { act: "retire", why: "three passes and nothing kept lately" };
 }
 
-/** The summary a retired event carries, naming the lever rather than the mystery. */
-export function retirementSummary(maxAttempts: number): string {
+/** The operator's lever, the last sentence of every retirement. */
+const RETIREMENT_LEVER = `The queue will not claim this event again; "Cascade now" runs prime's head fresh.`;
+
+function nothingKeptLead(maxAttempts: number): string {
   return (
     `No pass completed within ${maxAttempts} attempts and the last one kept nothing — ` +
-    `the ticks that spent them were cut before they could report. The queue will not ` +
-    `claim this event again; "Cascade now" runs prime's head fresh.`
+    `the ticks that spent them were cut before they could report.`
   );
+}
+
+/**
+ * The summary a retired event carries when its rows say nothing better:
+ * naming the lever rather than the mystery.
+ */
+export function retirementSummary(maxAttempts: number): string {
+  return `${nothingKeptLead(maxAttempts)} ${RETIREMENT_LEVER}`;
+}
+
+/** A result row as the retirement reads it, before the unreached ones are settled. */
+export type RetiringRow = {
+  clone_name: string | null;
+  status: string;
+  /** The prime head a pass delivered or found already present. */
+  delivered_sha: string | null;
+  pr_url: string | null;
+};
+
+type RetiringGroup = "delivered" | "inSync" | "proposed" | "skipped" | "failed" | "unfinished";
+
+/** In the order the sentence names them: what landed first, what is owed last. */
+const RETIRING_GROUPS: ReadonlyArray<{ group: RetiringGroup; label: string }> = [
+  { group: "delivered", label: "Delivered" },
+  { group: "inSync", label: "Already in sync" },
+  { group: "proposed", label: "Proposed" },
+  { group: "skipped", label: "Skipped" },
+  { group: "failed", label: "Failed" },
+  { group: "unfinished", label: "Not finished" },
+];
+
+function retiringGroupOf(row: RetiringRow): RetiringGroup {
+  switch (row.status) {
+    case "succeeded":
+      return "delivered";
+    case "pr_opened":
+      return "proposed";
+    case "failed":
+      return "failed";
+    case "skipped":
+      // A skip naming a pull request is the engine's "already proposed"; one
+      // carrying a delivered head and no pull request is its verified no-op.
+      if (row.pr_url) return "proposed";
+      if (row.delivered_sha) return "inSync";
+      return "skipped";
+    default:
+      // `queued`, `pushing`, and any status this build has never heard of.
+      return "unfinished";
+  }
+}
+
+function joinNames(names: readonly string[]): string {
+  if (names.length <= 1) return names.join("");
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
+function cloneList(rows: readonly RetiringRow[]): string {
+  const named = rows
+    .map((r) => r.clone_name?.trim() ?? "")
+    .filter((name) => name.length > 0)
+    .sort((a, b) => a.localeCompare(b, "en"));
+  const unnamed = rows.length - named.length;
+  if (unnamed === 1) named.push("an unnamed clone");
+  if (unnamed > 1) named.push(`${unnamed} unnamed clones`);
+  return joinNames(named);
+}
+
+/**
+ * The summary a retired event carries, read from what its passes left on the
+ * rows. `rows` is null where they could not be read, and the fixed sentence
+ * stands then — as it does where there are none.
+ */
+export function composeRetirementSummary(input: {
+  maxAttempts: number;
+  rows: readonly RetiringRow[] | null;
+}): string {
+  const rows = input.rows ?? [];
+  if (rows.length === 0) return retirementSummary(input.maxAttempts);
+
+  const parts = RETIRING_GROUPS.map(({ group, label }) => {
+    const members = rows.filter((r) => retiringGroupOf(r) === group);
+    return members.length > 0 ? `${label}: ${cloneList(members)}.` : null;
+  }).filter((part): part is string => part !== null);
+
+  const unfinished = rows.filter((r) => retiringGroupOf(r) === "unfinished").length;
+  const lead =
+    unfinished === rows.length
+      ? nothingKeptLead(input.maxAttempts)
+      : unfinished > 0
+        ? `Retired after ${input.maxAttempts} attempts, part-way through.`
+        : `Retired after ${input.maxAttempts} attempts, with every clone's row settled.`;
+
+  return [lead, ...parts, RETIREMENT_LEVER].join(" ");
 }

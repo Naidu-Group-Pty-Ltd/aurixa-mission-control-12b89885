@@ -8,7 +8,10 @@ import {
   RESOLVER_MODULE_CANDIDATES,
   IDENTITY_GUARD_SPEC_PATH,
   ISOLATION_SPEC_PATH,
+  ISOLATION_SPEC_PATHS,
+  LEGACY_ISOLATION_SPEC_PATH,
   CI_WORKFLOW_PATH,
+  findIsolationSpec,
   declaresFallbackPair,
   ciRunsIdentityGuard,
   appendOwnKeyAllowlist,
@@ -523,8 +526,46 @@ describe("the isolation spec a clone copied from a parent inherits", () => {
     "",
   ].join("\n");
 
-  it("names the one path it touches", () => {
-    expect(ISOLATION_SPEC_PATH).toBe("src/lib/__tests__/backendIsolation.spec.ts");
+  it("looks where the spec lives now, then where it lived before", () => {
+    // npc-client-dashboard #387/#388 moved the spec to src/lib/deploy/__tests__/
+    // and both children followed on 21 Oct 2026. Reading the old path alone
+    // answered "absent" on every repository that carries it.
+    expect(ISOLATION_SPEC_PATH).toBe("src/lib/deploy/__tests__/backendIsolation.spec.ts");
+    expect(LEGACY_ISOLATION_SPEC_PATH).toBe("src/lib/__tests__/backendIsolation.spec.ts");
+    expect(ISOLATION_SPEC_PATHS).toEqual([ISOLATION_SPEC_PATH, LEGACY_ISOLATION_SPEC_PATH]);
+  });
+
+  it("finds the spec at its current path", async () => {
+    const files: Record<string, string> = { [ISOLATION_SPEC_PATH]: SPEC };
+    const found = await findIsolationSpec(async (p) => files[p] ?? null);
+    expect(found).toEqual({ path: ISOLATION_SPEC_PATH, file: SPEC });
+  });
+
+  it("finds a copy made before the move at the old path", async () => {
+    const files: Record<string, string> = { [LEGACY_ISOLATION_SPEC_PATH]: SPEC };
+    const found = await findIsolationSpec(async (p) => files[p] ?? null);
+    expect(found).toEqual({ path: LEGACY_ISOLATION_SPEC_PATH, file: SPEC });
+  });
+
+  it("prefers the current path when both hold a copy", async () => {
+    const files: Record<string, string> = {
+      [ISOLATION_SPEC_PATH]: SPEC,
+      [LEGACY_ISOLATION_SPEC_PATH]: "stale",
+    };
+    const found = await findIsolationSpec(async (p) => files[p] ?? null);
+    expect(found?.path).toBe(ISOLATION_SPEC_PATH);
+  });
+
+  it("answers null only when neither path holds it", async () => {
+    expect(await findIsolationSpec(async () => null)).toBeNull();
+  });
+
+  it("does not take a failed read for an absent file", async () => {
+    await expect(
+      findIsolationSpec(async () => {
+        throw Object.assign(new Error("Bad credentials"), { status: 401 });
+      }),
+    ).rejects.toThrow("Bad credentials");
   });
 
   it("reads the pinned ref", () => {
@@ -569,5 +610,7 @@ describe("the isolation spec a clone copied from a parent inherits", () => {
     expect(step).toContain('status: "unchanged"');
     expect(step).toContain('status: "failed"');
     expect(step).toContain("rewriteOwnProjectRefConst(f.text, cloneProjectRef)");
+    // It reads both paths through the one helper, so neither can drift.
+    expect(step).toContain("findIsolationSpec(readFile)");
   });
 });
