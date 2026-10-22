@@ -4,8 +4,9 @@
 previous one stopped.** That session (branch `ccr-1c6390f6-4pds8i` in MC) ran
 out of context at 17:47 UTC and left no record of its last day. This document
 is that record and the state at hand-over. **Brought up to date at about
-19:55 UTC**, after Prime #3356, both children's reconciles and CD's cascade of
-#3356 had merged. It is deliberately short: read it first, and go to
+06:05 UTC on 22 Oct**, after Prime #3359 and #3360 had reached every clone but
+the CRM line (§0). §1–§5 are the state at 19:55 UTC on 21 Oct, kept as the
+record of how it got there. It is deliberately short: read it first, and go to
 [`HANDOFF_2026-10-19_CONTINUED.md`](./HANDOFF_2026-10-19_CONTINUED.md) only for
 the cascade engine's findings F15–F31.
 
@@ -16,7 +17,85 @@ forward faulty or broken code.*
 
 ---
 
-## 1. State at 19:50 UTC
+## 0. State at about 06:05 UTC on 22 Oct
+
+| Piece | State |
+|---|---|
+| Prime `main` | `d4fb7612`: #3360 (amenity register M11), merged 05:02:39 UTC. Before it, `d59560fe`: #3359, merged 22:42:18 UTC on 21 Oct, which retired Cloud Run from rendering and deleted `scripts/render-service/redeploy.sh`. Green on `main`: CI 9168 (39725763962) and Deploy 1133 (39725764001) on `d4fb761`; CI 9165 (39688407647) and PDF Import Release Gate 4454 (39688407975) on `d59560f`; the scheduled RBA refresh 26 (39697916342), migration drift check 42 (39685335564), AML sanctions refresh 85 (39680404078), and scheduled CI 9162 (39669359544, at its second attempt). |
+| CD | `main` `911341a`: cascade #396 (prime@`d4fb761`, 5 files) merged 05:25:40 UTC; #395 (prime@`d59560f`, 15 files) merged 23:08:02 UTC on 21 Oct. CI 1355 (39727963615) and Deploy 246 (39727963612) green. MC: `in_sync`, 0 behind, at `d4fb7612`. |
+| npc-test-76b3b3 | `main` `7371abe`: cascade #239 merged 05:48:44 UTC. CI 594 (39730160468) and Deploy 166 green. MC: `in_sync`, 0 behind, at `d4fb7612`. |
+| preflight-property-group | `main` `9b509e2`: cascade #239 merged 05:51:39 UTC. CI 583 (39730440713, finished 05:59:47) and Deploy 163 green. MC: `in_sync`, 0 behind, at `d4fb7612`. |
+| The CRM line | `cascading`, 1,064 behind, at `555df3ce`; last cascade 05:16 UTC on 21 Oct. #121 stays for a person. |
+| MC `cascade_events` | Nothing live. The newest, 708b6a3a (prime@`d4fb7612`), finished `partial` at 05:50:04 UTC, and the merge drain has since recounted it: "3 merged · 0 PRs · 0 failed · 0 skipped (of 4) · 1 never reached · 3 awaiting manual reconcile". |
+
+**How the children got #3356** (§5 expected it from 40ad41df's redelivery).
+They got it from d6769363, a redelivery of prime@`638f2918` that finished
+`partial` at 21:03:02 UTC: NPC Test #237 and Preflight #237 merged at 20:59–21:05
+UTC with #3356's deletions and specs. Before that, each child's #236 (merged
+20:59 UTC) moved `backendIsolation.spec.ts` to `src/lib/deploy/__tests__/`, the
+port of CD #387 and #388, so §6.2 is done. Every child cascade since then
+(#237, #238, #239) has held the same seven files for a person, as it should:
+`clientFacing.ts` and its test, `renderAssetNormalisation.spec.ts`,
+`lead-magnet-embed.html`, the moved `backendIsolation.spec.ts`,
+`amlCasesCutoverLinkClientFacing.test.tsx` and `networkGuard.spec.ts`.
+
+| Landing | When (UTC) | What |
+|---|---|---|
+| Prime #3359 | 21 Oct 22:42:18 | Cloud Run retired from rendering; `redeploy.sh` deleted |
+| CD #395 | 21 Oct 23:08:02 | prime@`d59560f`, 15 files, `67ee9be` |
+| NPC Test #238 | 22 Oct 00:45:06 | `efc606f` |
+| Preflight #238 | 22 Oct 00:50:35 | `99198c9` |
+| Prime #3360 | 22 Oct 05:02:39 | amenity register M11 |
+| CD #396 | 22 Oct 05:25:40 | prime@`d4fb761`, 5 files, `911341a` |
+| Preflight #239 | 22 Oct 05:51:39 | `9b509e2` |
+| NPC Test #239 | 22 Oct 05:48:44 | `7371abe` |
+
+**The CRM line is redelivered and cut, every time.** prime@`d59560fe` was
+redelivered three times (fb302fd5, 5dc48128, ede0c2ee), about 95 minutes apart:
+the 60-minute cooldown plus about 35 minutes of attempts. Each found the three
+delivered clones in sync and spent its three attempts on the CRM, whose pass is
+cut by the 60-second isolate limit every tick. The redelivery ceiling (three a
+head) bounds it, so it is waste rather than a loop. Expect 708b6a3a's first
+redelivery at about 06:50 UTC, with the same outcome for the CRM. Changing
+which line a head waits on is an engine decision.
+
+**Five retirements said nothing had happened.** 02047006, 302d58ff, fb302fd5,
+5dc48128 and ede0c2ee each carry the fixed sentence "No pass
+completed within 3 attempts and the last one kept nothing". It was not true.
+302d58ff delivered CD #395 before its CRM pass was cut every tick; fb302fd5
+delivered NPC Test #238 and Preflight #238 and found CD in sync. MC now
+composes the sentence from the rows as the passes left them
+(`composeRetirementSummary`, `exhaustedEvents.pure.ts`). Under it, 02047006
+would read: *"Retired after 3 attempts, part-way through. Already in sync: NPC
+Client Dashboard, NPC Test and Preflight Property Group. Not finished: NPC CRM
+Independent."* Three things it does not do:
+
+- **It changes no status.** A retired event stays `failed`, so the head
+  redelivery and the blockage taxonomy (`attempts_exhausted`) read it exactly
+  as before.
+- **It backfills nothing.** The stored summaries stay as written.
+- **It is not the last word.** If a row moves after the retirement (a
+  proposal the passes opened merges), the merge drain's recount rewrites the
+  summary as its counts line, as it already did.
+
+**The clone retarget looked for the isolation spec in the wrong place.**
+`retargetCloneRepo` step 2b rewrites a clone's `backendIsolation.spec.ts` to
+name the clone's own project, and read only `src/lib/__tests__/`. Since the
+moves (CD #387/#388, the children's #236s) it would have answered "absent" on
+every repository carrying the spec, and a clone made from one of them would
+have kept its parent's project ref and failed its first CI run. It now reads
+`src/lib/deploy/__tests__/` first and the old path second. The old path in
+`docs/LATERAL_MEMBRANE.md` (line 362) is a measurement from before the move
+and is left as written.
+
+**Scheduled workflows failing on CD and the children only.** The RBA
+refresh, the migration drift check and the AML sanctions refresh have failed
+on CD, NPC Test and Preflight since about 15 Oct, while all three are green on
+Prime. The cause has not been looked into.
+
+---
+
+## 1. State at 19:50 UTC (superseded by §0)
 
 | Piece | State |
 |---|---|
@@ -142,7 +221,7 @@ versions. It passed 601 tests in 24 files on each child. Fixed:
 and everywhere after: the children's own `backendIsolation` test "no source
 file names the prime", which CI does not run (§6).
 
-## 5. What comes next: the children's delivery of #3356
+## 5. What came next: the children's delivery of #3356 (done, §0)
 
 Neither child has #3356 yet. Both prime events held the children (and the CRM)
 behind CD while #394 gated, as the lineage rule requires. Each event then
@@ -180,19 +259,37 @@ the redelivery does this, and a hand-made event runs beside it.
 
 ## 6. Open, and the owner's to decide
 
-1. **Cloud Run, after #3356:**
-   - delete the unused `weasyprint-service` service;
-   - the deploy service account still holds the four roles the removed
-     deploys were granted (`DEPLOYMENT_PROTECTION.md`, "Known, not changed
-     here");
-   - delete `GCP_SA_KEY` if it exists, rather than move it into the
-     environment;
-   - `scripts/render-service/redeploy.sh` still targets Cloud Run and was
-     left in place.
-2. **The children's `backendIsolation.spec.ts`** is their own file (prime has
-   none), sits where no CI step looks, and fails "no source file names the
-   prime" on both. CD had the same and fixed it in #387 and #388; the same two
-   changes would be one pull request per child.
+1. **Cloud Run, after #3356 and #3359.** Nothing in this repository or any
+   clone's still deploys to it or calls it: `redeploy.sh` is gone from Prime
+   (#3359), CD (#395) and both children (#238), Prime's edge functions have
+   rendered on Fly since 17:11 UTC on 21 Oct, and MC never sent any clone a
+   render URL or token. What is left is in Google Cloud, and no session here
+   holds a Google login, so it is the owner's:
+   1. Confirm the service has served nothing since the switch:
+      ```
+      gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="weasyprint-service" AND logName="projects/npc-property-dashboard/logs/run.googleapis.com%2Frequests" AND timestamp>="2026-10-21T17:11:00Z"' --project npc-property-dashboard --limit=20 --format='table(timestamp,httpRequest.status,httpRequest.requestUrl)'
+      ```
+   2. If it has served nothing, delete it:
+      ```
+      gcloud run services delete weasyprint-service --region australia-southeast1 --project npc-property-dashboard
+      ```
+   3. **Hold** the role removals on
+      `weasyprint-deployer@npc-property-dashboard.iam.gserviceaccount.com`
+      (`cloudbuild.builds.editor`, `storage.admin`, `run.admin`,
+      `iam.serviceAccountUser`) until it is known which account
+      `GCP_DEPLOY_SERVICE_ACCOUNT` names: the Maps credential remediation signs
+      in as that one, and it may be this account.
+   4. Delete the `GCP_SA_KEY` repository secret if it exists.
+   5. Leave `pdf-parse-service` alone: the PDF sidecar stays on Cloud Run.
+
+   Two things recorded for whoever touches the Fly side next: the render
+   service is stated as $10–15 a month and costs about $31, and the Fly deploy
+   workflow prints "repointed: yes" even after a failure. The Cloud Run strings
+   still in shared edge code were left on purpose: editing `_shared/`
+   redeploys about 429 functions.
+2. **Done.** The children's `backendIsolation.spec.ts` moved to
+   `src/lib/deploy/__tests__/` in NPC Test #236 and Preflight #236, the port
+   of CD #387 and #388 (§0).
 3. **CD's two exclusion rows for the deleted Builder Stock workflows**
    (`af696884-bd8a-4404-b868-6700096783fb`,
    `0f924553-422b-4cc1-bde5-50a42a3bbff0`): they guard paths that no longer

@@ -184,7 +184,40 @@ export const GITLEAKS_CONFIG_PATH = ".gitleaks.toml";
  * `shippedBackendIdentity.spec.ts` (step 8), this spec is not
  * deployment-agnostic, which is exactly why it needs a writer.
  */
-export const ISOLATION_SPEC_PATH = "src/lib/__tests__/backendIsolation.spec.ts";
+export const ISOLATION_SPEC_PATH = "src/lib/deploy/__tests__/backendIsolation.spec.ts";
+
+/**
+ * Where the same spec lived before it moved, read only when the current path
+ * holds nothing.
+ *
+ * The spec sat in `src/lib/__tests__/`, which no CI step runs whole, so it
+ * failed on `main` with nothing reporting it. `npc-client-dashboard` #387/#388
+ * moved it to `src/lib/deploy/__tests__/` and the two children took the same
+ * move on 21 Oct 2026 (NPC Test #236, Preflight #236). This step read the old
+ * path alone, so from then on it answered "absent" on every repository that
+ * carries the spec, and a clone made from any of them would have kept the
+ * parent's ref and failed its first CI run. The old path stays as a second
+ * place to look, for a repository copied before the move.
+ */
+export const LEGACY_ISOLATION_SPEC_PATH = "src/lib/__tests__/backendIsolation.spec.ts";
+
+/** Every path the spec is looked for at, the current one first. */
+export const ISOLATION_SPEC_PATHS = [ISOLATION_SPEC_PATH, LEGACY_ISOLATION_SPEC_PATH] as const;
+
+/**
+ * The first of `ISOLATION_SPEC_PATHS` that holds the spec, read through the
+ * caller's reader, or null when neither does. A read that fails rather than
+ * answering "no such file" is thrown, never taken as absence.
+ */
+export async function findIsolationSpec<F>(
+  read: (path: string) => Promise<F | null>,
+): Promise<{ path: string; file: F } | null> {
+  for (const path of ISOLATION_SPEC_PATHS) {
+    const file = await read(path);
+    if (file) return { path, file };
+  }
+  return null;
+}
 
 const OWN_PROJECT_REF_CONST = /(\bconst\s+OWN_PROJECT_REF\s*=\s*)(['"])([a-z]{20})\2/;
 
@@ -482,31 +515,34 @@ export async function retargetCloneRepo(
 
   // 2b. The isolation spec a clone copied from a parent inherits naming the
   //     parent's project. Absent is the ordinary case — the prime carries no
-  //     such spec, so neither does anything created from it.
+  //     such spec, so neither does anything created from it. It is read at the
+  //     current path, then at the one it moved from; the first that holds it
+  //     is the one rewritten, and absent is said only when neither does.
   try {
-    const f = await readFile(ISOLATION_SPEC_PATH);
-    if (!f) {
+    const found = await findIsolationSpec(readFile);
+    if (!found) {
       actions.push({ target: ISOLATION_SPEC_PATH, status: "absent" });
     } else {
+      const { path, file: f } = found;
       const pinned = ownProjectRefConstOf(f.text);
       if (pinned === null) {
         actions.push({
-          target: ISOLATION_SPEC_PATH,
+          target: path,
           status: "failed",
           detail:
             "The isolation spec declares no OWN_PROJECT_REF this step can read, so it could not be pointed at this deployment's project. Check it names this deployment before its first CI run.",
         });
       } else if (pinned === cloneProjectRef) {
-        actions.push({ target: ISOLATION_SPEC_PATH, status: "unchanged" });
+        actions.push({ target: path, status: "unchanged" });
       } else {
         await writeFile(
-          ISOLATION_SPEC_PATH,
+          path,
           rewriteOwnProjectRefConst(f.text, cloneProjectRef),
           f.sha,
           "chore(aurixa): pin the isolation spec to this deployment's own project",
         );
         actions.push({
-          target: ISOLATION_SPEC_PATH,
+          target: path,
           status: "rewritten",
           detail: `${pinned} → ${cloneProjectRef}`,
         });

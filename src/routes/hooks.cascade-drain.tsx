@@ -45,8 +45,9 @@ import {
 } from "@/server/cascade/headRedelivery.pure";
 import {
   PROGRESS_COLUMN,
+  composeRetirementSummary,
   decideExhaustedEvent,
-  retirementSummary,
+  type RetiringRow,
 } from "@/server/cascade/exhaustedEvents.pure";
 import {
   createCascadeForAllClones,
@@ -493,6 +494,11 @@ async function claimOne(
  * named. Every write is guarded on `pending` + unclaimed so a racing claim
  * wins and this tick simply misses the event.
  *
+ * The retirement's summary says what the passes left on the rows — who was
+ * delivered, who was already in sync, who was never reached — because an
+ * event can be retired after delivering to most of its clones, and a fixed
+ * "nothing happened" sent the operator to re-run work that had landed.
+ *
  * Progress is `progressed_at`, which a pass writes only where it kept
  * something — a grown ledger, a settled row — the two things `drainOne`
  * counts for a pass that returned. It used to be the newest `updated_at`,
@@ -538,14 +544,17 @@ async function judgeExhaustedEvents(): Promise<{ retired: number; refunded: numb
       }
       out.refunded += 1;
     } else if (verdict.act === "retire") {
+      // Composed before the write, from the rows as the passes left them:
+      // the terminaliser below settles every unreached row as skipped, and
+      // read after it they would all look like skips somebody chose.
+      const summary = composeRetirementSummary({
+        maxAttempts: MAX_ATTEMPTS,
+        rows: await retiringRowsOf(event.id),
+      });
       const now = new Date().toISOString();
       const { data: retired, error: retireErr } = await admin
         .from("cascade_events")
-        .update({
-          status: "failed",
-          worker_finished_at: now,
-          summary: retirementSummary(MAX_ATTEMPTS),
-        })
+        .update({ status: "failed", worker_finished_at: now, summary })
         .eq("id", event.id)
         .eq("status", "pending")
         .is("worker_started_at", null)
@@ -567,7 +576,7 @@ async function judgeExhaustedEvents(): Promise<{ retired: number; refunded: numb
           kind: "cascade_failed",
           severity: "error",
           title: `Cascade retired after ${MAX_ATTEMPTS} attempts (${event.mode})`,
-          body: retirementSummary(MAX_ATTEMPTS),
+          body: summary,
           cascade_event_id: event.id,
           url: `/cascades/${event.id}`,
           metadata: { retired_by: "cascade-drain", attempts: event.attempts },
@@ -583,6 +592,37 @@ async function judgeExhaustedEvents(): Promise<{ retired: number; refunded: numb
     }
   }
   return out;
+}
+
+/**
+ * The event's result rows as its retirement summary reads them. Null when the
+ * read fails: the fixed sentence stands then, and a failed read never holds
+ * back the retirement it would have described.
+ */
+async function retiringRowsOf(eventId: string): Promise<RetiringRow[] | null> {
+  const { data, error } = await admin
+    .from("cascade_results")
+    .select("status, delivered_sha, pr_url, clones(name)")
+    .eq("cascade_event_id", eventId);
+  if (error) {
+    console.error(
+      `[cascade-drain] could not read ${eventId}'s rows for its retirement summary:`,
+      error.message,
+    );
+    return null;
+  }
+  type Joined = {
+    status: string;
+    delivered_sha: string | null;
+    pr_url: string | null;
+    clones: { name: string | null } | null;
+  };
+  return ((data ?? []) as unknown as Joined[]).map((r) => ({
+    clone_name: r.clones?.name ?? null,
+    status: String(r.status),
+    delivered_sha: r.delivered_sha ?? null,
+    pr_url: r.pr_url ?? null,
+  }));
 }
 
 /**
