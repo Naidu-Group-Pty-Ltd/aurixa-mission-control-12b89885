@@ -18,6 +18,10 @@
  * sides, and two lanes writing one path is how a cascade comes to argue with
  * itself. The two lanes' write sets are disjoint by this rule alone.
  *
+ * A line's own rules for its agents are never parent-level work either
+ * (`isLineOwnRule`). A file under `.claude/rules/` is not offered at all, in
+ * either direction, so it is never written, deleted or held.
+ *
  * **2. Which way?** (`decideLateral`) Neither parent is upstream, so direction
  * is read from each side's own history of the path:
  *
@@ -126,6 +130,33 @@ export const LATERAL_LEDGER_ENTITY = "lateral_boundary";
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
+ * A line's own rules for its agents, which this lane never carries either way.
+ *
+ * `.claude/rules/` holds a repository's guidance for its agents, one topic a
+ * file, and each line numbers its own: its `CLAUDE.md` indexes those files and
+ * no others. So the two parents hold the same rule at different paths, and every
+ * one of the other side's files reads to this lane as parent-level work — a path
+ * the prime has never held. Carried across, it is a duplicate in another line's
+ * numbering that the destination's `CLAUDE.md` does not index, and a mirror's
+ * cascade carries it on to every child.
+ *
+ * Measured on 23 Oct 2026, the day the fleet's guidance moved into these files:
+ * lateral #416 wrote 64 of the CRM-independent line's rule files into
+ * `npc-client-dashboard`, and the dependent's own cascade carried them on into
+ * `npc-test-76b3b3` and `preflight-property-group`. All three were cleaned by
+ * hand; lateral #419 wrote the same 64 again, the cascade carried them on again,
+ * and all three were cleaned by hand a second time the next day.
+ *
+ * Matched at any depth, because a nested project's rules are its own just the
+ * same. A rule meant for both lines belongs at the prime, as any shared file does.
+ */
+const LINE_OWN_RULES = /(?:^|\/)\.claude\/rules\//;
+
+export function isLineOwnRule(path: string): boolean {
+  return LINE_OWN_RULES.test(path);
+}
+
+/**
  * Every path the two parents disagree on and the prime does not currently hold.
  *
  * Present on one side only, or on both with different blobs. Blob SHAs are
@@ -133,6 +164,8 @@ export const LATERAL_LEDGER_ENTITY = "lateral_boundary";
  * binary as exactly as it settles text. A path in the prime's CURRENT tree is
  * dropped here without a question: the vertical cascade owns it on both sides,
  * and asking its history would spend a call to learn what the tree already said.
+ * A line's own rule file (`isLineOwnRule`) is dropped here too, before any
+ * history is walked for it, so it is never written, deleted or held.
  */
 export function lateralCandidates(args: {
   a: TreeIndex;
@@ -147,7 +180,7 @@ export function lateralCandidates(args: {
   for (const path of b.keys()) {
     if (!a.has(path) && !prime.has(path)) out.add(path);
   }
-  return [...out].filter(isSafeRepoPath).sort();
+  return [...out].filter((path) => isSafeRepoPath(path) && !isLineOwnRule(path)).sort();
 }
 
 /**

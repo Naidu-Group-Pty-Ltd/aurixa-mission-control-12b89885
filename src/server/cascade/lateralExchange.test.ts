@@ -35,6 +35,7 @@ import {
   historyProbesFor,
   inLateralScope,
   isLateralSlot,
+  isLineOwnRule,
   judgeLateralWrites,
   lateralBranchName,
   lateralCandidates,
@@ -129,6 +130,45 @@ describe("candidates: what the two parents disagree on that the prime does not h
   it("drops a path no repository could hold", () => {
     const a = tree({ "src/../../etc/passwd.ts": "x", "src/ok.ts": "y" });
     expect(lateralCandidates({ a, b: tree({}), prime })).toEqual(["src/ok.ts"]);
+  });
+
+  it("never offers a line's own rule file, whichever side holds it", () => {
+    // Each line numbers its own `.claude/rules/` for its own CLAUDE.md, so the
+    // prime has never held the other line's paths. On 23 Oct 2026 laterals
+    // #416 and #419 each wrote 64 of the independent's into the dependent.
+    const a = tree({
+      ".claude/rules/reports/046-generated-reports-pdfs.md": "independent's numbering",
+      ".claude/rules/listings/001.05-base-backfill.md": "a",
+      "src/ok.ts": "y",
+    });
+    const b = tree({
+      ".claude/rules/reports/091-generated-reports-pdfs.md": "dependent's numbering",
+      ".claude/rules/listings/001.05-base-backfill.md": "b",
+    });
+    expect(lateralCandidates({ a, b, prime })).toEqual(["src/ok.ts"]);
+    expect(lateralCandidates({ a: b, b: a, prime })).toEqual(["src/ok.ts"]);
+  });
+});
+
+describe("a line's own rules are told apart by their directory", () => {
+  it("is a file under `.claude/rules/`, at the root or in a nested project", () => {
+    expect(isLineOwnRule(".claude/rules/aml/014-the-sanctions-register-itself.md")).toBe(true);
+    expect(isLineOwnRule(".claude/rules/README.md")).toBe(true);
+    expect(isLineOwnRule("apps/portal/.claude/rules/routing.md")).toBe(true);
+  });
+
+  it("is nothing else the agents read, nor a lookalike", () => {
+    for (const path of [
+      "CLAUDE.md",
+      ".claude/settings.json",
+      ".claude/skills/steward/SKILL.md",
+      ".claude/rulesets/x.md",
+      "docs/claude/rules/x.md",
+      "src/lib/.claude-rules.ts",
+      "docs/.claude/rules.md",
+    ]) {
+      expect(isLineOwnRule(path), path).toBe(false);
+    }
   });
 });
 
