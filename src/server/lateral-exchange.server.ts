@@ -816,6 +816,8 @@ type Reconciled = {
   /** Records still worth tracking: open, or unreadable this slot. */
   stillOpen: LateralProposalRecord[];
   declines: Array<{ to: string; items: readonly ProposalItem[]; url: string }>;
+  /** Proposals merged since the last pass, and what each carried. */
+  delivered: Array<{ items: readonly ProposalItem[] }>;
   /** Proposals merged or declined since the last pass — a reason to run one. */
   settled: number;
 };
@@ -829,7 +831,13 @@ async function reconcileProposals(
   dryRun: boolean,
   stillUnpaused: () => Promise<boolean>,
 ): Promise<Reconciled> {
-  const out: Reconciled = { results: [], stillOpen: [], declines: [], settled: 0 };
+  const out: Reconciled = {
+    results: [],
+    stillOpen: [],
+    declines: [],
+    delivered: [],
+    settled: 0,
+  };
   for (const record of records) {
     const clone = clones.get(record.to);
     const base = { from: record.from, to: record.to, pr: record.pr, url: record.url };
@@ -864,6 +872,7 @@ async function reconcileProposals(
     const state = readProposalState(pr);
     if (state === "merged") {
       out.results.push({ ...base, state, why: null });
+      out.delivered.push({ items: record.items });
       out.settled++;
       continue;
     }
@@ -898,6 +907,7 @@ async function reconcileProposals(
       );
       if (landed.merged) {
         out.results.push({ ...base, state: "merged", why: landed.why });
+        out.delivered.push({ items: record.items });
         out.settled++;
         continue;
       }
@@ -1480,6 +1490,7 @@ async function passBoundary(
     originAnswers: new Map<string, OriginVerdict>(),
     decisions: new Map<string, SettledLateralDecision>(),
     declines: [] as Reconciled["declines"],
+    delivered: [] as Reconciled["delivered"],
     proposals: prior.proposals,
     memo: prior.memo,
   };
@@ -1509,6 +1520,7 @@ async function passBoundary(
       originAnswers: learned.originAnswers,
       decisions: learned.decisions,
       declines: learned.declines,
+      delivered: learned.delivered,
     });
     // The pause as it stands NOW. A pause or resume written while this pass
     // ran is the newer act, and a row that copied the old value would undo it.
@@ -1565,15 +1577,19 @@ async function passBoundary(
     );
     report.reconcile = rec.results;
     learned.declines = rec.declines;
+    learned.delivered = rec.delivered;
     learned.proposals = rec.stillOpen;
     // This slot's declines apply to this pass: a proposal closed a minute ago
-    // must not be re-opened by the pass that noticed it closing.
+    // must not be re-opened by the pass that noticed it closing. Its merges
+    // apply too: what they carried is no longer answered from memory, so a
+    // person's removal since is read rather than overwritten.
     const memo = nextLateralMemo({
       previous: prior.memo,
       nowMs: ctx.nowMs,
       originAnswers: new Map(),
       decisions: new Map(),
       declines: rec.declines,
+      delivered: rec.delivered,
     });
 
     // ── Heads, and whether a pass is worth running ──────────────────────────

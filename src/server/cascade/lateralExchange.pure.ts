@@ -1234,7 +1234,14 @@ export type LateralDecline = { sha: string; url: string; at: string };
 export type LateralMemo = {
   v: 1;
   origin: LateralOriginMemo;
-  /** `${path}|${aSha}|${bSha}` → the decision and when it was taken. */
+  /**
+   * `${path}|${aSha}|${bSha}` → the decision and when it was taken.
+   *
+   * Kept for a day, and only while the question is open: a decision about a
+   * path a merged proposal carried is forgotten (`nextLateralMemo`'s
+   * `delivered`), because the pair of blobs it is keyed on comes back the moment
+   * a person takes the delivered file out again.
+   */
   decisions: Readonly<Record<string, { at: string; d: SettledLateralDecision }>>;
   /**
    * destination repository → path → the copy a person declined there.
@@ -1351,6 +1358,22 @@ export function nextLateralMemo(args: {
   decisions: ReadonlyMap<string, SettledLateralDecision>;
   /** Proposals this slot found closed without merging. */
   declines?: ReadonlyArray<{ to: string; items: readonly ProposalItem[]; url: string }>;
+  /**
+   * Proposals this slot found merged. Every remembered decision about a path
+   * one of them carried is forgotten, because the merge closed the question it
+   * answered.
+   *
+   * A decision is keyed by the two blobs it was taken on, and a person who takes
+   * a delivered file back out restores exactly that pair. Remembered past the
+   * merge, the old answer is recalled for it, and the file is delivered again
+   * without the removal ever being read. On 23 Oct 2026 lateral #419 offered 64
+   * files back to `npc-client-dashboard` five minutes after a person removed
+   * them, on decisions taken three hours earlier. Forgotten, the next
+   * difference on the path is walked afresh, and the direction table reads the
+   * removal like any other. Decisions taken this pass are fresh evidence and are
+   * kept.
+   */
+  delivered?: ReadonlyArray<{ items: readonly ProposalItem[] }>;
 }): LateralMemo {
   const { previous, nowMs } = args;
   const nowIso = new Date(nowMs).toISOString();
@@ -1369,8 +1392,10 @@ export function nextLateralMemo(args: {
     }
   }
 
+  const spent = new Set((args.delivered ?? []).flatMap((p) => p.items.map((item) => item.path)));
   const decisions: Record<string, { at: string; d: SettledLateralDecision }> = {};
   for (const [key, entry] of Object.entries(previous.decisions)) {
+    if (spent.has(entry.d.path)) continue;
     if (nowMs - Date.parse(entry.at) < DECISION_TTL_MS) decisions[key] = entry;
   }
   for (const [key, d] of args.decisions) decisions[key] = { at: nowIso, d };

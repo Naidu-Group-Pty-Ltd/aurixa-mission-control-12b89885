@@ -1097,6 +1097,42 @@ describe("a line's own rules for its agents never cross", () => {
   });
 });
 
+describe("a delivery that merged is not answered from memory again", () => {
+  const FIX = "src/lib/reminders/priority.pure.ts";
+
+  // Taking a delivered file back out restores exactly the pair of blobs the
+  // delivery was decided on. Recalled from memory, that old decision delivered
+  // the file again without reading the removal: lateral #419, 23 Oct 2026.
+  const takenBackOut = async (gh: FakeGitHub, boundary: ReturnType<typeof world>["boundary"]) => {
+    gh.commitOn(IND, { [FIX]: null }, "not wanted here");
+    const next = await boundary();
+    expect(next.outcome).toBe("ran");
+    expect(next.directions.flatMap((d) => d.writes)).not.toContain(FIX);
+    // Read afresh, the removal is what the direction table says it is: the
+    // independent held exactly the mirror's copy and took it out.
+    expect(next.directions.find((d) => d.to === DEP)?.deletes).toEqual([FIX]);
+  };
+
+  it("after a person merges the proposal on GitHub", async () => {
+    const { gh, boundary } = world();
+    await boundary();
+    const pull = gh.pulls.find((p) => p.repo === IND)!;
+    await gh.octokit().pulls.merge({ owner: OWNER, repo: IND, pull_number: pull.number });
+    expect(gh.blobAt(gh.head(IND, "main")!, FIX)).toBe(gitBlobSha(PRIORITY));
+    await takenBackOut(gh, boundary);
+  });
+
+  it("after the lane merges it on green", async () => {
+    const { gh, boundary } = world({ mode: "auto_merge" });
+    gh.armRefused = true;
+    await boundary();
+    for (const p of gh.pulls) gh.greenAt(gh.head(p.repo, p.headRef)!);
+    const landed = await boundary();
+    expect(landed.reconcile.map((r) => r.state).sort()).toEqual(["merged", "merged"]);
+    await takenBackOut(gh, boundary);
+  });
+});
+
 describe("only a question with a different answer next time keeps the boundary running", () => {
   it("holds a history longer than the walk for a person, and the next slot rests", async () => {
     const { gh, boundary, lastState } = world();
