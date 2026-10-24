@@ -1013,6 +1013,39 @@ describe("memory across passes", () => {
     expect(Object.keys(next.origin.never).sort()).toEqual(["fresh"]);
     expect(Object.keys(next.decisions)).toEqual(["k"]);
   });
+
+  it("forgets what a merged proposal carried, and keeps what this pass decided", () => {
+    // A person who takes a delivered file back out restores the very pair the
+    // delivery was decided on. On 23 Oct 2026 #419 was offered from memory that way.
+    const removal = { act: "delete", path: "b.ts", on: DEP, deletedOn: IND } as const;
+    const other = { act: "write", path: "c.ts", from: DEP, to: IND } as const;
+    const previous: LateralMemo = {
+      ...EMPTY_LATERAL_MEMO,
+      decisions: {
+        [decisionKey("a.ts", "x", null)]: { at: iso(NOW - 1000), d: write },
+        [decisionKey("b.ts", "y", null)]: { at: iso(NOW - 1000), d: removal },
+        [decisionKey("c.ts", "z", null)]: { at: iso(NOW - 1000), d: other },
+      },
+    };
+    const next = nextLateralMemo({
+      previous,
+      nowMs: NOW,
+      originAnswers: new Map(),
+      decisions: new Map([[decisionKey("a.ts", "x2", null), write]]),
+      delivered: [
+        {
+          items: [
+            { path: "a.ts", sha: "x" },
+            { path: "b.ts", sha: DECLINED_DELETION },
+          ],
+        },
+      ],
+    });
+    expect(recalledDecision(next, decisionKey("a.ts", "x", null), NOW)).toBeNull();
+    expect(recalledDecision(next, decisionKey("b.ts", "y", null), NOW)).toBeNull();
+    expect(recalledDecision(next, decisionKey("c.ts", "z", null), NOW)).toEqual(other);
+    expect(recalledDecision(next, decisionKey("a.ts", "x2", null), NOW)).toEqual(write);
+  });
 });
 
 describe("a proposal a person closed is not re-opened", () => {

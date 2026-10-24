@@ -457,28 +457,40 @@ in either direction, and no history is walked. That covers both harms
 
 A rule both lines need is written at the prime.
 
-Lateral #419 was not a new judgement, and that half of the story is not this
-rule's to fix. In the ledger row of the 15:00 pass, the write decisions for
-these paths are dated 11:50 and 12:10, the two passes that built #416, and none
-is dated 15:00: none was decided again. A decision is remembered for a day under
+Lateral #419 was not a new judgement, and that half of the story is a rule of
+its own. In the ledger row of the 15:00 pass, the write decisions for these
+paths are dated 11:50 and 12:10, the two passes that built #416, and none is
+dated 15:00: none was decided again. A decision is remembered for a day under
 the two blobs it was taken on (`decisionKey`), and a hand removal restores
 exactly the pair the first write was decided on. So the removal was never read:
-the remembered write was reused. The rule above makes that moot for rule files.
-Any other file a person removes by hand within a day of the decision that
-delivered it is still offered again.
+the remembered write was reused, and the files went back five minutes after a
+person had taken them out.
+
+**A delivery that merged is no longer answered from memory.** When a pass finds
+a proposal merged, on GitHub or by its own gate, every remembered decision about
+a path the proposal carried is forgotten (`nextLateralMemo`'s `delivered`),
+because the merge closed the question it answered. The next difference on the
+path is walked afresh, and the direction table reads it like any other.
+
+That is not a new behaviour. It is what the lane already did once the
+remembered decision expired after its day; what is gone is the day-long window
+in which it delivered the file again instead. A removal of an unmodified
+delivered copy is therefore carried back to the other side as a deletion — the
+table's second row — wherever that side's scope, exclusions and imports allow.
+For the 64 rule files it never arises: they are no longer candidates at all.
 
 ## What is asserted
 
-| file                               | what it pins                                                                                                                                                                                                                                                                                                                        |
-| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `lateralMembranes.test.ts`         | the boundary joins the two parents and nobody else; the CRM line holds both ways; what never crosses either way; that the new species change nothing on any vertical membrane; every channel explains itself                                                                                                                        |
-| `lateralExchange.test.ts`          | candidates (never a line's own rule file), origin, every row of the direction table, the destination's rulebook in order, spec-with-subject, the import and overwrite rules, deletions to a fixed point, when a pass runs, memory, declines, the proposal text                                                                      |
-| `lateral-exchange.server.test.ts`  | a first pass proposes both ways under each destination's rulebook; a line's own rules neither written nor deleted, either way; the next slot; a person's push, before or during a rebuild, is never overwritten; declines remembered; auto-merge through the vertical gate; the pause; a failed read never taken for an absent fact |
-| `lateralBand.test.ts`              | the arch's midpoint and tangent against an independent evaluation; each pore's lanes; a lane never more permeable than its rule; the flow along the arch                                                                                                                                                                            |
-| `lateralBandRenders.test.ts`       | what the component actually EMITS: where the band lands, each direction's marks, the flow and its arrowheads, the wall framing every mouth (the passage's included), an undeclared lane                                                                                                                                             |
-| `membraneClearsLabels.test.ts`     | the arch, band, particles and arrowheads clear every caption, node and vertical band at every corner of the layout's jitter; nothing lit is drawn under either parent                                                                                                                                                               |
-| `membraneIsDrawn.contract.test.ts` | the band and panel are mounted, in the right layer, keyed on the boundary; the panel's words come from the shared vocabulary; a selected parent names its lateral boundary                                                                                                                                                          |
-| `membraneIsWired.contract.test.ts` | the vertical engine never passes the fleet's ref list, so the prime's cascade reads project refs exactly as it did                                                                                                                                                                                                                  |
+| file                               | what it pins                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `lateralMembranes.test.ts`         | the boundary joins the two parents and nobody else; the CRM line holds both ways; what never crosses either way; that the new species change nothing on any vertical membrane; every channel explains itself                                                                                                                                                                                                  |
+| `lateralExchange.test.ts`          | candidates (never a line's own rule file), origin, every row of the direction table, the destination's rulebook in order, spec-with-subject, the import and overwrite rules, deletions to a fixed point, when a pass runs, memory (forgotten once a delivery merges), declines, the proposal text                                                                                                             |
+| `lateral-exchange.server.test.ts`  | a first pass proposes both ways under each destination's rulebook; a line's own rules neither written nor deleted, either way; the next slot; a person's push, before or during a rebuild, is never overwritten; declines remembered; a person's removal of a merged delivery read, never answered from memory; auto-merge through the vertical gate; the pause; a failed read never taken for an absent fact |
+| `lateralBand.test.ts`              | the arch's midpoint and tangent against an independent evaluation; each pore's lanes; a lane never more permeable than its rule; the flow along the arch                                                                                                                                                                                                                                                      |
+| `lateralBandRenders.test.ts`       | what the component actually EMITS: where the band lands, each direction's marks, the flow and its arrowheads, the wall framing every mouth (the passage's included), an undeclared lane                                                                                                                                                                                                                       |
+| `membraneClearsLabels.test.ts`     | the arch, band, particles and arrowheads clear every caption, node and vertical band at every corner of the layout's jitter; nothing lit is drawn under either parent                                                                                                                                                                                                                                         |
+| `membraneIsDrawn.contract.test.ts` | the band and panel are mounted, in the right layer, keyed on the boundary; the panel's words come from the shared vocabulary; a selected parent names its lateral boundary                                                                                                                                                                                                                                    |
+| `membraneIsWired.contract.test.ts` | the vertical engine never passes the fleet's ref list, so the prime's cascade reads project refs exactly as it did                                                                                                                                                                                                                                                                                            |
 
 The render and geometry guards were each proven non-vacuous by planting the
 defect they describe — the passage's walls removed, a particle lit under a
