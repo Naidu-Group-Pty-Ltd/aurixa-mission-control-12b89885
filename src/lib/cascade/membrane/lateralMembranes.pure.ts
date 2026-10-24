@@ -57,6 +57,8 @@
  * sideways as well would give one path two authors and a cascade that argued
  * with itself. The two lanes therefore write disjoint sets of paths by
  * construction, which is what lets them run without knowing about each other.
+ * A line's own agent rules (`.claude/rules/`) are not parent-level work either:
+ * each line numbers its own, so they never cross.
  *
  * **Direction is read, not declared.** Neither parent is upstream of the
  * other, so a file moves toward the side still holding the version the other
@@ -124,6 +126,15 @@ const LATERAL_STANDING: readonly StandingOrgan[] = [
     does:
       "Carries only a file the prime's history has never held. Anything the prime owns, or " +
       "once owned, belongs to the vertical cascade on both sides.",
+  },
+  {
+    kind: "channel",
+    name: "isLineOwnRule",
+    where: "lateralExchange.pure.ts",
+    does:
+      "Never offers a file under `.claude/rules/`, either way. Each line numbers its own rules " +
+      "for its own `CLAUDE.md` to index, so a rule carried across is an unindexed duplicate on " +
+      "the other side, and a mirror's cascade carries it on to every child.",
   },
   {
     kind: "channel",

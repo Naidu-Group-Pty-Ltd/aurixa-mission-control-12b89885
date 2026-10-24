@@ -1051,6 +1051,52 @@ describe("the prime's history decides what is the lane's to move", () => {
   });
 });
 
+describe("a line's own rules for its agents never cross", () => {
+  it("writes none into the mirror, deletes none from it, and holds or reports none", async () => {
+    const { gh, boundary } = world();
+    // The independent's own rule, in its own numbering. The mirror is offered
+    // everything, and the prime never held the path — so the direction rule
+    // alone would write it across, as laterals #416 and #419 did.
+    gh.commitOn(IND, {
+      ".claude/rules/reports/046-generated-reports-pdfs.md": "# Generated reports (046)\n",
+    });
+    // The mirror's own rule, which the independent once held exactly and then
+    // removed. Read by the direction rule alone, that removal travels back and
+    // deletes the mirror's copy.
+    const OWN = "# Generated reports (091)\n";
+    gh.commitOn(DEP, { ".claude/rules/reports/091-generated-reports-pdfs.md": OWN });
+    gh.commitOn(IND, { ".claude/rules/reports/091-generated-reports-pdfs.md": OWN });
+    gh.commitOn(IND, { ".claude/rules/reports/091-generated-reports-pdfs.md": null });
+
+    const b = await boundary();
+    expect(b.outcome).toBe("ran");
+    // The world's four paths, and no rule file among the candidates.
+    expect(b.candidates).toBe(4);
+    const named = [
+      ...b.conflicts.map((c) => c.path),
+      ...b.deferred.map((d) => d.path),
+      ...b.directions.flatMap((d) => [
+        ...d.writes,
+        ...d.deletes,
+        ...d.held.map((h) => h.path),
+        ...d.keptDeletions.map((k) => k.path),
+        ...d.outOfScope,
+        ...d.unread,
+      ]),
+    ];
+    expect(named.filter((path) => path.includes(".claude/"))).toEqual([]);
+
+    // The proposal into the mirror carries its ordinary work and leaves the
+    // mirror's rules exactly as they were.
+    const head = gh.head(DEP, INTO_DEP)!;
+    expect(gh.blobAt(head, "src/lib/util/format.pure.ts")).toBe(gitBlobSha(FORMAT));
+    expect(gh.blobAt(head, ".claude/rules/reports/046-generated-reports-pdfs.md")).toBeUndefined();
+    expect(gh.blobAt(head, ".claude/rules/reports/091-generated-reports-pdfs.md")).toBe(
+      gitBlobSha(OWN),
+    );
+  });
+});
+
 describe("only a question with a different answer next time keeps the boundary running", () => {
   it("holds a history longer than the walk for a person, and the next slot rests", async () => {
     const { gh, boundary, lastState } = world();
