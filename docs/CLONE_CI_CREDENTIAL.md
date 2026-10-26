@@ -113,18 +113,26 @@ and no password, and the final update stores none.
   encrypted, in the same statement as the ref.
 - **A clone without one is given one**, through Supabase's own
   `PATCH /v1/projects/{ref}/database/password`, but only where
-  `decidePasswordSet` allows: none is stored, and the repository declares
-  `BACKEND_DEPLOYED_BY=mission-control`. A tenant whose own CI deploys holds its
-  own credentials and may have set its own password; a failed variable listing
-  is not a declaration either way. The ref comes from
-  `resolveCloneSecretTarget`, which refuses the prime and Mission Control's own
-  project. Supabase is told first and the row written second, only while it
-  still holds none, so a failed store leaves the database where it already was
-  and the next pass tries again. Each set files `clone_db_password_set`, which
-  never carries the password.
+  `decidePasswordSet` allows: none is stored, and neither the repository nor
+  its production environment holds a `SUPABASE_ACCESS_TOKEN` of its own. A
+  tenant whose own CI deploys holds that token, may have set its own password,
+  and would lose every connection made with it. `BACKEND_DEPLOYED_BY` is NOT
+  the signal: the declaration sweep writes it on every clone, a tenant's
+  included, because the deploy workflow lets a token outrank it. A secret
+  listing that failed is not an absent token, so it sets nothing.
+  The ref comes from `resolveCloneSecretTarget`, which refuses the prime and
+  Mission Control's own project. The row is claimed first — the new password
+  written only while the row holds none and names that project — and only the
+  pass that wins the claim resets the database, so two overlapping passes
+  cannot leave a stored password the database no longer takes. A reset
+  Supabase refuses releases the claim. Each set files `clone_db_password_set`,
+  which never carries the password.
 
-Resetting it was safe for the four clones it found: nothing held the lost
-password, and no edge function connects with `SUPABASE_DB_URL`.
+Resetting it was safe for the four clones it found on 26 Oct 2026: nothing
+held the lost password, no edge function connects with `SUPABASE_DB_URL`, and
+each clone's deploy workflow had stood down on its last run ("Report that
+Mission Control deploys this project"), which it does only where the
+repository holds no deploy token.
 
 ## Where it runs
 

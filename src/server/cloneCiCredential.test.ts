@@ -171,31 +171,29 @@ describe("the service-role key a clone is given", () => {
 });
 
 describe("giving a clone's database a password", () => {
-  const MC = { BACKEND_DEPLOYED_BY: "mission-control" };
-
   it("never replaces one that is stored", () => {
-    expect(decidePasswordSet({ passwordStored: true, variables: MC })).toEqual({
+    expect(decidePasswordSet({ passwordStored: true, tenantDeployTokenHeld: false })).toEqual({
       set: false,
       reason: null,
     });
   });
 
-  it("sets one only where Mission Control operates the backend", () => {
-    expect(decidePasswordSet({ passwordStored: false, variables: MC })).toEqual({ set: true });
+  it("sets one only where the repository holds no deploy token of its own", () => {
+    expect(decidePasswordSet({ passwordStored: false, tenantDeployTokenHeld: false })).toEqual({
+      set: true,
+    });
   });
 
-  it("leaves the owner's database alone when the repository does not say Mission Control", () => {
-    const notMissionControl: Record<string, string>[] = [{}, { BACKEND_DEPLOYED_BY: "tenant" }];
-    for (const variables of notMissionControl) {
-      const d = decidePasswordSet({ passwordStored: false, variables });
-      expect(d.set).toBe(false);
-      if (d.set) return;
-      expect(d.reason).toContain("the password is the owner's");
-    }
+  it("leaves a tenant-operated database alone", () => {
+    const d = decidePasswordSet({ passwordStored: false, tenantDeployTokenHeld: true });
+    expect(d.set).toBe(false);
+    if (d.set) return;
+    expect(d.reason).toContain("deploy token of its own");
+    expect(d.reason).toContain("the password is the owner's");
   });
 
-  it("does not read a failed variable listing as a declaration", () => {
-    const d = decidePasswordSet({ passwordStored: false, variables: null });
+  it("does not read a failed secret listing as an absent token", () => {
+    const d = decidePasswordSet({ passwordStored: false, tenantDeployTokenHeld: null });
     expect(d.set).toBe(false);
     if (d.set) return;
     expect(d.reason).toContain("could not be read");

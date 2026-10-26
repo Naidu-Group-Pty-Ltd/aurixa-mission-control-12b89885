@@ -89,12 +89,16 @@ export async function readPoolerFacts(projectRef: string): Promise<PoolerFacts |
  * keep it.
  *
  * Only ever called for a clone `decidePasswordSet` cleared: none stored, and
- * Mission Control declared as the backend's deployer. Supabase is told first
- * and the row written second, so a failed write leaves a database whose
- * password nobody holds, which is where it already was, and the next pass
- * tries again. The row is written only while it still names the project the
- * password was set on: a clone re-provisioned onto a new project in the
- * meantime keeps the new project's password, which is the one that connects.
+ * no deploy token of the tenant's own.
+ *
+ * The row is CLAIMED before Supabase is told: the new password is written only
+ * while the row still holds none and still names this project, and only the
+ * pass that wins that write resets the database. Two overlapping sweeps would
+ * otherwise both reset it, and whichever stored second could keep a password
+ * the database no longer takes, with every later pass seeing a stored one and
+ * never repairing it. A reset Supabase refuses releases the claim, so the next
+ * pass tries again; a release that also fails is named, because it leaves a
+ * stored password the database does not take.
  */
 async function setCloneDbPassword(input: {
   supabase: Db;
@@ -104,7 +108,30 @@ async function setCloneDbPassword(input: {
   const token = process.env.SB_MGMT_API_TOKEN;
   if (!token) return { ok: false, reason: "SB_MGMT_API_TOKEN is not configured" };
   const { generateSecurePassword } = await import("./backend-provisioning.server");
+  const { encryptSecret } = await import("./crypto.server");
   const password = generateSecurePassword();
+  const sealed = encryptSecret(password);
+
+  const { data: claimed, error: claimError } = await input.supabase
+    .from("clone_backends")
+    .update({ db_pass: sealed })
+    .eq("clone_id", input.cloneId)
+    .eq("supabase_project_ref", input.projectRef)
+    .is("db_pass", null)
+    .select("clone_id");
+  if (claimError) {
+    return { ok: false, reason: `the password could not be claimed: ${claimError.message}` };
+  }
+  if (!claimed || claimed.length === 0) {
+    return {
+      ok: false,
+      reason:
+        "another pass stored a password for this clone, or it no longer points at " +
+        `${input.projectRef}; nothing was reset`,
+    };
+  }
+
+  let refusal: string | null = null;
   try {
     const res = await fetch(`${MGMT_API}/projects/${input.projectRef}/database/password`, {
       method: "PATCH",
@@ -112,32 +139,24 @@ async function setCloneDbPassword(input: {
       body: JSON.stringify({ password }),
     });
     if (!res.ok) {
-      return {
-        ok: false,
-        reason: `Supabase refused the password for ${input.projectRef}: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`,
-      };
+      refusal = `Supabase refused the password for ${input.projectRef}: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`;
     }
   } catch (e) {
-    return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+    refusal = e instanceof Error ? e.message : String(e);
   }
+  if (refusal === null) return { ok: true, password };
 
-  const { encryptSecret } = await import("./crypto.server");
-  const { data, error } = await input.supabase
+  const { error: releaseError } = await input.supabase
     .from("clone_backends")
-    .update({ db_pass: encryptSecret(password) })
+    .update({ db_pass: null })
     .eq("clone_id", input.cloneId)
-    .eq("supabase_project_ref", input.projectRef)
-    .select("clone_id");
-  if (error) {
-    return { ok: false, reason: `the new password could not be stored: ${error.message}` };
-  }
-  if (!data || data.length === 0) {
-    return {
-      ok: false,
-      reason: `this clone no longer points at ${input.projectRef}, so the password set there was not kept`,
-    };
-  }
-  return { ok: true, password };
+    .eq("db_pass", sealed);
+  return {
+    ok: false,
+    reason: releaseError
+      ? `${refusal}; and the claimed password could not be released (${releaseError.message}), so the stored one is not the database's`
+      : refusal,
+  };
 }
 
 /**
@@ -290,6 +309,11 @@ export async function reconcileCloneCiCredentials(supabase: Db): Promise<Credent
   const { decryptSecret } = await import("./crypto.server");
   const { resolveCloneSecretTarget } = await import("./cloneAllowedOrigins.server");
   const { listRepoVariables } = await import("./github-variables.server");
+  const { listRepoSecretNames, listEnvironmentSecretNames } =
+    await import("./github-secrets.server");
+  // The name a tenant's own deploy token is kept under, from the module that
+  // writes it rather than spelled again here.
+  const { ACCESS_TOKEN_SECRET } = await import("./cloneBackendDeploy.server");
   const { writeAuditLog } = await import("./audit.server");
 
   const readStored = (value: unknown, what: string): HeldCredential => {
@@ -346,12 +370,22 @@ export async function reconcileCloneCiCredentials(supabase: Db): Promise<Credent
       continue;
     }
 
-    // One read of the repository's variables serves the password decision and
-    // the project-ref variable both.
     const variables = await listRepoVariables({ owner, repo });
     let password = readStored(backend.db_pass, "database password");
     if ("value" in password && !password.value) {
-      const decision = decidePasswordSet({ passwordStored: false, variables });
+      // Asked only when a password is missing: two listings, where the
+      // tenant's own deploy token would be if it had one.
+      const [repoSecrets, environmentSecrets] = await Promise.all([
+        listRepoSecretNames({ owner, repo }),
+        listEnvironmentSecretNames({ owner, repo, environment: CI_ENVIRONMENT }),
+      ]);
+      const decision = decidePasswordSet({
+        passwordStored: false,
+        tenantDeployTokenHeld:
+          repoSecrets === null || environmentSecrets === null
+            ? null
+            : [...repoSecrets, ...environmentSecrets].includes(ACCESS_TOKEN_SECRET),
+      });
       if (!decision.set) {
         password = {
           state: "cannot",

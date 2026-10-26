@@ -81,9 +81,9 @@
  * project ref at creation; the run then paused while the project came up, and
  * the resumed run knew no password to store. Creation now persists it with
  * the ref. A clone already without one is given a fresh one, by Supabase's
- * own endpoint, but only where its repository declares Mission Control as its
- * backend deployer: elsewhere the database, and its password, are the
- * owner's (`decidePasswordSet`).
+ * own endpoint, but only where its repository holds no deploy token of its
+ * own: where it does, the tenant operates the backend, and the database and
+ * its password are the owner's (`decidePasswordSet`).
  */
 
 /** The Actions secret a clone's `apply-migration.yml` and `migration-drift.yml` read. */
@@ -97,9 +97,6 @@ export const CI_ENVIRONMENT = "supabase-production";
 
 /** Not a credential: which project the repository belongs to, readable by anyone who can read it. */
 export const CI_PROJECT_REF_VARIABLE = "SUPABASE_PROJECT_REF";
-
-/** What `BACKEND_DEPLOYED_BY` says when Mission Control operates the clone's backend. */
-const MISSION_CONTROL_DEPLOYS = "mission-control";
 
 /** Supavisor's session-mode port. Transaction mode (6543) is never used here. */
 export const SESSION_POOLER_PORT = 5432;
@@ -237,33 +234,43 @@ export function judgeServiceRoleKey(input: {
 /**
  * May Mission Control give this clone's database a password?
  *
- * Only where none is stored, and only where the repository says Mission
- * Control operates the backend. A tenant whose own CI deploys holds its own
- * credentials, may have set its own password, and would lose every connection
- * made with it. A variable listing that failed is not a declaration either way,
- * so it leaves the password alone too.
+ * Only where none is stored, and only where Mission Control operates the
+ * backend. A tenant whose own CI deploys holds its own credentials, may have
+ * set its own password, and would lose every connection made with it.
+ *
+ * The signal is the deploy token, never `BACKEND_DEPLOYED_BY`. The declaration
+ * sweep writes that variable on EVERY clone repository, a tenant's included,
+ * because the deploy workflow lets a token outrank it
+ * (`cloneDeployerDeclaration.pure.ts`), so it says nothing about who operates
+ * the backend. A repository holding its own deploy token (`ACCESS_TOKEN_SECRET`
+ * in `cloneBackendDeploy.server.ts`) does say it, the way `deriveDeployRoute`
+ * reads it. A listing that failed is not an absent
+ * token, so it leaves the password alone too.
  */
 export function decidePasswordSet(input: {
   passwordStored: boolean;
-  /** The repository's variables, or null when GitHub could not be asked. */
-  variables: Readonly<Record<string, string>> | null;
+  /**
+   * Whether the repository, or its production environment, holds a deploy
+   * token of its own. Null when GitHub could not be asked.
+   */
+  tenantDeployTokenHeld: boolean | null;
 }): { set: true } | { set: false; reason: string | null } {
   if (input.passwordStored) return { set: false, reason: null };
-  if (input.variables === null) {
+  if (input.tenantDeployTokenHeld === null) {
     return {
       set: false,
       reason:
-        "no database password is stored for this clone, and whether Mission Control operates " +
-        "its backend could not be read, so none is set",
+        "no database password is stored for this clone, and whether its repository holds a " +
+        "deploy token of its own could not be read, so none is set",
     };
   }
-  if (input.variables.BACKEND_DEPLOYED_BY !== MISSION_CONTROL_DEPLOYS) {
+  if (input.tenantDeployTokenHeld) {
     return {
       set: false,
       reason:
-        "no database password is stored for this clone, and its repository does not declare " +
-        "Mission Control as its backend deployer (BACKEND_DEPLOYED_BY), so the password is the " +
-        "owner's and none is set",
+        "no database password is stored for this clone, and its repository holds a deploy " +
+        "token of its own, so the tenant operates the backend, the password is the owner's, " +
+        "and none is set",
     };
   }
   return { set: true };

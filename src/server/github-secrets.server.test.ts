@@ -5,6 +5,7 @@ import {
   RETIRED_CODEX_REPO_SECRETS,
   buildCodexRepoSecrets,
   describeSecretError,
+  listEnvironmentSecretNames,
   previewCodexRepoSecrets,
   putEnvironmentSecret,
   syncRepoSecrets,
@@ -399,5 +400,26 @@ describe("putEnvironmentSecret", () => {
     request.mockRejectedValue(Object.assign(new Error("Forbidden"), { status: 403 }));
     await expect(putEnvironmentSecret(input)).rejects.toMatchObject({ status: 403 });
     expect(request).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("listEnvironmentSecretNames", () => {
+  const input = { owner: "acme", repo: "widgets", environment: "supabase-production" };
+
+  it("returns the names, never a value", async () => {
+    request.mockResolvedValue({
+      data: { secrets: [{ name: "SUPABASE_SERVICE_ROLE_KEY", updated_at: "x" }] },
+    });
+    expect(await listEnvironmentSecretNames(input)).toEqual(["SUPABASE_SERVICE_ROLE_KEY"]);
+  });
+
+  it("reads an environment that does not exist as holding none", async () => {
+    request.mockRejectedValue(Object.assign(new Error("Not Found"), { status: 404 }));
+    expect(await listEnvironmentSecretNames(input)).toEqual([]);
+  });
+
+  it("answers null, never empty, when GitHub could not be asked", async () => {
+    request.mockRejectedValue(Object.assign(new Error("Forbidden"), { status: 403 }));
+    expect(await listEnvironmentSecretNames(input)).toBeNull();
   });
 });

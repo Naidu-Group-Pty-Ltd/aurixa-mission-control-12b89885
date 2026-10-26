@@ -44,16 +44,35 @@ describe("what is distributed", () => {
     expect(server).toContain("setCloneDbPassword({ supabase, cloneId: clone.id, projectRef })");
   });
 
-  it("sets a password only where the decision allows, and keeps it only for that project", () => {
+  it("sets a password only where the decision allows, and claims the row first", () => {
     const at = server.indexOf("await setCloneDbPassword(");
     expect(server.lastIndexOf("decidePasswordSet(", at)).toBeGreaterThan(-1);
-    expect(server).toContain('.eq("supabase_project_ref", input.projectRef)');
+    // The claim: written only while the row holds none and names this project,
+    // and BEFORE Supabase is told, so two overlapping passes cannot both reset.
+    const fn = server.slice(server.indexOf("async function setCloneDbPassword"));
+    const claim = fn.indexOf('.is("db_pass", null)');
+    expect(claim).toBeGreaterThan(-1);
+    expect(fn.indexOf('.eq("supabase_project_ref", input.projectRef)')).toBeLessThan(claim);
+    expect(claim).toBeLessThan(fn.indexOf("/database/password"));
+    // A refused reset releases exactly the claim it made.
+    expect(fn).toContain('.eq("db_pass", sealed)');
     // A password just set is written at once, not on the daily re-assertion.
     expect(server).toContain("password = { value: set.password, changed: true }");
-    // Supabase first, the row second: a failed store leaves the database where
-    // it already was, with no password anybody holds.
-    const fn = server.slice(server.indexOf("async function setCloneDbPassword"));
-    expect(fn.indexOf("/database/password")).toBeLessThan(fn.indexOf("encryptSecret(password)"));
+  });
+
+  it("decides who operates the backend from the deploy token, never BACKEND_DEPLOYED_BY", () => {
+    // The declaration sweep writes BACKEND_DEPLOYED_BY on every clone, a
+    // tenant's included, so it cannot say who operates the backend.
+    expect(pure).not.toMatch(/variables\.BACKEND_DEPLOYED_BY/);
+    // The token's name comes from the module that writes it, never spelled here.
+    expect(server).toContain(
+      'const { ACCESS_TOKEN_SECRET } = await import("./cloneBackendDeploy.server")',
+    );
+    expect(server).toContain("listRepoSecretNames({ owner, repo })");
+    expect(server).toContain(
+      "listEnvironmentSecretNames({ owner, repo, environment: CI_ENVIRONMENT })",
+    );
+    expect(server).toContain(".includes(ACCESS_TOKEN_SECRET)");
   });
 
   it("refuses a pooler user that is not this project's", () => {
