@@ -251,6 +251,31 @@ export async function listRepoSecretNames(input: {
   }
 }
 
+/**
+ * The NAMES of one environment's Actions secrets, never a value. `null` where
+ * GitHub could not be asked; an environment that does not exist holds none,
+ * which is GitHub's 404 for it.
+ */
+export async function listEnvironmentSecretNames(input: {
+  owner: string;
+  repo: string;
+  environment: string;
+  installationId?: string | null;
+}): Promise<string[] | null> {
+  try {
+    const octokit = getAppOctokit(input.installationId ?? undefined);
+    const { data } = await octokit.request(
+      "GET /repos/{owner}/{repo}/environments/{environment_name}/secrets",
+      { owner: input.owner, repo: input.repo, environment_name: input.environment, per_page: 100 },
+    );
+    return (data.secrets ?? []).map((s) => s.name);
+  } catch (e) {
+    if ((e as { status?: number }).status === 404) return [];
+    console.error("[github-secrets] could not list environment secret names:", e);
+    return null;
+  }
+}
+
 /** Remove a repository secret. One that is already gone is a success. */
 export async function deleteRepoSecret(input: {
   owner: string;

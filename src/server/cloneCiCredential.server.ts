@@ -20,10 +20,12 @@ import {
   CI_ENVIRONMENT,
   CI_PROJECT_REF_VARIABLE,
   CI_SERVICE_ROLE_SECRET,
+  claimedSealedPassword,
   composeSessionPoolerUrl,
   decidePasswordSet,
   emptyCredentialSweep,
   judgeServiceRoleKey,
+  pendingPassword,
   recordOutcome,
   type CredentialOutcome,
   type CredentialSweep,
@@ -88,23 +90,91 @@ export async function readPoolerFacts(projectRef: string): Promise<PoolerFacts |
  * Give a clone's database a password, through Supabase's own endpoint, and
  * keep it.
  *
- * Only ever called for a clone `decidePasswordSet` cleared: none stored, and
- * Mission Control declared as the backend's deployer. Supabase is told first
- * and the row written second, so a failed write leaves a database whose
- * password nobody holds, which is where it already was, and the next pass
- * tries again. The row is written only while it still names the project the
- * password was set on: a clone re-provisioned onto a new project in the
- * meantime keeps the new project's password, which is the one that connects.
+ * Only ever called for a clone `decidePasswordSet` cleared: none confirmed,
+ * and no deploy token of the tenant's own.
+ *
+ * The row is CLAIMED before Supabase is told: a new password is written, marked
+ * pending (`pendingPassword`), only while the row holds nothing and still
+ * names this project, and only the pass that wins that write goes on. Two
+ * overlapping sweeps would otherwise both reset the database, and whichever
+ * stored second could keep a password it no longer takes.
+ *
+ * A claim found already standing — another pass's, or one this pass's
+ * predecessor stopped inside — is FINISHED rather than refused: the same
+ * password is sent again and confirmed. That is what makes every interruption
+ * recoverable. Stopped before the reset, the next pass makes it; stopped after
+ * it, the next pass repeats it, which changes nothing; and a pending value is
+ * never handed out as a credential in the meantime.
  */
 async function setCloneDbPassword(input: {
   supabase: Db;
   cloneId: string;
   projectRef: string;
+  /** The row's stored value when it is a standing claim, to be finished. */
+  standingClaim: string | null;
 }): Promise<{ ok: true; password: string } | { ok: false; reason: string }> {
   const token = process.env.SB_MGMT_API_TOKEN;
   if (!token) return { ok: false, reason: "SB_MGMT_API_TOKEN is not configured" };
-  const { generateSecurePassword } = await import("./backend-provisioning.server");
-  const password = generateSecurePassword();
+  const { encryptSecret, decryptSecret } = await import("./crypto.server");
+
+  let claim: string;
+  let password: string;
+  const standingSealed = claimedSealedPassword(input.standingClaim);
+  if (input.standingClaim && standingSealed) {
+    claim = input.standingClaim;
+    // Re-read rather than trusted: the claim was read before the target was
+    // resolved, and a re-provision in between would pair one project's claim
+    // with another project's reset.
+    const { data: standing, error: standingError } = await input.supabase
+      .from("clone_backends")
+      .select("clone_id")
+      .eq("clone_id", input.cloneId)
+      .eq("supabase_project_ref", input.projectRef)
+      .eq("db_pass", claim);
+    if (standingError) {
+      return {
+        ok: false,
+        reason: `the standing claim could not be re-read: ${standingError.message}`,
+      };
+    }
+    if (!standing || standing.length === 0) {
+      return {
+        ok: false,
+        reason: `the standing claim no longer belongs to ${input.projectRef}; nothing was reset`,
+      };
+    }
+    try {
+      password = decryptSecret(standingSealed);
+    } catch (e) {
+      return {
+        ok: false,
+        reason: `the standing password claim could not be read: ${e instanceof Error ? e.message : String(e)}`,
+      };
+    }
+  } else {
+    const { generateSecurePassword } = await import("./backend-provisioning.server");
+    password = generateSecurePassword();
+    claim = pendingPassword(encryptSecret(password));
+    const { data: claimed, error: claimError } = await input.supabase
+      .from("clone_backends")
+      .update({ db_pass: claim })
+      .eq("clone_id", input.cloneId)
+      .eq("supabase_project_ref", input.projectRef)
+      .is("db_pass", null)
+      .select("clone_id");
+    if (claimError) {
+      return { ok: false, reason: `the password could not be claimed: ${claimError.message}` };
+    }
+    if (!claimed || claimed.length === 0) {
+      return {
+        ok: false,
+        reason:
+          "another pass claimed a password for this clone, or it no longer points at " +
+          `${input.projectRef}; the next pass finishes whatever stands`,
+      };
+    }
+  }
+
   try {
     const res = await fetch(`${MGMT_API}/projects/${input.projectRef}/database/password`, {
       method: "PATCH",
@@ -114,27 +184,33 @@ async function setCloneDbPassword(input: {
     if (!res.ok) {
       return {
         ok: false,
-        reason: `Supabase refused the password for ${input.projectRef}: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`,
+        reason:
+          `Supabase refused the password for ${input.projectRef}: HTTP ${res.status} ` +
+          `${(await res.text()).slice(0, 200)}; the claim stands and the next pass sends it again`,
       };
     }
   } catch (e) {
-    return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+    return {
+      ok: false,
+      reason: `${e instanceof Error ? e.message : String(e)}; the claim stands and the next pass sends it again`,
+    };
   }
 
-  const { encryptSecret } = await import("./crypto.server");
-  const { data, error } = await input.supabase
+  // Confirmed only over THIS claim, so a row that has moved on is left alone.
+  const { data: confirmed, error: confirmError } = await input.supabase
     .from("clone_backends")
     .update({ db_pass: encryptSecret(password) })
     .eq("clone_id", input.cloneId)
     .eq("supabase_project_ref", input.projectRef)
+    .eq("db_pass", claim)
     .select("clone_id");
-  if (error) {
-    return { ok: false, reason: `the new password could not be stored: ${error.message}` };
-  }
-  if (!data || data.length === 0) {
+  if (confirmError || !confirmed || confirmed.length === 0) {
     return {
       ok: false,
-      reason: `this clone no longer points at ${input.projectRef}, so the password set there was not kept`,
+      reason:
+        `Supabase took the password but it could not be confirmed` +
+        (confirmError ? ` (${confirmError.message})` : " (the claim had moved)") +
+        "; the next pass finishes whatever stands",
     };
   }
   return { ok: true, password };
@@ -290,6 +366,11 @@ export async function reconcileCloneCiCredentials(supabase: Db): Promise<Credent
   const { decryptSecret } = await import("./crypto.server");
   const { resolveCloneSecretTarget } = await import("./cloneAllowedOrigins.server");
   const { listRepoVariables } = await import("./github-variables.server");
+  const { listRepoSecretNames, listEnvironmentSecretNames } =
+    await import("./github-secrets.server");
+  // The name a tenant's own deploy token is kept under, from the module that
+  // writes it rather than spelled again here.
+  const { ACCESS_TOKEN_SECRET } = await import("./cloneBackendDeploy.server");
   const { writeAuditLog } = await import("./audit.server");
 
   const readStored = (value: unknown, what: string): HeldCredential => {
@@ -336,6 +417,13 @@ export async function reconcileCloneCiCredentials(supabase: Db): Promise<Credent
     let projectRef: string;
     try {
       projectRef = (await resolveCloneSecretTarget(supabase, clone.id)).projectRef;
+      // Two reads of one row: a re-provision between them would pair this
+      // row's credentials with another project.
+      if (projectRef !== backend.supabase_project_ref) {
+        throw new Error(
+          `this clone moved from ${backend.supabase_project_ref} to ${projectRef} during the pass; the next pass reads it again`,
+        );
+      }
     } catch (e) {
       recordOutcome(sweep, {
         repo: label,
@@ -346,19 +434,41 @@ export async function reconcileCloneCiCredentials(supabase: Db): Promise<Credent
       continue;
     }
 
-    // One read of the repository's variables serves the password decision and
-    // the project-ref variable both.
     const variables = await listRepoVariables({ owner, repo });
-    let password = readStored(backend.db_pass, "database password");
+    // A standing claim is not a credential: it is finished below, and until it
+    // is, nothing is handed out for it.
+    const standingClaim = claimedSealedPassword(backend.db_pass as string | null)
+      ? (backend.db_pass as string)
+      : null;
+    let password = standingClaim
+      ? ({ value: null } as HeldCredential)
+      : readStored(backend.db_pass, "database password");
     if ("value" in password && !password.value) {
-      const decision = decidePasswordSet({ passwordStored: false, variables });
+      // Asked only when a password is missing: two listings, where the
+      // tenant's own deploy token would be if it had one.
+      const [repoSecrets, environmentSecrets] = await Promise.all([
+        listRepoSecretNames({ owner, repo }),
+        listEnvironmentSecretNames({ owner, repo, environment: CI_ENVIRONMENT }),
+      ]);
+      const decision = decidePasswordSet({
+        passwordStored: false,
+        tenantDeployTokenHeld:
+          repoSecrets === null || environmentSecrets === null
+            ? null
+            : [...repoSecrets, ...environmentSecrets].includes(ACCESS_TOKEN_SECRET),
+      });
       if (!decision.set) {
         password = {
           state: "cannot",
           reason: decision.reason ?? "no database password is stored for this clone",
         };
       } else {
-        const set = await setCloneDbPassword({ supabase, cloneId: clone.id, projectRef });
+        const set = await setCloneDbPassword({
+          supabase,
+          cloneId: clone.id,
+          projectRef,
+          standingClaim,
+        });
         if (set.ok) {
           password = { value: set.password, changed: true };
           sweep.passwordsSet.push(label);
@@ -370,7 +480,9 @@ export async function reconcileCloneCiCredentials(supabase: Db): Promise<Credent
             metadata: {
               repo: label,
               project_ref: projectRef,
-              reason: "no database password was stored for this clone",
+              reason: standingClaim
+                ? "a standing password claim was finished"
+                : "no database password was stored for this clone",
             },
           });
         } else {

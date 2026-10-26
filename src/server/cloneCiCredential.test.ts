@@ -3,12 +3,15 @@ import {
   CI_DB_URL_SECRET,
   CI_ENVIRONMENT,
   CI_SERVICE_ROLE_SECRET,
+  PENDING_PASSWORD_PREFIX,
   SESSION_POOLER_PORT,
+  claimedSealedPassword,
   composeSessionPoolerUrl,
   decidePasswordSet,
   describeCredentialSweep,
   emptyCredentialSweep,
   judgeServiceRoleKey,
+  pendingPassword,
   recordOutcome,
   sweepIsNoteworthy,
 } from "./cloneCiCredential.pure";
@@ -57,15 +60,42 @@ describe("composing a clone's database URL", () => {
     expect(r.reason).toContain("refusing to hand a clone another database");
   });
 
-  it("refuses transaction mode", () => {
+  it("uses the session port on the shared pooler, whatever its default mode", () => {
+    // What Supabase reports for every clone (26 Oct 2026): the shared pooler
+    // host, with the TRANSACTION port because that is the default mode. The
+    // same host serves session mode on 5432, and that is what is composed.
     const r = composeSessionPoolerUrl({
       projectRef: REF,
       password: "s3cret",
       pooler: { ...POOLER, port: 6543 },
     });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(new URL(r.url).port).toBe("5432");
+    expect(r.url).not.toContain("6543");
+  });
+
+  it("refuses a non-session port anywhere but the shared pooler", () => {
+    const r = composeSessionPoolerUrl({
+      projectRef: REF,
+      password: "s3cret",
+      pooler: { ...POOLER, host: `db.${REF}.supabase.co`, port: 6543 },
+    });
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.reason).toContain("6543");
+    expect(r.reason).toContain("not the shared pooler");
+  });
+
+  it("does not take a look-alike host for the shared pooler", () => {
+    for (const host of ["pooler.supabase.com.evil.example", "aws-1.pooler.supabase.com.example"]) {
+      const r = composeSessionPoolerUrl({
+        projectRef: REF,
+        password: "s3cret",
+        pooler: { ...POOLER, host, port: 6543 },
+      });
+      expect(r.ok).toBe(false);
+    }
   });
 
   it("never composes half a URL", () => {
@@ -144,34 +174,47 @@ describe("the service-role key a clone is given", () => {
 });
 
 describe("giving a clone's database a password", () => {
-  const MC = { BACKEND_DEPLOYED_BY: "mission-control" };
-
   it("never replaces one that is stored", () => {
-    expect(decidePasswordSet({ passwordStored: true, variables: MC })).toEqual({
+    expect(decidePasswordSet({ passwordStored: true, tenantDeployTokenHeld: false })).toEqual({
       set: false,
       reason: null,
     });
   });
 
-  it("sets one only where Mission Control operates the backend", () => {
-    expect(decidePasswordSet({ passwordStored: false, variables: MC })).toEqual({ set: true });
+  it("sets one only where the repository holds no deploy token of its own", () => {
+    expect(decidePasswordSet({ passwordStored: false, tenantDeployTokenHeld: false })).toEqual({
+      set: true,
+    });
   });
 
-  it("leaves the owner's database alone when the repository does not say Mission Control", () => {
-    const notMissionControl: Record<string, string>[] = [{}, { BACKEND_DEPLOYED_BY: "tenant" }];
-    for (const variables of notMissionControl) {
-      const d = decidePasswordSet({ passwordStored: false, variables });
-      expect(d.set).toBe(false);
-      if (d.set) return;
-      expect(d.reason).toContain("the password is the owner's");
-    }
+  it("leaves a tenant-operated database alone", () => {
+    const d = decidePasswordSet({ passwordStored: false, tenantDeployTokenHeld: true });
+    expect(d.set).toBe(false);
+    if (d.set) return;
+    expect(d.reason).toContain("deploy token of its own");
+    expect(d.reason).toContain("the password is the owner's");
   });
 
-  it("does not read a failed variable listing as a declaration", () => {
-    const d = decidePasswordSet({ passwordStored: false, variables: null });
+  it("does not read a failed secret listing as an absent token", () => {
+    const d = decidePasswordSet({ passwordStored: false, tenantDeployTokenHeld: null });
     expect(d.set).toBe(false);
     if (d.set) return;
     expect(d.reason).toContain("could not be read");
+  });
+});
+
+describe("a password claim", () => {
+  it("is stored marked, and the mark is what tells it from a credential", () => {
+    const claim = pendingPassword("enc:v1:abc");
+    expect(claim.startsWith(PENDING_PASSWORD_PREFIX)).toBe(true);
+    expect(claimedSealedPassword(claim)).toBe("enc:v1:abc");
+  });
+
+  it("does not read a confirmed password, or nothing, as a claim", () => {
+    expect(claimedSealedPassword("enc:v1:abc")).toBeNull();
+    expect(claimedSealedPassword(null)).toBeNull();
+    expect(claimedSealedPassword(undefined)).toBeNull();
+    expect(claimedSealedPassword(PENDING_PASSWORD_PREFIX)).toBeNull();
   });
 });
 

@@ -81,9 +81,9 @@
  * project ref at creation; the run then paused while the project came up, and
  * the resumed run knew no password to store. Creation now persists it with
  * the ref. A clone already without one is given a fresh one, by Supabase's
- * own endpoint, but only where its repository declares Mission Control as its
- * backend deployer: elsewhere the database, and its password, are the
- * owner's (`decidePasswordSet`).
+ * own endpoint, but only where its repository holds no deploy token of its
+ * own: where it does, the tenant operates the backend, and the database and
+ * its password are the owner's (`decidePasswordSet`).
  */
 
 /** The Actions secret a clone's `apply-migration.yml` and `migration-drift.yml` read. */
@@ -98,9 +98,6 @@ export const CI_ENVIRONMENT = "supabase-production";
 /** Not a credential: which project the repository belongs to, readable by anyone who can read it. */
 export const CI_PROJECT_REF_VARIABLE = "SUPABASE_PROJECT_REF";
 
-/** What `BACKEND_DEPLOYED_BY` says when Mission Control operates the clone's backend. */
-const MISSION_CONTROL_DEPLOYS = "mission-control";
-
 /** Supavisor's session-mode port. Transaction mode (6543) is never used here. */
 export const SESSION_POOLER_PORT = 5432;
 
@@ -109,9 +106,21 @@ export type PoolerFacts = {
   host: string | null;
   /** e.g. `postgres.plisdzywzleljorrphxv` */
   user: string | null;
-  /** Whatever Supabase reports; only 5432 is accepted. */
+  /**
+   * Whatever Supabase reports. On the shared pooler this is the port of the
+   * project's DEFAULT pool mode, which is transaction (6543); the session
+   * port on the same host is 5432 regardless, and that is the one used.
+   */
   port: number | null;
 };
+
+/**
+ * Supavisor's shared pooler: one host per region serving BOTH modes, the port
+ * choosing which (5432 session, 6543 transaction). Anything else — a dedicated
+ * pooler on the project's own host — is not known to serve session mode on
+ * 5432, so a non-session port there is still refused.
+ */
+const SHARED_POOLER_HOST = /^[a-z0-9-]+\.pooler\.supabase\.com$/;
 
 export type ComposeResult =
   | { ok: true; url: string; host: string; user: string }
@@ -151,10 +160,19 @@ export function composeSessionPoolerUrl(input: {
       reason: `the pooler user "${user}" is not this project's (${ref}) — refusing to hand a clone another database`,
     };
   }
-  if (input.pooler.port !== null && input.pooler.port !== SESSION_POOLER_PORT) {
+  // Measured 26 Oct 2026, the first time any clone had a password to compose
+  // with: all four projects' pooler config reported port 6543. That is the
+  // default mode's port, not a statement about which modes the host serves —
+  // the shared pooler takes session connections on 5432 on the same host
+  // (Supabase, "Connect to your database"). Refusing it refused every clone.
+  if (
+    !SHARED_POOLER_HOST.test(host) &&
+    input.pooler.port !== null &&
+    input.pooler.port !== SESSION_POOLER_PORT
+  ) {
     return {
       ok: false,
-      reason: `Supabase reported pooler port ${input.pooler.port}; only the session port ${SESSION_POOLER_PORT} is used`,
+      reason: `Supabase reported pooler port ${input.pooler.port} on ${host}, which is not the shared pooler; only the session port ${SESSION_POOLER_PORT} is used`,
     };
   }
 
@@ -216,36 +234,73 @@ export function judgeServiceRoleKey(input: {
 /**
  * May Mission Control give this clone's database a password?
  *
- * Only where none is stored, and only where the repository says Mission
- * Control operates the backend. A tenant whose own CI deploys holds its own
- * credentials, may have set its own password, and would lose every connection
- * made with it. A variable listing that failed is not a declaration either way,
- * so it leaves the password alone too.
+ * Only where none is stored, and only where Mission Control operates the
+ * backend. A tenant whose own CI deploys holds its own credentials, may have
+ * set its own password, and would lose every connection made with it.
+ *
+ * The signal is the deploy token, never `BACKEND_DEPLOYED_BY`. The declaration
+ * sweep writes that variable on EVERY clone repository, a tenant's included,
+ * because the deploy workflow lets a token outrank it
+ * (`cloneDeployerDeclaration.pure.ts`), so it says nothing about who operates
+ * the backend. A repository holding its own deploy token (`ACCESS_TOKEN_SECRET`
+ * in `cloneBackendDeploy.server.ts`) does say it, the way `deriveDeployRoute`
+ * reads it. A listing that failed is not an absent
+ * token, so it leaves the password alone too.
  */
 export function decidePasswordSet(input: {
   passwordStored: boolean;
-  /** The repository's variables, or null when GitHub could not be asked. */
-  variables: Readonly<Record<string, string>> | null;
+  /**
+   * Whether the repository, or its production environment, holds a deploy
+   * token of its own. Null when GitHub could not be asked.
+   */
+  tenantDeployTokenHeld: boolean | null;
 }): { set: true } | { set: false; reason: string | null } {
   if (input.passwordStored) return { set: false, reason: null };
-  if (input.variables === null) {
+  if (input.tenantDeployTokenHeld === null) {
     return {
       set: false,
       reason:
-        "no database password is stored for this clone, and whether Mission Control operates " +
-        "its backend could not be read, so none is set",
+        "no database password is stored for this clone, and whether its repository holds a " +
+        "deploy token of its own could not be read, so none is set",
     };
   }
-  if (input.variables.BACKEND_DEPLOYED_BY !== MISSION_CONTROL_DEPLOYS) {
+  if (input.tenantDeployTokenHeld) {
     return {
       set: false,
       reason:
-        "no database password is stored for this clone, and its repository does not declare " +
-        "Mission Control as its backend deployer (BACKEND_DEPLOYED_BY), so the password is the " +
-        "owner's and none is set",
+        "no database password is stored for this clone, and its repository holds a deploy " +
+        "token of its own, so the tenant operates the backend, the password is the owner's, " +
+        "and none is set",
     };
   }
   return { set: true };
+}
+
+/**
+ * A database password Mission Control has CLAIMED for a clone and not yet
+ * confirmed Supabase holds.
+ *
+ * The claim is written to the row before Supabase is told, so two overlapping
+ * passes cannot both reset the database. But a pass can also stop between the
+ * claim and the reset, or between the reset and the confirmation, and a claim
+ * stored as a plain password would then read, to every later pass, as a
+ * credential the database takes when it may not. So a claim is stored marked:
+ * no pass ever hands a marked value out, and any pass that finds one sends
+ * the same password to Supabase again (setting a password it already holds
+ * changes nothing) and then stores it plain.
+ */
+export const PENDING_PASSWORD_PREFIX = "pending:";
+
+/** The stored form of a claim: the marker, then the sealed password. */
+export function pendingPassword(sealed: string): string {
+  return `${PENDING_PASSWORD_PREFIX}${sealed}`;
+}
+
+/** The sealed password inside a claim, or null when the stored value is not one. */
+export function claimedSealedPassword(stored: string | null | undefined): string | null {
+  if (!stored || !stored.startsWith(PENDING_PASSWORD_PREFIX)) return null;
+  const sealed = stored.slice(PENDING_PASSWORD_PREFIX.length);
+  return sealed.length > 0 ? sealed : null;
 }
 
 export type CredentialOutcome =
