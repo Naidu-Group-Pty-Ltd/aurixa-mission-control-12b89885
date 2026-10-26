@@ -1,10 +1,12 @@
 /**
- * Finds the prime's compressed bundle for a function, or asks the prime to
- * build one. The rules are `compressedEdgeBundle.pure.ts`; this is the GitHub
- * half: the runs of `edge-function-bundles.yml`, their artifacts, and the
- * dispatch.
+ * Finds the compressed bundle of a function that the repository its source
+ * comes from built, or asks that repository to build one: the prime, for the
+ * functions every clone takes from it, and a CRM line's own repository, for a
+ * function the line deploys from its own tree (`cloneOwnedFunctions.server.ts`).
+ * The rules are `compressedEdgeBundle.pure.ts`; this is the GitHub half: the
+ * runs of `edge-function-bundles.yml`, their artifacts, and the dispatch.
  *
- * Only a dispatch on the prime's own branch is read, newest first, and only
+ * Only a dispatch on the source's own branch is read, newest first, and only
  * its `edge-function-bundles` artifact. A bundle is used where `judgeBundle`
  * says it was built from the bytes this deploy would send, which is the whole
  * of its provenance: the run proves nothing on its own.
@@ -68,19 +70,19 @@ export function forgetBundleReads(): void {
 
 async function listBundleRuns(
   octokit: BundleOctokit,
-  prime: RepoRef,
+  source: RepoRef,
   nowMs: number,
 ): Promise<BundleRun[]> {
-  const key = `${prime.owner}/${prime.repo}@${prime.branch}`;
+  const key = `${source.owner}/${source.repo}@${source.branch}`;
   const hit = runsCache.get(key);
   if (hit && nowMs - hit.at < RUNS_TTL_MS) return hit.runs;
   const res = await withRetry(
     () =>
       octokit.request("GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs", {
-        owner: prime.owner,
-        repo: prime.repo,
+        owner: source.owner,
+        repo: source.repo,
         workflow_id: BUNDLE_WORKFLOW_FILE,
-        branch: prime.branch,
+        branch: source.branch,
         event: "workflow_dispatch",
         per_page: 20,
       }),
@@ -90,7 +92,7 @@ async function listBundleRuns(
   const runs: BundleRun[] = raw
     // The query asks for these; checked again so a reply that ignored a filter
     // cannot hand over a run started anywhere else.
-    .filter((r) => r.head_branch === prime.branch && r.event === "workflow_dispatch")
+    .filter((r) => r.head_branch === source.branch && r.event === "workflow_dispatch")
     .map((r) => ({
       id: Number(r.id),
       status: (r.status as string | null) ?? null,
@@ -106,14 +108,14 @@ async function listBundleRuns(
 
 async function readArchive(
   octokit: BundleOctokit,
-  prime: RepoRef,
+  source: RepoRef,
   runId: number,
 ): Promise<Uint8Array | null> {
   const listed = await withRetry(
     () =>
       octokit.request("GET /repos/{owner}/{repo}/actions/runs/{run_id}/artifacts", {
-        owner: prime.owner,
-        repo: prime.repo,
+        owner: source.owner,
+        repo: source.repo,
         run_id: runId,
         name: BUNDLE_ARTIFACT_NAME,
       }),
@@ -131,8 +133,8 @@ async function readArchive(
       octokit.request(
         "GET /repos/{owner}/{repo}/actions/artifacts/{artifact_id}/{archive_format}",
         {
-          owner: prime.owner,
-          repo: prime.repo,
+          owner: source.owner,
+          repo: source.repo,
           artifact_id: id,
           archive_format: "zip",
           // GitHub answers with a redirect to a signed storage URL. It is
@@ -179,7 +181,7 @@ async function bundleIn(
 
 async function requestBuild(
   octokit: BundleOctokit,
-  prime: RepoRef,
+  source: RepoRef,
   slug: string,
   runs: readonly BundleRun[],
   nowMs: number,
@@ -190,10 +192,10 @@ async function requestBuild(
     await withRetry(
       () =>
         octokit.request("POST /repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches", {
-          owner: prime.owner,
-          repo: prime.repo,
+          owner: source.owner,
+          repo: source.repo,
           workflow_id: BUNDLE_WORKFLOW_FILE,
-          ref: prime.branch,
+          ref: source.branch,
           inputs: { functions: slug },
         }),
       { attempts: 3, shouldRetry: isTransientHttpError },
@@ -201,26 +203,28 @@ async function requestBuild(
   } catch (e) {
     const status = (e as { status?: number })?.status;
     return status === 404
-      ? `asking ${prime.owner}/${prime.repo} for a build answered 404: .github/workflows/${BUNDLE_WORKFLOW_FILE} is not on ${prime.branch}, or the GitHub App lacks Actions: read & write`
-      : `asking ${prime.owner}/${prime.repo} for a build failed: ${e instanceof Error ? e.message : String(e)}`;
+      ? `asking ${source.owner}/${source.repo} for a build answered 404: .github/workflows/${BUNDLE_WORKFLOW_FILE} is not on ${source.branch}, or the GitHub App lacks Actions: read & write`
+      : `asking ${source.owner}/${source.repo} for a build failed: ${e instanceof Error ? e.message : String(e)}`;
   }
   // The next pass must see the run this started, not a listing from before it.
-  runsCache.delete(`${prime.owner}/${prime.repo}@${prime.branch}`);
-  return `asked ${prime.owner}/${prime.repo} to build it (${BUNDLE_WORKFLOW_FILE} on ${prime.branch})`;
+  runsCache.delete(`${source.owner}/${source.repo}@${source.branch}`);
+  return `asked ${source.owner}/${source.repo} to build it (${BUNDLE_WORKFLOW_FILE} on ${source.branch})`;
 }
 
 /**
- * The newest bundle the prime built that `fn` may be deployed as, or why there
- * is none and what was done about it.
+ * The newest bundle `source` built that `fn` may be deployed as, or why there
+ * is none and what was done about it. `source` is the repository `fn`'s files
+ * were read from: a bundle built anywhere else carries other bytes, and
+ * `judgeBundle` would refuse it.
  */
 export async function compressedBundleFor(input: {
-  prime: RepoRef;
+  source: RepoRef;
   fn: DeployableFunction;
   /** The App installation; a test stands in for GitHub here. */
   octokit?: BundleOctokit;
   nowMs?: number;
 }): Promise<CompressedBundleLookup> {
-  const { prime, fn } = input;
+  const { source, fn } = input;
   const nowMs = input.nowMs ?? Date.now();
   // Asked first, and of nobody: a deploy whose own imports did not close can
   // be matched by no bundle, so there is nothing worth a call or a build.
@@ -234,13 +238,25 @@ export async function compressedBundleFor(input: {
     return { state: "awaiting", why: `GitHub was not asked: ${spend.why}` };
   }
   const octokit = input.octokit ?? (getAppOctokit() as unknown as BundleOctokit);
-  const runs = await listBundleRuns(octokit, prime, nowMs);
+  let runs: BundleRun[];
+  try {
+    runs = await listBundleRuns(octokit, source, nowMs);
+  } catch (e) {
+    // The listing answers 404 for a workflow the repository does not hold.
+    // That is a named reason, not "no bundle", and nothing is dispatched to a
+    // workflow that is not there. Any other failure is thrown as before.
+    if ((e as { status?: number })?.status !== 404) throw e;
+    return {
+      state: "awaiting",
+      why: `${source.owner}/${source.repo} holds no .github/workflows/${BUNDLE_WORKFLOW_FILE} on ${source.branch} to build it with (or the GitHub App lacks Actions: read)`,
+    };
+  }
   const built = runs
     .filter((r) => r.status === "completed" && r.conclusion === "success")
     .slice(0, RUNS_SEARCHED);
   let found = "no build of it was found";
   for (const run of built) {
-    const archive = await readArchive(octokit, prime, run.id);
+    const archive = await readArchive(octokit, source, run.id);
     if (!archive) continue;
     const bundle = await bundleIn(archive, fn.slug);
     if (!bundle) continue;
@@ -261,6 +277,6 @@ export async function compressedBundleFor(input: {
     if (found === "no build of it was found")
       found = `the newest build is out of date: ${verdict.reason}`;
   }
-  const asked = await requestBuild(octokit, prime, fn.slug, runs, nowMs);
+  const asked = await requestBuild(octokit, source, fn.slug, runs, nowMs);
   return { state: "awaiting", why: `${found}; ${asked}` };
 }

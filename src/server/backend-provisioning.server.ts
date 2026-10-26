@@ -4439,12 +4439,13 @@ export { shouldForceAnonymousFunction } from "./anonymousFunctionSlugs.pure";
 
 /**
  * How a deploy may reach a function too large for the raw-source route: the
- * prime repository whose `edge-function-bundles.yml` builds the CLI's
- * compressed bundle (`compressedEdgeBundle.pure.ts`). Given only where the
- * bundle comes from the prime's tree, because a bundle is used only where it
- * was built from the very bytes this deploy would send.
+ * repository whose `edge-function-bundles.yml` builds the CLI's compressed
+ * bundle (`compressedEdgeBundle.pure.ts`). `source` is the repository the
+ * deploy's files were read from — the prime's, or a CRM line's own for a
+ * function the line deploys from its tree — because a bundle is used only
+ * where it was built from the very bytes this deploy would send.
  */
-export type CompressedRoute = { prime: RepoRef };
+export type CompressedRoute = { source: RepoRef };
 
 /**
  * Deploy one edge function bundle to a clone project via the Management API.
@@ -4452,9 +4453,9 @@ export type CompressedRoute = { prime: RepoRef };
  * `../_shared/x.ts`-style imports inside a function resolve within the bundle.
  *
  * With a `compressed` route, a bundle larger than `RAW_DEPLOY_CEILING_BYTES`,
- * or one the raw route refuses for its size, is deployed as the prime's
- * compressed bundle of the same source instead. Where there is none yet, the
- * deploy fails saying so, and the prime is asked to build one.
+ * or one the raw route refuses for its size, is deployed as the source
+ * repository's compressed bundle of the same files instead. Where there is
+ * none yet, the deploy fails saying so, and the source is asked to build one.
  */
 export async function deployEdgeFunction(
   projectRef: string,
@@ -4498,7 +4499,7 @@ export async function deployEdgeFunction(
   }
 
   const { compressedBundleFor } = await import("@/server/compressedEdgeBundle.server");
-  const found = await compressedBundleFor({ prime: route.prime, fn });
+  const found = await compressedBundleFor({ source: route.source, fn });
   if (found.state !== "ready") {
     const size = rawRefusal ?? `${rawBundleBytes(fn.files)} bytes of source`;
     const instead =
@@ -4514,7 +4515,7 @@ export async function deployEdgeFunction(
 }
 
 /**
- * Upload the prime's compressed bundle the way the CLI does: update the
+ * Upload a compressed bundle the way the CLI does: update the
  * function where the project holds it, create it where it does not.
  */
 async function deployCompressedBundle(
@@ -6138,7 +6139,7 @@ export async function provisionCloneBackend(
       primeOwner && primeRepo
         ? {
             compressed: {
-              prime: { owner: primeOwner, repo: primeRepo, branch: snapshot.sourceRef },
+              source: { owner: primeOwner, repo: primeRepo, branch: snapshot.sourceRef },
             },
           }
         : undefined,

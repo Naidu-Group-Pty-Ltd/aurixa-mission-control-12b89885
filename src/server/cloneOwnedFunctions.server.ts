@@ -262,7 +262,14 @@ export async function deployCloneOwnedFunctions(args: {
       const toDeploy = plans.filter((p) => wanted.has(p.slug));
       try {
         const bundles = await assembleFunctionBundles(octokit, cloneRef, toDeploy);
-        const results = await deployEdgeFunctions(projectRef, bundles);
+        // A function too large to send as source takes the compressed bundle
+        // THIS repository built of it (`compressedEdgeBundle.server.ts`): the
+        // prime's is built from other bytes. The line's `ai-dashboard-agent`
+        // is 494 files and 8.1 MB, and answered 413 on every pass until
+        // 26 Oct 2026, so the copy on the CRM line's backend was 14 Oct's.
+        const results = await deployEdgeFunctions(projectRef, bundles, undefined, undefined, {
+          compressed: { source: cloneRef },
+        });
         fresh = results.map((r) => ({
           slug: r.slug,
           success: r.success,

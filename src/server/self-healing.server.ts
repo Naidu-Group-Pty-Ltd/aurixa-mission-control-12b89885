@@ -1825,7 +1825,7 @@ async function executeEdgeFunctionDeploy(
   const { results, stoppedEarly } = await timed("deploy", () =>
     // Every bundle here is the prime's, so one too large for the raw route
     // can take the prime's compressed bundle of the same source.
-    deployWithinBudget(run, projectRef, batch, deadlineAt, { prime: source }),
+    deployWithinBudget(run, projectRef, batch, deadlineAt, { source }),
   );
   const failures = (results ?? []).filter((r) => r.error);
   if (failures.length === (results ?? []).length && failures.length > 0) {

@@ -139,13 +139,21 @@ export const PRIME_ONLY_FEATURES: readonly PrimeOnlyFeature[] = [
   },
   {
     // The prime builds the compressed bundle of a function too large for the
-    // raw-source deploy, and this deployment dispatches it there and nowhere
-    // else (`compressedEdgeBundle.pure.ts`). A clone would only run the
-    // workflow's pull request proof on the cascade that carried it, against
+    // raw-source deploy, for every clone that takes the function from it
+    // (`compressedEdgeBundle.pure.ts`). Carried to every clone, the workflow
+    // would run its pull request proof on the cascade that carried it, against
     // a tree that may not hold the two functions it bundles.
+    //
+    // A CRM line that deploys a function from its OWN tree builds that
+    // function's bundle in its own repository, from its own copy of these
+    // files (npc-crm-independent-6505dc #131, for its `ai-dashboard-agent`;
+    // `cloneOwnedFunctions.server.ts`). Being prime-only is what keeps that
+    // copy the line's: the cascade never writes the prime's over it, and never
+    // removes it while the prime holds its own.
     key: "edge-function-bundles",
     title: "Edge function bundles",
-    reason: "Prime-only: Mission Control asks the prime alone to build compressed bundles.",
+    reason:
+      "Prime-only: the prime builds the compressed bundles of the functions clones take from it; a line that deploys its own builds its own.",
     files: [
       ".github/workflows/edge-function-bundles.yml",
       "scripts/deploy/edge-bundle-capture.mjs",
