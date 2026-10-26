@@ -4,7 +4,9 @@
 Per assistant: GET fresh -> replace the system message with the generated
 prompt, bind the role's org tools from the manifest, leave every inline tool
 alone -> PATCH -> verify.
-Model (gpt-5.6-luna), voice, firstMessage, server, transcriber untouched.
+Model (gpt-5.6-luna), voice and server untouched. `firstMessage` is written
+only where the manifest declares one (FIRST_MESSAGES in build-fleet-prompts.py)
+and left exactly as it is live everywhere else.
 
 A VAPI PATCH replaces a whole top-level key, so `model` is always read fresh
 and sent back entire. Inline tools are never filtered: an earlier version kept
@@ -187,6 +189,13 @@ def main():
         model["messages"] = msgs
 
         body = {"model": model, "transcriber": dict(TRANSCRIBER)}
+        # A declared first message ends on a question (the generator asserts
+        # it): VAPI speaks it and then waits for the caller, and one that
+        # ended on "let me check the calendar" left both sides waiting until
+        # the call timed out on silence.
+        first_message = m.get("first_message")
+        if first_message:
+            body["firstMessage"] = first_message
         is_reception = RECEPTION_TOOL in m["tools"]
         if is_reception:
             body["backgroundSound"] = BACKGROUND_SOUND
@@ -219,6 +228,7 @@ def main():
         got_tr = v.get("transcriber") or {}
         tr_ok = all(got_tr.get(k) == val for k, val in TRANSCRIBER.items())
         bg_ok = (not is_reception) or v.get("backgroundSound") == BACKGROUND_SOUND
+        first_ok = (not first_message) or v.get("firstMessage") == first_message
         ok = (
             set(want_ids) <= set(got_ids)
             and any(kind == "query" for kind, _ in got_inline)
@@ -227,11 +237,14 @@ def main():
             and vm.get("model") == "gpt-5.6-luna"
             and tr_ok
             and bg_ok
+            and first_ok
         )
         status = "applied" if ok else "VERIFY-FAILED"
         kb_note = f" kb={','.join(got_kb_files) or 'none'}" + (f" (repointed {repointed})" if repointed else "")
-        speech = f" transcriber={'ok' if tr_ok else 'DRIFTED'}" + (
-            f" bg={v.get('backgroundSound') or 'none'}" if is_reception else ""
+        speech = (
+            f" transcriber={'ok' if tr_ok else 'DRIFTED'}"
+            + (f" bg={v.get('backgroundSound') or 'none'}" if is_reception else "")
+            + (f" firstMessage={'ok' if first_ok else 'DRIFTED'}" if first_message else "")
         )
         print(
             f"{status:14s} {m['name']:32s} prompt={len(got_sys)} toolIds={len(got_ids)} "

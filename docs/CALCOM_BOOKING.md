@@ -87,7 +87,11 @@ form. So the code can ship first.
    `reschedule_existing` and a 45-second timeout, and both say something when
    the calendar is slow. Commit `fleet-prompts/mc_org_tool_ids.json` if it had
    to create a tool. Until it runs, a caller with no email on file cannot
-   finish a booking, because the live declaration has nowhere to put one.
+   finish a booking, because the live declaration has nowhere to put one. Run
+   it after Mission Control is published with the Cal.com code, never before:
+   the new `book_appointment` description tells the agent a success is a
+   confirmed booking with the invitation already emailed, which the earlier
+   code does not do.
 6. **Deploy the waitlist site** (`aurixa-systems`). It asks this route for
    times on load; until step 2 it keeps its request form, and afterwards it
    books.
@@ -163,19 +167,19 @@ raises it at `error` severity, because it means every booking path is failing.
 
 ### What the agents say about a booking
 
-The fleet's words change separately from its tools. The twelve prompts and the
-knowledge base still describe a booking made on a call as a request the team
-confirms by email. Once Cal.com is on, that understates what happens — Cal.com
-confirms the booking and emails the invitation at once — but it never claims
-more than happened, and every reply from `book_appointment` already tells the
-agent what to say for the outcome it got (`voiceBooking.pure.ts`).
+The twelve prompts and the knowledge base say what `book_appointment` does
+once Cal.com is on: a booking made on a call is confirmed in the calendar there
+and then, and the invitation with the video link is emailed straight away. The
+booking specialist's first message asks which day or time suits, so a caller
+handed over from the front desk is never left waiting in silence.
 
-The new wording ships in a change of its own because its knowledge-base half
-cannot merge before the new corpus is uploaded: `npm run check:voice-kb` fails
-while the committed corpus differs from the copy `knowledge-base/vapi-file.json`
-records, so the fleet never answers from a corpus the repository does not hold.
-The prompts travel with it, so the prompts and the knowledge base never
-disagree. With `VAPI_KEY`, on that change's branch:
+None of it is live until `apply-fleet-upgrade.py` pushes it, and the
+knowledge-base half cannot merge before its corpus is uploaded:
+`npm run check:voice-kb` fails while the committed corpus differs from the copy
+`knowledge-base/vapi-file.json` records, so the fleet never answers from a
+corpus the repository does not hold. The prompts travel in the same change, so
+the prompts and the knowledge base never disagree. With `VAPI_KEY`, on the
+change's branch:
 
 ```bash
 python3 scripts/voice/upload-knowledge-base.py   # text/plain, polled to `done`; commit vapi-file.json
@@ -184,11 +188,19 @@ python3 scripts/voice/upload-knowledge-base.py   # text/plain, polled to `done`;
 then merge it, and from `main`:
 
 ```bash
-python3 scripts/voice/apply-fleet-upgrade.py     # prompts and knowledge-base file, all 12
+python3 scripts/voice/apply-fleet-upgrade.py     # prompts, first messages and knowledge-base file, all 12
 ```
 
+Run that only once Mission Control is published with the Cal.com code and
+`CALCOM_API_KEY` is set. Before then the live `book_appointment` still records
+a request, and these words would claim a confirmation it does not make.
+
 Uploading changes nothing live. The fleet reads the new file only once
-`apply-fleet-upgrade.py` points it there.
+`apply-fleet-upgrade.py` points it there. Until then the live agents still call
+a booking a request the team confirms by email — an understatement once
+Cal.com is on, never a claim beyond what happened — and every reply from
+`book_appointment` already tells the agent what to say for the outcome it got
+(`voiceBooking.pure.ts`).
 
 ## What operators see
 
