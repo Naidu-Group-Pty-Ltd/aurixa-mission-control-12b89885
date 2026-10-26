@@ -41,23 +41,38 @@ describe("what is distributed", () => {
   it("reaches a clone's project only through the guard that refuses the prime and itself", () => {
     expect(server).toContain("resolveCloneSecretTarget(supabase, clone.id)");
     // The password is set on the ref the guard returned, never the row's own.
-    expect(server).toContain("setCloneDbPassword({ supabase, cloneId: clone.id, projectRef })");
+    expect(server).toMatch(
+      /setCloneDbPassword\(\{\s*supabase,\s*cloneId: clone\.id,\s*projectRef,/,
+    );
   });
 
   it("sets a password only where the decision allows, and claims the row first", () => {
     const at = server.indexOf("await setCloneDbPassword(");
     expect(server.lastIndexOf("decidePasswordSet(", at)).toBeGreaterThan(-1);
-    // The claim: written only while the row holds none and names this project,
-    // and BEFORE Supabase is told, so two overlapping passes cannot both reset.
+    // The claim: marked pending, written only while the row holds nothing and
+    // names this project, and BEFORE Supabase is told, so two overlapping
+    // passes cannot both reset.
     const fn = server.slice(server.indexOf("async function setCloneDbPassword"));
     const claim = fn.indexOf('.is("db_pass", null)');
     expect(claim).toBeGreaterThan(-1);
-    expect(fn.indexOf('.eq("supabase_project_ref", input.projectRef)')).toBeLessThan(claim);
+    expect(fn.indexOf("claim = pendingPassword(encryptSecret(password))")).toBeLessThan(claim);
     expect(claim).toBeLessThan(fn.indexOf("/database/password"));
-    // A refused reset releases exactly the claim it made.
-    expect(fn).toContain('.eq("db_pass", sealed)');
+    // Confirmed only over this claim, and only after Supabase took it.
+    const confirm = fn.indexOf('.eq("db_pass", claim)');
+    expect(confirm).toBeGreaterThan(fn.indexOf("/database/password"));
+    // A refused reset leaves the claim standing for the next pass to finish;
+    // nothing releases it into a state a later pass could mistake.
+    expect(fn).not.toContain("db_pass: null");
     // A password just set is written at once, not on the daily re-assertion.
     expect(server).toContain("password = { value: set.password, changed: true }");
+  });
+
+  it("never hands out a standing claim, and finishes it", () => {
+    // A pending value is not a credential: the sweep holds nothing for it
+    // until the claim is finished.
+    expect(server).toContain("let password = standingClaim");
+    expect(server).toContain("? ({ value: null } as HeldCredential)");
+    expect(server).toContain("standingClaim,\n        });");
   });
 
   it("decides who operates the backend from the deploy token, never BACKEND_DEPLOYED_BY", () => {

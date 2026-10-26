@@ -276,6 +276,33 @@ export function decidePasswordSet(input: {
   return { set: true };
 }
 
+/**
+ * A database password Mission Control has CLAIMED for a clone and not yet
+ * confirmed Supabase holds.
+ *
+ * The claim is written to the row before Supabase is told, so two overlapping
+ * passes cannot both reset the database. But a pass can also stop between the
+ * claim and the reset, or between the reset and the confirmation, and a claim
+ * stored as a plain password would then read, to every later pass, as a
+ * credential the database takes when it may not. So a claim is stored marked:
+ * no pass ever hands a marked value out, and any pass that finds one sends
+ * the same password to Supabase again (setting a password it already holds
+ * changes nothing) and then stores it plain.
+ */
+export const PENDING_PASSWORD_PREFIX = "pending:";
+
+/** The stored form of a claim: the marker, then the sealed password. */
+export function pendingPassword(sealed: string): string {
+  return `${PENDING_PASSWORD_PREFIX}${sealed}`;
+}
+
+/** The sealed password inside a claim, or null when the stored value is not one. */
+export function claimedSealedPassword(stored: string | null | undefined): string | null {
+  if (!stored || !stored.startsWith(PENDING_PASSWORD_PREFIX)) return null;
+  const sealed = stored.slice(PENDING_PASSWORD_PREFIX.length);
+  return sealed.length > 0 ? sealed : null;
+}
+
 export type CredentialOutcome =
   /** Written where the environment held none. */
   | { repo: string; secret: string; state: "distributed" }

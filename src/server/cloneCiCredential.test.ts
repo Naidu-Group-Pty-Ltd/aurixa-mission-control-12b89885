@@ -3,12 +3,15 @@ import {
   CI_DB_URL_SECRET,
   CI_ENVIRONMENT,
   CI_SERVICE_ROLE_SECRET,
+  PENDING_PASSWORD_PREFIX,
   SESSION_POOLER_PORT,
+  claimedSealedPassword,
   composeSessionPoolerUrl,
   decidePasswordSet,
   describeCredentialSweep,
   emptyCredentialSweep,
   judgeServiceRoleKey,
+  pendingPassword,
   recordOutcome,
   sweepIsNoteworthy,
 } from "./cloneCiCredential.pure";
@@ -197,6 +200,21 @@ describe("giving a clone's database a password", () => {
     expect(d.set).toBe(false);
     if (d.set) return;
     expect(d.reason).toContain("could not be read");
+  });
+});
+
+describe("a password claim", () => {
+  it("is stored marked, and the mark is what tells it from a credential", () => {
+    const claim = pendingPassword("enc:v1:abc");
+    expect(claim.startsWith(PENDING_PASSWORD_PREFIX)).toBe(true);
+    expect(claimedSealedPassword(claim)).toBe("enc:v1:abc");
+  });
+
+  it("does not read a confirmed password, or nothing, as a claim", () => {
+    expect(claimedSealedPassword("enc:v1:abc")).toBeNull();
+    expect(claimedSealedPassword(null)).toBeNull();
+    expect(claimedSealedPassword(undefined)).toBeNull();
+    expect(claimedSealedPassword(PENDING_PASSWORD_PREFIX)).toBeNull();
   });
 });
 

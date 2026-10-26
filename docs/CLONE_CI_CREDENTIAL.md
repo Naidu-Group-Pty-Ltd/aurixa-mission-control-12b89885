@@ -122,11 +122,15 @@ and no password, and the final update stores none.
   listing that failed is not an absent token, so it sets nothing.
   The ref comes from `resolveCloneSecretTarget`, which refuses the prime and
   Mission Control's own project. The row is claimed first — the new password
-  written only while the row holds none and names that project — and only the
-  pass that wins the claim resets the database, so two overlapping passes
-  cannot leave a stored password the database no longer takes. A reset
-  Supabase refuses releases the claim. Each set files `clone_db_password_set`,
-  which never carries the password.
+  written, marked `pending:`, only while the row holds nothing and names that
+  project — and only the pass that wins the claim goes on, so two overlapping
+  passes cannot both reset the database. A claim is never handed out as a
+  credential, and a pass that finds one standing finishes it: it sends the
+  same password again (setting one the database already holds changes
+  nothing) and then stores it plain. So a pass stopped anywhere — before the
+  reset, after it, or before the confirmation — leaves a state the next pass
+  completes rather than a stored password the database does not take. Each
+  set files `clone_db_password_set`, which never carries the password.
 
 Resetting it was safe for the four clones it found on 26 Oct 2026: nothing
 held the lost password, no edge function connects with `SUPABASE_DB_URL`, and
