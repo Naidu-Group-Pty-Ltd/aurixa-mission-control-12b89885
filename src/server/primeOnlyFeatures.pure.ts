@@ -137,6 +137,24 @@ export const PRIME_ONLY_FEATURES: readonly PrimeOnlyFeature[] = [
     cronJobs: ["migration-dispatcher*"],
     buckets: ["ghl-marketing-dump"],
   },
+  {
+    // The prime builds the compressed bundle of a function too large for the
+    // raw-source deploy, and this deployment dispatches it there and nowhere
+    // else (`compressedEdgeBundle.pure.ts`). A clone would only run the
+    // workflow's pull request proof on the cascade that carried it, against
+    // a tree that may not hold the two functions it bundles.
+    key: "edge-function-bundles",
+    title: "Edge function bundles",
+    reason: "Prime-only: Mission Control asks the prime alone to build compressed bundles.",
+    files: [
+      ".github/workflows/edge-function-bundles.yml",
+      "scripts/deploy/edge-bundle-capture.mjs",
+      "src/lib/deploy/__tests__/edgeFunctionBundles.spec.ts",
+    ],
+    functions: [],
+    cronJobs: [],
+    buckets: [],
+  },
 ];
 
 const FUNCTIONS_PREFIX = "supabase/functions/";

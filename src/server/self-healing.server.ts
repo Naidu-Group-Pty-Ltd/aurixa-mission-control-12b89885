@@ -32,6 +32,7 @@
 //                          flow the normal scan → remediation pipeline.
 
 import type {
+  CompressedRoute,
   EdgeFunctionBundle,
   EdgeFunctionDeployResult,
 } from "@/server/backend-provisioning.server";
@@ -1561,6 +1562,7 @@ async function deployWithinBudget(
   projectRef: string,
   batch: readonly EdgeFunctionBundle[],
   deadlineAt: number,
+  compressed: CompressedRoute,
 ): Promise<{ results: TimedDeployResult[]; stoppedEarly: boolean }> {
   const { deployEdgeFunctions } = await import("@/server/backend-provisioning.server");
   let done = 0;
@@ -1568,7 +1570,8 @@ async function deployWithinBudget(
     items: batch,
     runOne: async (fn) => {
       const startedMs = Date.now();
-      const out = (await deployEdgeFunctions(projectRef, [fn])) ?? [];
+      const out =
+        (await deployEdgeFunctions(projectRef, [fn], undefined, undefined, { compressed })) ?? [];
       const endedMs = Date.now();
       done += 1;
       // Alive, and this far through the batch — see `touchRun`.
@@ -1820,7 +1823,9 @@ async function executeEdgeFunctionDeploy(
   }
 
   const { results, stoppedEarly } = await timed("deploy", () =>
-    deployWithinBudget(run, projectRef, batch, deadlineAt),
+    // Every bundle here is the prime's, so one too large for the raw route
+    // can take the prime's compressed bundle of the same source.
+    deployWithinBudget(run, projectRef, batch, deadlineAt, { prime: source }),
   );
   const failures = (results ?? []).filter((r) => r.error);
   if (failures.length === (results ?? []).length && failures.length > 0) {
