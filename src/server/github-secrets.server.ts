@@ -144,6 +144,75 @@ export async function putRepoSecret(input: PutRepoSecretInput): Promise<void> {
 }
 
 /**
+ * Encrypt + upsert an Actions secret held by one deployment ENVIRONMENT of a
+ * repository, rather than by the repository. Idempotent.
+ *
+ * The difference is who can read it. A repository secret reaches every job of
+ * every workflow on every branch; an environment secret reaches only a job that
+ * names the environment. The prime keeps its production credentials in
+ * `supabase-production` for that reason (`docs/operations/DEPLOYMENT_PROTECTION.md`),
+ * and every workflow that reads one names it, so a clone's copy belongs there
+ * too.
+ *
+ * An environment that does not exist yet is created, with no rules: exactly
+ * what GitHub does itself the first time a job names one. Its protection
+ * (a branch policy, reviewers) is the repository owner's, so this never
+ * changes an environment that exists.
+ *
+ * Says whether the secret was NEW, read from the secret's metadata before the
+ * write. GitHub never returns a value, so a re-write cannot be compared with
+ * what it replaces; "it was already there" is what lets a sweep that
+ * re-asserts every pass stay quiet once it has settled.
+ *
+ * Required GitHub App permissions: `Environments: Read & write` (creating
+ * one) and `Secrets: Read & write`.
+ */
+export async function putEnvironmentSecret(
+  input: PutRepoSecretInput & { environment: string },
+): Promise<{ created: boolean }> {
+  const nameProblem = validateSecretName(input.name);
+  if (nameProblem) {
+    throw new Error(`Invalid secret name "${input.name}": ${nameProblem}`);
+  }
+
+  const octokit = getAppOctokit(input.installationId ?? undefined);
+  const where = { owner: input.owner, repo: input.repo, environment_name: input.environment };
+
+  const readKey = () =>
+    octokit.request(
+      "GET /repos/{owner}/{repo}/environments/{environment_name}/secrets/public-key",
+      where,
+    );
+  let pk: { key: string; key_id: string };
+  try {
+    pk = (await readKey()).data;
+  } catch (e) {
+    if ((e as { status?: number }).status !== 404) throw e;
+    await octokit.request("PUT /repos/{owner}/{repo}/environments/{environment_name}", where);
+    pk = (await readKey()).data;
+  }
+
+  let created = false;
+  try {
+    await octokit.request(
+      "GET /repos/{owner}/{repo}/environments/{environment_name}/secrets/{secret_name}",
+      { ...where, secret_name: input.name },
+    );
+  } catch (e) {
+    if ((e as { status?: number }).status !== 404) throw e;
+    created = true;
+  }
+
+  const encrypted_value = sealedBoxBase64(pk.key, input.value);
+
+  await octokit.request(
+    "PUT /repos/{owner}/{repo}/environments/{environment_name}/secrets/{secret_name}",
+    { ...where, secret_name: input.name, encrypted_value, key_id: pk.key_id },
+  );
+  return { created };
+}
+
+/**
  * The NAMES of a repository's Actions secrets. GitHub never returns a value,
  * which is exactly what makes this safe to call for a status card.
  *

@@ -164,7 +164,7 @@ describe("the pipeline is budgeted and resumable", () => {
     const created = src.indexOf("projectRef = project.id;");
     expect(created).toBeGreaterThan(-1);
     const after = src.slice(created, created + 600);
-    expect(after).toContain("input.onProjectRef?.(projectRef)");
+    expect(after).toContain("input.onProjectRef?.(projectRef, dbPass)");
   });
 
   /**
@@ -189,6 +189,18 @@ describe("the pipeline is budgeted and resumable", () => {
 
   it("the runner wires onProjectRef to a clone_backends write", () => {
     expect(updateCallIn(code(runner()), "onProjectRef")).toContain("supabase_project_ref: ref");
+  });
+
+  /**
+   * The password is known only to the invocation that created the project,
+   * and that invocation almost never reaches the final update: the wait for
+   * the project to come up pauses it. Every clone provisioned before this was
+   * written lost its password that way (26 Oct 2026).
+   */
+  it("keeps the database password in the write that records the ref", () => {
+    expect(updateCallIn(code(runner()), "onProjectRef")).toContain(
+      "db_pass: encryptSecret(dbPass)",
+    );
   });
 
   /**

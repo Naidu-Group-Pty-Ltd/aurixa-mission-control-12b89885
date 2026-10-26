@@ -52,10 +52,54 @@
  * transaction: no prepared statements, no session state, and a `psql -f` of a
  * migration behaves in ways that are hard to predict and worse to debug. 5432
  * is the session port and is IPv4 on every tier, which GitHub's runners need.
+ *
+ * ## And the service-role key beside it (26 Oct 2026)
+ *
+ * The prime's sanctions, PEP and RBA refreshes write with the project's
+ * service-role key, and every clone receives those workflows. No clone
+ * received the key. Measured 26 Oct 2026: on all four clones every scheduled
+ * run of all three had failed at its credential check, every day, so each
+ * clone's sanctions register and office-holder index stood where the one-off
+ * reference copy left them in September and no clone held a single RBA
+ * observation. The key is the clone's OWN — read from `clone_backends`, where
+ * provisioning stored it — and it reaches the one project the database URL
+ * already reaches, so it travels under the same rule: a clone is only ever
+ * handed its own. `judgeServiceRoleKey` holds it to that.
+ *
+ * ## Both live in the production environment, never the repository
+ *
+ * A repository secret is readable by every job on every branch. Every
+ * workflow that reads either credential names `supabase-production`, which is
+ * where the prime keeps its own (`docs/operations/DEPLOYMENT_PROTECTION.md`),
+ * so that is where a clone's are written.
+ *
+ * ## A password nobody kept
+ *
+ * Measured the same day: no clone had a stored password, so this sweep had
+ * reported "cannot" for all four every half hour since it was written.
+ * Provisioning generated one, gave it to Supabase, and persisted only the
+ * project ref at creation; the run then paused while the project came up, and
+ * the resumed run knew no password to store. Creation now persists it with
+ * the ref. A clone already without one is given a fresh one, by Supabase's
+ * own endpoint, but only where its repository declares Mission Control as its
+ * backend deployer: elsewhere the database, and its password, are the
+ * owner's (`decidePasswordSet`).
  */
 
-/** The Actions secret a clone's `apply-migration.yml` reads. */
+/** The Actions secret a clone's `apply-migration.yml` and `migration-drift.yml` read. */
 export const CI_DB_URL_SECRET = "SUPABASE_DB_URL";
+
+/** The Actions secret a clone's sanctions, PEP and RBA refreshes read. */
+export const CI_SERVICE_ROLE_SECRET = "SUPABASE_SERVICE_ROLE_KEY";
+
+/** The environment every job that reads either credential names. */
+export const CI_ENVIRONMENT = "supabase-production";
+
+/** Not a credential: which project the repository belongs to, readable by anyone who can read it. */
+export const CI_PROJECT_REF_VARIABLE = "SUPABASE_PROJECT_REF";
+
+/** What `BACKEND_DEPLOYED_BY` says when Mission Control operates the clone's backend. */
+const MISSION_CONTROL_DEPLOYS = "mission-control";
 
 /** Supavisor's session-mode port. Transaction mode (6543) is never used here. */
 export const SESSION_POOLER_PORT = 5432;
@@ -119,45 +163,155 @@ export function composeSessionPoolerUrl(input: {
   return { ok: true, url, host, user };
 }
 
+/**
+ * Is this stored key the clone's own service-role key, in the form its
+ * workflows can use?
+ *
+ * Only a JWT passes. `rba-tables-ingest` sits behind the gateway's JWT check
+ * (`verify_jwt = true`), which does not admit an `sb_secret_` key, and a JWT
+ * is the one form that says which project it belongs to. Its `ref` must be
+ * this clone's: a key for any other project — the prime's above all — in a
+ * tenant's repository is the worst outcome this module could produce, so it
+ * is refused rather than written.
+ */
+export function judgeServiceRoleKey(input: {
+  projectRef: string;
+  key: string | null;
+}): { ok: true; key: string } | { ok: false; reason: string } {
+  const key = (input.key ?? "").trim();
+  if (!key) return { ok: false, reason: "no service-role key is stored for this clone" };
+  const parts = key.split(".");
+  if (parts.length !== 3) {
+    return {
+      ok: false,
+      reason:
+        "the stored service-role key is not a JWT, and the gateway in front of " +
+        "rba-tables-ingest admits only a JWT",
+    };
+  }
+  let claims: { ref?: unknown; role?: unknown };
+  try {
+    const b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    claims = JSON.parse(atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4))) as typeof claims;
+  } catch {
+    return { ok: false, reason: "the stored service-role key's claims could not be read" };
+  }
+  if (claims.role !== "service_role") {
+    return {
+      ok: false,
+      reason: `the stored key's role is "${String(claims.role)}", not service_role`,
+    };
+  }
+  if (claims.ref !== input.projectRef) {
+    return {
+      ok: false,
+      reason:
+        `the stored key belongs to project ${String(claims.ref)}, not this clone's ` +
+        `(${input.projectRef}) — refusing to hand a clone another project's key`,
+    };
+  }
+  return { ok: true, key };
+}
+
+/**
+ * May Mission Control give this clone's database a password?
+ *
+ * Only where none is stored, and only where the repository says Mission
+ * Control operates the backend. A tenant whose own CI deploys holds its own
+ * credentials, may have set its own password, and would lose every connection
+ * made with it. A variable listing that failed is not a declaration either way,
+ * so it leaves the password alone too.
+ */
+export function decidePasswordSet(input: {
+  passwordStored: boolean;
+  /** The repository's variables, or null when GitHub could not be asked. */
+  variables: Readonly<Record<string, string>> | null;
+}): { set: true } | { set: false; reason: string | null } {
+  if (input.passwordStored) return { set: false, reason: null };
+  if (input.variables === null) {
+    return {
+      set: false,
+      reason:
+        "no database password is stored for this clone, and whether Mission Control operates " +
+        "its backend could not be read, so none is set",
+    };
+  }
+  if (input.variables.BACKEND_DEPLOYED_BY !== MISSION_CONTROL_DEPLOYS) {
+    return {
+      set: false,
+      reason:
+        "no database password is stored for this clone, and its repository does not declare " +
+        "Mission Control as its backend deployer (BACKEND_DEPLOYED_BY), so the password is the " +
+        "owner's and none is set",
+    };
+  }
+  return { set: true };
+}
+
 export type CredentialOutcome =
-  /** Written, or already present and identical. */
-  | { repo: string; state: "distributed" }
+  /** Written where the environment held none. */
+  | { repo: string; secret: string; state: "distributed" }
+  /** Written again over one already there. GitHub cannot say whether it changed. */
+  | { repo: string; secret: string; state: "kept" }
   /** The clone has no provisioned backend yet; nothing to distribute. */
   | { repo: string; state: "no_backend" }
   /** Composed nothing, and said why. */
-  | { repo: string; state: "cannot"; reason: string }
+  | { repo: string; secret: string; state: "cannot"; reason: string }
   /** GitHub or Supabase refused. */
-  | { repo: string; state: "failed"; reason: string };
+  | { repo: string; secret: string; state: "failed"; reason: string };
 
 export type CredentialSweep = {
+  /** Repositories looked at. */
   considered: number;
+  /** `owner/repo NAME`, written where none was. */
   distributed: string[];
+  /** `owner/repo NAME`, re-asserted. Quiet: a settled fleet is all of these. */
+  kept: string[];
   noBackend: string[];
-  cannot: Array<{ repo: string; reason: string }>;
-  failed: Array<{ repo: string; reason: string }>;
+  /** Repositories whose database Mission Control gave a password this pass. */
+  passwordsSet: string[];
+  cannot: Array<{ repo: string; secret: string; reason: string }>;
+  failed: Array<{ repo: string; secret: string; reason: string }>;
 };
 
 export function emptyCredentialSweep(): CredentialSweep {
-  return { considered: 0, distributed: [], noBackend: [], cannot: [], failed: [] };
+  return {
+    considered: 0,
+    distributed: [],
+    kept: [],
+    noBackend: [],
+    passwordsSet: [],
+    cannot: [],
+    failed: [],
+  };
 }
 
 export function recordOutcome(sweep: CredentialSweep, outcome: CredentialOutcome): CredentialSweep {
-  sweep.considered += 1;
-  if (outcome.state === "distributed") sweep.distributed.push(outcome.repo);
-  else if (outcome.state === "no_backend") sweep.noBackend.push(outcome.repo);
-  else if (outcome.state === "cannot") sweep.cannot.push({ repo: outcome.repo, reason: outcome.reason });
-  else sweep.failed.push({ repo: outcome.repo, reason: outcome.reason });
+  if (outcome.state === "no_backend") sweep.noBackend.push(outcome.repo);
+  else if (outcome.state === "distributed")
+    sweep.distributed.push(`${outcome.repo} ${outcome.secret}`);
+  else if (outcome.state === "kept") sweep.kept.push(`${outcome.repo} ${outcome.secret}`);
+  else if (outcome.state === "cannot") {
+    sweep.cannot.push({ repo: outcome.repo, secret: outcome.secret, reason: outcome.reason });
+  } else sweep.failed.push({ repo: outcome.repo, secret: outcome.secret, reason: outcome.reason });
   return sweep;
 }
 
 /**
  * Is this pass worth an audit row?
  *
- * A settled fleet writes the same secret to the same repositories every half
- * hour. Filing that is how an audit log becomes something nobody reads.
+ * A settled fleet re-asserts the same secrets in the same repositories every
+ * half hour. Filing that is how an audit log becomes something nobody reads,
+ * so a re-assertion (`kept`) is quiet and only a first write, a password set,
+ * a refusal or a failure is filed.
  */
 export function sweepIsNoteworthy(sweep: CredentialSweep): boolean {
-  return sweep.distributed.length > 0 || sweep.cannot.length > 0 || sweep.failed.length > 0;
+  return (
+    sweep.distributed.length > 0 ||
+    sweep.passwordsSet.length > 0 ||
+    sweep.cannot.length > 0 ||
+    sweep.failed.length > 0
+  );
 }
 
 /**
@@ -168,6 +322,8 @@ export function describeCredentialSweep(sweep: CredentialSweep): string {
   if (sweep.considered === 0) return "No clone repositories to consider.";
   const parts = [`${sweep.considered} considered`];
   if (sweep.distributed.length) parts.push(`${sweep.distributed.length} distributed`);
+  if (sweep.kept.length) parts.push(`${sweep.kept.length} kept`);
+  if (sweep.passwordsSet.length) parts.push(`${sweep.passwordsSet.length} given a password`);
   if (sweep.noBackend.length) parts.push(`${sweep.noBackend.length} without a backend`);
   if (sweep.cannot.length) parts.push(`${sweep.cannot.length} could not be composed`);
   if (sweep.failed.length) parts.push(`${sweep.failed.length} failed`);

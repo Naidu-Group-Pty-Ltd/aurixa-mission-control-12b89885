@@ -6,6 +6,7 @@ import {
   buildCodexRepoSecrets,
   describeSecretError,
   previewCodexRepoSecrets,
+  putEnvironmentSecret,
   syncRepoSecrets,
   validateSecretName,
 } from "@/server/github-secrets.server";
@@ -298,5 +299,84 @@ describe("previewCodexRepoSecrets", () => {
     process.env.OPENAI_API_KEY = "sk-super-secret";
     const preview = await previewCodexRepoSecrets();
     expect(JSON.stringify(preview)).not.toContain("sk-super-secret");
+  });
+});
+
+describe("putEnvironmentSecret", () => {
+  // 32 zero bytes is a structurally valid X25519 public key for sealing.
+  const publicKey = btoa(String.fromCharCode(...new Uint8Array(32)));
+  const notFound = () => Promise.reject(Object.assign(new Error("Not Found"), { status: 404 }));
+  const input = {
+    owner: "acme",
+    repo: "widgets",
+    environment: "supabase-production",
+    name: "SUPABASE_SERVICE_ROLE_KEY",
+    value: "the-value",
+  };
+
+  it("writes into the environment, never the repository", async () => {
+    request.mockImplementation((route: string) => {
+      if (route.endsWith("/secrets/public-key")) return { data: { key: publicKey, key_id: "kid" } };
+      if (route.startsWith("GET")) return notFound();
+      return { data: {} };
+    });
+
+    const r = await putEnvironmentSecret(input);
+
+    expect(r.created).toBe(true);
+    const routes = request.mock.calls.map(([route]) => String(route));
+    expect(routes.every((route) => route.includes("/environments/{environment_name}"))).toBe(true);
+    expect(routes.some((route) => route.includes("/actions/secrets"))).toBe(false);
+    const put = request.mock.calls.find(([route]) =>
+      String(route).startsWith(
+        "PUT /repos/{owner}/{repo}/environments/{environment_name}/secrets/",
+      ),
+    )?.[1] as { environment_name: string; encrypted_value: string; key_id: string };
+    expect(put.environment_name).toBe("supabase-production");
+    expect(put.key_id).toBe("kid");
+    expect(put.encrypted_value).not.toContain("the-value");
+  });
+
+  it("says a secret that was already there was kept, not created", async () => {
+    request.mockImplementation((route: string) =>
+      route.startsWith("GET") ? { data: { key: publicKey, key_id: "kid" } } : { data: {} },
+    );
+    expect((await putEnvironmentSecret(input)).created).toBe(false);
+  });
+
+  it("creates an environment that does not exist yet, with no rules, and writes into it", async () => {
+    let created = false;
+    request.mockImplementation((route: string, params: Record<string, unknown>) => {
+      if (route === "PUT /repos/{owner}/{repo}/environments/{environment_name}") {
+        // Created bare, exactly as GitHub creates one on first use: no
+        // branch policy, no reviewers, nothing of the owner's decided here.
+        expect(Object.keys(params).sort()).toEqual(["environment_name", "owner", "repo"]);
+        created = true;
+        return { data: {} };
+      }
+      if (route.endsWith("/secrets/public-key")) {
+        return created ? { data: { key: publicKey, key_id: "kid" } } : notFound();
+      }
+      if (route.startsWith("GET")) return notFound();
+      return { data: {} };
+    });
+
+    expect((await putEnvironmentSecret(input)).created).toBe(true);
+    expect(created).toBe(true);
+  });
+
+  it("never changes an environment that exists", async () => {
+    request.mockImplementation((route: string) =>
+      route.startsWith("GET") ? { data: { key: publicKey, key_id: "kid" } } : { data: {} },
+    );
+    await putEnvironmentSecret(input);
+    const routes = request.mock.calls.map(([route]) => String(route));
+    expect(routes).not.toContain("PUT /repos/{owner}/{repo}/environments/{environment_name}");
+  });
+
+  it("carries a refusal that is not a missing environment", async () => {
+    request.mockRejectedValue(Object.assign(new Error("Forbidden"), { status: 403 }));
+    await expect(putEnvironmentSecret(input)).rejects.toMatchObject({ status: 403 });
+    expect(request).toHaveBeenCalledTimes(1);
   });
 });
