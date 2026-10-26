@@ -199,6 +199,21 @@ describe("a bundle too large for the raw route", () => {
     ]);
   });
 
+  it("fails saying no bundle can stand in, where none may", async () => {
+    lookup.compressedBundleFor.mockResolvedValue({
+      state: "refused",
+      why: "imports did not close",
+    });
+    await expect(
+      deployEdgeFunction(REF, bundleOf(RAW_DEPLOY_CEILING_BYTES + 1), {
+        compressed: { prime: PRIME },
+      }),
+    ).rejects.toThrow(
+      "Deploy failed for big-fn: too large to deploy as source (4000001 bytes of source), and no compressed bundle can stand in for it: imports did not close",
+    );
+    expect(calls).toEqual([]);
+  });
+
   it("says which bundle the API refused", async () => {
     answers = [{ status: 400, body: "invalid eszip" }];
     lookup.compressedBundleFor.mockResolvedValue(ready);

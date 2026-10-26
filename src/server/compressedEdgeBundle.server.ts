@@ -23,6 +23,7 @@ import {
   BUNDLE_ARTIFACT_NAME,
   BUNDLE_WORKFLOW_FILE,
   judgeBundle,
+  OPEN_IMPORTS,
   parseBundleManifest,
   planBuildRequest,
   type BundleManifest,
@@ -46,6 +47,8 @@ export type CompressedBundle = {
 
 export type CompressedBundleLookup =
   | ({ state: "ready" } & CompressedBundle)
+  /** No bundle may stand in for this deploy at all; nothing was asked of GitHub. */
+  | { state: "refused"; why: string }
   /** No bundle this deploy may send; `why` says what was found and what was asked for. */
   | { state: "awaiting"; why: string };
 
@@ -219,6 +222,9 @@ export async function compressedBundleFor(input: {
 }): Promise<CompressedBundleLookup> {
   const { prime, fn } = input;
   const nowMs = input.nowMs ?? Date.now();
+  // Asked first, and of nobody: a deploy whose own imports did not close can
+  // be matched by no bundle, so there is nothing worth a call or a build.
+  if (fn.importsClosed !== true) return { state: "refused", why: OPEN_IMPORTS };
   // Every lane that deploys a function can reach this, provisioning included,
   // so the spend asks the installation's window first, as an actor: a few
   // calls that land finished work. Refused, the deploy waits for a pass with

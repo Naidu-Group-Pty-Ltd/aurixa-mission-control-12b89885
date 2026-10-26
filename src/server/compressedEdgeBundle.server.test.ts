@@ -10,7 +10,12 @@ import {
   forgetBundleReads,
   type BundleOctokit,
 } from "./compressedEdgeBundle.server";
-import { gitBlobId, sha256Hex, type DeployableFunction } from "./compressedEdgeBundle.pure";
+import {
+  gitBlobId,
+  OPEN_IMPORTS,
+  sha256Hex,
+  type DeployableFunction,
+} from "./compressedEdgeBundle.pure";
 
 const PRIME = { owner: "naidu", repo: "prime", branch: "main" };
 const NOW = Date.parse("2026-10-26T10:00:00Z");
@@ -27,6 +32,7 @@ const fn = (sources = SOURCES): DeployableFunction => ({
     path,
     contentBase64: Buffer.from(t).toString("base64"),
   })),
+  importsClosed: true,
 });
 
 async function artifactOf(sources: Record<string, string>, body = "bundle", slug = "big-fn") {
@@ -130,6 +136,7 @@ const ago = (minutes: number) => new Date(NOW - minutes * 60_000).toISOString();
 const originalFetch = globalThis.fetch;
 beforeEach(() => {
   forgetBundleReads();
+  allowance.readGitHubRemaining.mockReset();
   allowance.readGitHubRemaining.mockResolvedValue(null);
 });
 afterEach(() => {
@@ -377,6 +384,19 @@ describe("compressedBundleFor", () => {
       /^GitHub was not asked: 10 call\(s\) left in the installation's window/,
     );
     expect(gh.calls).toEqual([]);
+  });
+
+  it("asks GitHub nothing, and builds nothing, for a deploy whose imports did not close", async () => {
+    const gh = github([]);
+    const r = await compressedBundleFor({
+      octokit: gh.octokit,
+      prime: PRIME,
+      fn: { ...fn(), importsClosed: false },
+      nowMs: NOW,
+    });
+    expect(r).toEqual({ state: "refused", why: OPEN_IMPORTS });
+    expect(gh.calls).toEqual([]);
+    expect(allowance.readGitHubRemaining).not.toHaveBeenCalled();
   });
 
   it("never reads a failed GitHub call as no bundle", async () => {

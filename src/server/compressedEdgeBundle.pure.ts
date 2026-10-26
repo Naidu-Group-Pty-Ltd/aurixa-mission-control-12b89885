@@ -33,14 +33,23 @@
  * file it names that this deploy carries has the same blob id here, and the
  * entry point is one of them.
  *
- * That is enough, by induction from the entry point: the entry point is the
- * same file, so it imports the same modules; each of those is in what this
- * deploy carries (`pruneBundleToReachable` also over-approximates the graph),
- * so it was compared, and is the same file too; and so on. The graph the
- * bundle was built from is the graph this deploy would have sent. A file the
- * manifest names that this deploy does not carry is one nothing loads, and is
- * not compared. Configuration the CLI reads beside a function (a `deno.json`,
- * an import map) is not imported, so it must be carried and equal.
+ * That is enough, by induction from the entry point, PROVIDED this deploy's
+ * own import walk closed: the entry point is the same file, so it imports the
+ * same modules; each of those is in what this deploy carries
+ * (`pruneBundleToReachable` over-approximates the graph, and found every file
+ * it walked to), so it was compared, and is the same file too; and so on. The
+ * graph the bundle was built from is the graph this deploy would have sent. A
+ * file the manifest names that this deploy does not carry is one nothing
+ * loads, and is not compared. Configuration the CLI reads beside a function
+ * (a `deno.json`, an import map) is not imported, so it must be carried and
+ * equal.
+ *
+ * Where the walk did not close, the induction has nothing to stand on. An
+ * import of a module the tree no longer holds falls back to carrying every
+ * file that exists, the deleted one is simply absent, and an older bundle
+ * that still contains it would pass every comparison. Codex found exactly
+ * that on #360. So a bundle stands in only for a deploy whose imports closed
+ * (`importsClosed`), and for any other the raw route is all there is.
  *
  * So a bundle built at one commit is good for a later one that changed nothing
  * the function loads, and never for one that did. Which run built it, and
@@ -113,6 +122,8 @@ export type DeployableFunction = {
   entrypointPath: string;
   importMapPath: string | null;
   files: ReadonlyArray<{ path: string; contentBase64: string }>;
+  /** Whether the walk from the entry point found every file it imports. See the header. */
+  importsClosed?: boolean;
 };
 
 /** The bytes a bundle would send, read from its base64 without decoding it. */
@@ -191,6 +202,11 @@ export function parseBundleManifest(
   };
 }
 
+/** Why no bundle may stand in for a deploy whose own imports did not close. */
+export const OPEN_IMPORTS =
+  "this deploy's source does not close over its imports (one names a file the tree does not hold, " +
+  "or one is computed), so no bundle can be shown to be built from it";
+
 export type BundleJudgement =
   | { ok: true }
   /** `stale`: a real bundle, built from source this deploy no longer sends. */
@@ -207,6 +223,7 @@ export function judgeBundle(input: {
 }): BundleJudgement {
   const { manifest, ezbr, fn } = input;
   const refuse = (reason: string) => ({ ok: false as const, stale: false, reason });
+  if (fn.importsClosed !== true) return refuse(OPEN_IMPORTS);
   if (manifest.slug !== fn.slug) return refuse(`the bundle is ${manifest.slug}'s`);
 
   const magic = new TextDecoder("latin1").decode(ezbr.subarray(0, COMPRESSED_ESZIP_MAGIC.length));

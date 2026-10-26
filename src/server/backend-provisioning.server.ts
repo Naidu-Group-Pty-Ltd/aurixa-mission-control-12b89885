@@ -4464,6 +4464,7 @@ export async function deployEdgeFunction(
     importMapPath: string | null;
     verifyJwt: boolean;
     files: Array<{ path: string; contentBase64: string }>;
+    importsClosed?: boolean;
   },
   opts?: { compressed?: CompressedRoute },
 ): Promise<{
@@ -4500,8 +4501,12 @@ export async function deployEdgeFunction(
   const found = await compressedBundleFor({ prime: route.prime, fn });
   if (found.state !== "ready") {
     const size = rawRefusal ?? `${rawBundleBytes(fn.files)} bytes of source`;
+    const instead =
+      found.state === "refused"
+        ? "and no compressed bundle can stand in for it"
+        : "and awaiting its compressed bundle";
     throw new Error(
-      `Deploy failed for ${fn.slug}: too large to deploy as source (${size}), and awaiting its compressed bundle: ${found.why}`,
+      `Deploy failed for ${fn.slug}: too large to deploy as source (${size}), ${instead}: ${found.why}`,
     );
   }
   const deployed = await deployCompressedBundle(projectRef, fn.slug, effectiveVerifyJwt, found);

@@ -15,7 +15,9 @@ import {
   type BundleManifest,
   type BundleRun,
   type DeployableFunction,
+  OPEN_IMPORTS,
 } from "./compressedEdgeBundle.pure";
+import { pruneBundleToReachable } from "./functionBundlePrune.pure";
 
 const b64 = (text: string) => Buffer.from(text).toString("base64");
 const blob = (text: string) => gitBlobId(Buffer.from(text));
@@ -38,6 +40,15 @@ function fnWith(overrides: Partial<Record<string, string>> = {}): DeployableFunc
     files: Object.entries(files)
       .filter((e): e is [string, string] => e[1] !== undefined)
       .map(([path, text]) => ({ path, contentBase64: b64(text) })),
+    // What `pruneBundleToReachable` says of this tree, never assumed.
+    importsClosed: pruneBundleToReachable({
+      entrypointPath: "big-fn/index.ts",
+      files: Object.keys(files)
+        .filter((p) => files[p] !== undefined)
+        .map((path) => ({ path })),
+      importMapPath: null,
+      textOf: (path) => files[path] ?? null,
+    }).pruned,
   };
 }
 
@@ -121,7 +132,30 @@ describe("parseBundleManifest", () => {
 describe("judgeBundle: a bundle is sent only where it was built from these bytes", () => {
   const ezbr = ezbrOf("bundle");
 
+  it("refuses where this deploy imports a module the tree no longer holds", () => {
+    // Codex on #360: `_shared/b.ts` deleted while `a.ts` still imports it. The
+    // pruner cannot close the walk and carries every file that exists, so the
+    // deleted one is simply absent, and the old bundle that still holds it
+    // would otherwise pass every comparison.
+    const deleted = fnWith({ "_shared/b.ts": undefined });
+    expect(deleted.importsClosed).toBe(false);
+    expect(judgeBundle({ manifest: manifestFor(ezbr), ezbr, fn: deleted })).toEqual({
+      ok: false,
+      stale: false,
+      reason: OPEN_IMPORTS,
+    });
+  });
+
+  it("refuses where nothing says whether the deploy's imports closed", () => {
+    const unknown = { ...fnWith(), importsClosed: undefined };
+    expect(judgeBundle({ manifest: manifestFor(ezbr), ezbr, fn: unknown })).toMatchObject({
+      ok: false,
+      stale: false,
+    });
+  });
+
   it("accepts a bundle built from exactly what this deploy carries", () => {
+    expect(fnWith().importsClosed).toBe(true);
     expect(judgeBundle({ manifest: manifestFor(ezbr), ezbr, fn: fnWith() })).toEqual({ ok: true });
   });
 
