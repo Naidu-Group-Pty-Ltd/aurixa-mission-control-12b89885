@@ -12,11 +12,11 @@ The obvious repair — give each clone a Supabase access token — does not exis
 
 ## Why a token cannot be minted at scale
 
-| Mechanism | Created how | Reaches |
-| --- | --- | --- |
-| Classic personal access token | By hand, in the dashboard | The whole account: every organization and project, **including ones created after it was issued** |
-| Scoped personal access token (`sbp_fc…`, public alpha) | By hand, in the dashboard | Only the organizations, projects and permissions chosen at creation |
-| OAuth app access + refresh token | Programmatically, after a user consents | The organizations that user granted |
+| Mechanism                                              | Created how                             | Reaches                                                                                           |
+| ------------------------------------------------------ | --------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Classic personal access token                          | By hand, in the dashboard               | The whole account: every organization and project, **including ones created after it was issued** |
+| Scoped personal access token (`sbp_fc…`, public alpha) | By hand, in the dashboard               | Only the organizations, projects and permissions chosen at creation                               |
+| OAuth app access + refresh token                       | Programmatically, after a user consents | The organizations that user granted                                                               |
 
 There is **no Management API endpoint that creates a personal access token**.
 Every one is a signed-in human in a browser, so "one per clone" is one manual
@@ -24,7 +24,7 @@ step per clone for ever — and the classic token Mission Control holds creates
 and deletes projects, which makes it the last thing that should sit in a
 tenant's repository.
 
-The OAuth flow *is* programmatic, and it is for a different problem: it
+The OAuth flow _is_ programmatic, and it is for a different problem: it
 authorizes an integration against somebody else's organizations. Every clone
 here lives in the one organization Mission Control already administers, so it
 would add a consent dance and a refresh-token store while granting exactly the
@@ -47,7 +47,7 @@ rather than 55 chunked Management API calls.
 **A clone is only ever handed its own database.** The pooler user is
 `postgres.<ref>`, so the composed URL is checked against the ref the caller
 asked for and a mismatch refuses. This fleet has already made the mirror-image
-of that mistake once: a workflow whose target *defaulted* to the prime.
+of that mistake once: a workflow whose target _defaulted_ to the prime.
 
 **Session mode, never transaction mode.** Supavisor's 6543 port pools per
 transaction — no prepared statements, no session state — and a `psql -f` of a
@@ -159,3 +159,53 @@ pass, because this installation's hourly GitHub allowance has run out before. A
 write over a secret that was already there is recorded as `kept` and files
 nothing; a first write, a password set, a refusal or a failure files one audit
 row.
+
+## And then it reads back what the CI did (26 Oct 2026)
+
+Distributing a credential is configuration. A refresh that runs on it is the
+effect, and until this section Mission Control never looked. Measured on 26 Oct
+2026, on all four clones: `aml-sanctions-refresh.yml` had failed 18 to 21
+scheduled runs in a row, `rba-refresh.yml` 28 to 30, `migration-drift.yml` 19
+to 21 (on the CRM line, every one of its 35 runs since it was created), and
+`aml-pep-officeholders-refresh.yml` every weekly run in the window. Each was a
+clone serving a stale sanctions list, a stale cash rate or an unverified
+schema, and nothing said so.
+
+So the same hook ends with a third pass, `sweepCloneCi`
+(`src/server/cloneCiWatch.server.ts`, judged in `cloneCiWatch.pure.ts`). Per
+clone it reads the scheduled runs, the runs dispatched on the default branch,
+the workflow list, and — where the clone protects any path — its
+`.github/workflows`, against the prime's read once for the pass. It finds three
+things:
+
+| finding   | when                                                                                                                                                                                                                                                             |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `failing` | the last two scheduled runs of a workflow failed, with no success of that workflow on the default branch since                                                                                                                                                   |
+| `stopped` | GitHub has disabled a workflow whose file declares a schedule (`disabled_inactivity`, `disabled_manually`): nothing fails, and nothing runs. Judged from the workflow list and the file, never from the run window, which a stopped workflow leaves within weeks |
+| `differs` | a workflow the clone holds `protected` is not the prime's copy — the cascade withholds it without comment, by design                                                                                                                                             |
+
+Three rules make it worth reading:
+
+1. **A success proven by hand counts.** A green `workflow_dispatch` on the
+   default branch ends a streak; a failed one never extends it. On the day this
+   was written every refresh had been repaired and proven by dispatch while its
+   schedule was still red, and a schedule-only watch would have opened with
+   eleven alarms about jobs that already worked.
+2. **Announced once.** A finding's identity carries no count, so a job failing
+   every night is one announcement, not one a night. A clearance is recorded and
+   not announced. A `differs` finding carries both blobs, so the prime moving a
+   protected workflow is news again — that is the moment somebody has to decide.
+   Only what LANDED counts as told: the record keeps what was observed and what
+   was announced apart, so a notification that fails to insert is tried again
+   on the next pass instead of being recorded as said.
+3. **A failed read is not a clean clone.** Any input that could not be read makes
+   the clone `unreadable` for the pass: nothing is recorded, its standing
+   findings stand, and a pass with any unreadable clone files a
+   `clone_ci_watch_cron` row, because a watch that cannot look is the one thing
+   it cannot report about itself.
+
+It reports and never repairs. Findings land on the clone's history as
+`clone_ci_watch` and in the inbox as `clone_ci_attention`, a kind of its own so
+muting it silences nothing else. It runs last, in a try of its own, after
+`decideSpend` has let it spend: seventeen reads a pass for four clones, and the
+first thing to yield when a cascade needs the installation budget.

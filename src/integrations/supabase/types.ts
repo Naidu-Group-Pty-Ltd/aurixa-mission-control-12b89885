@@ -16637,6 +16637,7 @@ export type Database = {
         | "codex_findings_detected"
         | "codex_scanner_failing"
         | "codex_findings_overdue"
+        | "clone_ci_attention"
       notification_severity: "info" | "success" | "warning" | "error"
       overage_policy: "block" | "topup_only" | "pay_as_you_go"
       provisioning_method: "fork" | "template" | "clone"
@@ -17140,6 +17141,7 @@ export const Constants = {
         "codex_findings_detected",
         "codex_scanner_failing",
         "codex_findings_overdue",
+        "clone_ci_attention",
       ],
       notification_severity: ["info", "success", "warning", "error"],
       overage_policy: ["block", "topup_only", "pay_as_you_go"],
