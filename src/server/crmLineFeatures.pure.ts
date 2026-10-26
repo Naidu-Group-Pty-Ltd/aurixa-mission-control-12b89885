@@ -591,10 +591,18 @@ export const CRM_LINE_VARIANT_PATTERNS: Readonly<Partial<Record<CrmMode, readonl
     "supabase/functions/vapi-call-webhook/index.ts",
     "supabase/functions/cleanup-call-log-names/index.ts",
     "src/components/call-logs/CleanupContactNames.tsx",
-    "supabase/functions/portal-book-appointment/index.ts",
-    // The prime's CA-3 test drives that function against GoHighLevel; the
-    // line's copy drives the native booking (head #109).
-    "supabase/functions/portal-book-appointment/calendar-id-refusal.test.ts",
+    // The whole function, specs included. Its `index.ts` books into the line's
+    // own calendar tables, and the prime's specs beside it drive GoHighLevel:
+    // the CA-3 test (head #109) and the preview-session test (head #129) are the
+    // line's own copies, and the prime's booking-emails, configured-calendar
+    // and email-outcome specs were left out by the hand sync at prime@641d101
+    // for that reason. Named file by file, the cascade of prime@22b7e00 (#121)
+    // wrote the prime's preview-session test over the line's and carried the
+    // three it had declined: 49 red tests, none about anything the line runs.
+    // A file here that is still byte-identical to a prime version is released
+    // by the evidence rule, so the function's pure modules keep following the
+    // prime; a spec the line does not hold is held for a person to port.
+    "supabase/functions/portal-book-appointment/**",
     "src/pages/Integrations.tsx",
     "supabase/functions/update-integration-secret/index.ts",
     "supabase/functions/_shared/clients/noteWords.pure.ts",
@@ -614,6 +622,13 @@ export const CRM_LINE_VARIANT_PATTERNS: Readonly<Partial<Record<CrmMode, readonl
     // The specs and gates that hold the shapes above.
     "src/components/clients/add-client/AddClientModal.test.tsx",
     "src/lib/security/__tests__/phantomColumnWrites.spec.ts",
+    // A ratchet over THIS tree's unpinned supabase-js imports. The line holds
+    // none of the thirteen GoHighLevel functions on the prime's list and holds
+    // `voice-automation-settings`, which the prime does not, so the prime's
+    // list fails both of the spec's ratchet tests here. The hand sync at
+    // prime@641d101 measured the line's own list; the next cascade (#121)
+    // wrote the prime's back over it, because nothing here named the file.
+    "src/lib/security/__tests__/supabaseJsVersionPins.spec.ts",
     "src/lib/security/auditRemediation.spec.ts",
     "src/lib/sync/__tests__/ghlConversationMap.test.ts",
     "scripts/security/check-cron-caller-names.mjs",

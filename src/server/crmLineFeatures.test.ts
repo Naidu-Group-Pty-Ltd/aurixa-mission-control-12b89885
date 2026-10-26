@@ -8,6 +8,7 @@ import {
   crmLineFeatureForPath,
   crmLineFunctionsIn,
   CRM_LINE_VARIANT_PATTERNS,
+  crmLineVariantFunctionNames,
   crmLineVariantPattern,
   crmLineWithheldFunctionNames,
   describeWithheldAcrossRegisters,
@@ -280,6 +281,40 @@ describe("the independent line's own copies", () => {
       expect(crmLineVariantPattern(path, "independent"), path).toBe(path);
       expect(crmLineVariantPattern(path, "dependent"), path).toBeNull();
     }
+  });
+
+  it("holds what the prime@22b7e00 cascade wrote over, or carried after the line declined it", () => {
+    // #121 delivered the prime's copy of the first two over the line's own and
+    // the last three the hand sync at prime@641d101 had left out: 49 red tests.
+    const PIN_RATCHET = "src/lib/security/__tests__/supabaseJsVersionPins.spec.ts";
+    expect(crmLineVariantPattern(PIN_RATCHET, "independent")).toBe(PIN_RATCHET);
+    expect(crmLineVariantPattern(PIN_RATCHET, "dependent")).toBeNull();
+    for (const spec of [
+      "preview-session-booking.test.ts",
+      "booking-emails.test.ts",
+      "configured-calendar-and-times.test.ts",
+      "email-outcome-and-appointments.test.ts",
+      // Already the line's before; still held, now by the function's glob.
+      "calendar-id-refusal.test.ts",
+      "index.ts",
+    ]) {
+      const path = `supabase/functions/portal-book-appointment/${spec}`;
+      expect(crmLineVariantPattern(path, "independent"), path).toBe(
+        "supabase/functions/portal-book-appointment/**",
+      );
+      expect(crmLineVariantPattern(path, "dependent"), path).toBeNull();
+    }
+    // A function of the same name prefix is not caught by the glob.
+    expect(
+      crmLineVariantPattern(
+        "supabase/functions/portal-book-appointment-v2/index.ts",
+        "independent",
+      ),
+    ).toBeNull();
+    // The function is still deployed from the line's own tree, once.
+    expect(
+      crmLineVariantFunctionNames("independent").filter((n) => n === "portal-book-appointment"),
+    ).toEqual(["portal-book-appointment"]);
   });
 
   it("does not list a path the line withholds outright", () => {

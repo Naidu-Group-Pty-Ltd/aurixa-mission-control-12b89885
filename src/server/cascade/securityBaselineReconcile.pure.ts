@@ -78,6 +78,39 @@
  * A file whose blob is the same on both sides counts as either side's. This
  * is still the generator's own answer, re-filed per caller rather than per
  * path. Nothing is read or parsed that the generator did not already write.
+ *
+ * ## A mixed caller the sides disagree about is settled by its differing files
+ *
+ * "Mixed otherwise" stopped being rare too. Measured 26 Oct 2026 on cascade
+ * #121 to `npc-crm-independent-6505dc`: the prime added
+ * `_shared/cronMigrationFunctionUrls.test.ts`, whose fixtures name
+ * `functions/v1/x`, so the prime recorded `_shared->x` and the clone did not.
+ * The merged `_shared` walks 1,355 files. Of the files either tree walks
+ * there, 31 differ: 23 only the line holds, 7 only the prime holds, and one
+ * both hold in different copies. So the pass refused, kept the clone's
+ * baseline, and the clone's `security` job failed on the three entries the
+ * delivery added.
+ *
+ * Every walked file of a mixed caller carries the same content in the merged
+ * tree as it does on one side or the other, or is a file a pump composed. So
+ * a caller's merged edges are those of four sets:
+ *
+ *   - `same`: the blob is the prime's AND the clone's;
+ *   - `fromPrime`: the prime's blob, not the clone's (a delivered file);
+ *   - `fromClone`: the clone's blob, not the prime's (the clone's own, or one
+ *     this pass does not deliver);
+ *   - `composed`: neither (a merged line variant).
+ *
+ * The last three are what make the caller mixed, and they are few. Their text
+ * is read and their edges taken by the generator's own rule (`edgesOfSource`,
+ * transcribed below). `same` is never read: the prime's edges for the caller
+ * are `same`'s plus those of the prime files whose content the merged tree
+ * does not carry, and the clone's likewise, so an edge either side records
+ * and none of its other files explains comes from `same`. An edge both sides
+ * record that their other files ALSO explain is the one thing this cannot
+ * place, and it still refuses, naming the edge. Where a read file's edges are
+ * not in that side's own baseline, the transcription or the baseline is
+ * wrong, and it refuses rather than write either.
  * Run over cascade #81's real trees (prime@72da9a5 onto the clone's main),
  * it wrote the document the generator wrote on that branch, byte for byte.
  *
@@ -119,10 +152,42 @@ const SHARED_DIRECTORY = "_shared";
 /** What the generator's walk keeps: source files. */
 const SOURCE_FILE = /\.(?:ts|tsx|js)$/;
 
-/** A refusal carries its reason, because the caller renders it to a person. */
+/**
+ * A refusal carries its reason, because the caller renders it to a person.
+ * One that could be settled by reading a few files says which, in `needs`
+ * (see "A mixed caller the sides disagree about" in the header).
+ */
 export type BaselineReconcile<T> =
   | { ok: true; merged: T; count: number }
-  | { ok: false; reason: string };
+  | { ok: false; reason: string; needs?: CallerSourceNeeds };
+
+/**
+ * The most texts one pass reads to settle the mixed callers. Measured on
+ * cascade #121 to `npc-crm-independent-6505dc`, replayed over its real trees:
+ * 51 (19 of the prime's, 31 of the clone's, one merged variant), and the
+ * baseline written from them was the generator's own output on the merged
+ * tree, byte for byte. Reads are by blob id, eighty to a GraphQL query, so
+ * this bounds a clone whose own shared library grows without bound rather
+ * than the ordinary case.
+ */
+export const MAX_BASELINE_SOURCE_READS = 120;
+
+/** The texts a mixed caller is settled from, by path. */
+export type CallerSources = {
+  /** The prime's text of a path. */
+  readonly prime: ReadonlyMap<string, string>;
+  /** The clone's text of a path, as its tree holds it before this pass. */
+  readonly clone: ReadonlyMap<string, string>;
+  /** The text this pass writes at a delivered path. */
+  readonly merged: ReadonlyMap<string, string>;
+};
+
+/** The paths whose text settling the mixed callers still needs, by side. */
+export type CallerSourceNeeds = {
+  prime: string[];
+  clone: string[];
+  merged: string[];
+};
 
 /**
  * The function names `config.toml` declares, by the GENERATOR's own rule.
@@ -171,6 +236,27 @@ export function isWalkedSourceFile(path: string): boolean {
   if (!path.startsWith(EDGE_FUNCTIONS_PREFIX)) return false;
   if (path.includes("/_shared/tests/")) return false;
   return SOURCE_FILE.test(path);
+}
+
+/**
+ * The generator's edge rule, transcribed from `security-inventory.mjs`:
+ *
+ *     for (const match of source.matchAll(/functions\/v1\/([A-Za-z0-9_-]+)/g))
+ *       internalEdges.add(`${caller}->${match[1]}`);
+ *
+ * Every occurrence counts, in a comment or a test fixture as much as in a
+ * call. Applied only to the files that make a caller mixed, and checked
+ * against the baselines the generator itself wrote before anything it says is
+ * used (`settleMixedCaller`).
+ */
+const INTER_FUNCTION_CALL = /functions\/v1\/([A-Za-z0-9_-]+)/g;
+
+/** The edges the generator reads out of one walked file. */
+export function edgesOfSource(path: string, source: string): string[] {
+  const caller = fileCaller(path);
+  const edges = new Set<string>();
+  for (const match of source.matchAll(INTER_FUNCTION_CALL)) edges.add(`${caller}->${match[1]}`);
+  return [...edges].sort();
 }
 
 /** The shape the generator emits, in the order it emits it. */
@@ -294,9 +380,127 @@ function fileCaller(path: string): string {
   return path.slice(EDGE_FUNCTIONS_PREFIX.length).split("/")[0];
 }
 
+type MixedCallerVerdict =
+  | { act: "edges"; edges: string[] }
+  | { act: "refuse"; reason: string }
+  | { act: "read"; needs: CallerSourceNeeds };
+
+/**
+ * One mixed caller's merged edges, from the texts of the files that make it
+ * mixed. See "A mixed caller the sides disagree about" in the header for the
+ * four sets and why `same` is never read.
+ */
+function settleMixedCaller(args: {
+  caller: string;
+  merged: ReadonlySet<string>;
+  primeFiles: ReadonlySet<string>;
+  cloneFiles: ReadonlySet<string>;
+  primeEdges: readonly string[];
+  cloneEdges: readonly string[];
+  primeTree: ReadonlyMap<string, string>;
+  cloneTree: ReadonlyMap<string, string>;
+  deliveredFiles: ReadonlySet<string>;
+  rewritten: ReadonlySet<string>;
+  sources: CallerSources;
+}): MixedCallerVerdict {
+  const { caller, primeTree, cloneTree, deliveredFiles, rewritten, sources } = args;
+  const same = new Set<string>();
+  const fromPrime: string[] = [];
+  const fromClone: string[] = [];
+  const composed: string[] = [];
+  for (const path of args.merged) {
+    const onPrime = primeTree.get(path);
+    const onClone = cloneTree.get(path);
+    if (deliveredFiles.has(path)) {
+      if (rewritten.has(path)) composed.push(path);
+      else if (onPrime === undefined) {
+        return {
+          act: "refuse",
+          reason: `\`${path}\` is delivered from the prime but the prime's tree does not list it`,
+        };
+      } else if (onClone === onPrime) same.add(path);
+      else fromPrime.push(path);
+    } else if (onClone === undefined) {
+      return {
+        act: "refuse",
+        reason: `\`${path}\` is in the merged tree, delivered by nobody and absent from the clone's`,
+      };
+    } else if (onClone === onPrime) same.add(path);
+    else fromClone.push(path);
+  }
+  const fromPrimeSet = new Set(fromPrime);
+  const fromCloneSet = new Set(fromClone);
+  const primeRest = [...args.primeFiles].filter((p) => !same.has(p) && !fromPrimeSet.has(p));
+  const cloneRest = [...args.cloneFiles].filter((p) => !same.has(p) && !fromCloneSet.has(p));
+
+  // A delivered file's text is the prime's, so either map answers for it.
+  const primeText = (path: string) => sources.prime.get(path) ?? sources.merged.get(path);
+  const needs: CallerSourceNeeds = {
+    prime: [...fromPrime, ...primeRest].filter((p) => primeText(p) === undefined),
+    clone: [...fromClone, ...cloneRest].filter((p) => !sources.clone.has(p)),
+    merged: composed.filter((p) => !sources.merged.has(p)),
+  };
+  if (needs.prime.length + needs.clone.length + needs.merged.length > 0) {
+    return { act: "read", needs };
+  }
+
+  const edgesOf = (paths: readonly string[], text: (p: string) => string | undefined) => {
+    const out = new Set<string>();
+    for (const path of paths)
+      for (const edge of edgesOfSource(path, text(path) ?? "")) out.add(edge);
+    return out;
+  };
+  const ePrime = edgesOf(fromPrime, primeText);
+  const eClone = edgesOf(fromClone, (p) => sources.clone.get(p));
+  const eComposed = edgesOf(composed, (p) => sources.merged.get(p));
+  const ePrimeRest = edgesOf(primeRest, primeText);
+  const eCloneRest = edgesOf(cloneRest, (p) => sources.clone.get(p));
+  const primeSide = new Set(args.primeEdges);
+  const cloneSide = new Set(args.cloneEdges);
+
+  // What the files say must be what the side's own baseline says of them, or
+  // either the transcription above or that baseline is wrong — and a merged
+  // baseline built on a wrong one is the silent answer this module refuses.
+  for (const [label, read, baseline] of [
+    ["the prime's", new Set([...ePrime, ...ePrimeRest]), primeSide],
+    ["this clone's", new Set([...eClone, ...eCloneRest]), cloneSide],
+  ] as const) {
+    const unexplained = [...read].filter((e) => !baseline.has(e)).sort();
+    if (unexplained.length > 0) {
+      return {
+        act: "refuse",
+        reason:
+          `\`${caller}\`'s files name ${unexplained.join(", ")}, which ${label} baseline does ` +
+          "not record, so that baseline does not describe the tree it was written from",
+      };
+    }
+  }
+
+  // An edge a side records that none of its OTHER files explains comes from `same`.
+  const fromSame = new Set<string>();
+  for (const e of primeSide) if (!ePrime.has(e) && !ePrimeRest.has(e)) fromSame.add(e);
+  for (const e of cloneSide) if (!eClone.has(e) && !eCloneRest.has(e)) fromSame.add(e);
+  const edges = new Set([...ePrime, ...eClone, ...eComposed, ...fromSame]);
+  const unplaced = [...primeSide].filter((e) => cloneSide.has(e) && !edges.has(e)).sort();
+  if (unplaced.length > 0) {
+    return {
+      act: "refuse",
+      reason:
+        `\`${caller}\` takes source files from both the prime and this clone, and both record ` +
+        `${unplaced.join(", ")} from files the merged tree does not keep, so whether a kept ` +
+        "file also names it cannot be told without reading every file",
+    };
+  }
+  return { act: "edges", edges: [...edges].sort() };
+}
+
 /**
  * The merged graph, caller by caller, or a refusal naming the first caller
  * that cannot be attributed. See "Given both trees" in the header.
+ *
+ * Given `sources`, a mixed caller the sides disagree about is settled from the
+ * files that make it mixed; any of their texts `sources` lacks are returned in
+ * `needs`, for every such caller at once, so one round of reads answers all.
  */
 export function attributeGraphByCaller(args: {
   primeGraph: readonly string[];
@@ -309,7 +513,8 @@ export function attributeGraphByCaller(args: {
   deliveredFiles: ReadonlySet<string>;
   /** Delivered paths whose content is neither side's. */
   rewritten: ReadonlySet<string>;
-}): { ok: true; graph: string[] } | { ok: false; reason: string } {
+  sources?: CallerSources;
+}): { ok: true; graph: string[] } | { ok: false; reason: string; needs?: CallerSourceNeeds } {
   const { primeTree, cloneTree, deliveredFiles, rewritten } = args;
 
   const filesBy = (paths: Iterable<string>) => {
@@ -366,6 +571,8 @@ export function attributeGraphByCaller(args: {
     ...cloneEdges.keys(),
   ]);
   const graph: string[] = [];
+  const needs: CallerSourceNeeds = { prime: [], clone: [], merged: [] };
+  let unread: string | null = null;
   for (const caller of [...callers].sort()) {
     const merged = mergedFiles.get(caller) ?? empty;
     const fromPrime = primeEdges.get(caller) ?? [];
@@ -382,14 +589,35 @@ export function attributeGraphByCaller(args: {
       graph.push(...fromPrime);
       continue;
     }
-    return {
-      ok: false,
-      reason:
-        `\`${caller}\` takes source files from both the prime and this clone, and the ` +
-        "inter-function call graph records it as one caller — so which side supplied each " +
-        "file decides its edges and this pass cannot tell",
-    };
+    const refusal =
+      `\`${caller}\` takes source files from both the prime and this clone, and the ` +
+      "inter-function call graph records it as one caller — so which side supplied each " +
+      "file decides its edges and this pass cannot tell";
+    if (!args.sources) return { ok: false, reason: refusal };
+    const verdict = settleMixedCaller({
+      caller,
+      merged,
+      primeFiles: primeFiles.get(caller) ?? empty,
+      cloneFiles: cloneFiles.get(caller) ?? empty,
+      primeEdges: fromPrime,
+      cloneEdges: fromClone,
+      primeTree,
+      cloneTree,
+      deliveredFiles,
+      rewritten,
+      sources: args.sources,
+    });
+    if (verdict.act === "refuse") return { ok: false, reason: verdict.reason };
+    if (verdict.act === "read") {
+      needs.prime.push(...verdict.needs.prime);
+      needs.clone.push(...verdict.needs.clone);
+      needs.merged.push(...verdict.needs.merged);
+      unread ??= `${refusal}, and the texts of the files that would settle it were not read`;
+      continue;
+    }
+    graph.push(...verdict.edges);
   }
+  if (unread !== null) return { ok: false, reason: unread, needs };
   return { ok: true, graph };
 }
 
@@ -425,6 +653,12 @@ export function reconcileSecurityInventory(args: {
    * composed it. Such a file is never attributed to prime.
    */
   rewrittenPaths?: Iterable<string>;
+  /**
+   * The texts that settle a mixed caller the two graphs disagree about.
+   * Omitted, such a caller refuses as it always has; given, any text it lacks
+   * comes back in the refusal's `needs` for the caller to read and ask again.
+   */
+  sources?: CallerSources;
 }): BaselineReconcile<string> {
   const primeParsed = parseJson(args.primeInventoryJson, "prime's security baseline");
   if (!primeParsed.ok) return primeParsed;
@@ -493,6 +727,7 @@ export function reconcileSecurityInventory(args: {
       mergedPaths,
       deliveredFiles,
       rewritten: new Set(args.rewrittenPaths ?? []),
+      sources: args.sources,
     });
     if (!attributed.ok) return attributed;
     graph = attributed.graph;

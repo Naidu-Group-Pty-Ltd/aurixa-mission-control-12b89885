@@ -43,6 +43,7 @@ import {
   decideVariantMerge,
   MAX_AGREEING_BASES,
   variantBaseFrom,
+  type VariantHistoryCommit,
   type VariantMergeVerdict,
 } from "./variantMerge.pure";
 
@@ -79,7 +80,7 @@ export async function mergeHeldVariant(args: {
 }): Promise<VariantMergeVerdict> {
   const { octokit, cloneRef, primeRef, path, maxBytes, revisions } = args;
 
-  let commits: { sha: string; message: string }[];
+  let commits: VariantHistoryCommit[];
   try {
     const { data } = await octokit.repos.listCommits({
       owner: cloneRef.owner,
@@ -88,7 +89,12 @@ export async function mergeHeldVariant(args: {
       path,
       per_page: VARIANT_BASE_COMMITS,
     });
-    commits = data.map((c) => ({ sha: c.sha, message: c.commit.message }));
+    commits = data.map((c) => ({
+      sha: c.sha,
+      message: c.commit.message,
+      root: Array.isArray(c.parents) && c.parents.length === 0,
+      date: c.commit.committer?.date ?? c.commit.author?.date ?? undefined,
+    }));
   } catch (e) {
     return {
       act: "hold",
@@ -98,6 +104,9 @@ export async function mergeHeldVariant(args: {
   }
   const named = variantBaseFrom(commits);
   if (named.kind === "none") return decideVariantMerge({ base: null, ours: "", theirs: "" });
+  if (named.kind === "mirror") {
+    return mergeOnMirrorBase({ ...args, root: named.commit, madeAt: named.date });
+  }
   const names = named.kind === "named" ? [named.primeRevision] : named.primeRevisions;
   if (names.length > MAX_AGREEING_BASES) {
     // Refused before a request is spent on it; nothing was read, so no text.
@@ -162,6 +171,101 @@ export async function mergeHeldVariant(args: {
       revision,
       text: bases[i] ? bases[i].content : null,
     })),
+    ours: ours.content,
+    theirs: theirs.content,
+  });
+}
+
+/**
+ * A held variant whose history names no revision and begins at the clone's
+ * first commit (`variantBaseFrom` → `mirror`; "The copy the clone was made
+ * with" there says why that copy is a prime version).
+ *
+ * Which prime revision held it is read off the prime's own history of the
+ * path: the newest prime commit that touched it before the clone was made.
+ * That revision's copy is the base only where it is byte-identical to the
+ * clone's first copy — the copy the line's own edits were made on — and any
+ * other answer holds for a person exactly as a path with no base always has.
+ *
+ * Five requests at most: the prime's history of the path, then the line's
+ * copy, the prime's current copy, the base, and the clone's first copy. The
+ * revision is kept in the pass's cache under the path, because it depends on
+ * the path's own history.
+ */
+async function mergeOnMirrorBase(args: {
+  octokit: Octokit;
+  cloneRef: RepoRef;
+  primeRef: RepoRef;
+  path: string;
+  maxBytes: number;
+  revisions?: Map<string, string>;
+  /** The clone's first commit. */
+  root: string;
+  /** When it was made. */
+  madeAt: string;
+}): Promise<VariantMergeVerdict> {
+  const { octokit, cloneRef, primeRef, path, maxBytes, revisions } = args;
+  const cacheKey = `mirror:${args.root}:${path}`;
+  let revision = revisions?.get(cacheKey);
+  if (!revision) {
+    try {
+      const { data } = await octokit.repos.listCommits({
+        owner: primeRef.owner,
+        repo: primeRef.repo,
+        sha: primeRef.branch,
+        path,
+        until: args.madeAt,
+        per_page: 1,
+      });
+      revision = data[0]?.sha;
+    } catch (e) {
+      return {
+        act: "hold",
+        why: `the prime's history of this file could not be read (${msg(e)})`,
+        ...(isTransientReadFailure(e) ? { transient: true as const } : {}),
+      };
+    }
+    if (!revision) {
+      return {
+        act: "hold",
+        why: "no commit on this line names the prime revision it was reconciled to, and the prime held no copy of it when this clone was made",
+      };
+    }
+    revisions?.set(cacheKey, revision);
+  }
+
+  let ours: RepoFile | null;
+  let theirs: RepoFile | null;
+  let base: RepoFile | null;
+  let first: RepoFile | null;
+  try {
+    [ours, theirs, base, first] = await Promise.all([
+      getFileContent(octokit, cloneRef, path, { maxBytes }),
+      getFileContent(octokit, primeRef, path, { maxBytes }),
+      getFileContent(octokit, { ...primeRef, branch: revision }, path, { maxBytes }),
+      getFileContent(octokit, { ...cloneRef, branch: args.root }, path, { maxBytes }),
+    ]);
+  } catch (e) {
+    return {
+      act: "hold",
+      why: `a copy of this file could not be read (${msg(e)})`,
+      ...(isTransientReadFailure(e) ? { transient: true as const } : {}),
+    };
+  }
+  if (!ours || !theirs) return { act: "hold", why: "this file is not on both sides to merge" };
+  if (!base || !first || base.sha !== first.sha) {
+    return {
+      act: "hold",
+      why:
+        "no commit on this line names the prime revision it was reconciled to, and the copy " +
+        `this clone was made with is not prime@${revision.slice(0, 7)}'s, so it cannot stand as the base`,
+    };
+  }
+  if (ours.binary || theirs.binary || base.binary) {
+    return { act: "hold", why: "a binary file is never merged line by line" };
+  }
+  return decideVariantMerge({
+    base: { revision, text: base.content },
     ours: ours.content,
     theirs: theirs.content,
   });

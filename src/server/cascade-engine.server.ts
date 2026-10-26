@@ -196,6 +196,7 @@ import {
   withheldBySource,
 } from "./cascade/securityInventoryHold.pure";
 import {
+  MAX_BASELINE_SOURCE_READS,
   reconcileFunctionCountRatchet,
   reconcileSecurityInventory,
 } from "./cascade/securityBaselineReconcile.pure";
@@ -3683,6 +3684,67 @@ export async function processClone(args: {
 
   absorbPrepared(prepared);
 
+  /**
+   * `reconcileSecurityInventory`, given the one round of reads it may ask for.
+   *
+   * A caller of the inter-function graph that takes files from both sides,
+   * and that the two baselines disagree about, is settled from the texts of
+   * the few files that make it mixed ("A mixed caller the sides disagree
+   * about" in `securityBaselineReconcile.pure.ts`). What this pass delivered it
+   * already holds; the rest is read by blob id from the listings, so a text is
+   * used only where it IS the file the tree names. Bounded: a caller needing
+   * more than `MAX_BASELINE_SOURCE_READS` texts refuses as it always did.
+   */
+  const reconcileInventoryReading = async (
+    args: Omit<Parameters<typeof reconcileSecurityInventory>[0], "sources">,
+  ): Promise<ReturnType<typeof reconcileSecurityInventory>> => {
+    const merged = new Map<string, string>(Object.entries(deliveredSource));
+    for (const [path, merge] of variantMerges) {
+      if (merge.text !== null && !merged.has(path)) merged.set(path, merge.text);
+    }
+    const prime = new Map<string, string>();
+    const cloneSide = new Map<string, string>();
+    const first = reconcileSecurityInventory({
+      ...args,
+      sources: { prime, clone: cloneSide, merged },
+    });
+    if (first.ok || !first.needs) return first;
+    const { needs } = first;
+    const wanted = needs.prime.length + needs.clone.length + needs.merged.length;
+    if (wanted > MAX_BASELINE_SOURCE_READS) {
+      return {
+        ok: false,
+        reason: `${first.reason}: settling it needs ${wanted} files read, over the ${MAX_BASELINE_SOURCE_READS} a pass reads for it`,
+      };
+    }
+    const wantsFrom = (paths: readonly string[], tree: ReadonlyMap<string, string> | null) =>
+      paths.flatMap((path) => {
+        const sha = tree?.get(path);
+        return sha ? [{ path, sha, size: undefined }] : [];
+      });
+    try {
+      const [fromPrime, fromClone] = await Promise.all([
+        readBlobTextsBatched(octokit, primeRef, wantsFrom(needs.prime, primeShaByPath)),
+        readBlobTextsBatched(octokit, cloneRef, wantsFrom(needs.clone, cloneShaByPath ?? null)),
+      ]);
+      for (const [path, text] of fromPrime) prime.set(path, text);
+      for (const [path, text] of fromClone) cloneSide.set(path, text);
+      await mapWithConcurrency(needs.merged, 8, async (path) => {
+        const blob = variantMerges.get(path)?.blob;
+        const text = blob ? await readMergedVariant(octokit, cloneRef, blob) : null;
+        if (text !== null) merged.set(path, text);
+      });
+    } catch (e) {
+      console.warn(
+        `[cascade] security baseline sources unread for clone ${clone.id}: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+      return first;
+    }
+    return reconcileSecurityInventory({ ...args, sources: { prime, clone: cloneSide, merged } });
+  };
+
   // ── supabase/config.toml: one file, two kinds of fact ──────────────────
   //
   // The path stays excluded and is NOT written by the loop above. Its first
@@ -4176,7 +4238,7 @@ export async function processClone(args: {
         cloneInventory !== null &&
         mergedToml &&
         mergedRegistryJson
-          ? reconcileSecurityInventory({
+          ? await reconcileInventoryReading({
               primeInventoryJson: primeInventory,
               cloneInventoryJson: cloneInventory,
               mergedToml,
@@ -5590,7 +5652,7 @@ export async function processClone(args: {
     const finalDelivered = treeEntries.filter((e) => e.sha !== null).map((e) => e.path);
     const finalTree = new Set([...inventoryRecount.cloneTree.keys(), ...finalDelivered]);
     for (const removed of deletesCrossing) finalTree.delete(removed);
-    const recount = reconcileSecurityInventory({
+    const recount = await reconcileInventoryReading({
       primeInventoryJson: inventoryRecount.primeInventoryJson,
       cloneInventoryJson: inventoryRecount.cloneInventoryJson,
       mergedToml: inventoryRecount.mergedToml,

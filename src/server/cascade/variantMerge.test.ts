@@ -315,3 +315,38 @@ describe("which held paths a pass merges first", () => {
     expect(MAX_VARIANT_MERGES).toBeGreaterThanOrEqual(26);
   });
 });
+
+describe("a history that begins at the clone's first commit", () => {
+  it("is based on that copy where nothing names a revision", () => {
+    expect(
+      variantBaseFrom([
+        { sha: "c2", message: "Close the line's last reach into GoHighLevel" },
+        { sha: "c1", message: "Initial commit", root: true, date: "2026-09-19T05:20:40Z" },
+      ]),
+    ).toEqual({ kind: "mirror", commit: "c1", date: "2026-09-19T05:20:40Z" });
+  });
+
+  it("prefers any commit that names a revision, however old", () => {
+    expect(
+      variantBaseFrom([
+        { sha: "c3", message: "an edit" },
+        { sha: "c2", message: "Reconcile at prime@e02572f" },
+        { sha: "c1", message: "Initial commit", root: true, date: "2026-09-19T05:20:40Z" },
+      ]),
+    ).toEqual({ kind: "named", primeRevision: "e02572f", commit: "c2" });
+  });
+
+  it("is no base where the walk stopped short of the first commit, or it has no date", () => {
+    expect(
+      variantBaseFrom([
+        { sha: "c2", message: "an edit" },
+        { sha: "c1", message: "older" },
+      ]),
+    ).toEqual({
+      kind: "none",
+    });
+    expect(variantBaseFrom([{ sha: "c1", message: "Initial commit", root: true }])).toEqual({
+      kind: "none",
+    });
+  });
+});
