@@ -779,6 +779,25 @@ export function backendIdentityHold(args: {
     };
   }
 
+  // The clone's copy IS the prime's file, with this deployment's own project
+  // and key where the prime's stand. Nothing is owed: the difference is the
+  // one thing a cascade must never write and no person has to look at. Held
+  // as `protected` — never released, never written, and not reported — so
+  // `supabaseTarget.pure.ts` on npc-crm-independent stops appearing under
+  // "Needs a human" on every pass, as it did on #121, while any OTHER change
+  // the prime makes to it still makes the two differ and is held for a person
+  // exactly as before.
+  if (sameApartFromBackendIdentity(primeContent, cloneContent)) {
+    return {
+      path,
+      pattern: "(content: this deployment's own backend)",
+      reason: "protected",
+      note:
+        `This clone's copy is prime's with this deployment's own Supabase project and key in ` +
+        `place of ${primeForeign.join(", ")}; nothing else differs, so nothing is owed.`,
+    };
+  }
+
   return {
     path,
     pattern: "(content: foreign backend ref)",
@@ -788,6 +807,28 @@ export function backendIdentityHold(args: {
       `${primeForeign.join(", ")}. Writing prime's version would point a shipped file at ` +
       `another tenant's database.`,
   };
+}
+
+/** A Supabase key as a source file spells it: a three-part JWT. */
+const JWT_TOKEN = /eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g;
+
+/**
+ * Whether two texts differ only in which Supabase project and key they name.
+ *
+ * Every project URL, every bare twenty-letter ref either side names, and every
+ * JWT is replaced by a placeholder, and what is left must be identical. A file
+ * that names a project on one side and none on the other is NOT the same apart
+ * from identity: a placeholder on one side alone is a difference.
+ */
+export function sameApartFromBackendIdentity(a: string, b: string): boolean {
+  const refs = [...new Set([...backendRefsIn(a), ...backendRefsIn(b)])];
+  const mask = (text: string) => {
+    let out = text.replace(JWT_TOKEN, "<key>");
+    out = out.replace(PROJECT_URL_REF, "<project>.supabase.co");
+    for (const ref of refs) out = out.replaceAll(ref, "<project>");
+    return out;
+  };
+  return mask(a) === mask(b);
 }
 
 /**

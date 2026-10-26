@@ -3661,9 +3661,13 @@ export async function processClone(args: {
       if (entry.kind === "held") {
         // Recorded in the same partition the path rules feed, so a content hold
         // reaches the pull request body, the withheld count and the "nothing to
-        // cascade" reason by exactly the route a listed path does.
+        // cascade" reason by exactly the route a listed path does — and owes a
+        // person something on exactly the terms a listed path does
+        // (`reportableHeld`): a `protected` content hold, a shipped file that
+        // differs from the prime's only by this deployment's own backend, is
+        // withheld without comment like a protected row.
         partition.held.push(entry.held);
-        needsReconcile.push(entry.held);
+        needsReconcile.push(...reportableHeld([entry.held]));
         continue;
       }
       if (entry.inline !== undefined) {
