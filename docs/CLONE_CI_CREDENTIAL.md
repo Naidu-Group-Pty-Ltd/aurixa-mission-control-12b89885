@@ -133,6 +133,10 @@ apply a migration by hand when Mission Control itself cannot be reached. Losing
 the second must not cost the first.
 
 It settles: GitHub never returns a secret's value, so there is nothing to
-compare against and the write is simply repeated. A write over a secret that
-was already there is recorded as `kept` and files nothing; a first write, a
-password set, a refusal or a failure files one audit row.
+compare against and the write is repeated — once a day, or at once when
+Mission Control has just changed the value (a password set that pass). A
+settled clone costs one variable listing and one metadata read per secret each
+pass, because this installation's hourly GitHub allowance has run out before. A
+write over a secret that was already there is recorded as `kept` and files
+nothing; a first write, a password set, a refusal or a failure files one audit
+row.

@@ -44,10 +44,12 @@ describe("what is distributed", () => {
     expect(server).toContain("setCloneDbPassword({ supabase, cloneId: clone.id, projectRef })");
   });
 
-  it("sets a password only where the decision allows, and never overwrites one", () => {
+  it("sets a password only where the decision allows, and keeps it only for that project", () => {
     const at = server.indexOf("await setCloneDbPassword(");
     expect(server.lastIndexOf("decidePasswordSet(", at)).toBeGreaterThan(-1);
-    expect(server).toContain('.is("db_pass", null)');
+    expect(server).toContain('.eq("supabase_project_ref", input.projectRef)');
+    // A password just set is written at once, not on the daily re-assertion.
+    expect(server).toContain("password = { value: set.password, changed: true }");
     // Supabase first, the row second: a failed store leaves the database where
     // it already was, with no password anybody holds.
     const fn = server.slice(server.indexOf("async function setCloneDbPassword"));

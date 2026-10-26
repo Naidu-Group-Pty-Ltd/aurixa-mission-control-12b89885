@@ -7,9 +7,10 @@
  * `supabase-production` environment rather than the repository.
  *
  * The pass is idempotent and settles: GitHub never returns a secret's value,
- * so there is nothing to compare against and the write is simply repeated. It
- * is a few sealed-box PUTs per clone per sweep, which is the cheapest correct
- * thing available, and a re-write is recorded as `kept` so a settled fleet
+ * so there is nothing to compare against and the write is repeated, once a
+ * day (`REASSERT_AFTER_MS`) or at once when Mission Control has just changed
+ * the value. A settled clone costs one variable listing and one metadata read
+ * per secret a pass, and a re-write is recorded as `kept`, so a settled fleet
  * files nothing.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -91,8 +92,9 @@ export async function readPoolerFacts(projectRef: string): Promise<PoolerFacts |
  * Mission Control declared as the backend's deployer. Supabase is told first
  * and the row written second, so a failed write leaves a database whose
  * password nobody holds, which is where it already was, and the next pass
- * tries again. The row is written only while it still holds none, so a
- * password stored by anything else in the meantime is never overwritten.
+ * tries again. The row is written only while it still names the project the
+ * password was set on: a clone re-provisioned onto a new project in the
+ * meantime keeps the new project's password, which is the one that connects.
  */
 async function setCloneDbPassword(input: {
   supabase: Db;
@@ -124,7 +126,7 @@ async function setCloneDbPassword(input: {
     .from("clone_backends")
     .update({ db_pass: encryptSecret(password) })
     .eq("clone_id", input.cloneId)
-    .is("db_pass", null)
+    .eq("supabase_project_ref", input.projectRef)
     .select("clone_id");
   if (error) {
     return { ok: false, reason: `the new password could not be stored: ${error.message}` };
@@ -132,12 +134,20 @@ async function setCloneDbPassword(input: {
   if (!data || data.length === 0) {
     return {
       ok: false,
-      reason:
-        "a password was stored for this clone while this one was being set; the next pass uses it",
+      reason: `this clone no longer points at ${input.projectRef}, so the password set there was not kept`,
     };
   }
   return { ok: true, password };
 }
+
+/**
+ * How long a credential already in the environment is trusted before it is
+ * written again. GitHub cannot say whether it still holds what Mission Control
+ * would send, so it is re-asserted, but once a day rather than every half
+ * hour: the steady state is then one metadata read per secret. A value known
+ * to have changed (a password set this pass) is written at once.
+ */
+const REASSERT_AFTER_MS = 24 * 3600 * 1000;
 
 /** Write one secret into the clone's production environment, as an outcome. */
 async function writeEnvironmentSecret(input: {
@@ -145,6 +155,7 @@ async function writeEnvironmentSecret(input: {
   repo: string;
   name: string;
   value: string;
+  changed: boolean;
 }): Promise<CredentialOutcome> {
   const label = `${input.owner}/${input.repo}`;
   try {
@@ -155,6 +166,7 @@ async function writeEnvironmentSecret(input: {
       environment: CI_ENVIRONMENT,
       name: input.name,
       value: input.value,
+      ...(input.changed ? {} : { reassertAfterMs: REASSERT_AFTER_MS }),
     });
     return { repo: label, secret: input.name, state: created ? "distributed" : "kept" };
   } catch (e) {
@@ -170,8 +182,8 @@ async function writeEnvironmentSecret(input: {
  * a state that will hold until somebody changes it.
  */
 export type HeldCredential =
-  | { value: string | null }
-  | { state: "cannot" | "failed"; reason: string };
+  /** `changed`: set this pass, so written at once rather than on the daily re-assertion. */
+  { value: string | null; changed?: boolean } | { state: "cannot" | "failed"; reason: string };
 
 /**
  * Write the clone's credentials into its production environment, and the
@@ -181,7 +193,8 @@ export type HeldCredential =
  * closed without a route, and an operator reading a red run needs to be able
  * to see which project it was pointed at. It is written whether or not either
  * credential could be, because it is a fact about the repository rather than
- * a credential.
+ * a credential. It is written only where the repository's variables, read
+ * once per pass by the caller, do not already say it (or could not be read).
  */
 export async function distributeCloneCiCredentials(input: {
   owner: string;
@@ -189,21 +202,25 @@ export async function distributeCloneCiCredentials(input: {
   projectRef: string;
   password: HeldCredential;
   serviceRoleKey: HeldCredential;
+  /** The repository's variables, or null when GitHub could not be asked. */
+  variables: Readonly<Record<string, string>> | null;
 }): Promise<CredentialOutcome[]> {
   const label = `${input.owner}/${input.repo}`;
   const outcomes: CredentialOutcome[] = [];
   const target = { owner: input.owner, repo: input.repo };
 
-  try {
-    const { putRepoVariable } = await import("./github-variables.server");
-    await putRepoVariable({ ...target, name: CI_PROJECT_REF_VARIABLE, value: input.projectRef });
-  } catch (e) {
-    outcomes.push({
-      repo: label,
-      secret: CI_PROJECT_REF_VARIABLE,
-      state: "failed",
-      reason: e instanceof Error ? e.message : String(e),
-    });
+  if (input.variables?.[CI_PROJECT_REF_VARIABLE] !== input.projectRef) {
+    try {
+      const { putRepoVariable } = await import("./github-variables.server");
+      await putRepoVariable({ ...target, name: CI_PROJECT_REF_VARIABLE, value: input.projectRef });
+    } catch (e) {
+      outcomes.push({
+        repo: label,
+        secret: CI_PROJECT_REF_VARIABLE,
+        state: "failed",
+        reason: e instanceof Error ? e.message : String(e),
+      });
+    }
   }
 
   if ("reason" in input.password) {
@@ -222,7 +239,12 @@ export async function distributeCloneCiCredentials(input: {
         };
     outcomes.push(
       composed.ok
-        ? await writeEnvironmentSecret({ ...target, name: CI_DB_URL_SECRET, value: composed.url })
+        ? await writeEnvironmentSecret({
+            ...target,
+            name: CI_DB_URL_SECRET,
+            value: composed.url,
+            changed: input.password.changed === true,
+          })
         : { repo: label, secret: CI_DB_URL_SECRET, state: "cannot", reason: composed.reason },
     );
   }
@@ -236,7 +258,12 @@ export async function distributeCloneCiCredentials(input: {
     });
     outcomes.push(
       key.ok
-        ? await writeEnvironmentSecret({ ...target, name: CI_SERVICE_ROLE_SECRET, value: key.key })
+        ? await writeEnvironmentSecret({
+            ...target,
+            name: CI_SERVICE_ROLE_SECRET,
+            value: key.key,
+            changed: false,
+          })
         : { repo: label, secret: CI_SERVICE_ROLE_SECRET, state: "cannot", reason: key.reason },
     );
   }
@@ -319,12 +346,12 @@ export async function reconcileCloneCiCredentials(supabase: Db): Promise<Credent
       continue;
     }
 
+    // One read of the repository's variables serves the password decision and
+    // the project-ref variable both.
+    const variables = await listRepoVariables({ owner, repo });
     let password = readStored(backend.db_pass, "database password");
     if ("value" in password && !password.value) {
-      const decision = decidePasswordSet({
-        passwordStored: false,
-        variables: await listRepoVariables({ owner, repo }),
-      });
+      const decision = decidePasswordSet({ passwordStored: false, variables });
       if (!decision.set) {
         password = {
           state: "cannot",
@@ -333,7 +360,7 @@ export async function reconcileCloneCiCredentials(supabase: Db): Promise<Credent
       } else {
         const set = await setCloneDbPassword({ supabase, cloneId: clone.id, projectRef });
         if (set.ok) {
-          password = { value: set.password };
+          password = { value: set.password, changed: true };
           sweep.passwordsSet.push(label);
           await writeAuditLog({
             action: "clone_db_password_set",
@@ -358,6 +385,7 @@ export async function reconcileCloneCiCredentials(supabase: Db): Promise<Credent
       projectRef,
       password,
       serviceRoleKey: readStored(backend.service_role_key, "service-role key"),
+      variables,
     });
     for (const outcome of outcomes) recordOutcome(sweep, outcome);
   }

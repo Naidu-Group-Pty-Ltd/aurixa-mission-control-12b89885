@@ -341,7 +341,28 @@ describe("putEnvironmentSecret", () => {
     request.mockImplementation((route: string) =>
       route.startsWith("GET") ? { data: { key: publicKey, key_id: "kid" } } : { data: {} },
     );
-    expect((await putEnvironmentSecret(input)).created).toBe(false);
+    expect(await putEnvironmentSecret(input)).toEqual({ created: false, written: true });
+  });
+
+  it("leaves a secret written inside the window alone, with one read", async () => {
+    const recently = new Date(Date.now() - 60_000).toISOString();
+    request.mockImplementation((route: string) =>
+      route.startsWith("GET") ? { data: { updated_at: recently } } : { data: {} },
+    );
+    const r = await putEnvironmentSecret({ ...input, reassertAfterMs: 24 * 3600_000 });
+    expect(r).toEqual({ created: false, written: false });
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it("writes one again once the window has passed", async () => {
+    const longAgo = new Date(Date.now() - 2 * 24 * 3600_000).toISOString();
+    request.mockImplementation((route: string) => {
+      if (route.endsWith("/secrets/public-key")) return { data: { key: publicKey, key_id: "kid" } };
+      if (route.startsWith("GET")) return { data: { updated_at: longAgo } };
+      return { data: {} };
+    });
+    const r = await putEnvironmentSecret({ ...input, reassertAfterMs: 24 * 3600_000 });
+    expect(r).toEqual({ created: false, written: true });
   });
 
   it("creates an environment that does not exist yet, with no rules, and writes into it", async () => {
