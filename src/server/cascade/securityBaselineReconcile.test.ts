@@ -1183,4 +1183,26 @@ describe("given both trees, the graph is attributed caller by caller", () => {
     expect(direct).toHaveLength(2);
     for (const call of direct) expect(call.slice(0, call.indexOf("})"))).toContain("sources: {");
   });
+
+  it("reads what a mixed caller needs with each listing's sizes, and per file past the batch", () => {
+    // Cascade #121 to `npc-crm-independent-6505dc`, 26 Oct 2026: every want
+    // was handed over with `size: undefined`, which the batch road drops, so
+    // nothing was read and the inventory refused as unread. And the one file
+    // the batch cannot serve whole (`ai-dashboard-agent/index.ts`, 1.7 MB)
+    // needs the per-file read after it.
+    const engine = readFileSync(join(process.cwd(), "src/server/cascade-engine.server.ts"), "utf8");
+    const start = engine.indexOf("const reconcileInventoryReading = async (");
+    expect(start).toBeGreaterThan(-1);
+    const helper = engine.slice(start, engine.indexOf("\n  };\n", start));
+    expect(helper).not.toContain("size: undefined");
+    expect(helper).not.toContain("readBlobTextsBatched(");
+    expect(helper).toContain(
+      "wantsFrom(needs.prime, args.primeTree, primeSizeByPath, primeModeByPath)",
+    );
+    expect(helper).toContain(
+      "wantsFrom(needs.clone, args.cloneTree, cloneSizeByPath, cloneModeByPath)",
+    );
+    expect(helper.match(/readBlobTextsExact\(/g)).toHaveLength(2);
+    expect(helper).toContain("size: sizes?.get(path)");
+  });
 });

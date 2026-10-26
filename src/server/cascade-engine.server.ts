@@ -32,6 +32,7 @@ import {
   OversizeFileError,
   copyBlobByStream,
   readBlobTextsBatched,
+  readBlobTextsExact,
   repoFileFromExactText,
   type RepoRef,
 } from "./github-app.server";
@@ -3721,15 +3722,39 @@ export async function processClone(args: {
         reason: `${first.reason}: settling it needs ${wanted} files read, over the ${MAX_BASELINE_SOURCE_READS} a pass reads for it`,
       };
     }
-    const wantsFrom = (paths: readonly string[], tree: ReadonlyMap<string, string> | null) =>
+    // Each want carries its listing's size: the batch road drops a want with
+    // none, and until 26 Oct 2026 every want here had none, so nothing was
+    // read and every mixed caller refused as unread (cascade #121 to
+    // `npc-crm-independent-6505dc`). What the batch cannot serve whole —
+    // `ai-dashboard-agent/index.ts` is 1.7 MB on both sides — is read per
+    // file by the same id (`readBlobTextsExact`). A link is not the file the
+    // generator reads, so only a regular file is asked for.
+    const wantsFrom = (
+      paths: readonly string[],
+      tree: ReadonlyMap<string, string> | null | undefined,
+      sizes: ReadonlyMap<string, number> | null,
+      modes: ReadonlyMap<string, string> | null,
+    ): TextWant[] =>
       paths.flatMap((path) => {
         const sha = tree?.get(path);
-        return sha ? [{ path, sha, size: undefined }] : [];
+        return sha && isBatchableTextMode(modes?.get(path))
+          ? [{ path, sha, size: sizes?.get(path) }]
+          : [];
       });
     try {
       const [fromPrime, fromClone] = await Promise.all([
-        readBlobTextsBatched(octokit, primeRef, wantsFrom(needs.prime, primeShaByPath)),
-        readBlobTextsBatched(octokit, cloneRef, wantsFrom(needs.clone, cloneShaByPath ?? null)),
+        readBlobTextsExact(
+          octokit,
+          primeRef,
+          wantsFrom(needs.prime, args.primeTree, primeSizeByPath, primeModeByPath),
+          { maxBytes: CASCADE_MAX_FILE_BYTES },
+        ),
+        readBlobTextsExact(
+          octokit,
+          cloneRef,
+          wantsFrom(needs.clone, args.cloneTree, cloneSizeByPath, cloneModeByPath),
+          { maxBytes: CASCADE_MAX_FILE_BYTES },
+        ),
       ]);
       for (const [path, text] of fromPrime) prime.set(path, text);
       for (const [path, text] of fromClone) cloneSide.set(path, text);

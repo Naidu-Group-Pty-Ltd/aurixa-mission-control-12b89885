@@ -469,6 +469,50 @@ export async function readBlobTextsBatched(
 }
 
 /**
+ * The exact text of every want that can be had: the batch road first, then
+ * the per-file read it leaves its callers, by the same blob id.
+ *
+ * For a caller that holds a listing and nothing else to fall back on. What
+ * `readBlobTextsBatched` leaves unanswered — a file larger than GraphQL serves
+ * whole, a batch that failed — is fetched from the blobs API by the id the
+ * listing gave, and kept only where the bytes' id is that id, so a text here
+ * is the file or it is absent. A want the listing gave no size for, or one
+ * over `maxBytes`, is never read whole and stays absent, as does any read
+ * that fails: absent is "not read", and the caller says so.
+ */
+export async function readBlobTextsExact(
+  octokit: Octokit,
+  ref: Pick<RepoRef, "owner" | "repo">,
+  wants: readonly import("@/server/cascade/primeTextBatch.pure").TextWant[],
+  opts: { maxBytes: number },
+): Promise<Map<string, string>> {
+  const { gitBlobSha } = await import("@/server/cascade/gitBlobSha.pure");
+  const { mapWithConcurrency } = await import("@/lib/concurrency");
+  const texts = await readBlobTextsBatched(octokit, ref, wants);
+  const asked = new Set<string>();
+  const rest = wants.filter((want) => {
+    if (texts.has(want.path) || asked.has(want.path)) return false;
+    asked.add(want.path);
+    return typeof want.size === "number" && want.size >= 0 && want.size <= opts.maxBytes;
+  });
+  await mapWithConcurrency(rest, 8, async (want) => {
+    try {
+      const { data } = await octokit.git.getBlob({
+        owner: ref.owner,
+        repo: ref.repo,
+        file_sha: want.sha,
+      });
+      if (data.encoding !== "base64") return;
+      const text = Buffer.from(data.content, "base64").toString("utf8");
+      if (gitBlobSha(text) === want.sha) texts.set(want.path, text);
+    } catch {
+      // Unread, and the caller's refusal names it.
+    }
+  });
+  return texts;
+}
+
+/**
  * A `RepoFile` for a text already proved to be the blob with this id.
  *
  * Only for texts `readBlobTextsBatched` returned, whose blob id was checked
