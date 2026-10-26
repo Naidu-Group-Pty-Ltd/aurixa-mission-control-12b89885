@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { writeAuditLog } from "@/server/audit.server";
 import { verifyCronAuth } from "@/server/cron-auth.server";
+import { beginGithubLane } from "@/server/githubUsageMeter";
 
 // Cron-invoked endpoint. pg_cron POSTs here every 30 minutes.
 // Auth: requires the shared CRON_SECRET as a Bearer token.
@@ -32,17 +33,24 @@ import { verifyCronAuth } from "@/server/cron-auth.server";
 // is a session-pooler database URL and never a Supabase access token — see
 // `cloneCiCredential.pure.ts`, which records why a token cannot be minted at
 // scale and must not be put in a tenant's repository even if it could.
+//
+// And last, it reads back what that CI then DID (`cloneCiWatch.server.ts`): a
+// scheduled workflow failing or stopped on a clone, or a protected workflow
+// that is no longer the prime's. Configuring a job is not the job running —
+// every clone's sanctions, PEP, RBA and drift jobs failed for weeks on
+// credentials this pass did not yet distribute, and nothing said so.
 export const Route = createFileRoute("/hooks/clone-deployer-declaration-reconcile")({
   server: {
     handlers: {
       POST: async ({ request }) => {
         const auth = verifyCronAuth(request);
         if (!auth.ok) return auth.response;
+        // Attribute this invocation's App-installation calls (githubUsageMeter.ts).
+        beginGithubLane("clone-deployer-declaration-reconcile");
 
         try {
-          const { reconcileCloneDeployerDeclarations } = await import(
-            "@/server/cloneDeployerDeclaration.server"
-          );
+          const { reconcileCloneDeployerDeclarations } =
+            await import("@/server/cloneDeployerDeclaration.server");
           const { sweepIsNoteworthy } = await import("@/server/cloneDeployerDeclaration.pure");
           const report = await reconcileCloneDeployerDeclarations(supabaseAdmin);
 
@@ -60,12 +68,10 @@ export const Route = createFileRoute("/hooks/clone-deployer-declaration-reconcil
           // cannot be reached. Losing the second must not cost the first.
           let credentials: unknown = null;
           try {
-            const { reconcileCloneCiCredentials } = await import(
-              "@/server/cloneCiCredential.server"
-            );
-            const { sweepIsNoteworthy: credentialSweepIsNoteworthy } = await import(
-              "@/server/cloneCiCredential.pure"
-            );
+            const { reconcileCloneCiCredentials } =
+              await import("@/server/cloneCiCredential.server");
+            const { sweepIsNoteworthy: credentialSweepIsNoteworthy } =
+              await import("@/server/cloneCiCredential.pure");
             const credentialReport = await reconcileCloneCiCredentials(supabaseAdmin);
             credentials = credentialReport;
             if (credentialSweepIsNoteworthy(credentialReport)) {
@@ -81,9 +87,46 @@ export const Route = createFileRoute("/hooks/clone-deployer-declaration-reconcil
             credentials = { error: message };
           }
 
+          // Never allowed to fail either pass above it, and the first to yield
+          // the installation budget: it only reads, and a report thirty minutes
+          // late costs nothing a cascade starved of calls would not cost more.
+          let ciWatch: unknown = null;
+          try {
+            const { decideSpend } = await import("@/server/cascade/githubBudget.pure");
+            const { readGitHubRemaining } = await import("@/server/githubAllowance.server");
+            const spend = decideSpend({ role: "scan", remaining: await readGitHubRemaining() });
+            if (!spend.proceed) {
+              ciWatch = { skipped: spend.why };
+            } else {
+              beginGithubLane("clone-ci-watch");
+              const { sweepCloneCi } = await import("@/server/cloneCiWatch.server");
+              const { ciWatchIsNoteworthy } = await import("@/server/cloneCiWatch.pure");
+              const watchReport = await sweepCloneCi(supabaseAdmin);
+              ciWatch = watchReport;
+              if (ciWatchIsNoteworthy(watchReport)) {
+                await writeAuditLog({
+                  action: "clone_ci_watch_cron",
+                  entityType: "cron",
+                  metadata: watchReport as unknown as Record<string, unknown>,
+                });
+              }
+            }
+          } catch (e) {
+            const message = e instanceof Error ? e.message : String(e);
+            console.error("[hooks/clone-deployer-declaration-reconcile] ci watch:", message);
+            ciWatch = { error: message };
+            // A watch that cannot look is the one thing the watch itself cannot
+            // report, so it is recorded here.
+            await writeAuditLog({
+              action: "clone_ci_watch_cron",
+              entityType: "cron",
+              metadata: { error: message },
+            });
+          }
+
           // 200 with the refusals in the body rather than 500: a repository
           // Mission Control may not write is a state, not a failed run.
-          return new Response(JSON.stringify({ success: true, ...report, credentials }), {
+          return new Response(JSON.stringify({ success: true, ...report, credentials, ciWatch }), {
             headers: { "Content-Type": "application/json" },
           });
         } catch (e) {

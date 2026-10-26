@@ -1,0 +1,17 @@
+-- @asserts enum:notification_kind
+--
+-- The alarm the clone CI watch raises (src/server/cloneCiWatch.server.ts): a
+-- clone repository's scheduled workflow has failed twice running with no
+-- success since, GitHub has stopped scheduling one, or a workflow the clone
+-- holds `protected` is no longer the prime's copy. Until now nothing raised
+-- any of these. Measured 26 Oct 2026: every clone's sanctions, PEP, RBA and
+-- migration-drift jobs had been failing for weeks, and nobody was told.
+--
+-- Its own value rather than `drift_high` or `migration_drift`:
+-- `notification_preferences.muted_kinds` is keyed on this enum, so a kind
+-- shared between two meanings is a mute that silences both — and `drift_high`
+-- is the channel with thousands of unread rows.
+--
+-- ALTER TYPE lives in its own migration on purpose: a new enum value cannot be
+-- added and used in the same transaction.
+ALTER TYPE public.notification_kind ADD VALUE IF NOT EXISTS 'clone_ci_attention';

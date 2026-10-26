@@ -1151,4 +1151,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20261020100500",
     assertions: [{ kind: "column", table: "cascade_results", column: "pass_trace" }],
   },
+  {
+    migration: "20261026220000_clone_ci_notification_kind.sql",
+    version: "20261026220000",
+    assertions: [{ kind: "enum", type: "notification_kind" }],
+  },
 ];
