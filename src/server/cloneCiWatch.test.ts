@@ -5,10 +5,13 @@ import {
   ciFingerprint,
   ciSeverity,
   ciWatchIsNoteworthy,
-  decideCiReport,
+  declaresSchedule,
   describeCiFinding,
   findingKey,
+  findingsToAnnounce,
   judgeCloneCi,
+  readCiObservation,
+  settleCiReport,
   type CiFinding,
   type CloneCiInputs,
   type WorkflowRunFact,
@@ -189,6 +192,46 @@ describe("a scheduled workflow", () => {
   });
 });
 
+describe("a stopped workflow", () => {
+  it("stays stopped after its runs have aged out of the window (Codex P2 on #365)", () => {
+    // A stopped workflow runs nothing, so the bounded run listing loses it;
+    // the file's own schedule is what keeps the finding standing.
+    expect(
+      findings({
+        scheduledRuns: [run(SANCTIONS, "2026-10-25T20:45:00Z", "success")],
+        workflows: [
+          { path: SANCTIONS, name: "Refresh sanctions", state: "active" },
+          { path: DRIFT, name: "Migration drift", state: "disabled_inactivity", hasSchedule: true },
+        ],
+      }),
+    ).toEqual([
+      { kind: "stopped", path: DRIFT, name: "Migration drift", state: "disabled_inactivity" },
+    ]);
+  });
+
+  it("is not a finding when the disabled workflow never had a schedule", () => {
+    expect(
+      findings({
+        workflows: [
+          {
+            path: ".github/workflows/manual.yml",
+            name: "Manual",
+            state: "disabled_manually",
+            hasSchedule: false,
+          },
+        ],
+      }),
+    ).toEqual([]);
+  });
+
+  it("knows a schedule only by its key", () => {
+    expect(declaresSchedule("on:\n  schedule:\n    - cron: '10 19 * * *'\n")).toBe(true);
+    expect(declaresSchedule("on:\n  'schedule':\n    - cron: '0 0 * * 0'\n")).toBe(true);
+    expect(declaresSchedule("on:\n  workflow_dispatch:\n# schedule removed 3 Oct\n")).toBe(false);
+    expect(declaresSchedule("on: [push, workflow_dispatch]\n")).toBe(false);
+  });
+});
+
 describe("a protected workflow", () => {
   it("differs when both sides carry it and the blobs are not the same", () => {
     expect(
@@ -254,44 +297,64 @@ describe("what is recorded and what is announced", () => {
     lastRunUrl: "https://github.com/o/r/actions/runs/1",
     lastSuccessAt: null,
   });
+  const told = (findings: CiFinding[]) => ({
+    fingerprint: ciFingerprint(findings),
+    announced: findings.map(findingKey).sort(),
+  });
 
-  it("announces everything on a clone never watched before", () => {
-    const d = decideCiReport({ previous: null, findings: [failing(SANCTIONS, 3)] });
-    expect(d.record).toBe(true);
-    expect(d.announce.map(findingKey)).toEqual([`failing:${SANCTIONS}`]);
+  it("announces everything on a clone never watched before, and records it as told", () => {
+    const findings = [failing(SANCTIONS, 3)];
+    const announce = findingsToAnnounce({ previous: null, findings });
+    expect(announce.map(findingKey)).toEqual([`failing:${SANCTIONS}`]);
+    expect(
+      settleCiReport({ previous: null, findings, announced: announce, delivered: true }),
+    ).toEqual({
+      record: true,
+      observation: told(findings),
+    });
   });
 
   it("records nothing for a clean clone that was clean", () => {
-    expect(decideCiReport({ previous: null, findings: [] })).toEqual({
-      fingerprint: "",
-      record: false,
-      announce: [],
-    });
+    expect(findingsToAnnounce({ previous: null, findings: [] })).toEqual([]);
+    expect(
+      settleCiReport({ previous: null, findings: [], announced: [], delivered: true }).record,
+    ).toBe(false);
   });
 
   it("does not announce a job again because it failed one more night", () => {
-    const previous = ciFingerprint([failing(SANCTIONS, 3)]);
-    const d = decideCiReport({ previous, findings: [failing(SANCTIONS, 4)] });
-    expect(d.record).toBe(false);
-    expect(d.announce).toEqual([]);
+    const previous = told([failing(SANCTIONS, 3)]);
+    const findings = [failing(SANCTIONS, 4)];
+    expect(findingsToAnnounce({ previous, findings })).toEqual([]);
+    expect(settleCiReport({ previous, findings, announced: [], delivered: true }).record).toBe(
+      false,
+    );
   });
 
   it("announces only what is new, and nothing when one of two clears", () => {
-    const both = ciFingerprint([failing(SANCTIONS, 3), failing(DRIFT, 3)]);
-    const shrunk = decideCiReport({ previous: both, findings: [failing(DRIFT, 4)] });
-    expect(shrunk.record).toBe(true);
-    expect(shrunk.announce).toEqual([]);
+    const both = told([failing(SANCTIONS, 3), failing(DRIFT, 3)]);
+    const shrunk = [failing(DRIFT, 4)];
+    expect(findingsToAnnounce({ previous: both, findings: shrunk })).toEqual([]);
+    expect(
+      settleCiReport({ previous: both, findings: shrunk, announced: [], delivered: true }),
+    ).toEqual({
+      record: true,
+      observation: told(shrunk),
+    });
 
-    const grown = decideCiReport({
-      previous: ciFingerprint([failing(DRIFT, 3)]),
+    const grown = findingsToAnnounce({
+      previous: told([failing(DRIFT, 3)]),
       findings: [failing(DRIFT, 4), failing(SANCTIONS, 2)],
     });
-    expect(grown.announce.map(findingKey)).toEqual([`failing:${SANCTIONS}`]);
+    expect(grown.map(findingKey)).toEqual([`failing:${SANCTIONS}`]);
   });
 
   it("records a clearance and announces nothing", () => {
-    const d = decideCiReport({ previous: ciFingerprint([failing(SANCTIONS, 3)]), findings: [] });
-    expect(d).toEqual({ fingerprint: "", record: true, announce: [] });
+    const previous = told([failing(SANCTIONS, 3)]);
+    expect(findingsToAnnounce({ previous, findings: [] })).toEqual([]);
+    expect(settleCiReport({ previous, findings: [], announced: [], delivered: true })).toEqual({
+      record: true,
+      observation: { fingerprint: "", announced: [] },
+    });
   });
 
   it("treats the prime moving a protected workflow as news again", () => {
@@ -301,11 +364,59 @@ describe("what is recorded and what is announced", () => {
       primeSha,
       cloneSha: "c".repeat(40),
     });
-    const d = decideCiReport({
-      previous: ciFingerprint([at("a".repeat(40))]),
-      findings: [at("b".repeat(40))],
+    expect(
+      findingsToAnnounce({ previous: told([at("a".repeat(40))]), findings: [at("b".repeat(40))] }),
+    ).toHaveLength(1);
+  });
+
+  it("keeps a finding whose notification did not land, and offers it again next pass", () => {
+    // Codex P1 on #365: a record written regardless of delivery read "already
+    // announced" and silenced a standing failure until it changed.
+    const findings = [failing(SANCTIONS, 3)];
+    const announce = findingsToAnnounce({ previous: null, findings });
+    const lost = settleCiReport({
+      previous: null,
+      findings,
+      announced: announce,
+      delivered: false,
     });
-    expect(d.announce).toHaveLength(1);
+    expect(lost).toEqual({
+      record: true,
+      observation: { fingerprint: ciFingerprint(findings), announced: [] },
+    });
+
+    const again = findingsToAnnounce({
+      previous: lost.observation,
+      findings: [failing(SANCTIONS, 4)],
+    });
+    expect(again.map(findingKey)).toEqual([`failing:${SANCTIONS}`]);
+    // Still failing to land: retried each pass, without a row per attempt.
+    expect(
+      settleCiReport({ previous: lost.observation, findings, announced: again, delivered: false })
+        .record,
+    ).toBe(false);
+    // Landed: written down as told, and quiet from then on.
+    const landed = settleCiReport({
+      previous: lost.observation,
+      findings,
+      announced: again,
+      delivered: true,
+    });
+    expect(landed).toEqual({ record: true, observation: told(findings) });
+  });
+
+  it("reads a record written before delivery was tracked as wholly told", () => {
+    const fingerprint = ciFingerprint([failing(SANCTIONS, 3)]);
+    expect(readCiObservation({ fingerprint })).toEqual({
+      fingerprint,
+      announced: [`failing:${SANCTIONS}`],
+    });
+    expect(readCiObservation({ fingerprint, announced: [] })).toEqual({
+      fingerprint,
+      announced: [],
+    });
+    expect(readCiObservation(null)).toBeNull();
+    expect(readCiObservation({ other: 1 })).toBeNull();
   });
 });
 
@@ -342,11 +453,12 @@ describe("what an operator reads", () => {
     ).toBe("error");
   });
 
-  it("files a row of its own only when the watch could not look", () => {
+  it("files a row of its own only when the watch could not look, or could not tell", () => {
     const base = {
       clones: 4,
       attention: 1,
       announced: 2,
+      undelivered: 0,
       cleared: 0,
       unreadable: 0,
       failed: 0,
@@ -355,5 +467,6 @@ describe("what an operator reads", () => {
     expect(ciWatchIsNoteworthy(base)).toBe(false);
     expect(ciWatchIsNoteworthy({ ...base, unreadable: 1 })).toBe(true);
     expect(ciWatchIsNoteworthy({ ...base, failed: 1 })).toBe(true);
+    expect(ciWatchIsNoteworthy({ ...base, undelivered: 1 })).toBe(true);
   });
 });

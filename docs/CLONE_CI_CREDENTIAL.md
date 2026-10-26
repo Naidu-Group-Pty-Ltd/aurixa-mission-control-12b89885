@@ -178,11 +178,11 @@ the workflow list, and — where the clone protects any path — its
 `.github/workflows`, against the prime's read once for the pass. It finds three
 things:
 
-| finding   | when                                                                                                                   |
-| --------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `failing` | the last two scheduled runs of a workflow failed, with no success of that workflow on the default branch since         |
-| `stopped` | GitHub has disabled a scheduled workflow (`disabled_inactivity`, `disabled_manually`): nothing fails, and nothing runs |
-| `differs` | a workflow the clone holds `protected` is not the prime's copy — the cascade withholds it without comment, by design   |
+| finding   | when                                                                                                                                                                                                                                                             |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `failing` | the last two scheduled runs of a workflow failed, with no success of that workflow on the default branch since                                                                                                                                                   |
+| `stopped` | GitHub has disabled a workflow whose file declares a schedule (`disabled_inactivity`, `disabled_manually`): nothing fails, and nothing runs. Judged from the workflow list and the file, never from the run window, which a stopped workflow leaves within weeks |
+| `differs` | a workflow the clone holds `protected` is not the prime's copy — the cascade withholds it without comment, by design                                                                                                                                             |
 
 Three rules make it worth reading:
 
@@ -195,6 +195,9 @@ Three rules make it worth reading:
    every night is one announcement, not one a night. A clearance is recorded and
    not announced. A `differs` finding carries both blobs, so the prime moving a
    protected workflow is news again — that is the moment somebody has to decide.
+   Only what LANDED counts as told: the record keeps what was observed and what
+   was announced apart, so a notification that fails to insert is tried again
+   on the next pass instead of being recorded as said.
 3. **A failed read is not a clean clone.** Any input that could not be read makes
    the clone `unreadable` for the pass: nothing is recorded, its standing
    findings stand, and a pass with any unreadable clone files a

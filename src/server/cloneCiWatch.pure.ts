@@ -97,8 +97,34 @@ export type WorkflowRunFact = {
   htmlUrl: string;
 };
 
+/** Whether GitHub has stopped running a workflow, as opposed to it being gone. */
+export function isStoppedState(state: string): boolean {
+  return STOPPED_STATES.has(state);
+}
+
+/**
+ * Whether a workflow file declares a schedule.
+ *
+ * `schedule` takes a list of crons, so it is always written as a key; the flow
+ * form `on: [push, schedule]` cannot carry one.
+ */
+export function declaresSchedule(workflowText: string): boolean {
+  return /^\s*["']?schedule["']?\s*:/m.test(workflowText);
+}
+
 /** One workflow, as `GET /repos/{o}/{r}/actions/workflows` reports it. */
-export type WorkflowFact = { path: string; name: string; state: string };
+export type WorkflowFact = {
+  path: string;
+  name: string;
+  state: string;
+  /**
+   * Whether the file itself declares a schedule. Read only for a workflow
+   * GitHub has stopped — usually none — because a stopped workflow runs
+   * nothing, so the run listing cannot say whether it ever had a schedule
+   * once its last runs have aged out of the window.
+   */
+  hasSchedule?: boolean;
+};
 
 /** A protected workflow path, and the blob each side holds (null: absent). */
 export type ProtectedWorkflowFact = {
@@ -172,19 +198,25 @@ export function judgeCloneCi(input: CloneCiInputs): CloneCiReading {
     scheduledByPath.set(run.path, list);
   }
 
+  // Stopped is judged from the workflow listing, which is not bounded by the
+  // run window. A stopped workflow produces no runs, so the window would lose
+  // it within weeks and the finding would read as cleared while GitHub still
+  // had it switched off. A disabled workflow with no schedule (dispatch-only)
+  // stops nothing that was going to run, and is not a finding.
+  for (const w of input.workflows) {
+    if (!STOPPED_STATES.has(w.state)) continue;
+    if (scheduledByPath.has(w.path) || w.hasSchedule === true) {
+      findings.push({ kind: "stopped", path: w.path, name: w.name, state: w.state });
+    }
+  }
+
   for (const [path, scheduled] of scheduledByPath) {
     const workflow = stateOf.get(path);
     // A workflow the repository no longer lists, or lists as deleted, cannot
     // be failing: its red history belongs to a file that is gone. Without this
     // a workflow removed BECAUSE it was wrong would be reported until its runs
-    // aged out of the window.
-    if (!workflow || workflow.state === "deleted") continue;
-
-    if (STOPPED_STATES.has(workflow.state)) {
-      findings.push({ kind: "stopped", path, name: workflow.name, state: workflow.state });
-      continue;
-    }
-    if (workflow.state !== "active") continue;
+    // aged out of the window. A stopped one was judged above.
+    if (!workflow || workflow.state !== "active") continue;
 
     const newestScheduled = [...scheduled].sort(byNewest)[0];
     if (input.now - Date.parse(newestScheduled.createdAt) > STALE_AFTER_DAYS * 86_400_000) continue;
@@ -262,40 +294,84 @@ export function ciFingerprint(findings: readonly CiFinding[]): string {
   return [...new Set(findings.map(findingKey))].sort().join("|");
 }
 
-export type CiReportDecision = {
-  fingerprint: string;
-  /** Write the observation down: what this clone's CI owes has changed. */
-  record: boolean;
-  /** The findings nobody has been told about yet. Empty: tell nobody. */
-  announce: CiFinding[];
-};
+/**
+ * What a clone's record says, as two separate facts.
+ *
+ * `fingerprint` is what was OBSERVED. `announced` is the part of it somebody
+ * has actually been TOLD — the keys whose notification landed. They are kept
+ * apart because a notification can fail where the observation does not: a
+ * notification that never arrived must be tried again, and a record that
+ * conflated the two would read "already announced" for ever.
+ */
+export type CiObservation = { fingerprint: string; announced: readonly string[] };
 
 /**
- * Whether a reading is worth writing down, and which part is news.
+ * The observation an audit row carries, or null when it carries none.
  *
- * `previous` is the fingerprint recorded when this clone's findings last
- * changed, and null when it has never been watched. Only a finding absent from
- * it is announced: a clearance is recorded and not announced (the person who
- * fixed it knows), and a reading that LOST one of two failures is not a reason
- * to repeat the one still standing. A failure that clears and comes back has a
- * recorded clearance in between, so it is news again.
+ * A row written before `announced` existed claimed its whole fingerprint as
+ * told, which is how it is read back.
  */
-export function decideCiReport(input: {
-  previous: string | null;
+export function readCiObservation(metadata: unknown): CiObservation | null {
+  const m = metadata as { fingerprint?: unknown; announced?: unknown } | null;
+  if (typeof m?.fingerprint !== "string") return null;
+  const announced = Array.isArray(m.announced)
+    ? m.announced.filter((k): k is string => typeof k === "string")
+    : m.fingerprint.split("|").filter(Boolean);
+  return { fingerprint: m.fingerprint, announced };
+}
+
+/**
+ * The findings nobody has been told about yet, or `previous` null when this
+ * clone has never been watched. A standing finding whose last notification did
+ * not land is in here again, which is the point.
+ */
+export function findingsToAnnounce(input: {
+  previous: CiObservation | null;
   findings: readonly CiFinding[];
-}): CiReportDecision {
+}): CiFinding[] {
+  const told = new Set(input.previous?.announced ?? []);
+  return input.findings.filter((f) => !told.has(findingKey(f)));
+}
+
+/**
+ * What to write down once the announcement has been attempted.
+ *
+ * `announced` keeps only findings still standing, so a clearance forgets it:
+ * a failure that clears and comes back is news again. Nothing is written for
+ * a clean clone that was clean, nor for a pass that changed neither fact — so
+ * a notification that keeps failing is retried every pass without a row per
+ * attempt. A clearance is recorded and never announced (whoever fixed it
+ * knows), and losing one of two failures repeats nothing about the other.
+ */
+export function settleCiReport(input: {
+  previous: CiObservation | null;
+  findings: readonly CiFinding[];
+  announced: readonly CiFinding[];
+  delivered: boolean;
+}): { record: boolean; observation: CiObservation } {
   const fingerprint = ciFingerprint(input.findings);
-  const known = new Set((input.previous ?? "").split("|").filter(Boolean));
-  return {
-    fingerprint,
-    record: fingerprint !== (input.previous ?? ""),
-    announce: input.findings.filter((f) => !known.has(findingKey(f))),
-  };
+  const standing = new Set(input.findings.map(findingKey));
+  const told = new Set(input.previous?.announced ?? []);
+  if (input.delivered) for (const f of input.announced) told.add(findingKey(f));
+  const announced = [...told].filter((k) => standing.has(k)).sort();
+
+  const previous = input.previous ?? { fingerprint: "", announced: [] };
+  const record =
+    fingerprint !== previous.fingerprint ||
+    announced.join("|") !== [...previous.announced].sort().join("|");
+  return { record, observation: { fingerprint, announced } };
 }
 
 export type CloneCiOutcome =
   | { clone: string; outcome: "clean" }
-  | { clone: string; outcome: "attention"; findings: CiFinding[]; announced: number }
+  | {
+      clone: string;
+      outcome: "attention";
+      findings: CiFinding[];
+      announced: number;
+      /** Findings whose notification did not land this pass, and will be retried. */
+      undelivered: number;
+    }
   | { clone: string; outcome: "cleared" }
   | { clone: string; outcome: "unreadable"; missing: string[] }
   | { clone: string; outcome: "failed"; error: string };
@@ -306,6 +382,8 @@ export type CloneCiWatchReport = {
   attention: number;
   /** Findings announced this pass. */
   announced: number;
+  /** Findings whose notification did not land this pass. */
+  undelivered: number;
   /** Clones whose findings cleared this pass. */
   cleared: number;
   /** Clones the watch could not read this pass, and so did not judge. */
@@ -318,10 +396,11 @@ export type CloneCiWatchReport = {
  * Whether a pass deserves a row of its own beside the per-clone records.
  *
  * Every finding already lands on its clone's own history, and a quiet pass is
- * almost every pass. What has no other record is the watch failing to look.
+ * almost every pass. What has no other record is the watch failing to look,
+ * or failing to tell.
  */
 export function ciWatchIsNoteworthy(report: CloneCiWatchReport): boolean {
-  return report.unreadable > 0 || report.failed > 0;
+  return report.unreadable > 0 || report.failed > 0 || report.undelivered > 0;
 }
 
 const short = (sha: string) => sha.slice(0, 7);

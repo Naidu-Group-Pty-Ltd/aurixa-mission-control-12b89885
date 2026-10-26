@@ -22,11 +22,17 @@ import { getAppOctokit } from "./github-app.server";
 import { notifyOperators, writeAuditLog } from "./audit.server";
 import {
   CLONE_CI_WATCH_ACTION,
+  ciFingerprint,
   ciSeverity,
-  decideCiReport,
+  declaresSchedule,
   describeCiFinding,
+  findingsToAnnounce,
+  isStoppedState,
   judgeCloneCi,
+  readCiObservation,
+  settleCiReport,
   type CiFinding,
+  type CiObservation,
   type CloneCiOutcome,
   type CloneCiWatchReport,
   type ProtectedWorkflowFact,
@@ -111,15 +117,56 @@ async function readRuns(
   }
 }
 
+/**
+ * The workflow list, and for each workflow GitHub has stopped, whether its file
+ * declares a schedule — read from the file, because a stopped workflow leaves
+ * no runs to say so. On a healthy repository that is no extra read at all.
+ */
 async function readWorkflows(
   octokit: CiOctokit,
-  repo: { owner: string; repo: string },
+  repo: { owner: string; repo: string; branch: string },
 ): Promise<WorkflowFact[] | null> {
   try {
-    const { data } = await octokit.actions.listRepoWorkflows({ ...repo, per_page: 100 });
-    return (data.workflows ?? []).map((w) => ({ path: w.path, name: w.name, state: w.state }));
+    const { data } = await octokit.actions.listRepoWorkflows({
+      owner: repo.owner,
+      repo: repo.repo,
+      per_page: 100,
+    });
+    const workflows: WorkflowFact[] = (data.workflows ?? []).map((w) => ({
+      path: w.path,
+      name: w.name,
+      state: w.state,
+    }));
+    for (const w of workflows) {
+      if (!isStoppedState(w.state)) continue;
+      const text = await readText(octokit, { ...repo, path: w.path });
+      // A file that could not be read is not a file without a schedule.
+      if (text === null) return null;
+      w.hasSchedule = text !== "" && declaresSchedule(text);
+    }
+    return workflows;
   } catch {
     return null;
+  }
+}
+
+/** A file's text; "" when the file is gone (404), null when it could not be read. */
+async function readText(
+  octokit: CiOctokit,
+  file: { owner: string; repo: string; branch: string; path: string },
+): Promise<string | null> {
+  try {
+    const { data } = await octokit.repos.getContent({
+      owner: file.owner,
+      repo: file.repo,
+      path: file.path,
+      ref: file.branch,
+    });
+    const f = data as { encoding?: string; content?: string };
+    if (f.encoding !== "base64" || typeof f.content !== "string") return null;
+    return Buffer.from(f.content, "base64").toString("utf8");
+  } catch (e) {
+    return status(e) === 404 ? "" : null;
   }
 }
 
@@ -151,8 +198,8 @@ async function readWorkflowBlobs(
   }
 }
 
-/** What this clone was last OBSERVED to owe — not what was last announced. */
-async function lastFingerprint(supabase: Db, cloneId: string): Promise<string | null> {
+/** What this clone was last observed to owe, and which of it somebody was told. */
+async function lastObservation(supabase: Db, cloneId: string): Promise<CiObservation | null> {
   const { data, error } = await supabase
     .from("audit_log")
     .select("metadata")
@@ -164,8 +211,7 @@ async function lastFingerprint(supabase: Db, cloneId: string): Promise<string | 
   // A history that could not be read is not a history of nothing: treating it
   // as one would announce every standing finding in the fleet again.
   if (error) throw new Error(`Could not read the watch's history: ${error.message}`);
-  const fp = (data?.metadata as { fingerprint?: unknown } | null)?.fingerprint;
-  return typeof fp === "string" ? fp : null;
+  return readCiObservation(data?.metadata ?? null);
 }
 
 function headline(label: string, findings: readonly CiFinding[]): string {
@@ -190,6 +236,7 @@ export async function sweepCloneCi(
     clones: 0,
     attention: 0,
     announced: 0,
+    undelivered: 0,
     cleared: 0,
     unreadable: 0,
     failed: 0,
@@ -249,6 +296,7 @@ export async function sweepCloneCi(
       if (outcome.outcome === "attention") {
         report.attention += 1;
         report.announced += outcome.announced;
+        report.undelivered += outcome.undelivered;
       } else if (outcome.outcome === "cleared") {
         report.cleared += 1;
       } else if (outcome.outcome === "unreadable") {
@@ -280,7 +328,7 @@ async function watchOneClone(args: {
   const [scheduledRuns, dispatchedRuns, workflows, protectedWorkflows] = await Promise.all([
     readRuns(octokit, repo, { event: "schedule" }),
     readRuns(octokit, repo, { event: "workflow_dispatch", branch }),
-    readWorkflows(octokit, repo),
+    readWorkflows(octokit, { ...repo, branch }),
     readProtectedWorkflows({
       supabase,
       octokit,
@@ -303,57 +351,64 @@ async function watchOneClone(args: {
     return { clone: label, outcome: "unreadable", missing: reading.missing };
   }
 
-  const previous = await lastFingerprint(supabase, cloneId);
-  const decision = decideCiReport({ previous, findings: reading.findings });
+  const previous = await lastObservation(supabase, cloneId);
+  const announce = findingsToAnnounce({ previous, findings: reading.findings });
 
-  if (!decision.record) {
-    return reading.findings.length > 0
-      ? { clone: label, outcome: "attention", findings: reading.findings, announced: 0 }
-      : { clone: label, outcome: "clean" };
+  // Announced first, and the record says whether it LANDED. `notifyOperators`
+  // answers false on a failed insert rather than throwing; a record written
+  // regardless would read "already told" and silence a standing failure until
+  // it changed. Undelivered findings stay out of `announced`, so the next pass
+  // tries them again.
+  const delivered =
+    announce.length === 0 ||
+    (await notifyOperators({
+      kind: "clone_ci_attention",
+      severity: ciSeverity(announce),
+      title: headline(label, announce),
+      // Named in full. "CI is failing" would send an operator to open four
+      // repositories to find out which job, since when, and where the log is.
+      body: announce.map(describeCiFinding).join("\n"),
+      cloneId,
+      url: `/clones/${cloneId}`,
+      metadata: {
+        fingerprint: ciFingerprint(reading.findings),
+        findings: announce,
+        source: CLONE_CI_WATCH_ACTION,
+      },
+    }));
+
+  const settled = settleCiReport({
+    previous,
+    findings: reading.findings,
+    announced: announce,
+    delivered,
+  });
+  // `writeAuditLog` logs a failed insert rather than throwing, so a lost record
+  // means the next pass announces these again: noise, the safe direction.
+  if (settled.record) {
+    await writeAuditLog({
+      action: CLONE_CI_WATCH_ACTION,
+      entityType: "clone",
+      entityId: cloneId,
+      metadata: {
+        fingerprint: settled.observation.fingerprint,
+        announced: settled.observation.announced,
+        findings: reading.findings,
+        lines: reading.findings.map(describeCiFinding),
+        repo: `${repo.owner}/${repo.repo}`,
+      },
+    });
   }
 
-  // Recorded before anything is announced. `writeAuditLog` logs a failed
-  // insert rather than throwing, so a lost record means the next pass sees the
-  // old fingerprint and announces these again — noise, which is the safe
-  // direction. A finding that quietly stops being reported is the other one.
-  await writeAuditLog({
-    action: CLONE_CI_WATCH_ACTION,
-    entityType: "clone",
-    entityId: cloneId,
-    metadata: {
-      fingerprint: decision.fingerprint,
-      findings: reading.findings,
-      lines: reading.findings.map(describeCiFinding),
-      repo: `${repo.owner}/${repo.repo}`,
-    },
-  });
-
-  if (reading.findings.length === 0) return { clone: label, outcome: "cleared" };
-  if (decision.announce.length === 0) {
-    return { clone: label, outcome: "attention", findings: reading.findings, announced: 0 };
+  if (reading.findings.length === 0) {
+    return { clone: label, outcome: settled.record ? "cleared" : "clean" };
   }
-
-  await notifyOperators({
-    kind: "clone_ci_attention",
-    severity: ciSeverity(decision.announce),
-    title: headline(label, decision.announce),
-    // Named in full. "CI is failing" would send an operator to open four
-    // repositories to find out which job, since when, and where the log is.
-    body: decision.announce.map(describeCiFinding).join("\n"),
-    cloneId,
-    url: `/clones/${cloneId}`,
-    metadata: {
-      fingerprint: decision.fingerprint,
-      findings: decision.announce,
-      source: CLONE_CI_WATCH_ACTION,
-    },
-  });
-
   return {
     clone: label,
     outcome: "attention",
     findings: reading.findings,
-    announced: decision.announce.length,
+    announced: delivered ? announce.length : 0,
+    undelivered: delivered ? 0 : announce.length,
   };
 }
 
