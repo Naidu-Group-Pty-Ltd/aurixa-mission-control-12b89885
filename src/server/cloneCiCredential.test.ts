@@ -57,15 +57,42 @@ describe("composing a clone's database URL", () => {
     expect(r.reason).toContain("refusing to hand a clone another database");
   });
 
-  it("refuses transaction mode", () => {
+  it("uses the session port on the shared pooler, whatever its default mode", () => {
+    // What Supabase reports for every clone (26 Oct 2026): the shared pooler
+    // host, with the TRANSACTION port because that is the default mode. The
+    // same host serves session mode on 5432, and that is what is composed.
     const r = composeSessionPoolerUrl({
       projectRef: REF,
       password: "s3cret",
       pooler: { ...POOLER, port: 6543 },
     });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(new URL(r.url).port).toBe("5432");
+    expect(r.url).not.toContain("6543");
+  });
+
+  it("refuses a non-session port anywhere but the shared pooler", () => {
+    const r = composeSessionPoolerUrl({
+      projectRef: REF,
+      password: "s3cret",
+      pooler: { ...POOLER, host: `db.${REF}.supabase.co`, port: 6543 },
+    });
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.reason).toContain("6543");
+    expect(r.reason).toContain("not the shared pooler");
+  });
+
+  it("does not take a look-alike host for the shared pooler", () => {
+    for (const host of ["pooler.supabase.com.evil.example", "aws-1.pooler.supabase.com.example"]) {
+      const r = composeSessionPoolerUrl({
+        projectRef: REF,
+        password: "s3cret",
+        pooler: { ...POOLER, host, port: 6543 },
+      });
+      expect(r.ok).toBe(false);
+    }
   });
 
   it("never composes half a URL", () => {

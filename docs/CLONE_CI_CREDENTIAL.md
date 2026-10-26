@@ -56,6 +56,13 @@ migration then behaves in ways that are hard to predict and worse to debug.
 need: the direct `db.<ref>.supabase.co` endpoint is IPv6 unless the project buys
 the IPv4 add-on.
 
+The port Supabase's pooler config reports is the project's DEFAULT mode's,
+which is transaction: on 26 Oct 2026, the first pass with a password to compose
+with, all four clones reported 6543, and a guard that refused any reported port
+but 5432 refused every one. The shared pooler (`<region>.pooler.supabase.com`)
+serves session mode on 5432 on the same host, so there the URL always uses
+5432; on any other host a non-session port is still refused.
+
 **Nothing composes half a URL.** A missing password, host or user refuses and
 says which. A string assembled around a hole is a credential that fails at
 connect time inside a CI job somebody else is reading.

@@ -109,9 +109,21 @@ export type PoolerFacts = {
   host: string | null;
   /** e.g. `postgres.plisdzywzleljorrphxv` */
   user: string | null;
-  /** Whatever Supabase reports; only 5432 is accepted. */
+  /**
+   * Whatever Supabase reports. On the shared pooler this is the port of the
+   * project's DEFAULT pool mode, which is transaction (6543); the session
+   * port on the same host is 5432 regardless, and that is the one used.
+   */
   port: number | null;
 };
+
+/**
+ * Supavisor's shared pooler: one host per region serving BOTH modes, the port
+ * choosing which (5432 session, 6543 transaction). Anything else — a dedicated
+ * pooler on the project's own host — is not known to serve session mode on
+ * 5432, so a non-session port there is still refused.
+ */
+const SHARED_POOLER_HOST = /^[a-z0-9-]+\.pooler\.supabase\.com$/;
 
 export type ComposeResult =
   | { ok: true; url: string; host: string; user: string }
@@ -151,10 +163,19 @@ export function composeSessionPoolerUrl(input: {
       reason: `the pooler user "${user}" is not this project's (${ref}) — refusing to hand a clone another database`,
     };
   }
-  if (input.pooler.port !== null && input.pooler.port !== SESSION_POOLER_PORT) {
+  // Measured 26 Oct 2026, the first time any clone had a password to compose
+  // with: all four projects' pooler config reported port 6543. That is the
+  // default mode's port, not a statement about which modes the host serves —
+  // the shared pooler takes session connections on 5432 on the same host
+  // (Supabase, "Connect to your database"). Refusing it refused every clone.
+  if (
+    !SHARED_POOLER_HOST.test(host) &&
+    input.pooler.port !== null &&
+    input.pooler.port !== SESSION_POOLER_PORT
+  ) {
     return {
       ok: false,
-      reason: `Supabase reported pooler port ${input.pooler.port}; only the session port ${SESSION_POOLER_PORT} is used`,
+      reason: `Supabase reported pooler port ${input.pooler.port} on ${host}, which is not the shared pooler; only the session port ${SESSION_POOLER_PORT} is used`,
     };
   }
 
