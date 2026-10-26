@@ -60,6 +60,65 @@ the IPv4 add-on.
 says which. A string assembled around a hole is a credential that fails at
 connect time inside a CI job somebody else is reading.
 
+## And the service-role key beside it (26 Oct 2026)
+
+A clone also ships the prime's three scheduled refreshes — the sanctions
+register, the PEP office-holder index and the RBA store — and each writes with
+the project's service-role key. Measured 26 Oct 2026: on all four clones every
+scheduled run of all three had failed at its credential check, every day, and
+so had every run of `migration-drift.yml`. Each clone's registers stood where
+the one-off reference copy left them in September (`docs/REFERENCE_DATA.md`:
+that copy is a seed, not a feed), and no clone held a single RBA observation.
+
+Mission Control holds each clone's own key (`clone_backends.service_role_key`,
+stored at provisioning) and now hands it over under the same rule as the URL:
+**a clone is only ever handed its own.** `judgeServiceRoleKey` admits a JWT
+whose `role` is `service_role` and whose `ref` is the clone's, and refuses
+anything else — another project's key, the prime's above all, the anon key, or
+a non-JWT `sb_secret_` key, which the gateway in front of `rba-tables-ingest`
+(`verify_jwt = true`) would refuse anyway.
+
+## Both live in `supabase-production`, never in the repository
+
+A repository secret is readable by every job of every workflow on every
+branch. The prime keeps its production credentials in the `supabase-production`
+environment (its `docs/operations/DEPLOYMENT_PROTECTION.md`), and every
+workflow that reads either credential names that environment, so a clone's copy
+is written there (`putEnvironmentSecret`). An environment that does not exist is
+created bare, as GitHub creates one the first time a job names it; one that
+exists is never changed, because its branch policy and reviewers are the
+owner's.
+
+`SUPABASE_PROJECT_REF` is written as a repository VARIABLE on every pass,
+whether or not either credential could be: it is a fact about the repository,
+not a credential.
+
+## The password nobody kept
+
+Until 26 Oct 2026 this sweep had reported `no database password is stored for
+this clone` for all four clones, every half hour, since it was written. The
+password is generated in the invocation that creates the project, and that
+invocation persisted only the ref (`onProjectRef`). The wait for a new project
+to come up outlives the budget and pauses; the resumed run enters with the ref
+and no password, and the final update stores none.
+
+- **Creation keeps it.** `onProjectRef(ref, dbPass)` writes the password,
+  encrypted, in the same statement as the ref.
+- **A clone without one is given one**, through Supabase's own
+  `PATCH /v1/projects/{ref}/database/password`, but only where
+  `decidePasswordSet` allows: none is stored, and the repository declares
+  `BACKEND_DEPLOYED_BY=mission-control`. A tenant whose own CI deploys holds its
+  own credentials and may have set its own password; a failed variable listing
+  is not a declaration either way. The ref comes from
+  `resolveCloneSecretTarget`, which refuses the prime and Mission Control's own
+  project. Supabase is told first and the row written second, only while it
+  still holds none, so a failed store leaves the database where it already was
+  and the next pass tries again. Each set files `clone_db_password_set`, which
+  never carries the password.
+
+Resetting it was safe for the four clones it found: nothing held the lost
+password, and no edge function connects with `SUPABASE_DB_URL`.
+
 ## Where it runs
 
 Inside `/hooks/clone-deployer-declaration-reconcile`, the sweep that already
@@ -74,5 +133,6 @@ apply a migration by hand when Mission Control itself cannot be reached. Losing
 the second must not cost the first.
 
 It settles: GitHub never returns a secret's value, so there is nothing to
-compare against and the write is simply repeated. A pass that distributes
-nothing new files no audit row.
+compare against and the write is simply repeated. A write over a secret that
+was already there is recorded as `kept` and files nothing; a first write, a
+password set, a refusal or a failure files one audit row.

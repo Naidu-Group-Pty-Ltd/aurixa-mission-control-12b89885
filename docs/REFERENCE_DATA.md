@@ -157,6 +157,18 @@ Three shapes of entry, and the rules each turns on:
   and screening keeps refusing. `normalised_names` travels verbatim because it
   was written by the same server-side normaliser the screening query uses.
 
+  **The copy is a seed, not a feed.** A table this sync calls `complete` is
+  never walked again, and its insert is `on conflict do nothing`, so a copied
+  register stands exactly where the prime's stood on the day it was copied. A
+  register is kept current by the clone's OWN scheduled refreshes
+  (`aml-sanctions-refresh.yml`, `aml-pep-officeholders-refresh.yml`, mirrored
+  from the prime), which load the publishers' files, upsert, and delete what
+  was delisted. Measured 26 Oct 2026, those had never once succeeded on any
+  clone, because none held the service-role key they write with, and each
+  clone's register still read 6–18 Sep. Mission Control now gives each clone
+  that key (`docs/CLONE_CI_CREDENTIAL.md`); re-walking this copy instead would
+  only re-add rows the clone already holds, and could never delist anything.
+
 Mechanically this is the `schema` field on an entry and `refName()` everywhere
 a table is named outside the allow-list — the SQL builders qualify with the
 entry's schema, and the `clone_reference_syncs` state row for an `aml` table is
