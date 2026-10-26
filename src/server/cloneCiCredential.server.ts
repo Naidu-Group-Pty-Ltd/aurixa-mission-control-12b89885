@@ -1,20 +1,31 @@
 /**
- * Give every clone repository a credential its own CI can apply a migration
- * with — see `cloneCiCredential.pure.ts` for why it is a database URL and not
- * a Supabase access token.
+ * Give every clone repository the credentials its own scheduled CI needs: a
+ * database URL to apply a migration and report drift with, and its own
+ * service-role key for the sanctions, PEP and RBA refreshes. See
+ * `cloneCiCredential.pure.ts` for why each is the shape it is, why neither is
+ * a Supabase access token, and why both are written into the
+ * `supabase-production` environment rather than the repository.
  *
  * The pass is idempotent and settles: GitHub never returns a secret's value,
- * so there is nothing to compare against and the write is simply repeated. It
- * is one sealed-box PUT per clone per sweep, which is the cheapest correct
- * thing available.
+ * so there is nothing to compare against and the write is repeated, once a
+ * day (`REASSERT_AFTER_MS`) or at once when Mission Control has just changed
+ * the value. A settled clone costs one variable listing and one metadata read
+ * per secret a pass, and a re-write is recorded as `kept`, so a settled fleet
+ * files nothing.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import {
   CI_DB_URL_SECRET,
+  CI_ENVIRONMENT,
+  CI_PROJECT_REF_VARIABLE,
+  CI_SERVICE_ROLE_SECRET,
   composeSessionPoolerUrl,
+  decidePasswordSet,
   emptyCredentialSweep,
+  judgeServiceRoleKey,
   recordOutcome,
+  type CredentialOutcome,
   type CredentialSweep,
   type PoolerFacts,
 } from "./cloneCiCredential.pure";
@@ -38,9 +49,7 @@ export async function readPoolerFacts(projectRef: string): Promise<PoolerFacts |
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!res.ok) {
-      console.error(
-        `[cloneCiCredential] pooler config for ${projectRef}: HTTP ${res.status}`,
-      );
+      console.error(`[cloneCiCredential] pooler config for ${projectRef}: HTTP ${res.status}`);
       return null;
     }
     const body = (await res.json()) as unknown;
@@ -51,8 +60,7 @@ export async function readPoolerFacts(projectRef: string): Promise<PoolerFacts |
 
     // Prefer the connection string Supabase composes itself: it is the one
     // place the host, the user and the port are guaranteed to agree.
-    const connection =
-      typeof row.connection_string === "string" ? row.connection_string : null;
+    const connection = typeof row.connection_string === "string" ? row.connection_string : null;
     if (connection) {
       try {
         const u = new URL(connection);
@@ -77,52 +85,190 @@ export async function readPoolerFacts(projectRef: string): Promise<PoolerFacts |
 }
 
 /**
- * Write the database URL, and the project ref beside it.
+ * Give a clone's database a password, through Supabase's own endpoint, and
+ * keep it.
  *
- * The ref is a VARIABLE rather than a secret on purpose: the workflow fails
- * closed without it, and an operator reading a red run needs to be able to see
- * which project it was pointed at.
+ * Only ever called for a clone `decidePasswordSet` cleared: none stored, and
+ * Mission Control declared as the backend's deployer. Supabase is told first
+ * and the row written second, so a failed write leaves a database whose
+ * password nobody holds, which is where it already was, and the next pass
+ * tries again. The row is written only while it still names the project the
+ * password was set on: a clone re-provisioned onto a new project in the
+ * meantime keeps the new project's password, which is the one that connects.
  */
-export async function distributeCloneCiCredential(input: {
+async function setCloneDbPassword(input: {
+  supabase: Db;
+  cloneId: string;
+  projectRef: string;
+}): Promise<{ ok: true; password: string } | { ok: false; reason: string }> {
+  const token = process.env.SB_MGMT_API_TOKEN;
+  if (!token) return { ok: false, reason: "SB_MGMT_API_TOKEN is not configured" };
+  const { generateSecurePassword } = await import("./backend-provisioning.server");
+  const password = generateSecurePassword();
+  try {
+    const res = await fetch(`${MGMT_API}/projects/${input.projectRef}/database/password`, {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+    });
+    if (!res.ok) {
+      return {
+        ok: false,
+        reason: `Supabase refused the password for ${input.projectRef}: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`,
+      };
+    }
+  } catch (e) {
+    return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+  }
+
+  const { encryptSecret } = await import("./crypto.server");
+  const { data, error } = await input.supabase
+    .from("clone_backends")
+    .update({ db_pass: encryptSecret(password) })
+    .eq("clone_id", input.cloneId)
+    .eq("supabase_project_ref", input.projectRef)
+    .select("clone_id");
+  if (error) {
+    return { ok: false, reason: `the new password could not be stored: ${error.message}` };
+  }
+  if (!data || data.length === 0) {
+    return {
+      ok: false,
+      reason: `this clone no longer points at ${input.projectRef}, so the password set there was not kept`,
+    };
+  }
+  return { ok: true, password };
+}
+
+/**
+ * How long a credential already in the environment is trusted before it is
+ * written again. GitHub cannot say whether it still holds what Mission Control
+ * would send, so it is re-asserted, but once a day rather than every half
+ * hour: the steady state is then one metadata read per secret. A value known
+ * to have changed (a password set this pass) is written at once.
+ */
+const REASSERT_AFTER_MS = 24 * 3600 * 1000;
+
+/** Write one secret into the clone's production environment, as an outcome. */
+async function writeEnvironmentSecret(input: {
+  owner: string;
+  repo: string;
+  name: string;
+  value: string;
+  changed: boolean;
+}): Promise<CredentialOutcome> {
+  const label = `${input.owner}/${input.repo}`;
+  try {
+    const { putEnvironmentSecret } = await import("./github-secrets.server");
+    const { created } = await putEnvironmentSecret({
+      owner: input.owner,
+      repo: input.repo,
+      environment: CI_ENVIRONMENT,
+      name: input.name,
+      value: input.value,
+      ...(input.changed ? {} : { reassertAfterMs: REASSERT_AFTER_MS }),
+    });
+    return { repo: label, secret: input.name, state: created ? "distributed" : "kept" };
+  } catch (e) {
+    const { describeSecretError } = await import("./github-secrets.server");
+    const { message } = describeSecretError(e, input.owner, input.repo);
+    return { repo: label, secret: input.name, state: "failed", reason: message };
+  }
+}
+
+/**
+ * A credential as the sweep found it: a value to write, or why there is none.
+ * A `failed` reason is something that went wrong this pass; a `cannot` one is
+ * a state that will hold until somebody changes it.
+ */
+export type HeldCredential =
+  /** `changed`: set this pass, so written at once rather than on the daily re-assertion. */
+  { value: string | null; changed?: boolean } | { state: "cannot" | "failed"; reason: string };
+
+/**
+ * Write the clone's credentials into its production environment, and the
+ * project ref beside them.
+ *
+ * The ref is a VARIABLE rather than a secret on purpose: the workflows fail
+ * closed without a route, and an operator reading a red run needs to be able
+ * to see which project it was pointed at. It is written whether or not either
+ * credential could be, because it is a fact about the repository rather than
+ * a credential. It is written only where the repository's variables, read
+ * once per pass by the caller, do not already say it (or could not be read).
+ */
+export async function distributeCloneCiCredentials(input: {
   owner: string;
   repo: string;
   projectRef: string;
-  password: string | null;
-}): Promise<{ ok: true } | { ok: false; reason: string; kind: "cannot" | "failed" }> {
-  const pooler = await readPoolerFacts(input.projectRef);
-  if (!pooler) {
-    return {
-      ok: false,
-      kind: "cannot",
-      reason: `Supabase would not report the pooler for ${input.projectRef}`,
-    };
-  }
-  const composed = composeSessionPoolerUrl({
-    projectRef: input.projectRef,
-    password: input.password,
-    pooler,
-  });
-  if (!composed.ok) return { ok: false, kind: "cannot", reason: composed.reason };
+  password: HeldCredential;
+  serviceRoleKey: HeldCredential;
+  /** The repository's variables, or null when GitHub could not be asked. */
+  variables: Readonly<Record<string, string>> | null;
+}): Promise<CredentialOutcome[]> {
+  const label = `${input.owner}/${input.repo}`;
+  const outcomes: CredentialOutcome[] = [];
+  const target = { owner: input.owner, repo: input.repo };
 
-  try {
-    const { putRepoSecret } = await import("./github-secrets.server");
-    await putRepoSecret({
-      owner: input.owner,
-      repo: input.repo,
-      name: CI_DB_URL_SECRET,
-      value: composed.url,
-    });
-    const { putRepoVariable } = await import("./github-variables.server");
-    await putRepoVariable({
-      owner: input.owner,
-      repo: input.repo,
-      name: "SUPABASE_PROJECT_REF",
-      value: input.projectRef,
-    });
-    return { ok: true };
-  } catch (e) {
-    return { ok: false, kind: "failed", reason: e instanceof Error ? e.message : String(e) };
+  if (input.variables?.[CI_PROJECT_REF_VARIABLE] !== input.projectRef) {
+    try {
+      const { putRepoVariable } = await import("./github-variables.server");
+      await putRepoVariable({ ...target, name: CI_PROJECT_REF_VARIABLE, value: input.projectRef });
+    } catch (e) {
+      outcomes.push({
+        repo: label,
+        secret: CI_PROJECT_REF_VARIABLE,
+        state: "failed",
+        reason: e instanceof Error ? e.message : String(e),
+      });
+    }
   }
+
+  if ("reason" in input.password) {
+    outcomes.push({ repo: label, secret: CI_DB_URL_SECRET, ...input.password });
+  } else {
+    const pooler = await readPoolerFacts(input.projectRef);
+    const composed = pooler
+      ? composeSessionPoolerUrl({
+          projectRef: input.projectRef,
+          password: input.password.value,
+          pooler,
+        })
+      : {
+          ok: false as const,
+          reason: `Supabase would not report the pooler for ${input.projectRef}`,
+        };
+    outcomes.push(
+      composed.ok
+        ? await writeEnvironmentSecret({
+            ...target,
+            name: CI_DB_URL_SECRET,
+            value: composed.url,
+            changed: input.password.changed === true,
+          })
+        : { repo: label, secret: CI_DB_URL_SECRET, state: "cannot", reason: composed.reason },
+    );
+  }
+
+  if ("reason" in input.serviceRoleKey) {
+    outcomes.push({ repo: label, secret: CI_SERVICE_ROLE_SECRET, ...input.serviceRoleKey });
+  } else {
+    const key = judgeServiceRoleKey({
+      projectRef: input.projectRef,
+      key: input.serviceRoleKey.value,
+    });
+    outcomes.push(
+      key.ok
+        ? await writeEnvironmentSecret({
+            ...target,
+            name: CI_SERVICE_ROLE_SECRET,
+            value: key.key,
+            changed: false,
+          })
+        : { repo: label, secret: CI_SERVICE_ROLE_SECRET, state: "cannot", reason: key.reason },
+    );
+  }
+
+  return outcomes;
 }
 
 /** Every clone with a repository and a provisioned backend. */
@@ -135,27 +281,48 @@ export async function reconcileCloneCiCredentials(supabase: Db): Promise<Credent
     .not("github_owner", "is", null)
     .not("github_repo", "is", null);
   if (error) {
-    sweep.failed.push({ repo: "*", reason: error.message });
+    sweep.failed.push({ repo: "*", secret: "*", reason: error.message });
     return sweep;
   }
   const targets = (clones ?? []).filter((c) => c.github_owner && c.github_repo);
   if (targets.length === 0) return sweep;
 
   const { decryptSecret } = await import("./crypto.server");
+  const { resolveCloneSecretTarget } = await import("./cloneAllowedOrigins.server");
+  const { listRepoVariables } = await import("./github-variables.server");
+  const { writeAuditLog } = await import("./audit.server");
+
+  const readStored = (value: unknown, what: string): HeldCredential => {
+    if (!value) return { value: null };
+    try {
+      return { value: decryptSecret(value as string) };
+    } catch (e) {
+      return {
+        state: "cannot",
+        reason: `the stored ${what} could not be read: ${e instanceof Error ? e.message : String(e)}`,
+      };
+    }
+  };
 
   for (const clone of targets) {
     const owner = clone.github_owner as string;
     const repo = clone.github_repo as string;
     const label = `${owner}/${repo}`;
+    sweep.considered += 1;
 
     const { data: backend, error: backendError } = await supabase
       .from("clone_backends")
-      .select("supabase_project_ref, db_pass")
+      .select("supabase_project_ref, db_pass, service_role_key")
       .eq("clone_id", clone.id)
       .maybeSingle();
 
     if (backendError) {
-      recordOutcome(sweep, { repo: label, state: "failed", reason: backendError.message });
+      recordOutcome(sweep, {
+        repo: label,
+        secret: "*",
+        state: "failed",
+        reason: backendError.message,
+      });
       continue;
     }
     if (!backend?.supabase_project_ref) {
@@ -163,26 +330,64 @@ export async function reconcileCloneCiCredentials(supabase: Db): Promise<Credent
       continue;
     }
 
-    let password: string | null = null;
+    // The one sanctioned way to a clone's project ref for a credential: it
+    // refuses the prime's project and Mission Control's own, so neither can be
+    // handed out, or given a password, even if the row were wrong.
+    let projectRef: string;
     try {
-      password = backend.db_pass ? decryptSecret(backend.db_pass as string) : null;
+      projectRef = (await resolveCloneSecretTarget(supabase, clone.id)).projectRef;
     } catch (e) {
       recordOutcome(sweep, {
         repo: label,
+        secret: "*",
         state: "cannot",
-        reason: `the stored database password could not be read: ${e instanceof Error ? e.message : String(e)}`,
+        reason: e instanceof Error ? e.message : String(e),
       });
       continue;
     }
 
-    const result = await distributeCloneCiCredential({
+    // One read of the repository's variables serves the password decision and
+    // the project-ref variable both.
+    const variables = await listRepoVariables({ owner, repo });
+    let password = readStored(backend.db_pass, "database password");
+    if ("value" in password && !password.value) {
+      const decision = decidePasswordSet({ passwordStored: false, variables });
+      if (!decision.set) {
+        password = {
+          state: "cannot",
+          reason: decision.reason ?? "no database password is stored for this clone",
+        };
+      } else {
+        const set = await setCloneDbPassword({ supabase, cloneId: clone.id, projectRef });
+        if (set.ok) {
+          password = { value: set.password, changed: true };
+          sweep.passwordsSet.push(label);
+          await writeAuditLog({
+            action: "clone_db_password_set",
+            entityType: "clone",
+            entityId: clone.id,
+            // The fact and its reason, never the password.
+            metadata: {
+              repo: label,
+              project_ref: projectRef,
+              reason: "no database password was stored for this clone",
+            },
+          });
+        } else {
+          password = { state: "failed", reason: set.reason };
+        }
+      }
+    }
+
+    const outcomes = await distributeCloneCiCredentials({
       owner,
       repo,
-      projectRef: backend.supabase_project_ref,
+      projectRef,
       password,
+      serviceRoleKey: readStored(backend.service_role_key, "service-role key"),
+      variables,
     });
-    if (result.ok) recordOutcome(sweep, { repo: label, state: "distributed" });
-    else recordOutcome(sweep, { repo: label, state: result.kind, reason: result.reason });
+    for (const outcome of outcomes) recordOutcome(sweep, outcome);
   }
 
   return sweep;

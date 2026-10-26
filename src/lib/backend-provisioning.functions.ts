@@ -507,7 +507,7 @@ async function runBackendProvisioning(
         },
         // Persist the ref the moment the project exists — a death after
         // creation must resume onto it, never orphan it (see the input doc).
-        onProjectRef: async (ref: string) => {
+        onProjectRef: async (ref: string, dbPass: string) => {
           // `schema_verified_at` is cleared because a NEW project has never
           // been verified, whatever the row remembers about the one before
           // it. That is what stops a verification of a dead project being
@@ -529,9 +529,18 @@ async function runBackendProvisioning(
           // removing them and reads four lines back from the `.update(` for
           // the `error` binding, so a comment between the two hides a checked
           // write from the checker and spends a ratchet slot on nothing.
+          //
+          // The password is written in the same statement, because this is
+          // the only invocation that knows it (see the input doc). A ref
+          // persisted without it is a database nobody can give a credential.
           const { error } = await supabase
             .from("clone_backends")
-            .update({ supabase_project_ref: ref, schema_verified_at: null, chunk_cursor: null })
+            .update({
+              supabase_project_ref: ref,
+              db_pass: encryptSecret(dbPass),
+              schema_verified_at: null,
+              chunk_cursor: null,
+            })
             .eq("clone_id", input.cloneId);
           if (error) {
             // The one write whose failure can cost a paid project: without

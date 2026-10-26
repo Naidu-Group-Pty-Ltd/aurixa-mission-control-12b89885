@@ -144,6 +144,87 @@ export async function putRepoSecret(input: PutRepoSecretInput): Promise<void> {
 }
 
 /**
+ * Encrypt + upsert an Actions secret held by one deployment ENVIRONMENT of a
+ * repository, rather than by the repository. Idempotent.
+ *
+ * The difference is who can read it. A repository secret reaches every job of
+ * every workflow on every branch; an environment secret reaches only a job that
+ * names the environment. The prime keeps its production credentials in
+ * `supabase-production` for that reason (`docs/operations/DEPLOYMENT_PROTECTION.md`),
+ * and every workflow that reads one names it, so a clone's copy belongs there
+ * too.
+ *
+ * An environment that does not exist yet is created, with no rules: exactly
+ * what GitHub does itself the first time a job names one. Its protection
+ * (a branch policy, reviewers) is the repository owner's, so this never
+ * changes an environment that exists.
+ *
+ * The secret's metadata is read first, and says two things. Whether it is NEW:
+ * GitHub never returns a value, so a re-write cannot be compared with what it
+ * replaces, and "it was already there" is what lets a sweep stay quiet once it
+ * has settled. And when it was last written: given `reassertAfterMs`, a secret
+ * written more recently than that is left alone, which turns a half-hourly
+ * sweep's steady state into one read per secret rather than three calls and a
+ * write. A caller that knows the value has just changed omits it.
+ *
+ * Required GitHub App permissions: `Environments: Read & write` (creating
+ * one) and `Secrets: Read & write`.
+ */
+export async function putEnvironmentSecret(
+  input: PutRepoSecretInput & { environment: string; reassertAfterMs?: number },
+): Promise<{ created: boolean; written: boolean }> {
+  const nameProblem = validateSecretName(input.name);
+  if (nameProblem) {
+    throw new Error(`Invalid secret name "${input.name}": ${nameProblem}`);
+  }
+
+  const octokit = getAppOctokit(input.installationId ?? undefined);
+  const where = { owner: input.owner, repo: input.repo, environment_name: input.environment };
+
+  let created = false;
+  let writtenAt: string | null = null;
+  try {
+    const { data } = await octokit.request(
+      "GET /repos/{owner}/{repo}/environments/{environment_name}/secrets/{secret_name}",
+      { ...where, secret_name: input.name },
+    );
+    writtenAt = data.updated_at ?? data.created_at ?? null;
+  } catch (e) {
+    if ((e as { status?: number }).status !== 404) throw e;
+    created = true;
+  }
+
+  if (!created && input.reassertAfterMs !== undefined && writtenAt) {
+    const age = Date.now() - Date.parse(writtenAt);
+    if (Number.isFinite(age) && age >= 0 && age < input.reassertAfterMs) {
+      return { created: false, written: false };
+    }
+  }
+
+  const readKey = () =>
+    octokit.request(
+      "GET /repos/{owner}/{repo}/environments/{environment_name}/secrets/public-key",
+      where,
+    );
+  let pk: { key: string; key_id: string };
+  try {
+    pk = (await readKey()).data;
+  } catch (e) {
+    if ((e as { status?: number }).status !== 404) throw e;
+    await octokit.request("PUT /repos/{owner}/{repo}/environments/{environment_name}", where);
+    pk = (await readKey()).data;
+  }
+
+  const encrypted_value = sealedBoxBase64(pk.key, input.value);
+
+  await octokit.request(
+    "PUT /repos/{owner}/{repo}/environments/{environment_name}/secrets/{secret_name}",
+    { ...where, secret_name: input.name, encrypted_value, key_id: pk.key_id },
+  );
+  return { created, written: true };
+}
+
+/**
  * The NAMES of a repository's Actions secrets. GitHub never returns a value,
  * which is exactly what makes this safe to call for a status card.
  *

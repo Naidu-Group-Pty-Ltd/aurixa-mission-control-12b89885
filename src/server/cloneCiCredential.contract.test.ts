@@ -23,6 +23,39 @@ describe("what is distributed", () => {
     expect(pure).toMatch(/@\$\{host\}:\$\{SESSION_POOLER_PORT\}\/postgres\?sslmode=require/);
   });
 
+  it("is written into the production environment, never as a repository secret", () => {
+    expect(pure).toContain('export const CI_ENVIRONMENT = "supabase-production"');
+    expect(server).toContain("putEnvironmentSecret");
+    expect(server).toContain("environment: CI_ENVIRONMENT");
+    // A repository secret is readable by every job on every branch.
+    expect(server).not.toContain("putRepoSecret");
+  });
+
+  it("hands over the stored service-role key only after judging it the clone's own", () => {
+    const at = server.indexOf("name: CI_SERVICE_ROLE_SECRET");
+    expect(at).toBeGreaterThan(-1);
+    expect(server.lastIndexOf("judgeServiceRoleKey(", at)).toBeGreaterThan(-1);
+    expect(server.slice(server.lastIndexOf("judgeServiceRoleKey(", at), at)).toContain("key.ok");
+  });
+
+  it("reaches a clone's project only through the guard that refuses the prime and itself", () => {
+    expect(server).toContain("resolveCloneSecretTarget(supabase, clone.id)");
+    // The password is set on the ref the guard returned, never the row's own.
+    expect(server).toContain("setCloneDbPassword({ supabase, cloneId: clone.id, projectRef })");
+  });
+
+  it("sets a password only where the decision allows, and keeps it only for that project", () => {
+    const at = server.indexOf("await setCloneDbPassword(");
+    expect(server.lastIndexOf("decidePasswordSet(", at)).toBeGreaterThan(-1);
+    expect(server).toContain('.eq("supabase_project_ref", input.projectRef)');
+    // A password just set is written at once, not on the daily re-assertion.
+    expect(server).toContain("password = { value: set.password, changed: true }");
+    // Supabase first, the row second: a failed store leaves the database where
+    // it already was, with no password anybody holds.
+    const fn = server.slice(server.indexOf("async function setCloneDbPassword"));
+    expect(fn.indexOf("/database/password")).toBeLessThan(fn.indexOf("encryptSecret(password)"));
+  });
+
   it("refuses a pooler user that is not this project's", () => {
     expect(pure).toContain("if (!user.endsWith(`.${ref}`))");
     expect(pure).toContain("refusing to hand a clone another database");

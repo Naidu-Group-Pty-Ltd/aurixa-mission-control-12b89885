@@ -5683,8 +5683,15 @@ export type ProvisionBackendInput = {
    * never orphan a paid project: the resume path reads the persisted ref and
    * continues onto it. Without this the ref reached the row only in the final
    * update, which is after every step that can die.
+   *
+   * The database password travels with it, for the same reason. It exists
+   * only in this invocation's memory, and the run that stores it at the end is
+   * almost never this one: the wait for a new project to come up outlives the
+   * budget and pauses, and the resumed run knows the ref and no password.
+   * Measured 26 Oct 2026, all four clones had none stored, so no clone's CI
+   * could be given a database URL (`cloneCiCredential.pure.ts`).
    */
-  onProjectRef?: (projectRef: string) => Promise<void>;
+  onProjectRef?: (projectRef: string, dbPass: string) => Promise<void>;
 };
 
 export type SchemaStrategy = "introspection" | "migration-replay";
@@ -5787,7 +5794,7 @@ export async function provisionCloneBackend(
     // Persist the ref the MOMENT it exists — a death anywhere after this
     // point must resume onto this project, never create (and pay for) a
     // second one. The final row update writing it again is idempotent.
-    await input.onProjectRef?.(projectRef);
+    await input.onProjectRef?.(projectRef, dbPass);
   }
 
   // Step 2: Wait for it to be ready. A fresh project can take minutes to
