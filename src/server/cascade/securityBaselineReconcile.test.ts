@@ -1058,6 +1058,27 @@ describe("given both trees, the graph is attributed caller by caller", () => {
       expect(graphOf(out)).not.toContain("_shared->x");
     });
 
+    it("asks for a composed file's prime original, and never reads its merged text as the prime's", () => {
+      // As the engine starts: no prime texts, the composed variant's text in
+      // `merged`. The prime's original names `x`, the composed copy and the
+      // clone do not, so `x` must not survive as an edge of an unread file.
+      const start = {
+        prime: new Map([[PRIME_ONLY, texts.prime.get(PRIME_ONLY)!]]),
+        clone: texts.clone,
+        merged: new Map([[NEW, "// names nothing"]]),
+      };
+      const asked = withTrees({ ...mixed, rewrittenPaths: [NEW], sources: start });
+      expect(asked.ok).toBe(false);
+      expect((asked as { needs: unknown }).needs).toEqual({ prime: [NEW], clone: [], merged: [] });
+
+      const answered = withTrees({
+        ...mixed,
+        rewrittenPaths: [NEW],
+        sources: { ...start, prime: new Map([...start.prime, [NEW, texts.prime.get(NEW)!]]) },
+      });
+      expect(graphOf(answered)).not.toContain("_shared->x");
+    });
+
     it("refuses where a file names an edge its own side's baseline does not record", () => {
       const out = withTrees({
         ...mixed,

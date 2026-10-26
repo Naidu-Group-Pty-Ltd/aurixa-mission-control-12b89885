@@ -288,11 +288,12 @@ describe("a slow pass is not a dead pass", () => {
       itself and a second pass started over the same batch.
     */
     expect(budgetedLoop).toMatch(
-      /runOne: async \(fn\) => \{[\s\S]{0,200}await touchRun\(run, \{ in_flight:/,
+      /runOne: async \(fn\) => \{[\s\S]{0,320}await touchRun\(run, \{ in_flight:/,
     );
     // After the deploy, not before: a heartbeat that precedes the work says
     // nothing about whether the work happened.
-    const deployed = budgetedLoop.indexOf("await deployEdgeFunctions(projectRef, [fn])");
+    // The call also hands over the prime's compressed route (`compressedEdgeBundle.pure.ts`).
+    const deployed = budgetedLoop.indexOf("await deployEdgeFunctions(projectRef, [fn],");
     const touched = budgetedLoop.indexOf("await touchRun(run,");
     expect(deployed).toBeGreaterThan(-1);
     expect(touched).toBeGreaterThan(deployed);

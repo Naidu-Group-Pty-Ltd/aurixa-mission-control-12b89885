@@ -54,6 +54,15 @@ import {
 import { crmLineCronJobsIn, crmLineCronReason, crmLineFunctionsIn } from "./crmLineFeatures.pure";
 import { deployedVerifyJwt } from "./anonymousFunctionSlugs.pure";
 import {
+  compressedUploadRequest,
+  ESZIP_CONTENT_TYPE,
+  isRawSizeRefusal,
+  RAW_DEPLOY_CEILING_BYTES,
+  rawBundleBytes,
+  type BundleManifest,
+} from "./compressedEdgeBundle.pure";
+import type { RepoRef } from "./github-app.server";
+import {
   readDeployedCopy,
   readProjectFunctionCopies,
   type ProjectFunctionCopy,
@@ -4429,9 +4438,23 @@ export type EdgeFunctionDeployResult = {
 export { shouldForceAnonymousFunction } from "./anonymousFunctionSlugs.pure";
 
 /**
+ * How a deploy may reach a function too large for the raw-source route: the
+ * prime repository whose `edge-function-bundles.yml` builds the CLI's
+ * compressed bundle (`compressedEdgeBundle.pure.ts`). Given only where the
+ * bundle comes from the prime's tree, because a bundle is used only where it
+ * was built from the very bytes this deploy would send.
+ */
+export type CompressedRoute = { prime: RepoRef };
+
+/**
  * Deploy one edge function bundle to a clone project via the Management API.
  * File paths are relative to the prime's supabase/functions/ directory, so
  * `../_shared/x.ts`-style imports inside a function resolve within the bundle.
+ *
+ * With a `compressed` route, a bundle larger than `RAW_DEPLOY_CEILING_BYTES`,
+ * or one the raw route refuses for its size, is deployed as the prime's
+ * compressed bundle of the same source instead. Where there is none yet, the
+ * deploy fails saying so, and the prime is asked to build one.
  */
 export async function deployEdgeFunction(
   projectRef: string,
@@ -4441,7 +4464,9 @@ export async function deployEdgeFunction(
     importMapPath: string | null;
     verifyJwt: boolean;
     files: Array<{ path: string; contentBase64: string }>;
+    importsClosed?: boolean;
   },
+  opts?: { compressed?: CompressedRoute },
 ): Promise<{
   verifyJwt: boolean;
   overrideReason: string | null;
@@ -4455,6 +4480,84 @@ export async function deployEdgeFunction(
     fn.verifyJwt,
   );
 
+  const route = opts?.compressed;
+  if (!route) {
+    const deployed = await deployRawSource(projectRef, fn, effectiveVerifyJwt);
+    return { verifyJwt: effectiveVerifyJwt, overrideReason, deployed };
+  }
+  let rawRefusal: string | null = null;
+  if (rawBundleBytes(fn.files) <= RAW_DEPLOY_CEILING_BYTES) {
+    try {
+      const deployed = await deployRawSource(projectRef, fn, effectiveVerifyJwt);
+      return { verifyJwt: effectiveVerifyJwt, overrideReason, deployed };
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      if (!isRawSizeRefusal(message)) throw e;
+      rawRefusal = message;
+    }
+  }
+
+  const { compressedBundleFor } = await import("@/server/compressedEdgeBundle.server");
+  const found = await compressedBundleFor({ prime: route.prime, fn });
+  if (found.state !== "ready") {
+    const size = rawRefusal ?? `${rawBundleBytes(fn.files)} bytes of source`;
+    const instead =
+      found.state === "refused"
+        ? "and no compressed bundle can stand in for it"
+        : "and awaiting its compressed bundle";
+    throw new Error(
+      `Deploy failed for ${fn.slug}: too large to deploy as source (${size}), ${instead}: ${found.why}`,
+    );
+  }
+  const deployed = await deployCompressedBundle(projectRef, fn.slug, effectiveVerifyJwt, found);
+  return { verifyJwt: effectiveVerifyJwt, overrideReason, deployed };
+}
+
+/**
+ * Upload the prime's compressed bundle the way the CLI does: update the
+ * function where the project holds it, create it where it does not.
+ */
+async function deployCompressedBundle(
+  projectRef: string,
+  slug: string,
+  verifyJwt: boolean,
+  bundle: { manifest: BundleManifest; ezbr: Uint8Array; runUrl: string },
+): Promise<{ id: string; version: number } | null> {
+  const send = (exists: boolean) => {
+    const { method, path } = compressedUploadRequest({
+      projectRef,
+      slug,
+      verifyJwt,
+      manifest: bundle.manifest,
+      exists,
+    });
+    return fetch(`${MGMT_API}${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${getMgmtToken()}`, "Content-Type": ESZIP_CONTENT_TYPE },
+      body: new Blob([bundle.ezbr as BlobPart]),
+    });
+  };
+  let res = await send(true);
+  if (res.status === 404) res = await send(false);
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(
+      `Deploy failed for ${slug}: ${res.status} — ${body} (compressed bundle from ${bundle.runUrl})`,
+    );
+  }
+  return readDeployedCopy(await res.json().catch(() => null));
+}
+
+async function deployRawSource(
+  projectRef: string,
+  fn: {
+    slug: string;
+    entrypointPath: string;
+    importMapPath: string | null;
+    files: Array<{ path: string; contentBase64: string }>;
+  },
+  effectiveVerifyJwt: boolean,
+): Promise<{ id: string; version: number } | null> {
   const form = new FormData();
   form.append(
     "metadata",
@@ -4485,8 +4588,7 @@ export async function deployEdgeFunction(
   // Which deploy this was. Read, never required: the deploy has succeeded
   // whatever the body says, and an unreadable body only means the redeploy
   // lane cannot prove this copy later and deploys it again.
-  const deployed = readDeployedCopy(await res.json().catch(() => null));
-  return { verifyJwt: effectiveVerifyJwt, overrideReason, deployed };
+  return readDeployedCopy(await res.json().catch(() => null));
 }
 
 export async function deployEdgeFunctions(
@@ -4494,6 +4596,7 @@ export async function deployEdgeFunctions(
   functions: Array<Parameters<typeof deployEdgeFunction>[1]>,
   onStatusUpdate?: (status: string, detail: string) => Promise<void>,
   deadlineAt?: number | null,
+  opts?: { compressed?: CompressedRoute },
 ): Promise<EdgeFunctionDeployResult[]> {
   const results: EdgeFunctionDeployResult[] = [];
   for (let i = 0; i < functions.length; i++) {
@@ -4513,7 +4616,11 @@ export async function deployEdgeFunctions(
       `Deploying edge function ${i + 1}/${functions.length}: ${fn.slug}`,
     );
     try {
-      const { verifyJwt, overrideReason, deployed } = await deployEdgeFunction(projectRef, fn);
+      const { verifyJwt, overrideReason, deployed } = await deployEdgeFunction(
+        projectRef,
+        fn,
+        opts,
+      );
       results.push({
         slug: fn.slug,
         success: true,
@@ -6020,11 +6127,21 @@ export async function provisionCloneBackend(
         }
       }
     }
+    // A function too large for the raw route takes the prime's compressed
+    // bundle of the same source (`compressedEdgeBundle.pure.ts`).
+    const [primeOwner, primeRepo] = snapshot.sourceRepo.split("/");
     const deployedNow = await deployEdgeFunctions(
       projectRef,
       functionsToDeploy,
       onStatusUpdate,
       input.deadlineAt,
+      primeOwner && primeRepo
+        ? {
+            compressed: {
+              prime: { owner: primeOwner, repo: primeRepo, branch: snapshot.sourceRef },
+            },
+          }
+        : undefined,
     );
     edgeFunctions = [...alreadyDeployed, ...deployedNow];
   }

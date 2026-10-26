@@ -106,7 +106,10 @@
  * transcribed below). `same` is never read: the prime's edges for the caller
  * are `same`'s plus those of the prime files whose content the merged tree
  * does not carry, and the clone's likewise, so an edge either side records
- * and none of its other files explains comes from `same`. An edge both sides
+ * and none of its other files explains comes from `same`. A composed file's
+ * prime original is one of those other files, so it is read from the prime;
+ * the merge's text never stands in for it, or an edge the merge dropped would
+ * be taken for one of `same`'s and kept. An edge both sides
  * record that their other files ALSO explain is the one thing this cannot
  * place, and it still refuses, naming the edge. Where a read file's edges are
  * not in that side's own baseline, the transcription or the baseline is
@@ -433,8 +436,12 @@ function settleMixedCaller(args: {
   const primeRest = [...args.primeFiles].filter((p) => !same.has(p) && !fromPrimeSet.has(p));
   const cloneRest = [...args.cloneFiles].filter((p) => !same.has(p) && !fromCloneSet.has(p));
 
-  // A delivered file's text is the prime's, so either map answers for it.
-  const primeText = (path: string) => sources.prime.get(path) ?? sources.merged.get(path);
+  // A file delivered unchanged is the prime's text, so what the pass writes
+  // answers for it. A composed one is not: its prime original is read like
+  // any other, never stood in for by the merge.
+  const primeText = (path: string) =>
+    sources.prime.get(path) ??
+    (deliveredFiles.has(path) && !rewritten.has(path) ? sources.merged.get(path) : undefined);
   const needs: CallerSourceNeeds = {
     prime: [...fromPrime, ...primeRest].filter((p) => primeText(p) === undefined),
     clone: [...fromClone, ...cloneRest].filter((p) => !sources.clone.has(p)),

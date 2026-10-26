@@ -85,6 +85,14 @@ export type PrimeEdgeFunction = {
   /** Import map path relative to supabase/functions/, if one exists */
   importMapPath: string | null;
   verifyJwt: boolean;
+  /**
+   * True where the walk from the entry point found every file it imports
+   * (`pruneBundleToReachable` pruned). False where it fell back to carrying
+   * everything, which includes an import of a file the tree no longer holds.
+   * A compressed bundle stands in only for a bundle whose imports closed
+   * (`compressedEdgeBundle.pure.ts`).
+   */
+  importsClosed?: boolean;
 };
 
 export type PrimeAuthConfig = {
@@ -2136,6 +2144,7 @@ export async function fetchPrimeBackendSnapshot(
       entrypointPath,
       importMapPath,
       verifyJwt: fnConfig.get(slug)?.verifyJwt ?? true,
+      importsClosed: prune.pruned,
     };
   });
 
