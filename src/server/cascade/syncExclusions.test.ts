@@ -11,6 +11,7 @@ import {
   partitionCascadePaths,
   reconcileSuffixFor,
   reportableHeld,
+  sameApartFromBackendIdentity,
   summaryOwesReconcile,
   requireExclusions,
   type SyncExclusion,
@@ -219,6 +220,8 @@ describe("isShippedPath — the same rule the clone's own isolation spec enforce
 
 describe("backendIdentityHold", () => {
   it("holds prime's copy when the clone's has been fixed — the reverted case", () => {
+    // Never written. The clone's copy is prime's with its own project in place
+    // of prime's, so nothing else is owed and it is held without comment.
     const hold = backendIdentityHold({
       path: "public/lead-magnet-embed.html",
       primeContent: primeEmbed,
@@ -226,8 +229,47 @@ describe("backendIdentityHold", () => {
       ownRef: CLONE,
     });
     expect(hold).not.toBeNull();
+    expect(hold!.reason).toBe("protected");
+    expect(reportableHeld([hold!])).toEqual([]);
+    expect(hold!.note).toContain(PRIME);
+  });
+
+  it("holds it for a person once prime has changed anything but the identity", () => {
+    const hold = backendIdentityHold({
+      path: "public/lead-magnet-embed.html",
+      primeContent: primeEmbed.replace("(function () {", "(function () { 'use strict';"),
+      cloneContent: cloneEmbed,
+      ownRef: CLONE,
+    });
     expect(hold!.reason).toBe("manual_reconcile");
     expect(hold!.note).toContain(PRIME);
+  });
+
+  it("is not the same apart from identity where one side names no project at all", () => {
+    // `supabaseTarget.pure.ts` before the line chose its own fallback: an empty
+    // pair against the prime's is a difference a person decides.
+    const prime = `export const FALLBACK_URL = 'https://${PRIME}.supabase.co';\n`;
+    const unset = "export const FALLBACK_URL = '';\n";
+    expect(sameApartFromBackendIdentity(prime, unset)).toBe(false);
+    expect(
+      backendIdentityHold({
+        path: "src/integrations/supabase/supabaseTarget.pure.ts",
+        primeContent: prime,
+        cloneContent: unset,
+        ownRef: CLONE,
+      })!.reason,
+    ).toBe("manual_reconcile");
+  });
+
+  it("reads a URL, a bare ref and a key as the identity, and nothing else", () => {
+    const of = (ref: string, key: string) =>
+      `// ${ref}\nexport const FALLBACK_URL = 'https://${ref}.supabase.co';\nexport const KEY =\n  '${key}';\n`;
+    const primeKey = "eyJhbGciOiJIUzI1NiJ9.eyJyZWYiOiJwcmltZSJ9.c2lnbmF0dXJlLXByaW1l";
+    const cloneKey = "eyJhbGciOiJIUzI1NiJ9.eyJyZWYiOiJjbG9uZSJ9.c2lnbmF0dXJlLWNsb25l";
+    expect(sameApartFromBackendIdentity(of(PRIME, primeKey), of(CLONE, cloneKey))).toBe(true);
+    expect(
+      sameApartFromBackendIdentity(of(PRIME, primeKey), `${of(CLONE, cloneKey)}// more\n`),
+    ).toBe(false);
   });
 
   it("stays quiet when the clone's copy names the prime too", () => {

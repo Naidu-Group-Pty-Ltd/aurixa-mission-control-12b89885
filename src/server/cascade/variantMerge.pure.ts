@@ -95,7 +95,23 @@ export type VariantBase =
   | { kind: "named"; primeRevision: string; commit: string }
   /** Every revision the commit names, lowercased, in the order it names them. */
   | { kind: "ambiguous"; primeRevisions: string[]; commit: string }
+  /**
+   * Nothing names a revision, and the walk reached the commit the clone's
+   * repository BEGAN with. See "The copy the clone was made with" below.
+   */
+  | { kind: "mirror"; commit: string; date: string }
   | { kind: "none" };
+
+/**
+ * One commit of a path's history, as the walk reads it. `root` marks a commit
+ * with no parent (the first in the repository); `date` is when it was made.
+ */
+export type VariantHistoryCommit = {
+  sha: string;
+  message: string;
+  root?: boolean;
+  date?: string;
+};
 
 /**
  * The base for one held path, from the commits that touched it, newest first.
@@ -106,13 +122,36 @@ export type VariantBase =
  * ambiguous commit, and an older base would misattribute everything it
  * brought. The names it carries are the candidates `decideAcrossBases` merges
  * against.
+ *
+ * ## The copy the clone was made with
+ *
+ * A file the line changed and never reconciled names no revision anywhere in
+ * its history: its commits are the clone's first one and the line's own edits.
+ * Measured on `npc-crm-independent-6505dc`, 26 Oct 2026: ten of its held
+ * variants were in that state, and every one was listed under "Needs a human"
+ * on every cascade, though seven of them already held every change the prime
+ * had made since and the other three differed only where the line removed
+ * GoHighLevel. Nothing could settle them: a reconcile that changes nothing
+ * commits nothing, so no later commit could ever touch them to name a base.
+ *
+ * The first commit of a clone's repository is `createUsingTemplate`'s copy of
+ * the prime's whole tree (`clone-repo-retarget.server.ts`), so the clone's
+ * first copy of a path IS a prime version of it. Where the walk reaches that
+ * commit having found no name, it is the base: `mirror`, carrying the commit
+ * and its date. The reader resolves which prime revision held that copy and
+ * refuses unless the two copies are byte-identical, so a first commit that is
+ * not a copy of the prime's file holds exactly as `none` did.
  */
-export function variantBaseFrom(commits: readonly { sha: string; message: string }[]): VariantBase {
+export function variantBaseFrom(commits: readonly VariantHistoryCommit[]): VariantBase {
   for (const c of commits) {
     const names = new Set<string>();
     for (const m of c.message.matchAll(PRIME_REVISION)) names.add(m[1].toLowerCase());
     if (names.size === 1) return { kind: "named", primeRevision: [...names][0], commit: c.sha };
     if (names.size > 1) return { kind: "ambiguous", primeRevisions: [...names], commit: c.sha };
+  }
+  const first = commits[commits.length - 1];
+  if (first?.root === true && first.date) {
+    return { kind: "mirror", commit: first.sha, date: first.date };
   }
   return { kind: "none" };
 }

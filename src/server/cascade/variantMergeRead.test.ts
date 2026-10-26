@@ -162,3 +162,122 @@ describe("a reconcile naming several prime revisions", () => {
     expect(revisions.get("bbbbbbb")).toBe(Y);
   });
 });
+
+describe("a file whose history begins at the clone's first commit and names no revision", () => {
+  const ROOT = "r".repeat(40);
+  const P = "p".repeat(40);
+  /** The line's edit on top of the first copy, and the first copy itself. */
+  function mirrorGithub(args: { files: Record<string, string>; primeHistory?: string[] }) {
+    const calls: string[] = [];
+    const octokit = {
+      repos: {
+        listCommits: async ({ repo, until }: { repo: string; until?: string }) => {
+          calls.push(`listCommits ${repo}${until ? ` until ${until}` : ""}`);
+          if (repo === "prime") return { data: (args.primeHistory ?? [P]).map((sha) => ({ sha })) };
+          return {
+            data: [
+              {
+                sha: "e1e1e1e1e1",
+                parents: [{ sha: ROOT }],
+                commit: {
+                  message: "Close the line's last reach into GoHighLevel",
+                  committer: { date: "2026-10-10T00:00:00Z" },
+                },
+              },
+              {
+                sha: ROOT,
+                parents: [],
+                commit: { message: "Initial commit", committer: { date: "2026-09-19T05:20:40Z" } },
+              },
+            ],
+          };
+        },
+        getCommit: async () => {
+          throw new Error("a mirror base resolves nothing by name");
+        },
+        getContent: async ({ ref }: { ref: string }) => {
+          calls.push(`getContent ${ref}`);
+          const text = args.files[ref];
+          if (text === undefined) throw Object.assign(new Error("Not Found"), { status: 404 });
+          return {
+            data: {
+              type: "file",
+              // A blob id is its bytes': the same text at two refs is one blob.
+              sha: `blob-${Buffer.from(text).toString("base64")}`,
+              content: Buffer.from(text, "utf8").toString("base64"),
+              encoding: "base64",
+              size: text.length,
+            },
+          };
+        },
+      },
+    } as unknown as Octokit;
+    return { octokit, calls };
+  }
+
+  it("is current where the line already holds everything the prime changed since", async () => {
+    const { octokit, calls } = mirrorGithub({
+      files: {
+        [ROOT]: nine(),
+        [P]: nine(),
+        "clone-head": nine({ 2: "2o", 8: "8t" }),
+        main: nine({ 8: "8t" }),
+      },
+    });
+    const v = await merge(octokit);
+    expect(v).toEqual({ act: "current", base: P });
+    // The prime revision is read off the prime's own history of the path, as of
+    // the clone's first commit.
+    expect(calls).toContain("listCommits prime until 2026-09-19T05:20:40Z");
+  });
+
+  it("merges the prime's later change on top of the line's own", async () => {
+    const { octokit } = mirrorGithub({
+      files: {
+        [ROOT]: nine(),
+        [P]: nine(),
+        "clone-head": nine({ 2: "2o" }),
+        main: nine({ 8: "8t" }),
+      },
+    });
+    expect(await merge(octokit)).toMatchObject({
+      act: "write",
+      text: nine({ 2: "2o", 8: "8t" }),
+      base: P,
+    });
+  });
+
+  it("holds where the first copy is not the prime revision's copy, rather than merge on it", async () => {
+    const { octokit } = mirrorGithub({
+      files: {
+        [ROOT]: nine({ 5: "5-provisioning-rewrote-it" }),
+        [P]: nine(),
+        "clone-head": nine({ 2: "2o" }),
+        main: nine({ 8: "8t" }),
+      },
+    });
+    const v = await merge(octokit);
+    expect(v.act).toBe("hold");
+    if (v.act === "hold") {
+      expect(v.why).toContain("cannot stand as the base");
+      expect(v.transient).toBeUndefined();
+    }
+  });
+
+  it("holds as before where the prime held no copy when the clone was made", async () => {
+    const { octokit } = mirrorGithub({ files: {}, primeHistory: [] });
+    const v = await merge(octokit);
+    expect(v.act).toBe("hold");
+    if (v.act === "hold") expect(v.why).toContain("names the prime revision");
+  });
+
+  it("keeps the revision in the pass's cache under the path", async () => {
+    const files = { [ROOT]: nine(), [P]: nine(), "clone-head": nine(), main: nine() };
+    const revisions = new Map<string, string>();
+    await merge(mirrorGithub({ files }).octokit, revisions);
+    expect(revisions.get(`mirror:${ROOT}:${PATH}`)).toBe(P);
+    const again = mirrorGithub({ files });
+    await merge(again.octokit, revisions);
+    expect(again.calls.filter((c) => c.startsWith("listCommits prime"))).toEqual([]);
+  });
+});

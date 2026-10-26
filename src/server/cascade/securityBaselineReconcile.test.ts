@@ -747,7 +747,9 @@ describe("the engine hands the withheld set to both baselines", () => {
     // baseline that travels is the SOURCE's, so a function the source lacks
     // too is no difference to reconcile (F22). Asserted present first, so a
     // renamed call cannot pass this by finding nothing.
-    const inv = engine.indexOf("reconcileSecurityInventory({");
+    // The engine calls it through `reconcileInventoryReading`, which hands
+    // its arguments on whole with the texts a mixed caller needs.
+    const inv = engine.indexOf("await reconcileInventoryReading({");
     expect(inv).toBeGreaterThan(-1);
     const invCall = engine.slice(inv, engine.indexOf("})", inv));
     expect(invCall).toContain("withheld: withheldFromSource");
@@ -764,7 +766,8 @@ describe("the engine hands the withheld set to both baselines", () => {
   it("counts the inventory only over a tree it could read", () => {
     // Without the clone's tree the "merged tree" is the delivery alone, and a
     // baseline counted over it describes a repository that does not exist.
-    const at = engine.indexOf("reconcileSecurityInventory({");
+    const at = engine.indexOf("await reconcileInventoryReading({");
+    expect(at).toBeGreaterThan(-1);
     expect(engine.slice(Math.max(0, at - 300), at)).toContain("cloneShaByPath !== null");
   });
 
@@ -976,6 +979,125 @@ describe("given both trees, the graph is attributed caller by caller", () => {
     expect((out as { reason: string }).reason).toContain("both the prime and this clone");
   });
 
+  describe("a mixed caller the sides disagree about, settled from its differing files", () => {
+    // Cascade #121's shape: prime adds a shared test whose fixtures name
+    // `functions/v1/x`, keeps a shared module the clone does not hold, and the
+    // clone keeps a shared module of its own. `auth.ts` is the same on both.
+    const NEW = F("_shared/cronUrls.test.ts");
+    const PRIME_ONLY = F("_shared/ghlStore.ts");
+    const OWN = F("_shared/crm.ts");
+    const primeTree = new Map([...PRIME_TREE, [NEW, "new-prime"], [PRIME_ONLY, "ghl-prime"]]);
+    const cloneTree = new Map([...CLONE_TREE, [OWN, "crm-shared"]]);
+    const mixed = {
+      primeInventoryJson: withGraph(PRIME_INVENTORY, [
+        "_shared->beta",
+        "_shared->sync-ghl",
+        "_shared->x",
+        "alpha->beta",
+      ]),
+      cloneInventoryJson: withGraph(CLONE_INVENTORY, [
+        "_shared->beta",
+        "_shared->crm-send-message",
+        "alpha->beta",
+      ]),
+      primeTree,
+      cloneTree,
+      mergedTreePaths: [...MERGED_TREE, NEW, OWN],
+      deliveredPaths: [...DELIVERED, NEW],
+    };
+    const texts = {
+      prime: new Map([
+        [NEW, "const URL = 'https://p.supabase.co/functions/v1/x';"],
+        [PRIME_ONLY, "fetch(`${base}/functions/v1/sync-ghl`)"],
+      ]),
+      clone: new Map([[OWN, "invoke('/functions/v1/crm-send-message')"]]),
+      merged: new Map<string, string>(),
+    };
+
+    it("asks for exactly the texts that settle it, all at once", () => {
+      const out = withTrees({
+        ...mixed,
+        sources: { prime: new Map(), clone: new Map(), merged: new Map() },
+      });
+      expect(out.ok).toBe(false);
+      const { needs, reason } = out as { needs: unknown; reason: string };
+      expect(reason).toContain("`_shared`");
+      // `auth.ts` is the same blob on both sides and is never asked for.
+      expect(needs).toEqual({ prime: [NEW, PRIME_ONLY], clone: [OWN], merged: [] });
+    });
+
+    it("carries the delivered file's edges and the clone's own, and drops the dropped file's", () => {
+      const out = withTrees({ ...mixed, sources: texts });
+      expect(graphOf(out)).toEqual([
+        "_shared->beta",
+        "_shared->crm-send-message",
+        "_shared->x",
+        "alpha->beta",
+      ]);
+    });
+
+    it("takes a delivered file's text from what the pass writes, without reading it", () => {
+      const out = withTrees({
+        ...mixed,
+        sources: {
+          ...texts,
+          prime: new Map([[PRIME_ONLY, texts.prime.get(PRIME_ONLY)!]]),
+          merged: new Map([[NEW, texts.prime.get(NEW)!]]),
+        },
+      });
+      expect(graphOf(out)).toContain("_shared->x");
+    });
+
+    it("reads a composed file's own text, never the prime's", () => {
+      // A merged line variant is neither side's: its edges are its own.
+      const out = withTrees({
+        ...mixed,
+        rewrittenPaths: [NEW],
+        sources: { ...texts, merged: new Map([[NEW, "// names nothing"]]) },
+      });
+      expect(graphOf(out)).not.toContain("_shared->x");
+    });
+
+    it("refuses where a file names an edge its own side's baseline does not record", () => {
+      const out = withTrees({
+        ...mixed,
+        sources: { ...texts, clone: new Map([[OWN, "'/functions/v1/never-recorded'"]]) },
+      });
+      expect(out.ok).toBe(false);
+      expect((out as { reason: string }).reason).toContain("_shared->never-recorded");
+      expect((out as { reason: string }).reason).toContain("this clone's baseline");
+    });
+
+    it("refuses an edge it cannot place when the graphs disagree", () => {
+      const OLD = F("_shared/legacy.ts");
+      const out = withTrees({
+        ...mixed,
+        primeInventoryJson: withGraph(PRIME_INVENTORY, ["_shared->x", "_shared->z", "alpha->beta"]),
+        cloneInventoryJson: withGraph(CLONE_INVENTORY, ["_shared->z", "alpha->beta"]),
+        primeTree: new Map([...primeTree, [OLD, "legacy-prime"]]),
+        cloneTree: new Map([...cloneTree, [OLD, "legacy-clone"]]),
+        mergedTreePaths: [...mixed.mergedTreePaths, OLD],
+        deliveredPaths: [...mixed.deliveredPaths, OLD],
+        rewrittenPaths: [OLD],
+        sources: {
+          prime: new Map([
+            [NEW, "'functions/v1/x'"],
+            [PRIME_ONLY, "'functions/v1/z'"],
+            [OLD, "'functions/v1/z'"],
+          ]),
+          clone: new Map([
+            [OWN, "// none"],
+            [OLD, "'functions/v1/z'"],
+          ]),
+          merged: new Map([[OLD, "// the merge dropped it"]]),
+        },
+      });
+      expect(out.ok).toBe(false);
+      expect((out as { reason: string }).reason).toContain("_shared->z");
+      expect((out as { needs?: unknown }).needs).toBeUndefined();
+    });
+  });
+
   it("carries nothing for a function the clone does not hold and this pass does not deliver", () => {
     // Prime's `gamma` is outside this clone's scope: its edge describes a
     // file the merged tree does not have.
@@ -1026,7 +1148,7 @@ describe("given both trees, the graph is attributed caller by caller", () => {
   it("is reached from both engine call sites with both trees and the rewritten paths", () => {
     const engine = readFileSync(join(process.cwd(), "src/server/cascade-engine.server.ts"), "utf8");
     const calls = engine
-      .split("reconcileSecurityInventory({")
+      .split("reconcileInventoryReading({")
       .slice(1)
       .map((c) => c.slice(0, c.indexOf("})")));
     expect(calls).toHaveLength(2);
@@ -1035,5 +1157,9 @@ describe("given both trees, the graph is attributed caller by caller", () => {
       expect(call).toMatch(/cloneTree: /);
       expect(call).toContain("rewrittenPaths: reconciledPaths");
     }
+    // And the reading helper is the only other caller, handing the sources on.
+    const direct = engine.split("reconcileSecurityInventory({").slice(1);
+    expect(direct).toHaveLength(2);
+    for (const call of direct) expect(call.slice(0, call.indexOf("})"))).toContain("sources: {");
   });
 });

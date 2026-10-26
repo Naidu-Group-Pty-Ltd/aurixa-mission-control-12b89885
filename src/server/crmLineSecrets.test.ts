@@ -268,16 +268,24 @@ describe("the head's own copies from the audit", () => {
       "supabase/functions/vapi-call-webhook/index.ts",
       "supabase/functions/cleanup-call-log-names/index.ts",
       "src/components/call-logs/CleanupContactNames.tsx",
-      "supabase/functions/portal-book-appointment/index.ts",
       "src/pages/Integrations.tsx",
       "supabase/functions/update-integration-secret/index.ts",
       "supabase/functions/_shared/clients/noteWords.pure.ts",
       "supabase/functions/manage-lead-magnets/index.ts",
       "src/components/clients/ActiveClientCard.tsx",
-      "supabase/functions/portal-book-appointment/calendar-id-refusal.test.ts",
     ]) {
       expect(CRM_LINE_VARIANT_PATTERNS.independent, path).toContain(path);
       expect(crmLineVariantPattern(path, "independent"), path).toBe(path);
+      expect(crmLineVariantPattern(path, "dependent"), path).toBeNull();
+    }
+    // The native booking is held whole since #121: its specs are the line's too.
+    for (const path of [
+      "supabase/functions/portal-book-appointment/index.ts",
+      "supabase/functions/portal-book-appointment/calendar-id-refusal.test.ts",
+    ]) {
+      expect(crmLineVariantPattern(path, "independent"), path).toBe(
+        "supabase/functions/portal-book-appointment/**",
+      );
       expect(crmLineVariantPattern(path, "dependent"), path).toBeNull();
     }
   });
