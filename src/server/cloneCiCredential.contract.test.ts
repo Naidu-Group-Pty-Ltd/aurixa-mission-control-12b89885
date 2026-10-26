@@ -58,13 +58,24 @@ describe("what is distributed", () => {
     expect(fn.indexOf("claim = pendingPassword(encryptSecret(password))")).toBeLessThan(claim);
     expect(claim).toBeLessThan(fn.indexOf("/database/password"));
     // Confirmed only over this claim, and only after Supabase took it.
-    const confirm = fn.indexOf('.eq("db_pass", claim)');
+    const confirm = fn.indexOf(".update({ db_pass: encryptSecret(password) })");
     expect(confirm).toBeGreaterThan(fn.indexOf("/database/password"));
+    expect(fn.indexOf('.eq("db_pass", claim)', confirm)).toBeGreaterThan(confirm);
     // A refused reset leaves the claim standing for the next pass to finish;
     // nothing releases it into a state a later pass could mistake.
     expect(fn).not.toContain("db_pass: null");
     // A password just set is written at once, not on the daily re-assertion.
     expect(server).toContain("password = { value: set.password, changed: true }");
+  });
+
+  it("pairs a clone's credentials only with the project it read them from", () => {
+    // The row and the guarded target are two reads; a re-provision between
+    // them must not pair one project's claim or key with another.
+    expect(server).toContain("if (projectRef !== backend.supabase_project_ref)");
+    const fn = server.slice(server.indexOf("async function setCloneDbPassword"));
+    const reread = fn.indexOf('.eq("db_pass", claim);');
+    expect(reread).toBeGreaterThan(-1);
+    expect(reread).toBeLessThan(fn.indexOf("/database/password"));
   });
 
   it("never hands out a standing claim, and finishes it", () => {

@@ -122,6 +122,27 @@ async function setCloneDbPassword(input: {
   const standingSealed = claimedSealedPassword(input.standingClaim);
   if (input.standingClaim && standingSealed) {
     claim = input.standingClaim;
+    // Re-read rather than trusted: the claim was read before the target was
+    // resolved, and a re-provision in between would pair one project's claim
+    // with another project's reset.
+    const { data: standing, error: standingError } = await input.supabase
+      .from("clone_backends")
+      .select("clone_id")
+      .eq("clone_id", input.cloneId)
+      .eq("supabase_project_ref", input.projectRef)
+      .eq("db_pass", claim);
+    if (standingError) {
+      return {
+        ok: false,
+        reason: `the standing claim could not be re-read: ${standingError.message}`,
+      };
+    }
+    if (!standing || standing.length === 0) {
+      return {
+        ok: false,
+        reason: `the standing claim no longer belongs to ${input.projectRef}; nothing was reset`,
+      };
+    }
     try {
       password = decryptSecret(standingSealed);
     } catch (e) {
@@ -396,6 +417,13 @@ export async function reconcileCloneCiCredentials(supabase: Db): Promise<Credent
     let projectRef: string;
     try {
       projectRef = (await resolveCloneSecretTarget(supabase, clone.id)).projectRef;
+      // Two reads of one row: a re-provision between them would pair this
+      // row's credentials with another project.
+      if (projectRef !== backend.supabase_project_ref) {
+        throw new Error(
+          `this clone moved from ${backend.supabase_project_ref} to ${projectRef} during the pass; the next pass reads it again`,
+        );
+      }
     } catch (e) {
       recordOutcome(sweep, {
         repo: label,
