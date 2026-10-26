@@ -3,8 +3,13 @@ import { gitBlobSha } from "./cascade/gitBlobSha.pure";
 import {
   PRIME_TEXT_BATCH_CONCURRENCY,
   PRIME_TEXT_BATCH_ENTRIES,
+  PRIME_TEXT_MAX_BYTES,
 } from "./cascade/primeTextBatch.pure";
-import { readBlobTextsBatched, repoFileFromExactText } from "./github-app.server";
+import {
+  readBlobTextsBatched,
+  readBlobTextsExact,
+  repoFileFromExactText,
+} from "./github-app.server";
 
 type Octokit = Parameters<typeof readBlobTextsBatched>[0];
 
@@ -143,6 +148,108 @@ describe("readBlobTextsBatched", () => {
     ]);
     expect(texts.size).toBe(0);
     expect(gh.queries).toHaveLength(0);
+  });
+});
+
+describe("readBlobTextsExact", () => {
+  /**
+   * `fakeGitHub`'s batch road, with the blobs API beside it: `git.getBlob`
+   * answers from `blobs` (or from `perFile`, to serve bytes that are not the
+   * id asked), and every id it was asked is recorded.
+   */
+  function withBlobs(
+    blobs: ReadonlyMap<string, string>,
+    perFile?: (sha: string) => { encoding: string; content: string } | Error | undefined,
+    batch?: Parameters<typeof fakeGitHub>[1],
+  ) {
+    const gh = fakeGitHub(blobs, batch);
+    const blobReads: string[] = [];
+    (gh.octokit as unknown as { git: unknown }).git = {
+      getBlob: async (args: { owner: string; repo: string; file_sha: string }) => {
+        expect([args.owner, args.repo]).toEqual(["o", "r"]);
+        blobReads.push(args.file_sha);
+        const shaped = perFile?.(args.file_sha);
+        if (shaped instanceof Error) throw shaped;
+        if (shaped !== undefined) return { data: shaped };
+        const text = blobs.get(args.file_sha);
+        if (text === undefined) throw Object.assign(new Error("Not Found"), { status: 404 });
+        return { data: { encoding: "base64", content: Buffer.from(text).toString("base64") } };
+      },
+    };
+    return { ...gh, blobReads };
+  }
+
+  // Larger than GraphQL serves whole, so the batch road never asks for it:
+  // the shape of `ai-dashboard-agent/index.ts`, 1.7 MB on both sides.
+  const big = "x".repeat(PRIME_TEXT_MAX_BYTES + 1);
+  const bigWant = {
+    path: "supabase/functions/ai-dashboard-agent/index.ts",
+    sha: gitBlobSha(big),
+    size: big.length,
+  };
+
+  it("reads per file, by blob id, what the batch road cannot serve whole", async () => {
+    const small = files(3);
+    const gh = withBlobs(
+      new Map([...small.map((f) => [f.sha, f.text] as const), [bigWant.sha, big]]),
+    );
+    const texts = await readBlobTextsExact(gh.octokit, REF, [...small, bigWant], {
+      maxBytes: 8 * 1024 * 1024,
+    });
+    expect(texts.size).toBe(4);
+    expect(texts.get(bigWant.path)).toBe(big);
+    for (const f of small) expect(texts.get(f.path)).toBe(f.text);
+    // The batch answered the small ones; only the big one went per file.
+    expect(gh.queries).toHaveLength(1);
+    expect(gh.blobReads).toEqual([bigWant.sha]);
+  });
+
+  it("reads per file what a failed batch left unanswered", async () => {
+    const list = files(2);
+    const gh = withBlobs(
+      new Map(list.map((f) => [f.sha, f.text])),
+      undefined,
+      () => new Error("secondary rate limit"),
+    );
+    const texts = await readBlobTextsExact(gh.octokit, REF, list, { maxBytes: 1024 });
+    expect([...texts.keys()].sort()).toEqual(list.map((f) => f.path).sort());
+    expect(gh.blobReads.sort()).toEqual(list.map((f) => f.sha).sort());
+  });
+
+  it("keeps a per-file text only where its bytes are the id asked", async () => {
+    const other = "export const other = 1;\n";
+    const gh = withBlobs(new Map(), () => ({
+      encoding: "base64",
+      content: Buffer.from(other).toString("base64"),
+    }));
+    const texts = await readBlobTextsExact(gh.octokit, REF, [bigWant], {
+      maxBytes: 8 * 1024 * 1024,
+    });
+    expect(texts.size).toBe(0);
+    expect(gh.blobReads).toEqual([bigWant.sha]);
+  });
+
+  it("never reads whole a file the listing gave no size for, or one over the ceiling", async () => {
+    const gh = withBlobs(new Map([[bigWant.sha, big]]));
+    const texts = await readBlobTextsExact(
+      gh.octokit,
+      REF,
+      [
+        { ...bigWant, size: undefined },
+        { ...bigWant, path: "over", size: big.length },
+      ],
+      { maxBytes: big.length - 1 },
+    );
+    expect(texts.size).toBe(0);
+    expect(gh.blobReads).toEqual([]);
+  });
+
+  it("leaves a failed per-file read absent and never throws", async () => {
+    const gh = withBlobs(new Map(), () => new Error("Bad credentials"));
+    const texts = await readBlobTextsExact(gh.octokit, REF, [bigWant], {
+      maxBytes: 8 * 1024 * 1024,
+    });
+    expect(texts.size).toBe(0);
   });
 });
 
