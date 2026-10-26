@@ -76,7 +76,7 @@ const ready = {
 
 describe("a bundle the raw route takes", () => {
   it("is posted as source, and GitHub is never asked", async () => {
-    const r = await deployEdgeFunction(REF, bundleOf(1000), { compressed: { prime: PRIME } });
+    const r = await deployEdgeFunction(REF, bundleOf(1000), { compressed: { source: PRIME } });
     expect(calls).toHaveLength(1);
     expect(calls[0].method).toBe("POST");
     expect(calls[0].url).toBe(
@@ -95,7 +95,7 @@ describe("a bundle the raw route takes", () => {
       },
     ];
     lookup.compressedBundleFor.mockResolvedValue(ready);
-    const r = await deployEdgeFunction(REF, bundleOf(1000), { compressed: { prime: PRIME } });
+    const r = await deployEdgeFunction(REF, bundleOf(1000), { compressed: { source: PRIME } });
     expect(calls.map((c) => c.method)).toEqual(["POST", "PATCH"]);
     expect(calls[1].contentType).toBe("application/vnd.denoland.eszip");
     expect(r.deployed).toEqual({ id: "f-1", version: 3 });
@@ -104,7 +104,7 @@ describe("a bundle the raw route takes", () => {
   it("fails as before on any other refusal", async () => {
     answers = [{ status: 500, body: { message: "boot error" } }];
     await expect(
-      deployEdgeFunction(REF, bundleOf(1000), { compressed: { prime: PRIME } }),
+      deployEdgeFunction(REF, bundleOf(1000), { compressed: { source: PRIME } }),
     ).rejects.toThrow(/Deploy failed for big-fn: 500/);
     expect(lookup.compressedBundleFor).not.toHaveBeenCalled();
   });
@@ -123,10 +123,10 @@ describe("a bundle too large for the raw route", () => {
   it("is never posted as source, and goes up as the CLI uploads it", async () => {
     lookup.compressedBundleFor.mockResolvedValue(ready);
     const r = await deployEdgeFunction(REF, bundleOf(RAW_DEPLOY_CEILING_BYTES + 1), {
-      compressed: { prime: PRIME },
+      compressed: { source: PRIME },
     });
     expect(lookup.compressedBundleFor).toHaveBeenCalledWith(
-      expect.objectContaining({ prime: PRIME, fn: expect.objectContaining({ slug: "big-fn" }) }),
+      expect.objectContaining({ source: PRIME, fn: expect.objectContaining({ slug: "big-fn" }) }),
     );
     expect(calls).toHaveLength(1);
     const url = new URL(calls[0].url);
@@ -150,7 +150,7 @@ describe("a bundle too large for the raw route", () => {
     answers = [{ status: 404, body: { message: "Function not found" } }];
     lookup.compressedBundleFor.mockResolvedValue(ready);
     await deployEdgeFunction(REF, bundleOf(RAW_DEPLOY_CEILING_BYTES + 1), {
-      compressed: { prime: PRIME },
+      compressed: { source: PRIME },
     });
     expect(calls.map((c) => c.method)).toEqual(["PATCH", "POST"]);
     const url = new URL(calls[1].url);
@@ -169,7 +169,7 @@ describe("a bundle too large for the raw route", () => {
       ...ready,
       manifest: { ...ready.manifest, slug: "stripe-webhook" },
     });
-    const r = await deployEdgeFunction(REF, webhook, { compressed: { prime: PRIME } });
+    const r = await deployEdgeFunction(REF, webhook, { compressed: { source: PRIME } });
     expect(r.verifyJwt).toBe(false);
     expect(r.overrideReason).toMatch(/anonymous-webhook pattern/);
     expect(new URL(calls[0].url).searchParams.get("verify_jwt")).toBe("false");
@@ -186,7 +186,7 @@ describe("a bundle too large for the raw route", () => {
       undefined,
       undefined,
       {
-        compressed: { prime: PRIME },
+        compressed: { source: PRIME },
       },
     );
     expect(calls).toEqual([]);
@@ -206,7 +206,7 @@ describe("a bundle too large for the raw route", () => {
     });
     await expect(
       deployEdgeFunction(REF, bundleOf(RAW_DEPLOY_CEILING_BYTES + 1), {
-        compressed: { prime: PRIME },
+        compressed: { source: PRIME },
       }),
     ).rejects.toThrow(
       "Deploy failed for big-fn: too large to deploy as source (4000001 bytes of source), and no compressed bundle can stand in for it: imports did not close",
@@ -219,7 +219,7 @@ describe("a bundle too large for the raw route", () => {
     lookup.compressedBundleFor.mockResolvedValue(ready);
     await expect(
       deployEdgeFunction(REF, bundleOf(RAW_DEPLOY_CEILING_BYTES + 1), {
-        compressed: { prime: PRIME },
+        compressed: { source: PRIME },
       }),
     ).rejects.toThrow(
       "Deploy failed for big-fn: 400 — invalid eszip (compressed bundle from https://github.com/naidu/prime/actions/runs/9)",

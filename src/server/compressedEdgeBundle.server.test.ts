@@ -156,7 +156,7 @@ describe("compressedBundleFor", () => {
     ]);
     const r = await compressedBundleFor({
       octokit: gh.octokit,
-      prime: PRIME,
+      source: PRIME,
       fn: fn(),
       nowMs: NOW,
     });
@@ -186,7 +186,7 @@ describe("compressedBundleFor", () => {
     ]);
     const r = await compressedBundleFor({
       octokit: gh.octokit,
-      prime: PRIME,
+      source: PRIME,
       fn: fn(),
       nowMs: NOW,
     });
@@ -206,7 +206,7 @@ describe("compressedBundleFor", () => {
     ]);
     const r = await compressedBundleFor({
       octokit: gh.octokit,
-      prime: PRIME,
+      source: PRIME,
       fn: fn(),
       nowMs: NOW,
     });
@@ -231,7 +231,7 @@ describe("compressedBundleFor", () => {
     const gh = github([]);
     const r = await compressedBundleFor({
       octokit: gh.octokit,
-      prime: PRIME,
+      source: PRIME,
       fn: fn(),
       nowMs: NOW,
     });
@@ -245,7 +245,7 @@ describe("compressedBundleFor", () => {
     const gh = github([{ id: 4, status: "in_progress", conclusion: null, created_at: ago(2) }]);
     const r = await compressedBundleFor({
       octokit: gh.octokit,
-      prime: PRIME,
+      source: PRIME,
       fn: fn(),
       nowMs: NOW,
     });
@@ -276,7 +276,7 @@ describe("compressedBundleFor", () => {
     ]);
     const r = await compressedBundleFor({
       octokit: gh.octokit,
-      prime: PRIME,
+      source: PRIME,
       fn: fn(),
       nowMs: NOW,
     });
@@ -298,7 +298,7 @@ describe("compressedBundleFor", () => {
     ]);
     const r = await compressedBundleFor({
       octokit: gh.octokit,
-      prime: PRIME,
+      source: PRIME,
       fn: fn(),
       nowMs: NOW,
     });
@@ -312,7 +312,7 @@ describe("compressedBundleFor", () => {
     const gh = github([], { dispatchStatus: 404 });
     const r = await compressedBundleFor({
       octokit: gh.octokit,
-      prime: PRIME,
+      source: PRIME,
       fn: fn(),
       nowMs: NOW,
     });
@@ -331,8 +331,8 @@ describe("compressedBundleFor", () => {
         zip: await artifactOf(SOURCES),
       },
     ]);
-    await compressedBundleFor({ octokit: gh.octokit, prime: PRIME, fn: fn(), nowMs: NOW });
-    await compressedBundleFor({ octokit: gh.octokit, prime: PRIME, fn: fn(), nowMs: NOW + 1000 });
+    await compressedBundleFor({ octokit: gh.octokit, source: PRIME, fn: fn(), nowMs: NOW });
+    await compressedBundleFor({ octokit: gh.octokit, source: PRIME, fn: fn(), nowMs: NOW + 1000 });
     expect(gh.calls.filter((c) => c.endsWith("/runs"))).toHaveLength(1);
     expect(gh.calls.filter((c) => c.includes("{archive_format}"))).toHaveLength(1);
   });
@@ -357,7 +357,7 @@ describe("compressedBundleFor", () => {
       asked.push({ url: String(url), init });
       return new Response(new Blob([zip as BlobPart]));
     }) as typeof fetch;
-    const r = await compressedBundleFor({ octokit, prime: PRIME, fn: fn(), nowMs: NOW });
+    const r = await compressedBundleFor({ octokit, source: PRIME, fn: fn(), nowMs: NOW });
     expect(r.state).toBe("ready");
     expect(asked).toEqual([{ url: "https://blob.example/artifact.zip?sig=x", init: undefined }]);
   });
@@ -375,7 +375,7 @@ describe("compressedBundleFor", () => {
     ]);
     const r = await compressedBundleFor({
       octokit: gh.octokit,
-      prime: PRIME,
+      source: PRIME,
       fn: fn(),
       nowMs: NOW,
     });
@@ -390,13 +390,37 @@ describe("compressedBundleFor", () => {
     const gh = github([]);
     const r = await compressedBundleFor({
       octokit: gh.octokit,
-      prime: PRIME,
+      source: PRIME,
       fn: { ...fn(), importsClosed: false },
       nowMs: NOW,
     });
     expect(r).toEqual({ state: "refused", why: OPEN_IMPORTS });
     expect(gh.calls).toEqual([]);
     expect(allowance.readGitHubRemaining).not.toHaveBeenCalled();
+  });
+
+  it("names a source that holds no bundle workflow, and asks it for nothing", async () => {
+    // A clone's own repository before its copy of the workflow lands: the
+    // listing answers 404. Measured on the prime the same way on 26 Oct 2026,
+    // when the deploy failed as "Not Found - list workflow runs".
+    const calls: string[] = [];
+    const octokit: BundleOctokit = {
+      request: async (route) => {
+        calls.push(route);
+        throw Object.assign(new Error("Not Found"), { status: 404 });
+      },
+    };
+    const r = await compressedBundleFor({
+      octokit,
+      source: { owner: "naidu", repo: "crm-line", branch: "main" },
+      fn: fn(),
+      nowMs: NOW,
+    });
+    expect(r).toEqual({
+      state: "awaiting",
+      why: "naidu/crm-line holds no .github/workflows/edge-function-bundles.yml on main to build it with (or the GitHub App lacks Actions: read)",
+    });
+    expect(calls).toEqual(["GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs"]);
   });
 
   it("never reads a failed GitHub call as no bundle", async () => {
@@ -406,7 +430,7 @@ describe("compressedBundleFor", () => {
       },
     };
     await expect(
-      compressedBundleFor({ octokit, prime: PRIME, fn: fn(), nowMs: NOW }),
+      compressedBundleFor({ octokit, source: PRIME, fn: fn(), nowMs: NOW }),
     ).rejects.toThrow("Bad credentials");
   });
 });

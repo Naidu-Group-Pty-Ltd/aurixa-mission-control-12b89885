@@ -177,6 +177,17 @@ describe("deployCloneOwnedFunctions", () => {
     expect(ref).toBe(CRM_PROJECT);
     expect(bundles.map((b) => b.slug)).toEqual(CRM);
     expect(bundles.every((b) => b.verifyJwt === false)).toBe(true);
+    // A function too large to send as source takes the compressed bundle the
+    // CLONE's repository built: the prime's is built from other bytes.
+    expect(project.deployEdgeFunctions.mock.calls[0][4]).toEqual({
+      compressed: {
+        source: {
+          owner: CRM_CLONE.github_owner,
+          repo: CRM_CLONE.github_repo,
+          branch: "main",
+        },
+      },
+    });
     // Each bundle carries the shared tree, which is where `_shared/crm` lives.
     const plans = gh.assembleFunctionBundles.mock.calls[0][2] as Array<{
       files: Array<{ rel: string }>;

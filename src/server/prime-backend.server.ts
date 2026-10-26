@@ -2343,6 +2343,9 @@ export async function assembleFunctionBundles(
       entrypointPath: plan.entrypointPath,
       importMapPath: plan.importMapPath,
       verifyJwt: plan.verifyJwt,
+      // What lets a compressed bundle stand in for a bundle too large to send
+      // as source: only one whose imports closed (`compressedEdgeBundle.pure.ts`).
+      importsClosed: prune.pruned,
     };
   });
 }
