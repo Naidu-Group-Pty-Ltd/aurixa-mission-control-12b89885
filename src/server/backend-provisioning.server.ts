@@ -6847,7 +6847,10 @@ export async function enqueueCloneBackendProvisioning(
     {
       clone_id: input.cloneId,
       status: "pending" as const,
-      region: input.region || "us-east-1",
+      // Sydney when nobody named one, as the wizard and the agreement path
+      // default to: the worker creates the clone's project in this region,
+      // and three of the four live clones' backends already run there.
+      region: input.region || "ap-southeast-2",
       admin_email: input.adminEmail,
       // A repair seeds nobody, so it queues no credential — and the drain's
       // claim and its stranded sweep both read `repair_requested_at` for

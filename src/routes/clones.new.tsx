@@ -148,7 +148,11 @@ function NewClone() {
   const [isolatedTenant, setIsolatedTenant] = useState(true);
   const [adminEmail, setAdminEmail] = useState("");
   const [adminPassword, setAdminPassword] = useState("");
-  const [backendRegion, setBackendRegion] = useState("us-east-1");
+  // Sydney: the region the signed-agreement path provisions in, and the one
+  // three of the four live clones' backends run in (27 Oct 2026). It was
+  // `us-east-1`, so an operator who did not change it put an Australian
+  // client's data in Virginia. Still a choice in the list below.
+  const [backendRegion, setBackendRegion] = useState("ap-southeast-2");
   const enqueueEdge = useServerFn(enqueueEdgeJob);
   // Issue #13: idempotency key for the whole submit. Generated once per
   // wizard mount so a double-click / retry lands on the same clone row
