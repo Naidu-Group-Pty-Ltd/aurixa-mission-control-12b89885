@@ -195,16 +195,19 @@ export function isTextFile(path: string): boolean {
 /**
  * Group blob paths under supabase/functions/ into per-slug bundles.
  * Returns the function slugs (directories) and the shared/root files that
- * ship with every bundle (`_shared/**`, root import_map.json / deno.json*).
+ * ship with every bundle (`_shared/**`, root import_map.json / deno.json*),
+ * and each function's own `deno.json` or `deno.jsonc` where it has one.
  */
 export function groupFunctionPaths(relPaths: string[]): {
   slugs: Map<string, string[]>;
   sharedFiles: string[];
   importMapPath: string | null;
+  slugImportMaps: Map<string, string>;
 } {
   const slugs = new Map<string, string[]>();
   const sharedFiles: string[] = [];
   let importMapPath: string | null = null;
+  const slugImportMaps = new Map<string, string>();
 
   for (const rel of relPaths) {
     if (isExcludedFunctionFile(rel)) continue;
@@ -225,9 +228,33 @@ export function groupFunctionPaths(relPaths: string[]): {
     const list = slugs.get(top) ?? [];
     list.push(rel);
     slugs.set(top, list);
+    const own = rel.slice(slash + 1);
+    if (own === "deno.json" || (own === "deno.jsonc" && !slugImportMaps.has(top))) {
+      slugImportMaps.set(top, rel);
+    }
   }
 
-  return { slugs, sharedFiles, importMapPath };
+  return { slugs, sharedFiles, importMapPath, slugImportMaps };
+}
+
+/**
+ * The import map a function deploys with: its own `deno.json` (or
+ * `deno.jsonc`) where it has one, else the tree's root map.
+ *
+ * The rule the Supabase CLI applies, and so the one the prime's own deploy
+ * ran: the prime's `mcp` and `builder-stock-marketplace` are live with their
+ * own `deno.json` as `import_map_path`. Every clone took the root map alone,
+ * so `mcp/deno.json`, which remaps the function's `npm:` specifiers onto
+ * esm.sh builds pinned to one zod major, never reached a clone at all
+ * (measured 27 Oct 2026: NPC Test's `mcp` deployed from `index.ts` alone,
+ * `import_map: false`). It ran, on a module graph the prime's map exists to
+ * keep it off.
+ */
+export function importMapFor(
+  slug: string,
+  grouped: Pick<ReturnType<typeof groupFunctionPaths>, "slugImportMaps" | "importMapPath">,
+): string | null {
+  return grouped.slugImportMaps.get(slug) ?? grouped.importMapPath;
 }
 
 /** Pick the entrypoint for a function bundle (paths relative to supabase/functions/). */
@@ -1941,7 +1968,8 @@ export async function fetchPrimeBackendSnapshot(
   const shaByRel = new Map(
     functionBlobs.map((b) => [b.path.slice(FUNCTIONS_PREFIX.length), b.sha]),
   );
-  const { slugs, sharedFiles, importMapPath } = groupFunctionPaths(relPaths);
+  const grouped = groupFunctionPaths(relPaths);
+  const { slugs, sharedFiles } = grouped;
 
   const configBlob = blobs.find((b) => b.path === CONFIG_TOML_PATH);
   // Through the commit cache like every other body, so a sweep serving three
@@ -1964,14 +1992,24 @@ export async function fetchPrimeBackendSnapshot(
   // below); the deploy set is derived from it after the fetch, because a
   // caller planning its skip list from this read (`planSkip`) needs the
   // bundles' contents to do it.
-  const allBundles: Array<{ slug: string; bundlePaths: string[]; entrypointPath: string }> = [];
+  const allBundles: Array<{
+    slug: string;
+    bundlePaths: string[];
+    entrypointPath: string;
+    importMapPath: string | null;
+  }> = [];
   for (const [slug, ownPaths] of Array.from(slugs.entries()).sort((a, b) =>
     a[0].localeCompare(b[0]),
   )) {
     const bundlePaths = [...ownPaths, ...sharedFiles];
     const entrypointPath = pickEntrypoint(slug, bundlePaths);
     if (!entrypointPath) continue; // no runnable entrypoint — not a deployable function
-    allBundles.push({ slug, bundlePaths, entrypointPath });
+    allBundles.push({
+      slug,
+      bundlePaths,
+      entrypointPath,
+      importMapPath: importMapFor(slug, grouped),
+    });
   }
 
   // Fetch each needed blob once, keyed by relative path — GraphQL batches,
@@ -2098,7 +2136,7 @@ export async function fetchPrimeBackendSnapshot(
   if (opts?.planSkip) {
     const specifiersOf = memoisedSpecifiers(decodedText);
     bundleDigests = new Map();
-    for (const { slug, bundlePaths, entrypointPath } of allBundles) {
+    for (const { slug, bundlePaths, entrypointPath, importMapPath } of allBundles) {
       const outcome = pruneBundleToReachable({
         entrypointPath,
         files: bundlePaths.map((path) => ({ path })),
@@ -2142,31 +2180,33 @@ export async function fetchPrimeBackendSnapshot(
   const functionSourceTruncated = typeof limit === "number" && deployable.length > limit;
   const selected = functionSourceTruncated ? deployable.slice(0, limit) : deployable;
 
-  const functions: PrimeEdgeFunction[] = selected.map(({ slug, bundlePaths, entrypointPath }) => {
-    const prune =
-      prunedBySlug.get(slug) ??
-      pruneBundleToReachable({
+  const functions: PrimeEdgeFunction[] = selected.map(
+    ({ slug, bundlePaths, entrypointPath, importMapPath }) => {
+      const prune =
+        prunedBySlug.get(slug) ??
+        pruneBundleToReachable({
+          entrypointPath,
+          files: bundlePaths.map((path) => ({ path })),
+          importMapPath,
+          textOf,
+        });
+      if (!prune.pruned) {
+        // Loud, because a bundle carrying the whole tree is one the deploy API
+        // will refuse — and the reason names which file to look at.
+        console.warn(
+          `[prime-backend] ${slug}: carrying the whole shared tree — ${prune.reason ?? "unknown"}`,
+        );
+      }
+      return {
+        slug,
+        files: prune.keep.map((rel) => fileByPath.get(rel)!),
         entrypointPath,
-        files: bundlePaths.map((path) => ({ path })),
         importMapPath,
-        textOf,
-      });
-    if (!prune.pruned) {
-      // Loud, because a bundle carrying the whole tree is one the deploy API
-      // will refuse — and the reason names which file to look at.
-      console.warn(
-        `[prime-backend] ${slug}: carrying the whole shared tree — ${prune.reason ?? "unknown"}`,
-      );
-    }
-    return {
-      slug,
-      files: prune.keep.map((rel) => fileByPath.get(rel)!),
-      entrypointPath,
-      importMapPath,
-      verifyJwt: fnConfig.get(slug)?.verifyJwt ?? true,
-      importsClosed: prune.pruned,
-    };
-  });
+        verifyJwt: fnConfig.get(slug)?.verifyJwt ?? true,
+        importsClosed: prune.pruned,
+      };
+    },
+  );
 
   // ── Secret shells ──
   //
@@ -2290,7 +2330,7 @@ export function planFunctionBundles(
     plans.push({
       slug,
       entrypointPath,
-      importMapPath: grouped.importMapPath,
+      importMapPath: importMapFor(slug, grouped),
       verifyJwt: fnConfig.get(slug)?.verifyJwt ?? true,
       files: bundlePaths.map((rel) => {
         const sha = shaByRel.get(rel);

@@ -1,7 +1,11 @@
+import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
+import { stripComments } from "@/server/sourceComments.pure";
 import {
   migrationIdFromFilename,
   groupFunctionPaths,
+  importMapFor,
+  planFunctionBundles,
   pickEntrypoint,
   parseFunctionConfig,
   extractSecretNames,
@@ -60,6 +64,64 @@ describe("groupFunctionPaths", () => {
     const { slugs, sharedFiles } = groupFunctionPaths(["README.md", "deno.json", "fn/index.ts"]);
     expect(sharedFiles).toEqual(["deno.json"]);
     expect(Array.from(slugs.keys())).toEqual(["fn"]);
+  });
+});
+
+describe("a function deploys with its own import map, as the CLI deploys it", () => {
+  // The prime's CI deploys `mcp` and `builder-stock-marketplace` with their own
+  // `deno.json` as `import_map_path`. Every clone took the root map alone, so
+  // NPC Test's `mcp` was live from `index.ts` alone (27 Oct 2026).
+  const grouped = groupFunctionPaths([
+    "mcp/index.ts",
+    "mcp/deno.json",
+    "typed/index.ts",
+    "typed/deno.jsonc",
+    "both/index.ts",
+    "both/deno.jsonc",
+    "both/deno.json",
+    "plain/index.ts",
+    "plain/lib/deno.json",
+    "_shared/cors.ts",
+    "import_map.json",
+  ]);
+
+  it("is the function's own deno.json, preferred over deno.jsonc, else the tree's root map", () => {
+    expect(importMapFor("mcp", grouped)).toBe("mcp/deno.json");
+    expect(importMapFor("typed", grouped)).toBe("typed/deno.jsonc");
+    expect(importMapFor("both", grouped)).toBe("both/deno.json");
+    // Only the file beside the entrypoint is the function's config.
+    expect(importMapFor("plain", grouped)).toBe("import_map.json");
+    expect(importMapFor("mcp", groupFunctionPaths(["mcp/index.ts"]))).toBeNull();
+  });
+
+  it("is what a planned bundle carries, and the file travels in it", () => {
+    const sha = (n: number) => String(n).padStart(40, "0");
+    const files = ["mcp/index.ts", "mcp/deno.json", "plain/index.ts", "_shared/cors.ts"].map(
+      (rel, i) => ({ rel, sha: sha(i) }),
+    );
+    const plans = planFunctionBundles(
+      {
+        sourceRepo: "o/prime",
+        sourceRef: "main",
+        sourceSha: sha(9),
+        files,
+        configToml: null,
+        declaredFunctionSlugs: ["mcp", "plain"],
+      },
+      ["mcp", "plain"],
+    );
+    const mcp = plans.find((p) => p.slug === "mcp")!;
+    expect(mcp.importMapPath).toBe("mcp/deno.json");
+    expect(mcp.files.map((f) => f.rel)).toContain("mcp/deno.json");
+    expect(plans.find((p) => p.slug === "plain")!.importMapPath).toBeNull();
+  });
+
+  it("is chosen the same way where the prime's snapshot assembles every bundle", () => {
+    const code = stripComments(readFileSync("src/server/prime-backend.server.ts", "utf8"));
+    // Both planners ask one rule, and nothing hands every bundle the root map.
+    expect(code.match(/importMapPath: importMapFor\(slug, grouped\)/g)).toHaveLength(2);
+    expect(code).not.toContain("importMapPath: grouped.importMapPath");
+    expect(code).not.toContain("const { slugs, sharedFiles, importMapPath } = groupFunctionPaths(");
   });
 });
 
@@ -173,6 +235,10 @@ describe("selectProjectKeys", () => {
   });
 
   it("returns nulls when nothing matches", () => {
-    expect(selectProjectKeys([])).toEqual({ anonKey: null, serviceRoleKey: null, gatewayKey: null });
+    expect(selectProjectKeys([])).toEqual({
+      anonKey: null,
+      serviceRoleKey: null,
+      gatewayKey: null,
+    });
   });
 });
