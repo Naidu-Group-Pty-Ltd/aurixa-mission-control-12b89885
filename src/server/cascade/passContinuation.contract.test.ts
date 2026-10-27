@@ -548,11 +548,13 @@ describe("a pass resumes inside a clone", () => {
     // delivery it stayed 0 and this guard could never be satisfied. A carry
     // is all text by construction, which is how its budget bound came to be
     // the one bound it could never reach.
-    // And it leaves the clone's measured tail — the stages after this loop,
-    // which never ask — less the slack the platform allows past the budget
-    // (`cascade/passBudget.pure.ts`). Zero for every mirror at p90.
+    // It reserves one more file and NOT the stages after this loop. A pause
+    // here keeps only binary blobs — text travels inline and is read again on
+    // the next pass — so stopping earlier to leave room for the tail would
+    // turn a text-heavy pass into a pause it never gets past (Codex P2 on
+    // #369; `cascade/passBudget.pure.ts`).
     expect(process).toMatch(
-      /const shouldStop = \(\) =>\s*resume\?\.budget !== undefined &&\s*filesRead > 0 &&\s*resume\.budget\.isPastDeadline\(slowestFileMs \+ \(resume\.tailReserveMs \?\? 0\)\);/,
+      /const shouldStop = \(\) =>\s*resume\?\.budget !== undefined && filesRead > 0 && resume\.budget\.isPastDeadline\(slowestFileMs\);/,
     );
     // Incremented once, where the read is attempted, rather than at each of
     // the four exits below it.

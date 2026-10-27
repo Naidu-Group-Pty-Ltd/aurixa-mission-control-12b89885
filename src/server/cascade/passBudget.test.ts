@@ -7,12 +7,10 @@ import { describe, expect, it } from "vitest";
 import {
   CLAIM_HEADROOM_MS,
   INVOCATION_BUDGET_MS,
-  PAST_BUDGET_SLACK_MS,
   claimHasHeadroom,
   clonePassBudgets,
   ownPassReserveMs,
   readPassTrace,
-  tailReserveMs,
 } from "./passBudget.pure";
 
 const trace = (over: Record<string, unknown> = {}) => ({
@@ -59,28 +57,8 @@ describe("ownPassReserveMs — how long the clone's next pass should be assumed 
   });
 });
 
-describe("tailReserveMs — what the prepare loop leaves for the unchecked stages after it", () => {
-  it("is the clone's tail less the slack the platform allows past the budget", () => {
-    // The CRM at p90: entered `deliver` at 21 s and finished at 58.8 s — a
-    // 37.8 s tail, 22.8 s more than the 15 s of slack.
-    expect(tailReserveMs(trace({ ended_ms: 58_800 }))).toBe(37_800 - PAST_BUDGET_SLACK_MS);
-  });
-
-  it("is zero for a mirror, whose tail fits in the slack — preparation unchanged", () => {
-    // A mirror at p90: 17.6 s from `deliver` to the end.
-    expect(tailReserveMs(trace({ ended_ms: 21_000 + 14_000 }))).toBe(0);
-  });
-
-  it("is zero for anything but a finished pass that entered `deliver`", () => {
-    expect(tailReserveMs(trace({ outcome: "paused" }))).toBe(0);
-    expect(tailReserveMs(trace({ outcome: undefined, ended_ms: undefined }))).toBe(0);
-    expect(tailReserveMs(trace({ phases: [["listing", 0]] }))).toBe(0);
-    expect(tailReserveMs(null)).toBe(0);
-  });
-});
-
-describe("clonePassBudgets — newest trace per clone, and newest finished one for the tail", () => {
-  it("reads the pass reserve from the latest trace and the tail from the latest finished", () => {
+describe("clonePassBudgets — the newest readable trace per clone", () => {
+  it("reads each clone's reserve from its latest trace, however that pass ended", () => {
     const budgets = clonePassBudgets([
       // Newest first: a pass the platform ended, then a finished one.
       { clone_id: "crm", pass_trace: trace({ outcome: undefined, ended_ms: undefined }) },
@@ -88,12 +66,9 @@ describe("clonePassBudgets — newest trace per clone, and newest finished one f
       { clone_id: "cd", pass_trace: trace({ ended_ms: 22_000 }) },
       { clone_id: "cd", pass_trace: trace({ ended_ms: 59_000 }) },
     ]);
-    expect(budgets.get("crm")).toEqual({
-      passMs: INVOCATION_BUDGET_MS,
-      tailMs: 37_800 - PAST_BUDGET_SLACK_MS,
-    });
-    // The older, slower dashboard pass is not the latest: 22 s, tail 1 s.
-    expect(budgets.get("cd")).toEqual({ passMs: 22_000, tailMs: 0 });
+    expect(budgets.get("crm")).toEqual({ passMs: INVOCATION_BUDGET_MS });
+    // The older, slower dashboard pass is not the latest.
+    expect(budgets.get("cd")).toEqual({ passMs: 22_000 });
   });
 
   it("leaves out a clone with no readable trace, and ignores rows with no clone", () => {
@@ -102,6 +77,14 @@ describe("clonePassBudgets — newest trace per clone, and newest finished one f
       { clone_id: null, pass_trace: trace() },
     ]);
     expect(budgets.size).toBe(0);
+  });
+
+  it("skips an unreadable newest row and reads the next one", () => {
+    const budgets = clonePassBudgets([
+      { clone_id: "cd", pass_trace: { v: 2 } },
+      { clone_id: "cd", pass_trace: trace({ ended_ms: 25_000 }) },
+    ]);
+    expect(budgets.get("cd")).toEqual({ passMs: 25_000 });
   });
 });
 

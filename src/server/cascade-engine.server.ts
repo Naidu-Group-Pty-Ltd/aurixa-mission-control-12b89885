@@ -1198,7 +1198,6 @@ export async function executeCascade(
             }
           },
           budget: opts?.budget,
-          tailReserveMs: passBudgets.get(clone.id)?.tailMs ?? 0,
           onPhase: (phase, atMs) => writeTrace(enterPhase(passTrace, phase, atMs, traceStartedAt)),
         },
       });
@@ -1917,14 +1916,6 @@ export async function processClone(args: {
     progress: unknown;
     onProgress: (progress: CascadeProgress) => Promise<void>;
     budget?: CascadeBudget;
-    /**
-     * What the prepare loop must leave of the budget for the stages after it,
-     * which never ask: this clone's last measured tail, less the slack the
-     * platform allows past the budget (`cascade/passBudget.pure.ts`). Zero —
-     * the old behaviour — for a clone with no finished trace, and for every
-     * mirror at p90.
-     */
-    tailReserveMs?: number;
     /**
      * Told each stage as the pass enters it, with the milliseconds since the
      * pass began (`cascade/passTrace.pure.ts`). Never awaited: a trace is for
@@ -3266,9 +3257,7 @@ export async function processClone(args: {
    * the window.
    */
   const shouldStop = () =>
-    resume?.budget !== undefined &&
-    filesRead > 0 &&
-    resume.budget.isPastDeadline(slowestFileMs + (resume.tailReserveMs ?? 0));
+    resume?.budget !== undefined && filesRead > 0 && resume.budget.isPastDeadline(slowestFileMs);
 
   /**
    * The lane for a file too large to read: carry it without ever holding it.
