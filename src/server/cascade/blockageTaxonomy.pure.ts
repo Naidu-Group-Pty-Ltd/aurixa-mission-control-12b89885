@@ -42,9 +42,10 @@
  * future edit can flip it.
  *
  * Client-safe: pure, and its only imports are the two constants the drain
- * itself runs on.
+ * itself runs on and the one rule that names a rollback script.
  */
 import { MAX_ATTEMPTS, STALL_MINUTES } from "./drainLimits.pure";
+import { isRollbackScript } from "../primeMigrationDiagnosis.pure";
 
 /**
  * Who can actually clear this. The custodian reads it as a permission, so a
@@ -320,6 +321,18 @@ export type CloneBlockageFacts = {
     heldCount: number;
     /** The first migration it holds, for the sentence an operator reads. */
     firstHeld: string | null;
+    /**
+     * The corpus files that carry the version, as its note names them. Null
+     * where no note names them — an older note, or a version known only from
+     * a `blockedBy` — which is "not known", never "none".
+     */
+    files?: readonly string[] | null;
+    /**
+     * Older holes the clone's record counts and does not list. Carried by the
+     * oldest note only: the notes are the newest, so a new hole is never
+     * hidden behind legacy ones (`PRIME_LEDGER_HOLE_NOTE_CAP`).
+     */
+    olderUnlisted?: number;
   }>;
   sloMinutes: number;
 };
@@ -471,13 +484,23 @@ export function classifyBlockages(facts: CloneBlockageFacts, now: Date): Detecte
         this one is not counted here, so the count is a floor and never a
         total (Codex, on this change).
       */
-      (hole.heldCount > 0
-        ? `${facts.label} has ${hole.heldCount} migration(s) recorded as waiting behind ${hole.version}` +
-          (hole.firstHeld ? `, starting with ${hole.firstHeld}` : "") +
-          ": the prime's ledger does not record that migration, so this clone may not run it either, and what waits behind it stays held until it does. "
-        : `The prime's ledger does not record ${hole.version}, so no clone may be sent it; nothing on ${facts.label} is recorded as waiting behind it. `) +
-        "It clears when the prime runs that file — nothing here can, and stamping the prime's ledger instead would send this clone a migration whose prerequisite does not exist. " +
-        "Whether this prime ran it untracked is a separate reading, against its catalog rather than its ledger: Fleet Manager → Prime Ledger Reconciliation.",
+      /*
+        AND A ROLLBACK SCRIPT IS NEVER TO BE RUN.
+
+        The ordinary remedy — "it clears when the prime runs that file" — is
+        exactly wrong for two of the CRM independent's holes, which are
+        `20250124120001_rollback_client_data_rls_policies.sql` and
+        `20250124130001_rollback_financial_data_rls_policies.sql`: each undoes
+        an RLS fix, and the row told an operator to dispatch it. Stamping the
+        ledger is no better — a version the prime records is one every clone
+        is then sent. So a hole whose files include a rollback script says
+        that, names the file, and says what the row is for. Which file is a
+        rollback script is `isRollbackScript`'s decision, the one the
+        migration diagnosis refuses a dry run on, never a second pattern
+        here. A note that names no files (written before notes carried them)
+        reads as an ordinary hole until the next pass rewrites it.
+      */
+      primeLedgerHoleDetail(facts.label, hole),
       null,
     );
   }
@@ -734,6 +757,46 @@ export function classifyBlockages(facts: CloneBlockageFacts, now: Date): Detecte
     return found.filter((b) => !BLOCKAGE_POLICY[b.cls].conditionedOnDivergence);
   }
   return found;
+}
+
+/** What one `prime_ledger_hole` row says. See the comments at its call. */
+function primeLedgerHoleDetail(
+  label: string,
+  hole: CloneBlockageFacts["primeLedgerHoles"][number],
+): string {
+  const evidence =
+    "Whether this prime ran it untracked is a separate reading, against its catalog rather than its ledger: Fleet Manager → Prime Ledger Reconciliation.";
+  const unlisted =
+    (hole.olderUnlisted ?? 0) > 0
+      ? ` Older than this one, ${hole.olderUnlisted} more version(s) the prime's ledger does not record are counted on ${label}'s record but not listed one by one: the newest are listed, so a hole merged since is never hidden behind old ones.`
+      : "";
+  const rollbacks = (hole.files ?? []).filter(isRollbackScript);
+
+  if (rollbacks.length > 0) {
+    return (
+      `${hole.version} carries a rollback script, ${rollbacks.join(", ")}: it undoes an earlier migration and must never be run — not on the prime, not on any clone. ` +
+      (hole.heldCount > 0
+        ? `${label} has ${hole.heldCount} migration(s) recorded as waiting behind it` +
+          (hole.firstHeld ? `, starting with ${hole.firstHeld}` : "") +
+          ", and they stay held while it stands. "
+        : `Nothing on ${label} is recorded as waiting behind it: this row is recorded only for completeness. `) +
+      "The prime's ledger rightly does not record it, and nothing here clears it — running it, or stamping the prime's ledger to say it ran, would send the undo to every clone. " +
+      "What becomes of the legacy file is the owner's decision: a file the prime declares withdrawn in supabase/migrations/MIGRATION_WITHDRAWN.json stops counting as a hole. " +
+      evidence +
+      unlisted
+    );
+  }
+
+  return (
+    (hole.heldCount > 0
+      ? `${label} has ${hole.heldCount} migration(s) recorded as waiting behind ${hole.version}` +
+        (hole.firstHeld ? `, starting with ${hole.firstHeld}` : "") +
+        ": the prime's ledger does not record that migration, so this clone may not run it either, and what waits behind it stays held until it does. "
+      : `The prime's ledger does not record ${hole.version}, so no clone may be sent it; nothing on ${label} is recorded as waiting behind it. `) +
+    "It clears when the prime runs that file — nothing here can, and stamping the prime's ledger instead would send this clone a migration whose prerequisite does not exist. " +
+    evidence +
+    unlisted
+  );
 }
 
 /**

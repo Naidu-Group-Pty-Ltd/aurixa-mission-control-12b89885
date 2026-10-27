@@ -91,6 +91,10 @@ export type AppliedRecordEntry = {
   name?: JsonValue;
   blockedBy?: JsonValue;
   primeLedgerHole?: JsonValue;
+  /** On a hole note: the corpus files that carry the version, when known. */
+  files?: JsonValue;
+  /** On the OLDEST hole note: how many older holes are counted and not noted. */
+  olderUnlisted?: JsonValue;
   [key: string]: JsonValue | undefined;
 };
 
@@ -178,24 +182,44 @@ export function holesNamedBy(stored: unknown): string[] {
  *
  * Measured 27 Sep 2026: two holes on each mirror, and on the CRM
  * independent — the one clone the cap binds — 189 corpus versions that
- * neither ledger records by version, the first 50 of them exactly the 50
- * notes the lane filed. Every open row is rewritten by the ledger on each
- * pass, which is the cost this bound holds down.
+ * neither ledger records by version. Every open row is rewritten by the
+ * ledger on each pass, which is the cost this bound holds down.
  *
- * THE NOTES ARE THE OLDEST, AND STAY THE OLDEST, because the ledger clears a
- * row the moment its version leaves the notes. Kept oldest first, a version
- * leaves when it stops being a hole — the prime records it, or the clone
- * gains it — and never because a newer one arrived. A window at
- * the newest end would move each time a migration merged and waited for its
- * dispatch, stamping `cleared_at` on a hole that still stands and reopening
- * it with a fresh start once the dispatch landed. What the notes cannot show
- * past the cap, the sentence does: `primeLedgerHoleSpan` names the count and
- * both ends, from every hole rather than from the notes.
+ * THE NOTES ARE THE NEWEST. They were the oldest, on the reasoning that a
+ * window at the newest end moves whenever a migration merges and waits for
+ * its dispatch. It does — and the oldest window was worse for never moving:
+ * the CRM independent's 50 notes were legacy versions, 20250124120000 to
+ * 20260721160000, open since 22 Sep and holding nothing back, so no hole
+ * merged after them could ever reach a note. Measured 27 Oct 2026:
+ * `20270103090000` waited 16 days for its dispatch with a blockage row on
+ * all three mirrors and none on the CRM.
+ *
+ * A fresh hole is the one somebody can act on — usually a file merged and not
+ * yet dispatched — so it is the one that must never be hidden. The cost moves
+ * to the old end: past the cap, a hole opening or closing at the newest end
+ * shifts the window by one, and the oldest listed version's row is cleared
+ * and later reopened with a fresh start. That costs a legacy version nobody
+ * is acting on one row's date; the old order cost a new hole its visibility.
+ * What the window leaves out is counted on its oldest note (`olderUnlisted`)
+ * and said on that note's row, and the clone's sentence names the count and
+ * both ends from every hole (`primeLedgerHoleSpan`).
  */
 export const PRIME_LEDGER_HOLE_NOTE_CAP = 50;
 
 /** A note that says the prime's ledger does not record this version. */
-export function primeLedgerHoleNote(version: string): AppliedRecordEntry {
+export function primeLedgerHoleNote(
+  version: string,
+  extra: {
+    /**
+     * The corpus files that carry the version. What the blockage row needs to
+     * tell a rollback script from a migration waiting for its dispatch — the
+     * remedies are opposite, and the version alone cannot say which.
+     */
+    files?: readonly string[] | null;
+    /** Holes older than this one, counted and not noted. Only the oldest note carries it. */
+    olderUnlisted?: number;
+  } = {},
+): AppliedRecordEntry {
   return {
     id: version,
     name: version,
@@ -206,7 +230,70 @@ export function primeLedgerHoleNote(version: string): AppliedRecordEntry {
     success: true,
     skipped: true,
     primeLedgerHole: true,
+    ...(extra.files && extra.files.length > 0 ? { files: [...extra.files] } : {}),
+    ...(extra.olderUnlisted && extra.olderUnlisted > 0
+      ? { olderUnlisted: extra.olderUnlisted }
+      : {}),
   };
+}
+
+/**
+ * The notes one pass files: the newest `PRIME_LEDGER_HOLE_NOTE_CAP` holes, in
+ * corpus order, each naming the files that carry it.
+ *
+ * `holes` is EVERY hole the pass measured, in corpus order — which is version
+ * order, so its tail is the newest. The selection is made here and nowhere
+ * else, because two lanes file notes (the replay, and the no-op pass that
+ * reconciles them) and a window chosen at each end is how the two would
+ * disagree about which versions are listed: every pass would then rewrite the
+ * record and the ledger would clear and reopen rows that never changed.
+ *
+ * `corpus` names the files; without it the notes carry none, and a blockage
+ * row reads the hole by its version alone.
+ */
+export function primeLedgerHoleNotes(
+  holes: readonly string[],
+  corpus?: ReadonlyArray<{ id: string; name: string }> | null,
+): AppliedRecordEntry[] {
+  const unique = distinctVersions(holes);
+  const listed = unique.slice(Math.max(0, unique.length - PRIME_LEDGER_HOLE_NOTE_CAP));
+  const olderUnlisted = unique.length - listed.length;
+  const listedSet = new Set(listed);
+  const filesOf = new Map<string, string[]>();
+  for (const m of corpus ?? []) {
+    if (!listedSet.has(m.id)) continue;
+    const files = filesOf.get(m.id) ?? [];
+    files.push(m.name);
+    filesOf.set(m.id, files);
+  }
+  return listed.map((version, i) =>
+    primeLedgerHoleNote(version, {
+      files: filesOf.get(version) ?? null,
+      olderUnlisted: i === 0 ? olderUnlisted : 0,
+    }),
+  );
+}
+
+/**
+ * What a hole note adds to its version, read back off the clone's row.
+ *
+ * The column is JSONB written by several generations of this lane, so a field
+ * that is missing or malformed reads as not known — `files: null`, never an
+ * empty list that would claim the version has no files — and an absent count
+ * is none unlisted.
+ */
+export function holeNoteDetail(entry: AppliedRecordEntry | null | undefined): {
+  files: string[] | null;
+  olderUnlisted: number;
+} {
+  const rawFiles = entry?.files;
+  const files = Array.isArray(rawFiles)
+    ? rawFiles.filter((f): f is string => typeof f === "string" && f !== "")
+    : [];
+  const rawOlder = entry?.olderUnlisted;
+  const olderUnlisted =
+    typeof rawOlder === "number" && Number.isInteger(rawOlder) && rawOlder > 0 ? rawOlder : 0;
+  return { files: files.length > 0 ? files : null, olderUnlisted };
 }
 
 export type BlockageReconciliation = {
@@ -216,11 +303,11 @@ export type BlockageReconciliation = {
    * row is left as found. A healthy fleet reaches this branch on every pass.
    */
   entries: AppliedRecordEntry[] | null;
-  /** Versions the stored record named that this pass disproved. */
+  /** Versions the stored record named that this pass disproved: no longer holes at all. */
   discharged: string[];
-  /** Versions this pass measured that the stored record did not name. */
+  /** Versions this pass notes that the stored record did not name. */
   opened: string[];
-  /** Every version this pass measured, in corpus order. */
+  /** Every version this pass measured, in corpus order — noted or not. */
   holes: string[];
 };
 
@@ -240,24 +327,26 @@ export type BlockageReconciliation = {
 export function reconcileBlockageRecord(args: {
   /** `clone_backends.migrations_applied` as read. Any shape is tolerated. */
   stored: unknown;
-  /** The holes this pass measured, in corpus order. */
+  /**
+   * EVERY hole this pass measured, in corpus order — never a capped list.
+   * Which of them are noted is `primeLedgerHoleNotes`'s decision, so that the
+   * replay and this pass make it the same way.
+   */
   measured: readonly string[];
+  /** The corpus, so each note can name its files. See `primeLedgerHoleNotes`. */
+  corpus?: ReadonlyArray<{ id: string; name: string }> | null;
 }): BlockageReconciliation {
-  const measured: string[] = [];
-  const measuredSet = new Set<string>();
-  for (const v of args.measured) {
-    if (typeof v !== "string" || v === "") continue;
-    if (measuredSet.has(v)) continue;
-    measuredSet.add(v);
-    measured.push(v);
-  }
+  const measured = distinctVersions(args.measured);
+  const measuredSet = new Set(measured);
+  const notes = primeLedgerHoleNotes(measured, args.corpus);
+  const listed = notes.map((n) => n.id as string);
 
   const stored = entriesOf(args.stored);
   const named = holesNamedBy(args.stored);
   const namedSet = new Set(named);
 
   const discharged = named.filter((v) => !measuredSet.has(v));
-  const opened = measured.filter((v) => !namedSet.has(v));
+  const opened = listed.filter((v) => !namedSet.has(v));
 
   /*
     WHAT IS COMPARED IS THE RECORD, NOT THE HOLE SET.
@@ -279,22 +368,56 @@ export function reconcileBlockageRecord(args: {
     So the test is whether the stored notes ALREADY ARE the notes this pass
     would write. A legacy `blockedBy` entry never is one, so it is always
     replaced; an unchanged healthy row still writes nothing.
+
+    WHOLE NOTES, NOT IDS. A note carries its files and, on the oldest, the
+    count left unlisted, and a record that differs only there is still the
+    wrong record — a note written before it named its files would otherwise
+    never gain them. Compared field by field and never as text: the column is
+    JSONB, which hands keys back in its own order.
   */
   const storedNotes = stored.filter(isBlockageNote);
   const settled =
-    storedNotes.length === measured.length &&
-    storedNotes.every((e, i) => e.primeLedgerHole === true && e.id === measured[i]);
+    storedNotes.length === notes.length && storedNotes.every((e, i) => sameJson(e, notes[i]));
   if (settled) {
     return { entries: null, discharged, opened, holes: measured };
   }
 
   const kept = stored.filter((e) => !isBlockageNote(e));
   return {
-    entries: [...kept, ...measured.map(primeLedgerHoleNote)],
+    entries: [...kept, ...notes],
     discharged,
     opened,
     holes: measured,
   };
+}
+
+/** Versions in the order given, without repeats or blanks. */
+function distinctVersions(versions: readonly string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const v of versions) {
+    if (typeof v !== "string" || v === "") continue;
+    if (seen.has(v)) continue;
+    seen.add(v);
+    out.push(v);
+  }
+  return out;
+}
+
+/** Structural equality of two JSON values, whatever order their keys are in. */
+function sameJson(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((v, i) => sameJson(v, b[i]));
+  }
+  const ra = a as Record<string, unknown>;
+  const rb = b as Record<string, unknown>;
+  const keys = (r: Record<string, unknown>) => Object.keys(r).filter((k) => r[k] !== undefined);
+  const ka = keys(ra);
+  const kb = keys(rb);
+  return ka.length === kb.length && ka.every((k) => k in rb && sameJson(ra[k], rb[k]));
 }
 
 /**
@@ -444,14 +567,15 @@ export function primeLedgerHoleTally(holes: readonly string[]): string {
  * already holds is no hole for it, whatever the prime's ledger says.
  *
  * TAKES EVERY HOLE, NEVER THE NOTES. The notes are capped at
- * `PRIME_LEDGER_HOLE_NOTE_CAP` and kept oldest first, so on a clone past the
- * cap they are the wrong list to count from in both directions: the count
- * they give is the cap, and their last entry is the fiftieth-oldest hole
- * rather than the newest. Measured on the CRM independent, 27 Sep 2026: 189
- * holes by version (the lane also clears by body, so its own count may be
- * lower), notes ending at 20260721160000, while the two newest —
- * 20261219040000 and 20261219050000, the pair every mirror reports — were in
- * no note and in no sentence.
+ * `PRIME_LEDGER_HOLE_NOTE_CAP`, so on a clone past the cap they are the wrong
+ * list to count from: the count they give is the cap, and one end of the span
+ * is wherever the cap fell rather than the true end. Measured on the CRM
+ * independent, 27 Sep 2026, when the notes were still the oldest: 189 holes
+ * by version (the lane also clears by body, so its own count may be lower),
+ * notes ending at 20260721160000, while the two newest — 20261219040000 and
+ * 20261219050000, the pair every mirror reports — were in no note and in no
+ * sentence. The notes are the newest now, and read from them the sentence
+ * would lose the OLDEST end instead.
  *
  * Both ends are named because they carry different remedies. The oldest is
  * where a reconciliation starts; the newest is usually a file merged and not

@@ -83,7 +83,6 @@ import { notifyOperators, writeAuditLog } from "./audit.server";
 import { chunkCursorFor } from "./chunkCursorStore.pure";
 import { ClaimLostError } from "./provisioningBudget";
 import {
-  PRIME_LEDGER_HOLE_NOTE_CAP,
   blockageDetailFor,
   primeLedgerHoleSentence,
   primeLedgerHoleTally,
@@ -1902,7 +1901,11 @@ export async function runFleetMigrationSync(
         } else {
           const blockage = reconcileBlockageRecord({
             stored: (current as { migrations_applied?: unknown } | null)?.migrations_applied,
-            measured: primeLedgerHoles.slice(0, PRIME_LEDGER_HOLE_NOTE_CAP),
+            // Every hole, and the corpus that names their files: which of them
+            // are noted is the record's own decision, made exactly as the
+            // replay made it (`primeLedgerHoleNotes`).
+            measured: primeLedgerHoles,
+            corpus: scopedMetas,
           });
           const inspected =
             (current as { status_detail?: string | null } | null)?.status_detail ?? null;
@@ -1940,8 +1943,8 @@ export async function runFleetMigrationSync(
             ? null
             : blockageDetailFor({
                 standing: inspected,
-                // Every hole, not the capped notes `blockage.holes` holds: the
-                // sentence names the count and both ends.
+                // Every hole, never the capped notes: the sentence names the
+                // count and both ends.
                 holes: primeLedgerHoles,
                 // A pass that changed nothing can still have stopped with more to
                 // send, so this is handed over rather than assumed: without it the

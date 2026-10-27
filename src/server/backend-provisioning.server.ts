@@ -23,7 +23,7 @@ import {
   cursorRanPastEnd,
   type StoredSeedShape,
 } from "./chunkCursorStore.pure";
-import { PRIME_LEDGER_HOLE_NOTE_CAP, primeLedgerHoleNote } from "./fleetBlockageRecord.pure";
+import { primeLedgerHoleNotes } from "./fleetBlockageRecord.pure";
 import type { CorpusMeta } from "./fleetCorpusScope.pure";
 import {
   frontierFromReplay,
@@ -3300,8 +3300,11 @@ export async function applyPrimeMigrations(
       blockage ledger reads.
     */
     primeLedgerHoles = [...part.holes];
-    for (const version of part.holes.slice(0, PRIME_LEDGER_HOLE_NOTE_CAP)) {
-      results.push(primeLedgerHoleNote(version) as PrimeMigrationResult);
+    // The NEWEST holes, each naming its files, chosen by the one function the
+    // no-op pass reconciles these notes with — so the two never disagree about
+    // which versions are listed (`primeLedgerHoleNotes`).
+    for (const note of primeLedgerHoleNotes(part.holes, scope.corpus)) {
+      results.push(note as PrimeMigrationResult);
     }
   }
 

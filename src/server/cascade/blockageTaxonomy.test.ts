@@ -1189,3 +1189,90 @@ describe("a migration the prime merged and never ran", () => {
     });
   });
 });
+
+/*
+  A ROLLBACK SCRIPT IS NEVER TO BE RUN.
+
+  Two of the CRM independent's holes are `20250124120001_rollback_client_data_rls_policies.sql`
+  and `20250124130001_rollback_financial_data_rls_policies.sql`, each an undo of
+  an RLS fix, and their rows said "It clears when the prime runs that file" —
+  an instruction to dispatch them.
+*/
+describe("a hole that is a rollback script", () => {
+  const ROLLBACK = "20250124120001_rollback_client_data_rls_policies.sql";
+  const crm = (hole: Partial<CloneBlockageFacts["primeLedgerHoles"][number]>) =>
+    facts({
+      label: "NPC CRM Independent",
+      syncScope: "modules",
+      primeLedgerHoles: [
+        { version: "20250124120001", heldCount: 0, firstHeld: null, files: [ROLLBACK], ...hole },
+      ],
+    });
+
+  it("names the file, says it must never be run, and says the row is for completeness", () => {
+    const [found] = classifyBlockages(crm({}), NOW);
+    expect(found.cls).toBe("prime_ledger_hole");
+    expect(found.detail).toContain(`20250124120001 carries a rollback script, ${ROLLBACK}`);
+    expect(found.detail).toContain("must never be run");
+    expect(found.detail).toContain("recorded only for completeness");
+    expect(found.detail).not.toContain("prime runs that file");
+    // The same identity as before, so the row standing today is the one that
+    // changes its words, and nothing reopens.
+    expect(found.fingerprint).toBe("prime_ledger_hole:20250124120001");
+    expect(found.owner).toBe("operator");
+    expect(found.selfHeals).toBe(false);
+  });
+
+  it("does not invite a stamp either — a version the prime records is sent to every clone", () => {
+    const [found] = classifyBlockages(crm({}), NOW);
+    expect(found.detail).toContain(
+      "stamping the prime's ledger to say it ran, would send the undo to every clone",
+    );
+    expect(found.detail).toContain("Prime Ledger Reconciliation");
+  });
+
+  it("says what waits behind it, and does not call that completeness", () => {
+    const [found] = classifyBlockages(
+      crm({ heldCount: 2, firstHeld: "20250125000000_x.sql" }),
+      NOW,
+    );
+    expect(found.detail).toContain(
+      "NPC CRM Independent has 2 migration(s) recorded as waiting behind it, starting with 20250125000000_x.sql",
+    );
+    expect(found.detail).not.toContain("only for completeness");
+    expect(found.detail).toContain("must never be run");
+  });
+
+  it("is told apart by the one rule the migration diagnosis uses, not by its version", () => {
+    // An ordinary migration, named by its note, reads as an ordinary hole.
+    const [ordinary] = classifyBlockages(
+      crm({ version: "20270103090000", files: ["20270103090000_add_rollbacks_table.sql"] }),
+      NOW,
+    );
+    expect(ordinary.detail).toContain("prime runs that file");
+    expect(ordinary.detail).not.toContain("rollback script");
+    // A note that names no files cannot say, and keeps the ordinary words.
+    const [unnamed] = classifyBlockages(crm({ files: null }), NOW);
+    expect(unnamed.detail).toContain("prime runs that file");
+  });
+});
+
+describe("the hole rows past the cap", () => {
+  it("say, on the oldest listed, how many older holes the record counts and does not list", () => {
+    const found = classifyBlockages(
+      facts({
+        label: "NPC CRM Independent",
+        syncScope: "modules",
+        primeLedgerHoles: [
+          { version: "20260101000000", heldCount: 0, firstHeld: null, olderUnlisted: 136 },
+          { version: "20270103090000", heldCount: 0, firstHeld: null },
+        ],
+      }),
+      NOW,
+    );
+    expect(found[0].detail).toContain(
+      "136 more version(s) the prime's ledger does not record are counted on NPC CRM Independent's record but not listed one by one",
+    );
+    expect(found[1].detail).not.toContain("not listed");
+  });
+});
