@@ -172,10 +172,22 @@ function CascadeDetailPage() {
       return;
     }
 
-    // Reopen the event
+    // Reopen the event as the drain revives one: claimable. Reopened with the
+    // last pass's claim still on it, an event the run below never reached, or
+    // refused before writing, sat `pending` with `worker_started_at` set, which
+    // no claim, reclaim or retirement can reach. `attempts` starts again
+    // because a person asked: the ceiling stops a loop of automatic attempts,
+    // and a retried event at it could otherwise never be claimed again.
     await supabase
       .from("cascade_events")
-      .update({ status: "pending", completed_at: null })
+      .update({
+        status: "pending",
+        completed_at: null,
+        worker_started_at: null,
+        worker_finished_at: null,
+        next_attempt_at: new Date().toISOString(),
+        attempts: 0,
+      })
       .eq("id", event.id);
 
     toast.info(`Retrying ${failedIds.length} clone(s)…`);

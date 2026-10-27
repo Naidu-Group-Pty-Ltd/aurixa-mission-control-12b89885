@@ -126,3 +126,26 @@ describe("the approval gate holds when it cannot be read", () => {
     ).toEqual({ blocked: false });
   });
 });
+
+describe("a person's retry reopens an event claimable", () => {
+  // "Retry N failed" reopened the event with the last pass's claim still on
+  // it, so where the inline run never started, or refused before writing, the
+  // event sat `pending` with `worker_started_at` set: C3's strand, by hand.
+  const page = stripComments(readFileSync("src/routes/cascades.$eventId.tsx", "utf8"));
+  const start = page.indexOf("const retryFailed = async () => {");
+  const retry = page.slice(start, page.indexOf("toast.info(`Retrying", start));
+
+  it("clears the claim the drain reads, as the drain's own revive does", () => {
+    expect(retry.length).toBeGreaterThan(200);
+    const reopen = retry.slice(retry.indexOf('.from("cascade_events")'));
+    for (const field of [
+      'status: "pending"',
+      "worker_started_at: null",
+      "worker_finished_at: null",
+      "next_attempt_at: new Date().toISOString()",
+      "attempts: 0",
+    ]) {
+      expect(reopen, field).toContain(field);
+    }
+  });
+});
