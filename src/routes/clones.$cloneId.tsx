@@ -175,7 +175,14 @@ function CloneDetail() {
       url: `/clones/${cloneId}`,
       metadata: { module_id: moduleId },
     });
-    toast.success("Module injected — pushing commit to repo");
+    // Installing records a row and pushes nothing. A module-scoped clone takes
+    // the module's files on its next cascade; a mirror is delivered its whole
+    // tree whatever it installed, so the row changes no file there.
+    toast.success(
+      clone?.sync_scope === "mirror"
+        ? "Module recorded. This clone is a mirror, so it already receives every file."
+        : "Module installed. Its files arrive with the next cascade.",
+    );
     void load();
   };
 
@@ -217,7 +224,11 @@ function CloneDetail() {
         },
       });
       if (!result.ok) return toast.error(result.error ?? "Re-sync failed");
-      toast.success(`Re-synced ${module?.name ?? "module"} — cascading scoped files`);
+      toast.success(
+        clone?.sync_scope === "mirror"
+          ? "Cascade started. A mirror is delivered its whole tree, not one module's files."
+          : `Cascade started for ${module?.name ?? "the module"}'s files`,
+      );
       void load();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Re-sync failed");
@@ -512,6 +523,7 @@ function CloneDetail() {
       <CloneSecurityAssessmentsCard cloneId={cloneId} />
       <CloneCodexScansCard cloneId={cloneId} />
       <ModuleInjector
+        isMirror={clone.sync_scope === "mirror"}
         installed={installed}
         available={available}
         resyncingId={resyncingId}
@@ -535,6 +547,7 @@ function CloneDetail() {
 }
 
 function ModuleInjector({
+  isMirror,
   installed,
   available,
   resyncingId,
@@ -542,6 +555,7 @@ function ModuleInjector({
   remove,
   resync,
 }: {
+  isMirror: boolean;
   installed: Module[];
   available: Module[];
   resyncingId: string | null;
@@ -593,7 +607,9 @@ function ModuleInjector({
                         title={
                           noGlobs
                             ? "Module has no file_globs to push"
-                            : "Re-sync this module's files only"
+                            : isMirror
+                              ? "Cascade this clone (a mirror is delivered its whole tree)"
+                              : "Re-sync this module's files only"
                         }
                         className="h-7 gap-1 px-2 text-muted-foreground hover:text-primary"
                       >
