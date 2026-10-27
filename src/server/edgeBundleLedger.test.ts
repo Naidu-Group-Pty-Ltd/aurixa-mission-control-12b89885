@@ -6,7 +6,12 @@
  * believed current is a tenant running code nobody can see is stale.
  */
 import { describe, expect, it } from "vitest";
-import { isLedgeredCopy, ledgerCurrentSlugs, type LedgerEntry } from "./edgeBundleLedger.pure";
+import {
+  isLedgeredCopy,
+  ledgerChangedSlugs,
+  ledgerCurrentSlugs,
+  type LedgerEntry,
+} from "./edgeBundleLedger.pure";
 import type { ProjectFunctionCopy } from "./projectFunctionCopies.pure";
 
 const T = Date.parse("2026-10-20T06:00:00.000Z");
@@ -19,6 +24,9 @@ const copy = (over: Partial<ProjectFunctionCopy> = {}): ProjectFunctionCopy => (
   updatedMs: T,
   id: "fn-1",
   version: 41,
+  // No readable build unless a test gives one: the version rule alone, as it
+  // stood before builds were read.
+  build: null,
   active: true,
   ...over,
 });
@@ -61,6 +69,59 @@ describe("isLedgeredCopy — is the clone's copy the very deploy this lane made?
     // A copy listed long after the deploy is still that deploy if nothing has
     // been written over it: a clone untouched for a month owes nothing new.
     expect(isLedgeredCopy(entry(), copy({ updatedMs: T + 30 * 86_400_000 }))).toBe(true);
+  });
+});
+
+describe("isLedgeredCopy — the build, where a secret write has moved the version", () => {
+  it("is, where the version moved but the copy still runs this lane's build", () => {
+    // Every clone on 27 Oct 2026: built at the ledger's version, listed one
+    // or two past it after the password and origin writes of 26 Oct.
+    expect(isLedgeredCopy(entry(), copy({ version: 42, build: 41 }))).toBe(true);
+    expect(isLedgeredCopy(entry(), copy({ version: 43, build: 41 }))).toBe(true);
+  });
+
+  it("is not, once anything has deployed since — a deploy builds again", () => {
+    expect(isLedgeredCopy(entry(), copy({ version: 42, build: 42 }))).toBe(false);
+    expect(isLedgeredCopy(entry(), copy({ version: 44, build: 43 }))).toBe(false);
+  });
+
+  it("is not, where the build is unreadable and the version has moved", () => {
+    // A compressed bundle: its path carries no build, so the version decides.
+    expect(isLedgeredCopy(entry(), copy({ version: 42, build: null }))).toBe(false);
+  });
+
+  it("is not, under a different function id, whatever the build says", () => {
+    expect(isLedgeredCopy(entry(), copy({ id: "fn-2", version: 41, build: 41 }))).toBe(false);
+  });
+
+  it("is not, where the copy is inactive or the entry names no deploy", () => {
+    expect(isLedgeredCopy(entry(), copy({ version: 42, build: 41, active: false }))).toBe(false);
+    expect(isLedgeredCopy(entry("d1", "fn-1", null), copy({ build: 41 }))).toBe(false);
+    expect(isLedgeredCopy(entry("d1", null, 41), copy({ build: 41 }))).toBe(false);
+  });
+
+  it("proves a copy whose version is unreported but whose build is this deploy's", () => {
+    expect(isLedgeredCopy(entry(), copy({ version: null, build: 41 }))).toBe(true);
+  });
+});
+
+describe("ledgerChangedSlugs — which owed bundles carry a change", () => {
+  it("is every bundle whose digest moved or that was never recorded", () => {
+    const ledger = new Map<string, LedgerEntry>([
+      ["same", entry("a")],
+      ["moved", entry("old")],
+    ]);
+    const digests = new Map([
+      ["same", "a"],
+      ["moved", "new"],
+      ["never", "x"],
+    ]);
+    expect(ledgerChangedSlugs({ ledger, digests })).toEqual(["moved", "never"]);
+  });
+
+  it("ignores ledger rows for bundles the prime no longer defines", () => {
+    const ledger = new Map<string, LedgerEntry>([["gone", entry("a")]]);
+    expect(ledgerChangedSlugs({ ledger, digests: new Map() })).toEqual([]);
   });
 });
 

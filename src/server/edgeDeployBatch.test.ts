@@ -5,6 +5,8 @@
 import { describe, expect, it } from "vitest";
 import {
   countLanded,
+  CHANGED_AHEAD_MS,
+  changedFirst,
   inDeployOrder,
   planDeployGeneration,
   planEdgeDeployPass,
@@ -534,9 +536,10 @@ describe("planEdgeDeployResume — a restarted generation outranks a finished pa
   });
 
   it("a still source still lets a budget pause requeue attempt-neutrally", () => {
-    expect(
-      planEdgeDeployResume({ ...base, stoppedEarly: true, sourceMoved: false }),
-    ).toEqual({ kind: "requeue", attemptNeutral: true });
+    expect(planEdgeDeployResume({ ...base, stoppedEarly: true, sourceMoved: false })).toEqual({
+      kind: "requeue",
+      attemptNeutral: true,
+    });
   });
 });
 
@@ -579,6 +582,78 @@ describe("stalestFirst — the copy the clone has held longest goes first", () =
     // read, so every key is equal and the lane deploys as it did before.
     const names = slugs(12);
     expect(order(new Map(), names)).toEqual(names);
+  });
+});
+
+describe("changedFirst — a fix does not wait its turn behind a refill", () => {
+  const order = (
+    freshness: ReadonlyMap<string, number>,
+    changed: ReadonlySet<string>,
+    names: readonly string[],
+  ) =>
+    inDeployOrder(
+      names.map((slug) => ({ slug })),
+      changedFirst(changed, stalestFirst(freshness)),
+    ).map((b) => b.slug);
+
+  it("puts a changed bundle ahead of every unchanged one, however fresh its copy", () => {
+    // `manage-agency-agreements` on NPC Test, 26 Oct 2026: changed on the
+    // prime at 06:18, its copy among the freshest of a 402-bundle refill, and
+    // so deployed last, at 18:42. Changed, it goes first.
+    const freshness = new Map([
+      ["abs-data-service", Date.parse("2026-09-01T00:00:00Z")],
+      ["aml-cases", Date.parse("2026-09-02T00:00:00Z")],
+      ["manage-agency-agreements", Date.parse("2026-10-22T00:00:00Z")],
+    ]);
+    expect(
+      order(freshness, new Set(["manage-agency-agreements"]), [
+        "abs-data-service",
+        "aml-cases",
+        "manage-agency-agreements",
+      ]),
+    ).toEqual(["manage-agency-agreements", "abs-data-service", "aml-cases"]);
+  });
+
+  it("keeps staleness order inside each group", () => {
+    const freshness = new Map([
+      ["a", 3_000],
+      ["b", 1_000],
+      ["c", 2_000],
+      ["d", 4_000],
+    ]);
+    expect(order(freshness, new Set(["d", "c"]), ["a", "b", "c", "d"])).toEqual([
+      "c",
+      "d",
+      "b",
+      "a",
+    ]);
+  });
+
+  it("still puts a missing copy first, changed or not", () => {
+    const freshness = new Map([["held", Date.parse("2026-10-01T00:00:00Z")]]);
+    expect(order(freshness, new Set(["held"]), ["held", "new-fn"])).toEqual(["new-fn", "held"]);
+  });
+
+  it("is stalest-first exactly when nothing is marked changed", () => {
+    // The ledger could not be read: the order the lane always used.
+    const freshness = new Map([
+      ["alpha", Date.parse("2026-10-08T12:00:00Z")],
+      ["beta", Date.parse("2026-10-06T09:00:00Z")],
+    ]);
+    const names = ["alpha", "beta", "gamma"];
+    expect(order(freshness, new Set(), names)).toEqual(
+      inDeployOrder(
+        names.map((slug) => ({ slug })),
+        stalestFirst(freshness),
+      ).map((b) => b.slug),
+    );
+  });
+
+  it("separates the groups by more than any timestamp can span", () => {
+    // Today's epoch milliseconds are ~1.8e12; the band must clear them all.
+    expect(CHANGED_AHEAD_MS).toBeGreaterThan(Date.parse("9999-12-31T23:59:59Z"));
+    const key = changedFirst(new Set(["x"]), () => Date.parse("9999-12-31T23:59:59Z"));
+    expect(key("x")).toBeLessThan(0);
   });
 });
 
@@ -1014,22 +1089,36 @@ describe("the deploy ledger across a run's passes — a merge re-owes only what 
           updatedMs: START_MS - 86_400_000 - ((i * 37) % bundles.length) * 60_000,
           id: `id:${slug}`,
           version: 1,
+          build: 1,
           active: true,
         },
       ]),
     );
 
-  /** A deploy of `slug` onto the clone, by whoever made it. */
+  /** A deploy of `slug` onto the clone, by whoever made it: it builds, at the new version. */
   const write = (copies: Map<string, ProjectFunctionCopy>, slug: string, atMs: number) => {
     const before = copies.get(slug);
+    const version = (before?.version ?? 0) + 1;
     const next: ProjectFunctionCopy = {
       updatedMs: atMs,
       id: before?.id ?? `id:${slug}`,
-      version: (before?.version ?? 0) + 1,
+      version,
+      build: version,
       active: true,
     };
     copies.set(slug, next);
     return next;
+  };
+
+  /**
+   * A write to the project's secrets: every function's version moves and
+   * nothing is rebuilt, so every build stays where it was (measured on all
+   * four clones, 26 Oct 2026). `updated_at` does not move either.
+   */
+  const secretWrite = (copies: Map<string, ProjectFunctionCopy>) => {
+    for (const [slug, copy] of copies) {
+      copies.set(slug, { ...copy, version: (copy.version ?? 0) + 1 });
+    }
   };
 
   /** The prime's digests at commit `k`: a merge changes `perMerge` bundles. */
@@ -1071,6 +1160,8 @@ describe("the deploy ledger across a run's passes — a merge re-owes only what 
     readonly ledgerWritable: boolean;
     /** Deploys of these slugs by something else, just before the pass. */
     readonly foreignWrites?: ReadonlyMap<number, string>;
+    /** Passes before which a secret write bumps every function's version. */
+    readonly secretWritesBefore?: ReadonlySet<number>;
     /** The prime's commit when the run starts; merges count on from it. */
     readonly startCommit?: number;
   }) {
@@ -1096,6 +1187,7 @@ describe("the deploy ledger across a run's passes — a merge re-owes only what 
       digests = primeAt(commit, input.changedPerMerge);
       const foreign = input.foreignWrites?.get(p);
       if (foreign) write(input.copies, foreign, nowMs - 60_000);
+      if (input.secretWritesBefore?.has(p)) secretWrite(input.copies);
 
       const generation = planDeployGeneration({
         runStartedAt,
@@ -1282,5 +1374,48 @@ describe("the deploy ledger across a run's passes — a merge re-owes only what 
       expect(ledger.get(slug)?.functionVersion).toBe(copies.get(slug)?.version);
       expect(ledger.get(slug)?.digest).toBe(run.digests.get(slug));
     }
+  });
+
+  it("re-owes nothing after a secret write, because the build it runs has not moved", async () => {
+    /*
+      The state of every clone on 27 Oct 2026. The ledger proved every
+      bundle; then the database password was written, which bumped every
+      function's version and rebuilt nothing. Read by version alone, the
+      ledger proved none of them, and the next shared-code merge would have
+      redeployed ~400 bundles per clone. Read by build, nothing is owed.
+    */
+    const copies = cloneOf();
+    const run = await simulate({
+      passes: 10,
+      slots: 2,
+      mergeEvery: 0,
+      changedPerMerge: 0,
+      copies,
+      ledger: provenLedger(copies),
+      ledgerReadable: true,
+      ledgerWritable: true,
+      secretWritesBefore: new Set([0]),
+    });
+    expect(run.outcome).toEqual({ kind: "complete", pass: 0 });
+    expect(run.deploys).toBe(0);
+  });
+
+  it("re-owes the whole fleet after a secret write where no build can be read", async () => {
+    // The rule as it stood: a compressed bundle's path carries no build, and
+    // neither would a reshaped one. Owed, never skipped — the safe direction.
+    const copies = cloneOf();
+    for (const [slug, copy] of copies) copies.set(slug, { ...copy, build: null });
+    const run = await simulate({
+      passes: 400,
+      slots: 2,
+      mergeEvery: 0,
+      changedPerMerge: 0,
+      copies,
+      ledger: provenLedger(copies),
+      ledgerReadable: true,
+      ledgerWritable: true,
+      secretWritesBefore: new Set([0]),
+    });
+    expect(run.deploys).toBe(FLEET.length);
   });
 });

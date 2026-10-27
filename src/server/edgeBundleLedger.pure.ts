@@ -22,7 +22,7 @@
  * **A clone's copy is current only where BOTH halves agree.** The ledger's
  * digest equals the digest the prime's tree gives that bundle now, AND the
  * clone still lists the very copy the ledger recorded: the same function id
- * at the same version. The first says the bundle has not changed since this
+ * at the same version — or running the same build, below. The first says the bundle has not changed since this
  * lane deployed it; the second says nothing has been written over that deploy
  * since. Every deploy of a function increments its version, so a copy
  * replaced by anything else — the clone's own CI, a publish, a person — is a
@@ -33,6 +33,19 @@
  * version that either side failed to report: each redeploys. A redeploy costs
  * one call; a bundle wrongly believed current is a tenant running code nobody
  * can see is stale.
+ *
+ * ## Or the build, where the version has moved without a deploy
+ *
+ * "Every deploy increments its version" is true; "only a deploy does" is not.
+ * A write to the project's secrets bumps every function's version without
+ * rebuilding any, and on 27 Oct 2026 that had left the ledger proving none of
+ * ~1,550 bundles that were, every one, still running the build this lane made
+ * (`projectFunctionCopies.pure.ts` has the measurement). So a copy also counts
+ * where the version has moved but the BUILD it runs — the deploy counter
+ * named in its `entrypoint_path` — is still the version this lane's deploy was
+ * answered with. A secret write cannot move the build; any deploy by anybody
+ * does, so the second half still means "nothing has been written over it".
+ * A copy whose build cannot be read keeps the version rule alone.
  *
  * ## Why the version and not the clock
  *
@@ -61,8 +74,34 @@ export type LedgerEntry = {
 export function isLedgeredCopy(entry: LedgerEntry, copy: ProjectFunctionCopy | undefined): boolean {
   if (!copy || !copy.active) return false;
   if (entry.functionId === null || entry.functionVersion === null) return false;
-  if (copy.id === null || copy.version === null) return false;
-  return copy.id === entry.functionId && copy.version === entry.functionVersion;
+  if (copy.id === null || copy.id !== entry.functionId) return false;
+  // Nothing has touched the function since this lane's deploy.
+  if (copy.version !== null && copy.version === entry.functionVersion) return true;
+  // Something bumped the version — a secret write does — but the code that
+  // runs is still the build this lane's deploy made.
+  return copy.build !== null && copy.build === entry.functionVersion;
+}
+
+/**
+ * The slugs whose bundle the prime has CHANGED since this lane last recorded
+ * deploying it — a digest that is no longer the ledger's, or no ledger row at
+ * all. Sorted.
+ *
+ * Not the complement of `ledgerCurrentSlugs`: a bundle can be unchanged and
+ * still unproven (something else deployed over it). This answers a different
+ * question — which owed bundles carry a CHANGE — and the deploy order puts
+ * those first, so a fix to one function lands in the first pass instead of
+ * waiting its turn behind a refill (`changedFirst`).
+ */
+export function ledgerChangedSlugs(input: {
+  readonly ledger: ReadonlyMap<string, LedgerEntry>;
+  readonly digests: ReadonlyMap<string, string>;
+}): string[] {
+  const out: string[] = [];
+  for (const [slug, digest] of input.digests) {
+    if (input.ledger.get(slug)?.digest !== digest) out.push(slug);
+  }
+  return out.sort();
 }
 
 /**

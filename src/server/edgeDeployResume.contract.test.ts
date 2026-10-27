@@ -151,7 +151,26 @@ describe("a pass deploys the copies the clone has held longest first", () => {
       Ordered by the clone's own `updated_at`, whatever a pass lands goes to
       the back of the queue and stays there across the restart.
     */
-    expect(snapshotCall).toContain("deployOrder: stalestFirst(freshness)");
+    expect(lane).toContain("const stalest = stalestFirst(freshness);");
+    expect(snapshotCall).toContain("deployOrder: (slug) => deployOrder(slug)");
+  });
+
+  it("puts the bundles the prime changed ahead of the rest, decided at the commit read", () => {
+    /*
+      Measured 26 Oct 2026: `manage-agency-agreements` changed on the prime
+      at 06:18 and reached NPC Test 402nd of 402 at 18:42, because NPC Test was
+      mid-refill and stalest-first queued the fix behind ~400 unchanged
+      bundles. The changed set is taken inside `planSkip`, from the digests of
+      the commit this pass deploys, and only from a ledger that was READ — an
+      unreadable one marks nothing changed, which is stalest-first exactly.
+    */
+    expect(snapshotCall).toContain(
+      "ledgerChangedSlugs({ ledger: ledger.entries, digests: bundleDigests })",
+    );
+    expect(snapshotCall).toContain("deployOrder = changedFirst(planned.changed, stalest);");
+    expect(snapshotCall).toMatch(
+      /planned\.changed = new Set\(\s*ledger\.state === "read"\s*\?\s*ledgerChangedSlugs/,
+    );
   });
 
   it("orders by the same reading of the clone the skip list is taken from", () => {
