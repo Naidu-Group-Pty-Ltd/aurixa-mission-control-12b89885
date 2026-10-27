@@ -324,17 +324,47 @@ export function isCloneFunctionPath(repoPath: string): boolean {
  * Minimal config.toml reader: per-function `verify_jwt` flags from
  * `[functions.<slug>]` sections. Anything unspecified defaults to true,
  * matching the Supabase CLI default.
+ *
+ * Read line by line, as TOML scopes a key: to the table header above it,
+ * until the next header line. It used to take a section's body up to the
+ * first `[` anywhere, so an array value written before `verify_jwt` (the CLI
+ * accepts `static_files = [...]` there) hid the flag, and the function
+ * deployed checking a JWT the prime does not ask its callers for. It also read
+ * a header inside a comment as a section: the prime's own config mentions
+ * `[functions.X]` in prose. Neither had bitten on 27 Oct 2026; the flag
+ * decides whether a webhook can reach its function at all.
  */
 export function parseFunctionConfig(toml: string | null): Map<string, { verifyJwt: boolean }> {
   const out = new Map<string, { verifyJwt: boolean }>();
   if (!toml) return out;
-  const sectionRx = /\[functions\.(?:"([^"]+)"|([A-Za-z0-9_-]+))\]([^[]*)/g;
-  let m: RegExpExecArray | null;
-  while ((m = sectionRx.exec(toml)) !== null) {
-    const slug = m[1] ?? m[2];
-    const body = m[3] ?? "";
-    const vj = /(^|\n)\s*verify_jwt\s*=\s*(true|false)/.exec(body);
-    out.set(slug, { verifyJwt: vj ? vj[2] === "true" : true });
+  const KEY = String.raw`(?:"([^"]+)"|([A-Za-z0-9_-]+))`;
+  const functionHeader = new RegExp(String.raw`^functions\.${KEY}$`);
+  const dottedFlag = new RegExp(String.raw`^${KEY}\.verify_jwt\s*=\s*(true|false)\s*(?:#.*)?$`);
+  const flag = /^verify_jwt\s*=\s*(true|false)\s*(?:#.*)?$/;
+  /** The slug whose table the next keys belong to; "functions" for the parent table. */
+  let table: string | null = null;
+  let slug: string | null = null;
+  for (const raw of toml.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line === "" || line.startsWith("#")) continue;
+    const header = /^\[(\[?)([^\]]*)\]\]?\s*(?:#.*)?$/.exec(line);
+    if (header) {
+      // An array of tables (`[[...]]`) or a sub-table is not the function's
+      // own table, and the keys under it are not its flags.
+      const name = header[2].trim();
+      const m = header[1] ? null : functionHeader.exec(name);
+      slug = m ? (m[1] ?? m[2]) : null;
+      table = header[1] ? null : name;
+      if (slug && !out.has(slug)) out.set(slug, { verifyJwt: true });
+      continue;
+    }
+    if (slug) {
+      const v = flag.exec(line);
+      if (v) out.set(slug, { verifyJwt: v[1] === "true" });
+    } else if (table === "functions") {
+      const v = dottedFlag.exec(line);
+      if (v) out.set(v[1] ?? v[2], { verifyJwt: v[3] === "true" });
+    }
   }
   return out;
 }

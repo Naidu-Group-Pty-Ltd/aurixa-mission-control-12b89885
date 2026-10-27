@@ -167,6 +167,37 @@ verify_jwt = true
     const cfg = parseFunctionConfig(`[functions.fn]\nimport_map = "./import_map.json"\n`);
     expect(cfg.get("fn")?.verifyJwt).toBe(true);
   });
+
+  it("reads the flag after an array value, which once cut the section short", () => {
+    // The body used to end at the first `[`, so this read as true and the
+    // function deployed checking a JWT its callers never send.
+    const cfg = parseFunctionConfig(
+      `[functions.hook]\nstatic_files = ["./functions/hook/*.html"]\nverify_jwt = false\n` +
+        `[functions.multi]\nstatic_files = [\n  "./a.html",\n  "./b.html",\n]\nverify_jwt = false # public\n`,
+    );
+    expect(cfg.get("hook")?.verifyJwt).toBe(false);
+    expect(cfg.get("multi")?.verifyJwt).toBe(false);
+  });
+
+  it("reads no section out of a comment, and no flag out of a sub-table", () => {
+    const cfg = parseFunctionConfig(
+      `# An omitted \`[functions.X]\` block asserts the gateway checks a JWT.\n` +
+        `# [functions.retired]\n# verify_jwt = false\n` +
+        `[functions.fn]\nverify_jwt = true\n` +
+        `[functions.fn.env]\nverify_jwt = false\n` +
+        `[[functions.fn.hooks]]\nverify_jwt = false\n`,
+    );
+    expect([...cfg.keys()]).toEqual(["fn"]);
+    expect(cfg.get("fn")?.verifyJwt).toBe(true);
+  });
+
+  it("reads a flag written as a dotted key in the functions table", () => {
+    const cfg = parseFunctionConfig(
+      `[functions]\nhook.verify_jwt = false\n"q-fn".verify_jwt = false\n`,
+    );
+    expect(cfg.get("hook")?.verifyJwt).toBe(false);
+    expect(cfg.get("q-fn")?.verifyJwt).toBe(false);
+  });
 });
 
 describe("extractSecretNames", () => {
