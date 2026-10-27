@@ -611,6 +611,20 @@ export const CRM_LINE_VARIANT_PATTERNS: Readonly<Partial<Record<CrmMode, readonl
     // a note copied there.
     "supabase/functions/manage-lead-magnets/index.ts",
     "src/components/clients/ActiveClientCard.tsx",
+    // The voice agents' calendar and email, set from this deployment's Settings
+    // and applied by Mission Control onto the line's own Make stack
+    // (`docs/CLONE_VOICE_AUTOMATION.md`): one commit on the head, 57151ce, and
+    // the doc for the agents' calls, c758e12. The dependent line has no such
+    // stack. Lateral #350 (10 Oct 2026) carried the form, its spec, the broker
+    // and the first doc into `npc-client-dashboard`, where nothing calls them;
+    // named here, the lane sets them aside on a boundary between the two lines,
+    // so taking them off there is not read as this line retiring them.
+    "src/lib/voiceAutomation/**",
+    "src/components/settings/VoiceAgentCalendarEmailCard.tsx",
+    "supabase/functions/_shared/voiceAutomationBroker.pure.ts",
+    "supabase/functions/voice-automation-settings/**",
+    "docs/integrations/VOICE_AGENT_CALENDAR_EMAIL.md",
+    "docs/integrations/VOICE_AGENT_CALL_LOGS.md",
     // Server code that no longer reaches a withheld function.
     "supabase/functions/ai-dashboard-agent/index.ts",
     "supabase/functions/finance-portal-client-data/index.ts",

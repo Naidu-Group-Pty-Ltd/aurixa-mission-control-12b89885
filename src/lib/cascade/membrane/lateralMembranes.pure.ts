@@ -129,12 +129,21 @@ const LATERAL_STANDING: readonly StandingOrgan[] = [
   },
   {
     kind: "channel",
-    name: "isLineOwnRule",
+    name: "isLineOwnPath",
     where: "lateralExchange.pure.ts",
     does:
-      "Never offers a file under `.claude/rules/`, either way. Each line numbers its own rules " +
-      "for its own `CLAUDE.md` to index, so a rule carried across is an unindexed duplicate on " +
-      "the other side, and a mirror's cascade carries it on to every child.",
+      "Never offers a file under `.claude/rules/` or `voice-agents/`, either way. Each line " +
+      "numbers its own rules for its own `CLAUDE.md` to index, and a voice stack is one " +
+      "deployment's numbers and webhooks, so either carried across is another deployment's on " +
+      "this one, and a mirror's cascade carries it on to every child.",
+  },
+  {
+    kind: "channel",
+    name: "isCrossLineVariant",
+    where: "lateralExchange.pure.ts",
+    does:
+      "Between two CRM lines, never offers a file either line holds in its own shape. One line " +
+      "taking off a copy that reached it is not that line retiring the other's file.",
   },
   {
     kind: "channel",

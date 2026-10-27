@@ -35,7 +35,8 @@ import {
   historyProbesFor,
   inLateralScope,
   isLateralSlot,
-  isLineOwnRule,
+  isCrossLineVariant,
+  isLineOwnPath,
   judgeLateralWrites,
   lateralBranchName,
   lateralCandidates,
@@ -111,7 +112,7 @@ describe("candidates: what the two parents disagree on that the prime does not h
       "docs/same.md": "same",
       "docs/differs.md": "d-b",
     });
-    expect(lateralCandidates({ a, b, prime })).toEqual([
+    expect(lateralCandidates({ a, b, prime }).paths).toEqual([
       "docs/differs.md",
       "src/lib/crm/crmProvider.ts",
       "src/lib/reminders/priority.pure.ts",
@@ -124,12 +125,12 @@ describe("candidates: what the two parents disagree on that the prime does not h
     // cascade comes to argue with itself.
     const a = tree({ "src/App.tsx": "a" });
     const b = tree({ "src/App.tsx": "b" });
-    expect(lateralCandidates({ a, b, prime })).toEqual([]);
+    expect(lateralCandidates({ a, b, prime }).paths).toEqual([]);
   });
 
   it("drops a path no repository could hold", () => {
     const a = tree({ "src/../../etc/passwd.ts": "x", "src/ok.ts": "y" });
-    expect(lateralCandidates({ a, b: tree({}), prime })).toEqual(["src/ok.ts"]);
+    expect(lateralCandidates({ a, b: tree({}), prime }).paths).toEqual(["src/ok.ts"]);
   });
 
   it("never offers a line's own rule file, whichever side holds it", () => {
@@ -145,16 +146,81 @@ describe("candidates: what the two parents disagree on that the prime does not h
       ".claude/rules/reports/091-generated-reports-pdfs.md": "dependent's numbering",
       ".claude/rules/listings/001.05-base-backfill.md": "b",
     });
-    expect(lateralCandidates({ a, b, prime })).toEqual(["src/ok.ts"]);
-    expect(lateralCandidates({ a: b, b: a, prime })).toEqual(["src/ok.ts"]);
+    expect(lateralCandidates({ a, b, prime }).paths).toEqual(["src/ok.ts"]);
+    expect(lateralCandidates({ a: b, b: a, prime }).paths).toEqual(["src/ok.ts"]);
+  });
+
+  it("never offers a deployment's voice stack, whichever side holds it, and counts it aside", () => {
+    // Lateral #349 wrote 142 files of the independent's stack into the
+    // dependent: its Make webhook URLs and Vapi numbers among them.
+    const a = tree({
+      "voice-agents/crm-independent/make/hooks.json": "the independent's hook urls",
+      "voice-agents/crm-independent/vapi/b_phones.json": "its numbers",
+      "src/ok.ts": "y",
+    });
+    const b = tree({ "voice-agents/dashboard/vapi/assistants.json": "the dependent's own" });
+    const out = lateralCandidates({ a, b, prime });
+    expect(out.paths).toEqual(["src/ok.ts"]);
+    expect(out.lineOwn).toEqual([
+      "voice-agents/crm-independent/make/hooks.json",
+      "voice-agents/crm-independent/vapi/b_phones.json",
+      "voice-agents/dashboard/vapi/assistants.json",
+    ]);
+    expect(lateralCandidates({ a: b, b: a, prime }).paths).toEqual(["src/ok.ts"]);
+  });
+
+  it("sets aside a CRM line's own copy only between two lines", () => {
+    // Measured 27 Oct 2026: the dependent took these off by hand on 8 Oct, and
+    // the table then decided every pass to delete the LINE's own copies.
+    const dependent = tree({ "src/ok.ts": "y" });
+    const independent = tree({
+      "src/branding/linePalette.ts": "the line's palette",
+      "scripts/lib/crmLineFeatures.mjs": "the line's gates",
+      "src/lib/voiceAutomation/voiceAutomationForm.pure.ts": "the line's voice settings",
+      "src/lib/reminders/priority.pure.ts": "shared work",
+    });
+    const across = lateralCandidates({
+      a: dependent,
+      b: independent,
+      prime,
+      crmModes: { a: "dependent", b: "independent" },
+    });
+    expect(across.paths).toEqual(["src/lib/reminders/priority.pure.ts", "src/ok.ts"]);
+    expect(across.lineOwn).toEqual([
+      "scripts/lib/crmLineFeatures.mjs",
+      "src/branding/linePalette.ts",
+      "src/lib/voiceAutomation/voiceAutomationForm.pure.ts",
+    ]);
+    // Either side may be the line's: the register is read for both.
+    expect(
+      lateralCandidates({
+        a: independent,
+        b: dependent,
+        prime,
+        crmModes: { a: "independent", b: "dependent" },
+      }).lineOwn,
+    ).toEqual(across.lineOwn);
+    // Two parents on one line share its copies, and modes not given tell no line apart.
+    for (const crmModes of [{ a: "independent", b: "independent" }, undefined]) {
+      expect(lateralCandidates({ a: dependent, b: independent, prime, crmModes }).lineOwn).toEqual(
+        [],
+      );
+    }
   });
 });
 
-describe("a line's own rules are told apart by their directory", () => {
-  it("is a file under `.claude/rules/`, at the root or in a nested project", () => {
-    expect(isLineOwnRule(".claude/rules/aml/014-the-sanctions-register-itself.md")).toBe(true);
-    expect(isLineOwnRule(".claude/rules/README.md")).toBe(true);
-    expect(isLineOwnRule("apps/portal/.claude/rules/routing.md")).toBe(true);
+describe("what a deployment keeps as its own is told apart by its directory", () => {
+  it("is a file under `.claude/rules/` or `voice-agents/`, at the root or in a nested project", () => {
+    for (const path of [
+      ".claude/rules/aml/014-the-sanctions-register-itself.md",
+      ".claude/rules/README.md",
+      "apps/portal/.claude/rules/routing.md",
+      "voice-agents/crm-independent/make/hooks.json",
+      "voice-agents/crm-independent/HANDOFF.md",
+      "apps/portal/voice-agents/vapi/assistants.json",
+    ]) {
+      expect(isLineOwnPath(path), path).toBe(true);
+    }
   });
 
   it("is nothing else the agents read, nor a lookalike", () => {
@@ -166,9 +232,56 @@ describe("a line's own rules are told apart by their directory", () => {
       "docs/claude/rules/x.md",
       "src/lib/.claude-rules.ts",
       "docs/.claude/rules.md",
+      "voice-agents.md",
+      "docs/voice-agents-architecture.md",
+      "src/lib/voice-agents.ts",
+      "src/voice-agentsx/a.ts",
+      "src/lib/voiceAutomation/voiceAutomationForm.pure.ts",
     ]) {
-      expect(isLineOwnRule(path), path).toBe(false);
+      expect(isLineOwnPath(path), path).toBe(false);
     }
+  });
+});
+
+describe("a CRM line's own copy is told apart only across lines", () => {
+  const across = { a: "dependent", b: "independent" };
+
+  it("is a path the register names for either side's line", () => {
+    for (const path of [
+      "src/lib/crm/crmProvider.ts",
+      "supabase/functions/crm-calendar/index.ts",
+      "src/components/clients/NativePipelineCreator.tsx",
+      ".github/workflows/decommission-crm-line-functions.yml",
+      "src/components/settings/VoiceAgentCalendarEmailCard.tsx",
+      "supabase/functions/voice-automation-settings/index.ts",
+      "docs/integrations/VOICE_AGENT_CALENDAR_EMAIL.md",
+    ]) {
+      expect(isCrossLineVariant(path, across), path).toBe(true);
+      expect(isCrossLineVariant(path, { a: across.b, b: across.a }), path).toBe(true);
+    }
+  });
+
+  it("is nothing the register does not name, and nothing at all on one line", () => {
+    expect(isCrossLineVariant("src/lib/reminders/priority.pure.ts", across)).toBe(false);
+    expect(isCrossLineVariant("docs/integrations/OTHER.md", across)).toBe(false);
+    for (const same of [
+      { a: "independent", b: "independent" },
+      { a: "dependent", b: "dependent" },
+      { a: null, b: null },
+    ]) {
+      expect(isCrossLineVariant("src/lib/crm/crmProvider.ts", same)).toBe(false);
+    }
+  });
+
+  it("reads an unrecorded side as another line, as the destination's write rule does", () => {
+    // `judgeLateralWrites` holds the origin's copies wherever its mode is not
+    // the destination's, unrecorded included, and this agrees with it.
+    expect(isCrossLineVariant("src/lib/crm/crmProvider.ts", { a: null, b: "independent" })).toBe(
+      true,
+    );
+    expect(isCrossLineVariant("src/lib/crm/crmProvider.ts", { a: null, b: "dependent" })).toBe(
+      false,
+    );
   });
 });
 
@@ -1452,6 +1565,49 @@ describe("one ledger row carries the state and the report together", () => {
     expect(back!.deferred.length).toBeLessThanOrEqual(60);
     expect(back!.directions[0].held[0].note!.length).toBeLessThanOrEqual(400);
     expect(compactLateralReport(report).directions[0].writes).toEqual(["a.ts"]);
+  });
+
+  it("keeps each list's whole length, and the held reasons in full, beside a clipped list", () => {
+    // 27 Oct 2026: 67 held into the dependent, the row kept 60, and the panel
+    // said 60. The seven it dropped were the voice stack, which sorts last.
+    const held = Array.from({ length: 67 }, (_, i) => ({
+      path: `p${String(i).padStart(2, "0")}.ts`,
+      pattern: "x",
+      reason: i < 55 ? ("protected" as const) : ("manual_reconcile" as const),
+      note: null,
+    }));
+    const big = { ...report, directions: [{ ...report.directions[0], held }] };
+    const once = compactLateralReport(big);
+    expect(once.directions[0].held).toHaveLength(60);
+    expect(once.directions[0].totals).toEqual({
+      writes: 1,
+      deletes: 0,
+      held: 67,
+      heldByReason: { protected: 55, manual_reconcile: 12 },
+    });
+    expect(once.totals).toEqual({ conflicts: 0, deferred: 200 });
+    // Compacted again, a row keeps the counts it was given, not its clipped lists' lengths.
+    const twice = compactLateralReport(once);
+    expect(twice.directions[0].totals?.held).toBe(67);
+    expect(twice.totals?.deferred).toBe(200);
+    // And the counts survive the row.
+    const back = readLateralReport(
+      JSON.parse(
+        JSON.stringify(
+          composeLateralLedgerRow({
+            event: "exchange",
+            state: EMPTY_LATERAL_LEDGER,
+            report: big,
+            trigger: "slot",
+            heads: null,
+          }),
+        ),
+      ),
+    );
+    expect(back!.directions[0].totals?.heldByReason).toEqual({
+      protected: 55,
+      manual_reconcile: 12,
+    });
   });
 
   it("reads a row it cannot fully parse as no report, never as half of one", () => {

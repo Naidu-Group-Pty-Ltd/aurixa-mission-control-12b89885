@@ -156,7 +156,29 @@ function Eyebrow({ children }: { children: React.ReactNode }) {
   );
 }
 
+/**
+ * A held list's size, and what a row clipped from it.
+ *
+ * A ledger row keeps sixty held paths and the whole count beside them
+ * (`compactLateralReport`), so the count is read from `totals` where a row
+ * carries it. Where the list was cut, the reasons are counted in full, so the
+ * paths not listed still say why they stayed.
+ */
+function heldSummary(d: LateralDirectionReport): { total: number; unlisted: string | null } {
+  const total = d.totals?.held ?? d.held.length;
+  if (!d.totals || total <= d.held.length) return { total, unlisted: null };
+  const reasons = Object.entries(d.totals.heldByReason)
+    .filter(([, n]) => (n ?? 0) > 0)
+    .map(([reason, n]) => `${REASON_LABEL[reason as keyof typeof REASON_LABEL]}: ${n}`)
+    .join(" · ");
+  return {
+    total,
+    unlisted: `The first ${d.held.length} of ${total}, by path, are listed. All ${total} by reason — ${reasons}.`,
+  };
+}
+
 function DirectionLine({ d }: { d: LateralDirectionReport }) {
+  const held = heldSummary(d);
   return (
     <div className="border border-border/40 bg-muted/20 p-2.5">
       <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px]">
@@ -167,7 +189,8 @@ function DirectionLine({ d }: { d: LateralDirectionReport }) {
       </div>
       <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">{d.why}</p>
       <p className="mt-1 font-mono text-[10px] text-muted-foreground">
-        {d.writes.length} to write · {d.deletes.length} to delete · {d.held.length} held
+        {d.totals?.writes ?? d.writes.length} to write · {d.totals?.deletes ?? d.deletes.length} to
+        delete · {held.total} held
       </p>
       {d.pr ? (
         <a
@@ -188,6 +211,11 @@ function DirectionLine({ d }: { d: LateralDirectionReport }) {
           <summary className="cursor-pointer font-mono text-[10px] text-muted-foreground">
             What was held, and why
           </summary>
+          {held.unlisted ? (
+            <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">
+              {held.unlisted}
+            </p>
+          ) : null}
           <ul className="mt-1 flex flex-col gap-1">
             {d.held.map((h) => (
               <li key={h.path} className="text-[10px] leading-relaxed text-muted-foreground">
@@ -251,6 +279,7 @@ function BandKey({ boundary }: { boundary: LateralBoundary }) {
 
 /** One pass, as a person reads it: the verdict, the reason, and each direction. */
 function ExchangeReport({ report }: { report: LateralBoundaryReport }) {
+  const conflictCount = report.totals?.conflicts ?? report.conflicts.length;
   return (
     <div className="mt-2 flex flex-col gap-2">
       <div>
@@ -265,8 +294,8 @@ function ExchangeReport({ report }: { report: LateralBoundaryReport }) {
       {report.conflicts.length > 0 ? (
         <details>
           <summary className="cursor-pointer font-mono text-[10px] text-warning">
-            {report.conflicts.length} file{report.conflicts.length === 1 ? "" : "s"} changed on both
-            sides — a person decides
+            {conflictCount} file{conflictCount === 1 ? "" : "s"} changed on both sides — a person
+            decides
           </summary>
           <ul className="mt-1 flex flex-col gap-1">
             {report.conflicts.map((c) => (

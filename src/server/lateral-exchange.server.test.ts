@@ -1097,6 +1097,83 @@ describe("a line's own rules for its agents never cross", () => {
   });
 });
 
+describe("a deployment's own voice stack never crosses", () => {
+  it("writes none of it into the mirror, deletes none of the mirror's, and only counts it", async () => {
+    const { gh, boundary } = world();
+    // The independent's stack: the webhooks its agents call. The mirror is
+    // offered everything and the prime never held the path, so the direction
+    // rule alone would write it across, as lateral #349 did on 10 Oct 2026.
+    const HOOKS = '{ "adapter": { "url": "https://hook.us2.make.com/independent" } }\n';
+    gh.commitOn(IND, { "voice-agents/crm-independent/make/hooks.json": HOOKS });
+    // The mirror's own, which the independent once held exactly and removed.
+    const OWN = '{ "assistant": "the dependent\'s own" }\n';
+    gh.commitOn(DEP, { "voice-agents/dashboard/vapi/assistants.json": OWN });
+    gh.commitOn(IND, { "voice-agents/dashboard/vapi/assistants.json": OWN });
+    gh.commitOn(IND, { "voice-agents/dashboard/vapi/assistants.json": null });
+
+    const b = await boundary();
+    expect(b.outcome).toBe("ran");
+    expect(b.candidates).toBe(4);
+    expect(b.lineOwn).toBe(2);
+    const named = [
+      ...b.conflicts.map((c) => c.path),
+      ...b.deferred.map((d) => d.path),
+      ...b.directions.flatMap((d) => [
+        ...d.writes,
+        ...d.deletes,
+        ...d.held.map((h) => h.path),
+        ...d.keptDeletions.map((k) => k.path),
+        ...d.outOfScope,
+        ...d.unread,
+      ]),
+    ];
+    expect(named.filter((path) => path.includes("voice-agents/"))).toEqual([]);
+
+    const head = gh.head(DEP, INTO_DEP)!;
+    expect(gh.blobAt(head, "src/lib/util/format.pure.ts")).toBe(gitBlobSha(FORMAT));
+    expect(gh.blobAt(head, "voice-agents/crm-independent/make/hooks.json")).toBeUndefined();
+    expect(gh.blobAt(head, "voice-agents/dashboard/vapi/assistants.json")).toBe(gitBlobSha(OWN));
+  });
+});
+
+describe("a CRM line's own copy is never read as the other line's work", () => {
+  it("is not deleted from its line because the other line took the copy it was given off", async () => {
+    const { gh, db, boundary } = world();
+    // The two parents' recorded lines, as the fleet records them.
+    for (const clone of db.rows.clones)
+      clone.crm_mode = clone.id === "ind" ? "independent" : "dependent";
+    // A module on the independent that covers its palette, so its scope is
+    // not what keeps the file: on the fleet that was all that did.
+    db.rows.clone_modules.push({
+      clone_id: "ind",
+      modules: { slug: "branding", file_globs: ["src/branding/**"] },
+    });
+    // The line's palette, carried to the dependent before the destination
+    // refused another line's copies, then taken off it by hand (8 Oct 2026).
+    const PALETTE = "export const linePalette = { primary: 'teal' };\n";
+    gh.commitOn(IND, { "src/branding/linePalette.ts": PALETTE });
+    gh.commitOn(DEP, { "src/branding/linePalette.ts": PALETTE });
+    gh.commitOn(DEP, { "src/branding/linePalette.ts": null });
+
+    const b = await boundary();
+    expect(b.outcome).toBe("ran");
+    expect(b.lineOwn).toBe(2);
+    for (const d of b.directions) {
+      expect(d.deletes, `${d.from}→${d.to}`).not.toContain("src/branding/linePalette.ts");
+      expect(d.keptDeletions.map((k) => k.path)).not.toContain("src/branding/linePalette.ts");
+    }
+    expect(b.conflicts).toEqual([]);
+    // The proposal into the line leaves the line's palette where it is.
+    const intoInd = gh.head(IND, INTO_IND)!;
+    expect(gh.blobAt(intoInd, "src/branding/linePalette.ts")).toBe(gitBlobSha(PALETTE));
+    // And the routing layer that reached the dependent's membrane before is
+    // now set aside before the question, not held at the destination.
+    expect(b.directions.flatMap((d) => d.held.map((h) => h.path))).not.toContain(
+      "src/lib/crm/nativeAdapter.ts",
+    );
+  });
+});
+
 describe("a delivery that merged is not answered from memory again", () => {
   const FIX = "src/lib/reminders/priority.pure.ts";
 
