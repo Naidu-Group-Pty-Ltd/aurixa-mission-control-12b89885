@@ -75,6 +75,21 @@ export const vercelProvider: HostingProvider = {
           framework: input.framework ?? "vite",
           gitRepository: { type: "github", repo },
           rootDirectory: input.rootDirectory ?? null,
+          // In the SAME call as the git link, because the link is what starts
+          // the first build: a variable written by a second call can arrive
+          // after that build has already read an empty environment. Shaped
+          // exactly as `syncEnv` writes them, so `syncing_env` later upserts
+          // over identical rows rather than beside them.
+          ...(input.env && input.env.length > 0
+            ? {
+                environmentVariables: input.env.map((v) => ({
+                  key: v.key,
+                  value: v.value,
+                  type: "encrypted",
+                  target: v.targets,
+                })),
+              }
+            : {}),
         },
         teamId,
       );

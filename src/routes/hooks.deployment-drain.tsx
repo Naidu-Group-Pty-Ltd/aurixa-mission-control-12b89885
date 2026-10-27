@@ -37,7 +37,11 @@ import {
   DEPLOYMENT_STATUSES,
   type DeploymentStatus,
 } from "@/server/hosting/deploymentState.pure";
-import { buildCloneEnv, envDigest } from "@/server/hosting/envPolicy.pure";
+import { buildCloneEnv, envDigest, type CloneEnvVar } from "@/server/hosting/envPolicy.pure";
+import {
+  decideProjectCreation,
+  readRetargetRecord,
+} from "@/server/hosting/projectCreationGate.pure";
 import { cloneFqdn, resolveCloneOrigin } from "@/server/hosting/dnsTarget.pure";
 import {
   enqueueDomainVerificationJobs,
@@ -65,6 +69,10 @@ type DeploymentRow = {
   dns_target_value: string | null;
   domain_verification: unknown;
   env_digest: string | null;
+  /** When an environment was last published to the project, if ever. */
+  env_synced_at: string | null;
+  /** When a build last reached READY, if ever. */
+  last_deployed_at: string | null;
   attempts: number;
   max_attempts: number;
   created_at: string;
@@ -127,7 +135,7 @@ async function claim(limit: number): Promise<DeploymentRow[]> {
     .is("worker_started_at", null)
     .in("status", CLAIMABLE)
     .select(
-      "clone_id, provider_slug, status, project_id, project_name, team_id, latest_deployment_id, provider_origin, domain, dns_target_type, dns_target_value, domain_verification, env_digest, attempts, max_attempts, created_at, status_since",
+      "clone_id, provider_slug, status, project_id, project_name, team_id, latest_deployment_id, provider_origin, domain, dns_target_type, dns_target_value, domain_verification, env_digest, env_synced_at, last_deployed_at, attempts, max_attempts, created_at, status_since",
     );
   // Losing the race is normal and returns zero rows with no error. A fault is
   // not, and must not be reported as one.
@@ -243,12 +251,30 @@ async function loadContext(cloneId: string) {
       .maybeSingle(),
     admin
       .from("clone_backends")
-      .select("supabase_url, supabase_project_ref, anon_key, status")
+      .select("supabase_url, supabase_project_ref, anon_key, status, repo_retarget")
       .eq("clone_id", cloneId)
       .maybeSingle(),
     admin.from("platform_hosting_config").select("*").eq("singleton", true).maybeSingle(),
   ]);
   return { clone, backend, config };
+}
+
+/**
+ * The prime BACKEND's ref, for the pairing check in `buildCloneEnv`.
+ *
+ * Best-effort: a deployment that has not configured the prime backend still
+ * gets the pairing checks, it just has no name to compare against. Resolving
+ * it must never be able to STOP a deployment — an unconfigured prime is a
+ * Mission Control setting, not a fault in this clone. Read by both steps that
+ * publish an environment: `creating_project` and `syncing_env`.
+ */
+async function primeBackendRefBestEffort(): Promise<string | null> {
+  try {
+    const { resolvePrimeBackendRef } = await import("@/server/prime-backend.server");
+    return await resolvePrimeBackendRef(admin);
+  } catch {
+    return null;
+  }
 }
 
 async function step(row: DeploymentRow): Promise<StepOutcome> {
@@ -280,16 +306,62 @@ async function step(row: DeploymentRow): Promise<StepOutcome> {
           retryable: false,
         };
       }
+      // No project until a build of this repository could only inline this
+      // clone's own backend: Vercel builds it the moment a project links it,
+      // and the environment arrives two passes later. A row that has been past
+      // here before passes straight through. See `projectCreationGate.pure.ts`.
+      const { BUILD_IDENTITY_TARGETS } = await import("@/server/clone-repo-retarget.server");
+      const gate = decideProjectCreation({
+        hasProject: Boolean(row.project_id),
+        envSyncedAt: row.env_synced_at,
+        lastDeployedAt: row.last_deployed_at,
+        backend: backend
+          ? {
+              status: backend.status,
+              hasUrl: Boolean(backend.supabase_url),
+              hasAnonKey: Boolean(backend.anon_key),
+              retarget: readRetargetRecord(backend.repo_retarget, BUILD_IDENTITY_TARGETS),
+            }
+          : null,
+      });
+      if (gate.kind === "wait") {
+        return {
+          kind: "wait",
+          seconds: 120,
+          detail: gate.detail,
+          dependency: gate.dependency,
+        };
+      }
+      if (gate.kind === "refuse") {
+        return { kind: "error", error: gate.reason, retryable: false };
+      }
       const prefix = (config?.vercel_project_prefix ?? "").trim();
       const name = `${prefix}${clone.slug}`.toLowerCase();
       return {
         kind: "advance",
         patch: { project_name: name, team_id: config?.vercel_team_id ?? null },
+        result: { gate: gate.why },
       };
     }
 
     // ── Project ──────────────────────────────────────────────────────────
     case "creating_project": {
+      // The clone's own pair travels WITH the project, not after it: the link
+      // this call makes starts a production build, and on the CRM that build
+      // was queued 64 seconds after creation, two passes before `syncing_env`
+      // could publish anything. `pending` held this row until the backend had
+      // a pair to give, and `buildCloneEnv` refuses an incoherent pair or the
+      // prime's here exactly as it does at `syncing_env`. A row past its first
+      // build whose backend publishes no pair gets none, as it always did.
+      const envAtCreation: CloneEnvVar[] =
+        backend?.supabase_url && backend?.anon_key
+          ? buildCloneEnv({
+              supabaseUrl: backend.supabase_url,
+              supabaseProjectRef: backend.supabase_project_ref,
+              supabaseAnonKey: backend.anon_key,
+              primeProjectRef: await primeBackendRefBestEffort(),
+            })
+          : [];
       const res = await provider.createOrAdoptProject({
         cloneId: row.clone_id,
         name: row.project_name ?? clone.slug,
@@ -298,6 +370,7 @@ async function step(row: DeploymentRow): Promise<StepOutcome> {
           name: clone.github_repo,
           defaultBranch: clone.default_branch || "main",
         },
+        env: envAtCreation,
       });
       return {
         kind: "advance",
@@ -306,8 +379,19 @@ async function step(row: DeploymentRow): Promise<StepOutcome> {
           project_name: res.projectName,
           team_id: res.teamId ?? null,
           provider_origin: res.origin ?? null,
+          // A project created just now holds the pair and nothing else, so a
+          // digest left by an earlier project would let `syncing_env` skip
+          // the push this one needs — a value written outside `syncing_env`
+          // invalidates the digest. An adopted project keeps it: the digest
+          // may be describing exactly that project.
+          ...(res.adopted ? {} : { env_digest: null }),
         },
-        result: { adopted: res.adopted, projectId: res.projectId },
+        result: {
+          adopted: res.adopted,
+          projectId: res.projectId,
+          // Names only, never a value.
+          env_at_creation: res.adopted ? [] : envAtCreation.map((v) => v.key),
+        },
       };
     }
 
@@ -472,17 +556,7 @@ async function step(row: DeploymentRow): Promise<StepOutcome> {
       // This comment used to say the key "already lives in the clone's own
       // private repo at `.aurixa/credentials.json`, which the build reads".
       // Nothing read that file; the write is deleted.
-      // Best-effort: a deployment that has not configured the prime backend
-      // still gets the pairing checks, it just has no name to compare against.
-      // Resolving it must never be able to STOP a deployment — an unconfigured
-      // prime is a Mission Control setting, not a fault in this clone.
-      let primeProjectRef: string | null = null;
-      try {
-        const { resolvePrimeBackendRef } = await import("@/server/prime-backend.server");
-        primeProjectRef = await resolvePrimeBackendRef(admin);
-      } catch {
-        primeProjectRef = null;
-      }
+      const primeProjectRef = await primeBackendRefBestEffort();
       // This clone's OWN Turnstile widget, minted here because Vite inlines
       // `VITE_*` at BUILD time: a site key that arrives after `deploying` is a
       // site key the bundle does not have. Best-effort for the same reason the

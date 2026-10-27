@@ -129,6 +129,23 @@ export function declaresFallbackPair(text: string): boolean {
 }
 
 /**
+ * Every target name step 6 can record for the pair a BUILD inlines or serves:
+ * the shipped files, each candidate declaring module, and the joined form the
+ * step records when no module declares the pair or the step itself fails.
+ *
+ * The deployment drain reads a recorded retarget through this before it lets
+ * a clone's hosting project exist (`projectCreationGate.pure.ts`), because
+ * Vercel builds the repository the moment a project links it. Derived from
+ * the constants above, so a target added there is held here without a second
+ * list to remember.
+ */
+export const BUILD_IDENTITY_TARGETS: readonly string[] = [
+  ...SHIPPED_BACKEND_PAIR_PATHS,
+  ...RESOLVER_MODULE_CANDIDATES,
+  RESOLVER_MODULE_CANDIDATES.join(" | "),
+];
+
+/**
  * The guard that keeps this step honest after provisioning has finished.
  *
  * Retargeting sets the values once. Nothing re-checks them: a later cascade,
