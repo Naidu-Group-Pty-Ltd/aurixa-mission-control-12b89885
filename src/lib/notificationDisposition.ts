@@ -57,7 +57,7 @@ export type NotificationKind = Database["public"]["Enums"]["notification_kind"];
  * rejection, a deletion, a captured lead and an armed payment gate are all
  * absent from this list despite being ordinary events.
  */
-export const NOTIFICATION_RECORD_KINDS: ReadonlySet<NotificationKind> = new Set<NotificationKind>([
+export const SUCCESS_RECORD_KINDS: ReadonlySet<NotificationKind> = new Set<NotificationKind>([
   // The delivery worked. 693 unread on 18 Sep 2026 — the largest single
   // success in the channel.
   "cascade_completed",
@@ -95,6 +95,50 @@ export const NOTIFICATION_RECORD_KINDS: ReadonlySet<NotificationKind> = new Set<
   // Terminal: the assessment is closed and its findings had their own kinds.
   "security_assessment_closed",
   "purchase_completed",
+]);
+
+/**
+ * Kinds that restate a reading Mission Control already takes and shows, in
+ * words that cannot tell a delivery in flight from one that has stopped.
+ *
+ * Not successes, so the test of membership is harder than the list above's and
+ * every entry has to pass all of it: the reading is shown where it is
+ * MEASURED, the kind has been measured to fire on the normal state of a
+ * working fleet, and nobody acts on it. A name that reads like a problem is
+ * expected here, which is why this is its own list, pinned entry by entry in
+ * the test, rather than an exception carved out of the guard on the first one.
+ *
+ * - `drift_high`. The fleet drift scan asks a model about every clone with
+ *   `commits_behind > 0` and files this when it rates a suggestion high, so it
+ *   fires in every ordinary delivery window: prime pushes, the fleet is behind
+ *   for the seventeen minutes CI takes, and the scan calls that urgent.
+ *   Measured 27 Oct 2026: 4,649 unread and none ever read, 77% of the 6,028
+ *   unread under "Needs attention". The number it restates is
+ *   `commits_behind`, which `drift-refresh` takes from GitHub and the fleet
+ *   pages show. What it cannot see, a delivery that has stopped, is the
+ *   convergence auditor's to raise (`stalled`, docs/CASCADE_PIPELINE_HEALTH.md
+ *   §3), and until that ships `cascade_blocked`, `cascade_failed` and
+ *   `clone_ci_attention` still reach the inbox. Decided in
+ *   docs/DELIVERY_SYSTEM_PLAN.md, W5.
+ *
+ * `drift_medium` is NOT here, though the plan names it beside `drift_high`.
+ * The fleet scan never raises it. Five other producers do, and each one names
+ * something a person must do: a cascade conflict the resolver could not settle
+ * (`cascadeConflictMerge`), a proposal that cannot be rebuilt
+ * (`cascadeProposalRepair`), wiring that never reached a held file
+ * (`heldFileDriftSweep`), a brand profile not yet applied, and voice-agent
+ * settings changed directly in Make. Measured 27 Oct 2026: 26 unread, all
+ * from the first three. Filing it as a record would hide all five to quiet
+ * 26 rows.
+ */
+export const RESTATEMENT_RECORD_KINDS: ReadonlySet<NotificationKind> = new Set<NotificationKind>([
+  "drift_high",
+]);
+
+/** Everything the inbox leaves to the record: the two lists above, and nothing else. */
+export const NOTIFICATION_RECORD_KINDS: ReadonlySet<NotificationKind> = new Set<NotificationKind>([
+  ...SUCCESS_RECORD_KINDS,
+  ...RESTATEMENT_RECORD_KINDS,
 ]);
 
 /**

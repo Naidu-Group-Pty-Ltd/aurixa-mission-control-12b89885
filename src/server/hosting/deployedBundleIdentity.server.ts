@@ -18,9 +18,9 @@ import {
   billingFallbackSentence,
   declaredPathArtefact,
   entryAssetPaths,
+  isUnprovenBackend,
   isWrongBackend,
   readBundleIdentity,
-  repeatsLastBundleNotice,
   shouldRequestResync,
   verdictIsAboutTheClone,
   type BundleIdentityReading,
@@ -301,7 +301,9 @@ export type BundleVerification = {
  * **Reported when it is about the clone and wrong.** A notification rather
  * than a status change: the deployment IS live and demoting it would be a
  * worse lie than the one this finds — the same judgement `onLive` already
- * makes about a failed auth-config re-apply.
+ * makes about a failed auth-config re-apply. An unproven reading
+ * (`carries_both`) is not wrong, so it is recorded and drawn and nothing
+ * more: see `isWrongBackend` for the 917 notices it filed as "Wrong backend".
  *
  * **Re-synced at most once per artefact.** See `shouldRequestResync`.
  */
@@ -390,19 +392,24 @@ export async function verifyCloneBundleIdentity(
     );
   }
 
+  // The log keeps saying what the probe could not prove. An unproven backend
+  // pages nobody and rebuilds nothing, and it is still not a success: logged as
+  // one, the deployment's history would read green over a bundle whose
+  // backend nobody has established.
+  const backendNotProven = isWrongBackend(reading.verdict) || isUnprovenBackend(reading.verdict);
   const { error: eventErr } = await admin.from("deployment_events").insert({
     clone_id: cloneId,
     provider_slug: row.provider_slug ?? "vercel",
     action: "verify_bundle_identity",
     // A bundle that serves the right database while its customers' fallback
     // link cannot buy — or credits the prime — is not a successful probe.
-    success: !isWrongBackend(reading.verdict) && reading.billingUid !== "fallback",
+    success: !backendNotProven && reading.billingUid !== "fallback",
     // What the missing identity COSTS is read off the backend beside it: the
     // clone's resolver spends the prime's built-in only while the build talks
     // to the prime's project, so on a build resolving its own the fallback link
     // is browse-only rather than crediting anybody. One sentence, shared with
     // the card, so the log and the page cannot disagree about it.
-    error_message: isWrongBackend(reading.verdict)
+    error_message: backendNotProven
       ? reading.billingUid === "fallback"
         ? `${reading.detail} ${billingFallbackSentence(reading.verdict)}`
         : reading.detail
@@ -442,6 +449,9 @@ export async function verifyCloneBundleIdentity(
     }
   }
 
+  // `carries_prime` only. An unproven `carries_both` files nothing here: the
+  // kind this would file under is an inbox kind for the definite fault, and the
+  // reading is already on the card as "backend unproven" and in the event above.
   const wrongBackend = verdictIsAboutTheClone(reading.verdict) && isWrongBackend(reading.verdict);
   // A missing billing identity is reported once per artefact rather than on
   // every sweep. The wrong-backend report predates this and keeps its cadence;
@@ -450,19 +460,7 @@ export async function verifyCloneBundleIdentity(
   const newBillingFault =
     reading.billingUid === "fallback" &&
     (row.bundle_billing_uid !== "fallback" || row.bundle_artefact !== reading.artefact);
-  // An unproven reading of unchanged bytes is reported once per artefact too
-  // (`repeatsLastBundleNotice`); a definite wrong backend keeps its cadence.
-  const repeatsLast =
-    wrongBackend &&
-    reading.verdict === "carries_both" &&
-    !resyncRequested &&
-    repeatsLastBundleNotice({
-      verdict: reading.verdict,
-      artefact: reading.artefact,
-      resyncRequested,
-      last: await lastBundleNotice(cloneId),
-    });
-  if ((wrongBackend && !repeatsLast) || newBillingFault) {
+  if (wrongBackend || newBillingFault) {
     const remedy = resyncRequested
       ? "An environment re-sync and rebuild have been requested."
       : decision.reason;
@@ -497,30 +495,6 @@ export async function verifyCloneBundleIdentity(
   }
 
   return { probed: true, reading, resyncRequested };
-}
-
-/**
- * The `metadata` of the newest bundle-identity notice for this clone, or null.
- *
- * Null for a failed read as well as for none, so a read that fails reports
- * rather than stays quiet: under-notifying is the worse error.
- */
-async function lastBundleNotice(
-  cloneId: string,
-): Promise<{ verdict?: unknown; artefact?: unknown; resync_requested?: unknown } | null> {
-  const { data, error } = await admin
-    .from("notifications")
-    .select("metadata")
-    .eq("kind", "deployment_bundle_identity")
-    .eq("clone_id", cloneId)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (error || !data) return null;
-  const metadata = data.metadata;
-  return metadata && typeof metadata === "object" && !Array.isArray(metadata)
-    ? (metadata as { verdict?: unknown; artefact?: unknown; resync_requested?: unknown })
-    : null;
 }
 
 /**

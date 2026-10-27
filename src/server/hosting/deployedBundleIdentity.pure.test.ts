@@ -15,6 +15,7 @@ import {
   carriesIdentityLiteral,
   declaredPathArtefact,
   entryAssetPaths,
+  isUnprovenBackend,
   isWrongBackend,
   readBundleIdentity,
   shouldRequestResync,
@@ -93,7 +94,7 @@ describe("readBundleIdentity", () => {
     expect(isWrongBackend(r.verdict)).toBe(false);
   });
 
-  it("refuses to call BOTH a pass", () => {
+  it("refuses to call BOTH a pass, and refuses to call it wrong", () => {
     const r = readBundleIdentity({
       source: `${OWN_BACKEND_SOURCE};${WRONG_BACKEND_SOURCE}`,
       scanned,
@@ -101,7 +102,28 @@ describe("readBundleIdentity", () => {
       primeRef: PRIME,
     });
     expect(r.verdict).toBe("carries_both");
-    expect(isWrongBackend(r.verdict)).toBe(true);
+    expect(r.verdict).not.toBe("carries_own");
+    // Renegotiated 27 Oct 2026. This asserted `isWrongBackend` true, which
+    // pinned the defect: a correctly configured clone whose build does not
+    // declare its backend reads exactly this, so the verdict filed 917
+    // "Wrong backend" errors and asked for 339 rebuilds on it alone, none of
+    // which could change it. It is unproven, which is a third thing.
+    expect(isWrongBackend(r.verdict)).toBe(false);
+    expect(isUnprovenBackend(r.verdict)).toBe(true);
+    expect(r.detail).toContain("unproven");
+  });
+
+  it("calls only BOTH unproven, and only the prime's alone wrong", () => {
+    const verdicts = [
+      "carries_own",
+      "carries_prime",
+      "carries_both",
+      "names_neither",
+      "unreadable",
+      "unreachable",
+    ] as const;
+    expect(verdicts.filter(isWrongBackend)).toEqual(["carries_prime"]);
+    expect(verdicts.filter(isUnprovenBackend)).toEqual(["carries_both"]);
   });
 
   it("says NOTHING FOUND is a fact about the scan, and is not a pass", () => {
@@ -378,10 +400,32 @@ describe("shouldRequestResync", () => {
     expect(d.resync).toBe(true);
   });
 
-  it("asks for one on an ambiguous reading too — unproven is not proven", () => {
-    expect(
-      shouldRequestResync({ verdict: "carries_both", artefact, lastResyncArtefact: null }).resync,
-    ).toBe(true);
+  it("asks for none on an unproven reading, because no rebuild can prove it", () => {
+    // Renegotiated 27 Oct 2026. This asserted a re-sync, on "unproven is not
+    // proven". Unproven is not proven, and a rebuild does not prove it either:
+    // a re-sync remedies an environment that never reached the build, and a
+    // bundle naming the clone's own ref shows that it did. Measured: each
+    // mirror still read `carries_both` after 110 to 121 re-syncs, and all
+    // three read `carries_own` the day their builds declared their backend.
+    const d = shouldRequestResync({ verdict: "carries_both", artefact, lastResyncArtefact: null });
+    expect(d.resync).toBe(false);
+    expect(d.reason).toMatch(/neither the wrong backend nor the wrong billing identity/);
+  });
+
+  it("still asks once for a missing billing identity on an unproven bundle", () => {
+    // The billing fault is read off the bytes on its own evidence, so it keeps
+    // its one rebuild; what it costs is said to be unknown, because the
+    // backend beside it is.
+    const d = shouldRequestResync({
+      verdict: "carries_both",
+      billingUid: "fallback",
+      artefact,
+      lastResyncArtefact: null,
+    });
+    expect(d.resync).toBe(true);
+    expect(d.reason).toMatch(/no billing identity of its own/);
+    expect(d.reason).toMatch(/this reading cannot say which/);
+    expect(d.reason).not.toMatch(/wrong backend/);
   });
 
   it("does NOT ask twice for the same artefact", () => {

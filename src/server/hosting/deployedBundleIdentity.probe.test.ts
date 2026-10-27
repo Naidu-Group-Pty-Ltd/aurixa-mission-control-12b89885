@@ -351,11 +351,21 @@ describe("verifyCloneBundleIdentity acts on what it found, and says what it foun
   });
 });
 
-describe("an unproven reading of unchanged bytes is reported once per artefact", () => {
+describe("an unproven reading is recorded, and neither reported nor rebuilt", () => {
+  /*
+    Renegotiated 27 Oct 2026. This block pinned `carries_both` as a wrong
+    backend reported once per artefact, with a re-sync for each new one. Every
+    correctly configured clone whose build does not declare its backend reads
+    `carries_both`, so that came to 917 "Wrong backend" errors and 339
+    rebuilds that could not change the reading: each mirror read it through
+    110 to 121 of them, and read `carries_own` the day its build declared.
+    What stays pinned is the part that was right: the reading is recorded, and
+    never as a success.
+  */
   const CLONE = "7e2c004d-5a56-4d9f-bdae-09d28885d234";
 
-  /** What NPC Test's card held on 20 Oct 2026: re-synced once, and the rebuild came back the same. */
-  function seedAfterRebuild(lastNotice: Record<string, unknown> | null) {
+  /** NPC Test as its card stood on 20 Oct 2026: one re-sync spent, and the bundle unchanged. */
+  function seed(deployment: Record<string, unknown> = {}) {
     db.rows = {
       clone_deployments: {
         clone_id: CLONE,
@@ -363,76 +373,107 @@ describe("an unproven reading of unchanged bytes is reported once per artefact",
         bundle_resync_artefact: ENTRY,
         bundle_billing_uid: "own",
         bundle_artefact: ENTRY,
+        ...deployment,
       },
       clones: { id: CLONE, name: "NPC Test", deploy_url: ORIGIN, billing_user_id: UID },
       clone_backends: { supabase_project_ref: OWN_REF },
       clone_turnstile_identities: null,
-      notifications: lastNotice ? { metadata: lastNotice } : null,
     };
   }
 
-  /** The newest notice's metadata, in the shape production wrote it. */
-  const said = (over: Record<string, unknown> = {}) => ({
-    artefact: ENTRY,
-    billing_uid: "own",
-    resync_requested: false,
-    scanned: [ENTRY],
-    verdict: "carries_both",
-    ...over,
-  });
-
   /** A correctly configured clone: its own project, and the prime's ref beside it. */
   const BOTH = `const u="https://${OWN_REF}.supabase.co",p="${PRIME_REF}";${RESOLVER}const Cu="${UID}";`;
+  const UNDECLARED = JSON.stringify({ buildId: "b-3" });
 
   const inserted = (table: string) =>
     db.inserts.filter((i) => i.table === table).map((i) => i.values);
+  const deploymentPatch = () =>
+    db.updates.find((u) => u.table === "clone_deployments")?.patch ?? {};
 
-  it("says nothing when the last notice said the same of the same bytes", async () => {
-    seedAfterRebuild(said());
-    serve({ "/version.json": JSON.stringify({ buildId: "b-3" }), "/": HTML, [ENTRY]: BOTH });
+  it("files no notice and asks for no re-sync over bytes it has read before", async () => {
+    seed();
+    serve({ "/version.json": UNDECLARED, "/": HTML, [ENTRY]: BOTH });
 
     const out = await verifyCloneBundleIdentity(CLONE, { primeRef: PRIME_REF });
 
     expect(out.reading?.verdict).toBe("carries_both");
     expect(out.resyncRequested).toBe(false);
+    expect(db.resyncs).toHaveLength(0);
     expect(inserted("notifications")).toHaveLength(0);
-    // Still recorded: a notice that stops repeating must not stop the log.
-    const [event] = inserted("deployment_events");
-    expect(event.success).toBe(false);
-    expect((event.payload as Record<string, unknown>).verdict).toBe("carries_both");
   });
 
-  it("says once that the re-sync it asked for changed nothing", async () => {
-    seedAfterRebuild(said({ resync_requested: true }));
-    serve({ "/version.json": JSON.stringify({ buildId: "b-3" }), "/": HTML, [ENTRY]: BOTH });
-
-    await verifyCloneBundleIdentity(CLONE, { primeRef: PRIME_REF });
-
-    const notes = inserted("notifications");
-    expect(notes).toHaveLength(1);
-    expect(notes[0].body).toMatch(/already requested for this exact artefact/);
-    expect((notes[0].metadata as Record<string, unknown>).resync_requested).toBe(false);
-  });
-
-  it("reports a new artefact, and asks for its re-sync", async () => {
-    seedAfterRebuild(said({ artefact: "/assets/index-OLD.js" }));
-    db.rows.clone_deployments = {
-      ...(db.rows.clone_deployments as Record<string, unknown>),
+  it("nor over a new artefact nobody has re-synced, which used to earn both", async () => {
+    seed({
       bundle_resync_artefact: "/assets/index-OLD.js",
       bundle_artefact: "/assets/index-OLD.js",
-    };
-    serve({ "/version.json": JSON.stringify({ buildId: "b-4" }), "/": HTML, [ENTRY]: BOTH });
+    });
+    serve({ "/version.json": UNDECLARED, "/": HTML, [ENTRY]: BOTH });
 
     const out = await verifyCloneBundleIdentity(CLONE, { primeRef: PRIME_REF });
 
+    expect(out.resyncRequested).toBe(false);
+    expect(db.resyncs).toHaveLength(0);
+    expect(inserted("notifications")).toHaveLength(0);
+    // No attempt was spent, so the once-per-artefact guard is not stamped.
+    expect(deploymentPatch()).not.toHaveProperty("bundle_resync_artefact");
+  });
+
+  it("still records the reading, and never as a success", async () => {
+    seed();
+    serve({ "/version.json": UNDECLARED, "/": HTML, [ENTRY]: BOTH });
+
+    await verifyCloneBundleIdentity(CLONE, { primeRef: PRIME_REF });
+
+    // The card draws this as "backend unproven".
+    expect(deploymentPatch().bundle_identity).toBe("carries_both");
+    const [event] = inserted("deployment_events");
+    expect(event.success).toBe(false);
+    expect(event.error_message).toMatch(/unproven/);
+    expect((event.payload as Record<string, unknown>).verdict).toBe("carries_both");
+    expect((event.payload as Record<string, unknown>).resync).toBe(false);
+  });
+
+  it("reads no notice to decide, so a read that fails cannot make it speak", async () => {
+    // It read the newest bundle notice to decide whether it was repeating
+    // itself, and a failed read reported. There is nothing left to decide.
+    seed();
+    db.failedReads.add("notifications");
+    serve({ "/version.json": UNDECLARED, "/": HTML, [ENTRY]: BOTH });
+
+    await verifyCloneBundleIdentity(CLONE, { primeRef: PRIME_REF });
+
+    expect(inserted("notifications")).toHaveLength(0);
+  });
+
+  it("reports a missing billing identity beside it as that fault, not as a wrong backend", async () => {
+    seed({ bundle_resync_artefact: null });
+    serve({
+      "/version.json": UNDECLARED,
+      "/": HTML,
+      [ENTRY]: `const u="https://${OWN_REF}.supabase.co",p="${PRIME_REF}";${RESOLVER}`,
+    });
+
+    const out = await verifyCloneBundleIdentity(CLONE, { primeRef: PRIME_REF });
+
+    expect(out.reading?.verdict).toBe("carries_both");
+    expect(out.reading?.billingUid).toBe("fallback");
+    // The billing fault is read off the bytes on its own evidence and keeps
+    // its one rebuild.
     expect(out.resyncRequested).toBe(true);
-    expect(inserted("notifications")).toHaveLength(1);
+    expect(db.resyncs[0].reason).toMatch(/no billing identity of its own/);
+    const notes = inserted("notifications");
+    expect(notes).toHaveLength(1);
+    expect(notes[0].title).toMatch(/No billing identity in the bundle/);
+    expect(notes[0].title).not.toMatch(/Wrong backend/);
+    // Which way its purchase link fails cannot be read off a bundle naming
+    // both projects, so it is not called browse-only, and stays an error.
+    expect(notes[0].severity).toBe("error");
   });
 
   it("keeps the cadence of a deployment that names only the prime", async () => {
-    seedAfterRebuild(said({ verdict: "carries_prime" }));
+    seed();
     serve({
-      "/version.json": JSON.stringify({ buildId: "b-3" }),
+      "/version.json": UNDECLARED,
       "/": HTML,
       [ENTRY]: `const p="${PRIME_REF}";${RESOLVER}const Cu="${UID}";`,
     });
@@ -440,16 +481,9 @@ describe("an unproven reading of unchanged bytes is reported once per artefact",
     const out = await verifyCloneBundleIdentity(CLONE, { primeRef: PRIME_REF });
 
     expect(out.reading?.verdict).toBe("carries_prime");
-    expect(inserted("notifications")).toHaveLength(1);
-  });
-
-  it("reports when the last notice cannot be read", async () => {
-    seedAfterRebuild(said());
-    db.failedReads.add("notifications");
-    serve({ "/version.json": JSON.stringify({ buildId: "b-3" }), "/": HTML, [ENTRY]: BOTH });
-
-    await verifyCloneBundleIdentity(CLONE, { primeRef: PRIME_REF });
-
-    expect(inserted("notifications")).toHaveLength(1);
+    const notes = inserted("notifications");
+    expect(notes).toHaveLength(1);
+    expect(notes[0].title).toMatch(/Wrong backend in the bundle/);
+    expect(notes[0].severity).toBe("error");
   });
 });

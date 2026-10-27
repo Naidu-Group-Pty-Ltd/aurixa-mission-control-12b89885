@@ -161,9 +161,42 @@ export function carriesIdentityLiteral(source: string, identity: string): boolea
   return new RegExp(`(?<![A-Za-z0-9_\\-./@])${escaped}(?![A-Za-z0-9_\\-./@])`).test(source);
 }
 
-/** Is this verdict one that says the deployment is serving the wrong backend? */
+/**
+ * Is this verdict one that says the deployment is serving the wrong backend?
+ *
+ * Only `carries_prime`: the artefact names the prime's project and not the
+ * clone's. It used to include `carries_both` as well, which this module calls
+ * ambiguous by construction. That is the reading of a correctly configured
+ * clone whose build does not declare its backend: the clone's own ref resolved
+ * from the environment, beside the prime's compiled in as the fallback. A
+ * re-sync remedies an environment that never reached the build, and here the
+ * clone's ref did reach it, so the rebuild names both again. `carries_both`
+ * therefore started rebuilds that could not change their own reading, and was
+ * reported as "Wrong backend" at error severity. Measured 27 Oct 2026:
+ * 240 re-syncs between 27 Sep and 20 Oct (342 in all, 339 of them with no
+ * billing fault beside the reading), each of the three mirrors still reading
+ * `carries_both` after 110 to 121 of them, and 917 unread notices, every one
+ * `carries_both`. The mirrors read `carries_own` from 20 Oct, once their
+ * builds declared their backend in `/version.json`; no rebuild did that.
+ *
+ * `carries_both` is `isUnprovenBackend`: recorded, drawn on the card as
+ * "backend unproven", and acted on by nobody.
+ */
 export function isWrongBackend(verdict: BundleIdentityVerdict): boolean {
-  return verdict === "carries_prime" || verdict === "carries_both";
+  return verdict === "carries_prime";
+}
+
+/**
+ * Is this verdict one that cannot say which backend the browser uses?
+ *
+ * Kept apart from `isWrongBackend` so neither is read as the other. It is not
+ * a pass, so the probe's event is not logged as a success and the card draws a
+ * warning. It is not a fault either, so it pages nobody and asks for no
+ * rebuild. What settles it is the build declaring what it resolved, which is a
+ * change to the clone's source rather than to what was published to it.
+ */
+export function isUnprovenBackend(verdict: BundleIdentityVerdict): boolean {
+  return verdict === "carries_both";
 }
 
 /** Is this verdict a statement about the clone at all, or about our probe? */
@@ -388,6 +421,11 @@ export function readBundleIdentity(input: BundleIdentityInput): BundleIdentityRe
  * it. So the guard is the attempt, never its outcome — and a second wrong
  * reading on a NEW artefact is a fact about the clone's source, to be reported
  * to a person rather than ground at.
+ *
+ * An unproven backend (`carries_both`) earns none: see `isWrongBackend` for
+ * the 240 rebuilds that could not change it. A missing billing identity on
+ * the same bundle still earns its one, because that fault is read off the
+ * bytes on its own evidence.
  */
 export function shouldRequestResync(input: {
   verdict: BundleIdentityVerdict;
@@ -438,44 +476,6 @@ export function shouldRequestResync(input: {
     resync: true,
     reason: `${fault}; the published environment may not have reached the build, and rebuilding with it is the one remedy that can`,
   };
-}
-
-/**
- * Whether a `carries_both` notice would only repeat the last one.
- *
- * `carries_both` is the scan reading bytes, and the same bytes give the same
- * reading, so a re-probe of an artefact nobody has changed cannot tell a
- * person anything the last notice did not. Measured 20 Oct 2026: 917 unread
- * "Wrong backend in the bundle" notices, every one `carries_both`, and all
- * but four of them on the prime's three mirrors. Every correctly configured
- * clone names the prime's ref (it is how a build recognises the prime), and
- * none of the three publishes the `supabase` block in `/version.json` that
- * would settle it (the CRM line's build does, and has drawn none since
- * 20 Sep). So each probe of the same bytes said the same thing again: on
- * every deploy, every six hours, and after every re-sync rebuild.
- *
- * So it is reported as a missing billing identity is, once per artefact, plus
- * once more when the re-sync asked for that artefact is seen to have changed
- * nothing, which is a different sentence. Nothing else is suppressed:
- * `carries_prime` keeps its cadence, since a deployment signing its customers
- * in to another tenant's database is not a reading to go quiet about. And a
- * last notice that cannot be read is no last notice, so a lost read reports.
- */
-export function repeatsLastBundleNotice(input: {
-  verdict: BundleIdentityVerdict;
-  artefact: string | null;
-  /** Whether this probe asked for a re-sync. */
-  resyncRequested: boolean;
-  /** The `metadata` of the newest bundle-identity notice for this clone. */
-  last: { verdict?: unknown; artefact?: unknown; resync_requested?: unknown } | null | undefined;
-}): boolean {
-  if (input.verdict !== "carries_both") return false;
-  if (input.resyncRequested || !input.artefact || !input.last) return false;
-  return (
-    input.last.verdict === input.verdict &&
-    input.last.artefact === input.artefact &&
-    input.last.resync_requested === false
-  );
 }
 
 /**

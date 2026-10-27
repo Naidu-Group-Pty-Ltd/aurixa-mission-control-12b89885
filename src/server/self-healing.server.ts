@@ -487,19 +487,67 @@ export async function executeRemediationRun(
       error: message,
       exhausted,
     });
-    if (exhausted) {
-      await admin.from("notifications").insert({
-        kind: "remediation_failed",
-        severity: "error",
-        title: `Self-healing failed · ${run.action_type.replace(/_/g, " ")}`,
-        body: message.slice(0, 400),
-        clone_id: run.clone_id,
-        url: "/support/tickets",
-        metadata: { run_id: run.id, ticket_id: run.ticket_id },
-      });
-    }
+    if (exhausted) await raiseRemediationFailed(run, message);
     return { status: exhausted ? "failed" : "retrying" };
   }
+}
+
+/**
+ * Tell a person a run spent its last attempt, once per standing fault.
+ *
+ * It filed one notice per exhausted run, and a standing fault exhausts every
+ * run planned behind it: 116 notices from four faults on four clones by
+ * 27 Oct 2026, about six per clone per day. The rule, the error normalisation
+ * that makes "the same fault" mean the same fault, and why a failed read still
+ * files are in `remediationFailedNotice.pure.ts`.
+ */
+async function raiseRemediationFailed(
+  run: { id: string; ticket_id: string | null; clone_id: string | null; action_type: string },
+  message: string,
+): Promise<void> {
+  const { decideRemediationFailedNotice, describeRemediationFailure } =
+    await import("@/server/remediationFailedNotice.pure");
+  const notice = describeRemediationFailure({
+    runId: run.id,
+    ticketId: run.ticket_id ?? null,
+    cloneId: run.clone_id ?? null,
+    actionType: run.action_type,
+    error: message,
+  });
+
+  let read: Parameters<typeof decideRemediationFailedNotice>[0];
+  try {
+    let standing = admin
+      .from("notifications")
+      .select("id")
+      .eq("kind", "remediation_failed")
+      .eq("metadata->>fingerprint", notice.metadata.fingerprint)
+      .is("read_at", null)
+      .limit(1);
+    standing = run.clone_id ? standing.eq("clone_id", run.clone_id) : standing.is("clone_id", null);
+    const { data, error } = await standing;
+    read = error
+      ? { ok: false, error: error.message }
+      : { ok: true, standing: (data ?? []).length > 0 };
+  } catch (e) {
+    read = { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+
+  const decision = decideRemediationFailedNotice(read);
+  if (!read.ok) console.error(`[self-healing] remediation_failed: ${decision.why}`);
+  if (!decision.file) return;
+
+  // Through `notifyOperators`, so an insert the database refuses is logged
+  // rather than dropped: this notice is now the only one for its fault.
+  await notifyOperators({
+    kind: "remediation_failed",
+    severity: "error",
+    title: notice.title,
+    body: notice.body,
+    cloneId: run.clone_id ?? null,
+    url: notice.url,
+    metadata: notice.metadata,
+  });
 }
 
 /** Park a run for human validation and say why. */

@@ -275,6 +275,8 @@ import {
   type PassPhase,
   type PassTrace,
 } from "./cascade/passTrace.pure";
+import type { ClonePassBudget } from "./cascade/passBudget.pure";
+import { readClonePassBudgets } from "./cascade/clonePassBudgets.server";
 import { carrierSettledMessage } from "./cascade/carrierSettlement.pure";
 import {
   describeTreePause,
@@ -810,6 +812,12 @@ export async function executeCascade(
     .map((r) => (r as { clones: { id: string } | null }).clones?.id)
     .filter((v): v is string => Boolean(v));
   const pinCheck = await validateClonePinsServer(supabase, cloneIds);
+  // Each clone's last pass, for asking the budget about THIS clone rather than
+  // the slowest one so far (`cascade/passBudget.pure.ts`). Only where there is
+  // a budget to ask: a pass with none never stops early anyway.
+  const passBudgets = opts?.budget
+    ? await readClonePassBudgets(supabase, cloneIds)
+    : new Map<string, ClonePassBudget>();
   const blockedClones = new Map<string, string[]>();
   if (pinCheck.ok && pinCheck.issues.length > 0) {
     for (const issue of pinCheck.issues) {
@@ -944,7 +952,14 @@ export async function executeCascade(
     : roundRobin;
 
   for (const r of orderedRows) {
-    if (attempted > 0 && opts?.budget?.isPastDeadline(slowestMs)) {
+    // Reserve the slowest clone so far AND this clone's own last pass. The
+    // first alone let a 20 s mirror wave the CRM in behind it with 24 s left
+    // for a pass that takes 40, which the platform then ended (48 of the CRM's
+    // 67 traced passes, 20–27 Oct 2026). A clone whose last pass the platform
+    // ended reserves the whole budget, so it only ever starts first.
+    const ownPassMs =
+      passBudgets.get((r as { clones: { id: string } | null }).clones?.id ?? "")?.passMs ?? 0;
+    if (attempted > 0 && opts?.budget?.isPastDeadline(Math.max(slowestMs, ownPassMs))) {
       stoppedEarly = true;
       break;
     }

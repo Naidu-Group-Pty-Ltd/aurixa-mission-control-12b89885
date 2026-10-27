@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
+import { CREATION_ARM_GRACE_MS } from "./armGrace.pure";
 import {
   decideEventFold,
+  isArmed,
   isFoldableCommitEvent,
   scopeFilterIsEmpty,
   supersededSummary,
@@ -131,6 +133,48 @@ describe("the fold", () => {
   });
 });
 
+describe("an event still inside its arm grace is not folded yet", () => {
+  const T = Date.parse("2026-10-18T21:29:02.000Z");
+  const at = (msBeforeNow: number) => new Date(T - msBeforeNow).toISOString();
+
+  it("leaves a young event alone — its rows may still be on their way", () => {
+    // Event 0a3c9817, 18 Oct 2026: folded 0.29 s after it was created, closed
+    // with no rows yet, and its four rows sat queued under a completed event.
+    const decision = decideEventFold(
+      [
+        event({ id: "carrier", created_at: at(600_000) }),
+        event({ id: "young", created_at: at(290) }),
+      ],
+      T,
+    );
+    expect(decision).toEqual({ keep: "carrier", supersede: [] });
+  });
+
+  it("folds it on a later tick, once the grace has passed", () => {
+    const decision = decideEventFold(
+      [
+        event({ id: "carrier", created_at: at(600_000) }),
+        event({ id: "armed", created_at: at(CREATION_ARM_GRACE_MS) }),
+      ],
+      T,
+    );
+    expect(decision).toEqual({ keep: "carrier", supersede: ["armed"] });
+  });
+
+  it("asked without a clock, folds as it always did", () => {
+    const decision = decideEventFold([
+      event({ id: "carrier", created_at: at(600_000) }),
+      event({ id: "young", created_at: at(290) }),
+    ]);
+    expect(decision).toEqual({ keep: "carrier", supersede: ["young"] });
+  });
+
+  it("reads an unreadable creation time as armed, which is the old behaviour", () => {
+    expect(isArmed("not a date", T)).toBe(true);
+    expect(isArmed(at(1), T)).toBe(false);
+  });
+});
+
 describe("the story a superseded row carries", () => {
   it("names the survivor", () => {
     expect(supersededSummary("0123456789abcdef")).toContain("01234567");
@@ -145,9 +189,56 @@ describe("the wiring the fold depends on", () => {
 
   it("the drain folds the backlog before anything is claimed", () => {
     const foldAt = drain.indexOf("await foldQueuedCommitEvents()");
-    const claimLoopAt = drain.indexOf("const r = await drainOne(budget, failedThisTick)");
+    const claimLoopAt = drain.indexOf("const r = await drainOne(budget, ranThisTick)");
     expect(foldAt).toBeGreaterThan(-1);
     expect(claimLoopAt).toBeGreaterThan(foldAt);
+  });
+
+  it("the drain folds with the clock, so the arm grace holds at the fold too", () => {
+    expect(drain).toContain("decideEventFold((data ?? []) as FoldableEvent[], Date.now())");
+  });
+
+  it("the drain settles rows still queued under a settled event, after the fold", () => {
+    const sweep = drain.slice(
+      drain.indexOf("async function settleStrandedRows"),
+      drain.indexOf("async function claimOne"),
+    );
+    expect(sweep).toContain('.select("id, cascade_events!inner(status)")');
+    expect(sweep).toContain('.eq("status", "queued")');
+    expect(sweep).toContain('.in("cascade_events.status", ["completed", "failed"])');
+    // Re-checked at the write, so a row a claim has since moved is left alone.
+    expect(sweep.slice(sweep.indexOf(".update("))).toContain('.eq("status", "queued")');
+    expect(sweep).toContain("carrierSettledMessage(");
+  });
+
+  it("the sweep leaves a row anything touched within a stall window — a retry's re-armed rows", () => {
+    // "Retry failed" re-queues a failed event's rows before it reopens the
+    // event, so between its two writes a re-armed row reads exactly like a
+    // strand (Codex P2 on #369). Only age tells them apart, and it is asked at
+    // the read and again at the write.
+    const sweep = drain.slice(
+      drain.indexOf("async function settleStrandedRows"),
+      drain.indexOf("async function claimOne"),
+    );
+    expect(sweep).toMatch(
+      /const untouchedSince = new Date\(Date\.now\(\) - STALL_MINUTES \* 60_000\)\.toISOString\(\);/,
+    );
+    const read = sweep.slice(0, sweep.indexOf(".update("));
+    const write = sweep.slice(sweep.indexOf(".update("));
+    expect(read).toContain('.lt("updated_at", untouchedSince)');
+    expect(write).toContain('.lt("updated_at", untouchedSince)');
+    // The age means something only because every write to a row stamps it —
+    // the retry's own reset included.
+    const table = readFileSync(
+      "supabase/migrations/20260419215311_091021d2-99de-4fc1-b893-0cfa0ddf8f6c.sql",
+      "utf8",
+    );
+    expect(table).toMatch(
+      /CREATE TRIGGER update_cascade_results_updated_at\s+BEFORE UPDATE ON public\.cascade_results\s+FOR EACH ROW EXECUTE FUNCTION public\.update_updated_at_column\(\);/,
+    );
+    expect(drain.indexOf("await settleStrandedRows()")).toBeGreaterThan(
+      drain.indexOf("await foldQueuedCommitEvents()"),
+    );
   });
 
   it("the fold's updates re-check pending + unclaimed, so a racing claim wins", () => {
