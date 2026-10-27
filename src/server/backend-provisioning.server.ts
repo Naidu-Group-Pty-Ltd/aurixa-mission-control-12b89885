@@ -3355,7 +3355,21 @@ export async function applyPrimeMigrations(
   let attempted = 0;
   let slowestMs = 0;
   let stoppedEarly = false;
-  let chunkCursorDiscarded = false;
+  /*
+    A CURSOR INTO A VERSION THE CLONE ALREADY RECORDS IS DISCARDED.
+
+    A seed's version is recorded only after its last statement, so a cursor
+    naming a recorded version is a position in work that is finished — by this
+    lane or by another one, which keeps no cursor of this lane's to clear. The
+    loop below skips the version as applied, so it never reaches the seed and
+    never says the cursor is done with, and the row kept it: NPC Test's cursor
+    still named `20270130090000`, recorded on 22 Oct, and on 27 Oct the drain
+    served it every five minutes for nothing — 237 of 239 passes in 24 hours
+    found the clone current, at about 1,900 GitHub calls a day
+    (`docs/DELIVERY_SYSTEM_PLAN.md` §4.3, W7). Said here, where the ledger is
+    in hand, through the flag the fleet lane already clears its cursor on.
+  */
+  let chunkCursorDiscarded = Boolean(oversize?.cursor && applied.has(oversize.cursor.migrationId));
   let chunksApplied = 0;
   // Whether any migration body was SENT this pass, failed or not — a file that
   // fails part-way may already have committed what it scheduled. Not

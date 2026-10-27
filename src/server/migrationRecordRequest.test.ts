@@ -3,6 +3,10 @@
  * replay itself, against a Management API that records every query, so what is
  * asserted is what a clone would have been SENT. The rule and its exceptions
  * are `migrationRecordRequest.pure.ts`'s.
+ *
+ * And the cursor the replay discards when the clone's ledger already records
+ * the version it points into, which is the same lane's other half-applied
+ * state (`docs/DELIVERY_SYSTEM_PLAN.md`, W7).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -202,5 +206,56 @@ describe("applyPrimeMigrations — a migration is applied and recorded in one re
     expect(requests).toHaveLength(1);
     expect(requests[0].startsWith(wrapped.sql)).toBe(true);
     expect(requests[0].slice(wrapped.sql.length)).toMatch(LEDGER_RECORD);
+  });
+});
+
+describe("applyPrimeMigrations — a cursor the clone's ledger has passed is discarded", () => {
+  const oversize = (migrationId: string) => ({
+    streamSql: async () => {
+      throw new Error("no seed is streamed by a pass that has nothing to send");
+    },
+    cursor: { migrationId, statementsDone: 47 },
+  });
+
+  it("says discard when the ledger records the version the cursor points into", async () => {
+    managementApi({ applied: [A.id, B.id], tables: 10 });
+
+    const out = await applyPrimeMigrations(
+      REF,
+      [A, B],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      oversize(A.id),
+    );
+
+    expect(out.chunkCursorDiscarded).toBe(true);
+    expect(out.chunkCursor).toBeNull();
+    expect(out.results.every((r) => r.success && r.skipped)).toBe(true);
+  });
+
+  it("keeps a cursor into a version the ledger does not hold", async () => {
+    managementApi({ applied: [A.id], tables: 10 });
+
+    const out = await applyPrimeMigrations(
+      REF,
+      [A],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      oversize(B.id),
+    );
+
+    expect(out.chunkCursorDiscarded).toBe(false);
+  });
+
+  it("says nothing about a cursor nobody passed", async () => {
+    managementApi({ applied: [A.id], tables: 10 });
+
+    const out = await applyPrimeMigrations(REF, [A]);
+
+    expect(out.chunkCursorDiscarded).toBe(false);
   });
 });
