@@ -209,6 +209,33 @@ describe("the wiring the fold depends on", () => {
     // Re-checked at the write, so a row a claim has since moved is left alone.
     expect(sweep.slice(sweep.indexOf(".update("))).toContain('.eq("status", "queued")');
     expect(sweep).toContain("carrierSettledMessage(");
+  });
+
+  it("the sweep leaves a row anything touched within a stall window — a retry's re-armed rows", () => {
+    // "Retry failed" re-queues a failed event's rows before it reopens the
+    // event, so between its two writes a re-armed row reads exactly like a
+    // strand (Codex P2 on #369). Only age tells them apart, and it is asked at
+    // the read and again at the write.
+    const sweep = drain.slice(
+      drain.indexOf("async function settleStrandedRows"),
+      drain.indexOf("async function claimOne"),
+    );
+    expect(sweep).toMatch(
+      /const untouchedSince = new Date\(Date\.now\(\) - STALL_MINUTES \* 60_000\)\.toISOString\(\);/,
+    );
+    const read = sweep.slice(0, sweep.indexOf(".update("));
+    const write = sweep.slice(sweep.indexOf(".update("));
+    expect(read).toContain('.lt("updated_at", untouchedSince)');
+    expect(write).toContain('.lt("updated_at", untouchedSince)');
+    // The age means something only because every write to a row stamps it —
+    // the retry's own reset included.
+    const table = readFileSync(
+      "supabase/migrations/20260419215311_091021d2-99de-4fc1-b893-0cfa0ddf8f6c.sql",
+      "utf8",
+    );
+    expect(table).toMatch(
+      /CREATE TRIGGER update_cascade_results_updated_at\s+BEFORE UPDATE ON public\.cascade_results\s+FOR EACH ROW EXECUTE FUNCTION public\.update_updated_at_column\(\);/,
+    );
     expect(drain.indexOf("await settleStrandedRows()")).toBeGreaterThan(
       drain.indexOf("await foldQueuedCommitEvents()"),
     );

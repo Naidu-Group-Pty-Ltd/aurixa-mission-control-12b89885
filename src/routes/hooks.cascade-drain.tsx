@@ -391,15 +391,28 @@ async function foldQueuedCommitEvents(): Promise<number> {
  * that arrives late by another way, and the four themselves, with the
  * carrier's sentence (`carrierSettledMessage`) so the row says what happened.
  *
+ * ONLY A ROW NOBODY HAS TOUCHED FOR A STALL WINDOW. A queued row under a
+ * settled event is not always a strand: "Retry failed" on the cascade page
+ * re-queues its failed rows first and reopens their event second, two writes
+ * from the browser, and a tick that landed between them would skip the very
+ * rows the retry had just re-armed — the retry then finds no queued work and
+ * reports itself complete (Codex P2 on #369). Every write to a row stamps its
+ * `updated_at` (`update_cascade_results_updated_at`), so a re-armed row is
+ * seconds old while the four strands had sat untouched since 18 Oct. The age
+ * is asked at the read and again at the write, so a row re-armed between the
+ * two is left alone as well.
+ *
  * Housekeeping, not delivery: a read or write that fails is reported in the
  * tick's answer and costs nothing but one more tick of the strand.
  */
 async function settleStrandedRows(): Promise<number | { error: string }> {
+  const untouchedSince = new Date(Date.now() - STALL_MINUTES * 60_000).toISOString();
   const { data, error } = await admin
     .from("cascade_results")
     .select("id, cascade_events!inner(status)")
     .eq("status", "queued")
     .in("cascade_events.status", ["completed", "failed"])
+    .lt("updated_at", untouchedSince)
     .limit(200);
   if (error) {
     console.error("[cascade-drain] could not read stranded rows:", error.message);
@@ -413,12 +426,13 @@ async function settleStrandedRows(): Promise<number | { error: string }> {
       status: "skipped",
       completed_at: new Date().toISOString(),
       error_message: carrierSettledMessage(
-        "was already settled when this row arrived, so no pass could ever reach it; its " +
-          "delivery is carried by the event that superseded it.",
+        "had already settled while this row was still queued, so no pass of it will ever " +
+          "reach this row, and nothing was delivered for it here.",
       ),
     })
     .in("id", ids)
     .eq("status", "queued")
+    .lt("updated_at", untouchedSince)
     .select("id");
   if (settleErr) {
     console.error("[cascade-drain] could not settle stranded rows:", settleErr.message);
