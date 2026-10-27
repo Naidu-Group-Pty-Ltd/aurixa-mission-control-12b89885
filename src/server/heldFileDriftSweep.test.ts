@@ -112,7 +112,11 @@ const PRIME = "npc-property-dashbord";
 const CRM = "npc-crm-independent-6505dc";
 
 /** The tables the sweep reads, answering as PostgREST does for these shapes. */
-function db(opts: { exclusions: Array<{ pattern: string; reason: string }> }) {
+function db(opts: {
+  exclusions: Array<{ pattern: string; reason: string }>;
+  /** The clone's last recorded observation, newest first, as `lastFingerprint` reads it. */
+  history?: Array<{ metadata: Record<string, unknown> }>;
+}) {
   const query = (rows: unknown[]) => {
     const q: Record<string, unknown> = {};
     for (const m of ["select", "eq", "not", "order", "limit"]) q[m] = () => q;
@@ -139,7 +143,7 @@ function db(opts: { exclusions: Array<{ pattern: string; reason: string }> }) {
         ]);
       }
       if (table === "clone_sync_exclusions") return query(opts.exclusions);
-      if (table === "audit_log") return query([]);
+      if (table === "audit_log") return query(opts.history ?? []);
       throw new Error(`unexpected table ${table}`);
     },
   } as never;
@@ -200,6 +204,23 @@ describe("the held files that can be behind are read, however many sort before t
     const report = await sweepHeldFileDrift(db({ exclusions: HELD }));
     expect(report.detail).toEqual([{ clone: "NPC CRM Independent", outcome: "clean" }]);
     expect(recorded.audit).toEqual([]);
+  });
+
+  it("records the clearance when a reported clone's held file now matches the prime", async () => {
+    // Repaired to the prime's bytes, so nothing is left that can be behind. The
+    // gap announced before is cleared in the record, or the same gap coming
+    // back would match the old fingerprint and never be announced.
+    github.repos.set(PRIME, { "src/held/zPage.tsx": PAGE_PRIME, "src/lib/wiring.ts": WIRING });
+    github.repos.set(CRM, { "src/held/zPage.tsx": PAGE_PRIME, "src/lib/wiring.ts": WIRING });
+    const history = [{ metadata: { fingerprint: "src/held/zPage.tsx>src/lib/wiring.ts:b" } }];
+    const report = await sweepHeldFileDrift(db({ exclusions: HELD, history }));
+    expect(report.detail).toEqual([{ clone: "NPC CRM Independent", outcome: "cleared" }]);
+    expect(recorded.audit).toEqual([
+      expect.objectContaining({
+        metadata: expect.objectContaining({ fingerprint: "", findings: [] }),
+      }),
+    ]);
+    expect(recorded.notified).toEqual([]);
   });
 });
 

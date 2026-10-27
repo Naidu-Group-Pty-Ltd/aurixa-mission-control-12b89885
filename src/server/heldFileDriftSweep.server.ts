@@ -323,12 +323,12 @@ async function sweepOneClone(args: {
       return primeSha !== undefined && primeSha !== tree.entries.get(path);
     })
     .sort();
-  if (held.length === 0) {
-    // Not "clean" in the interesting sense and not a failure either: this clone
-    // holds no source file back in a version the prime has, so there is no held
-    // file to be behind.
-    return { clone: label, outcome: "clean" };
-  }
+  // No early return when nothing is left to read. "No held file can be behind"
+  // is a whole-clone answer, so it clears a gap announced before, and a clone
+  // repaired to the prime's bytes lands here, because the filter above drops a
+  // copy that matches. Returning before the record left the old fingerprint
+  // standing, and the same gap coming back then read as already announced. With
+  // no path to read, the reads below make no request.
   const heldPaths = held.slice(0, MAX_HELD_PATHS);
   let capped = heldPaths.length < held.length;
 
