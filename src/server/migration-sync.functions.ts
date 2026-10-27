@@ -283,6 +283,21 @@ export const syncCloneMigrations = createServerFn({ method: "POST" })
         return { ok: false, error: "Prime not configured — set the prime repo in Settings first" };
       }
 
+      // The clone's CRM line, for the cron sweep after the replay (see the
+      // replay's `crmMode`). A read that failed is an unknown line, and an
+      // unknown line sweeps the prime's own jobs alone, as before.
+      const { data: lineRow, error: lineErr } = await supabase
+        .from("clones")
+        .select("crm_mode")
+        .eq("id", data.cloneId)
+        .maybeSingle();
+      if (lineErr) {
+        console.warn("[migration-sync] the clone's CRM line could not be read", {
+          cloneId: data.cloneId,
+          error: lineErr.message,
+        });
+      }
+
       // The SCOPED corpus — the same one the scheduled fleet sync replays —
       // and never the raw repo. This button used to pass `corpus.metas`
       // directly: 962 files, including two rollback scripts and 52
@@ -426,6 +441,7 @@ export const syncCloneMigrations = createServerFn({ method: "POST" })
             // part and reporting the clone level — and the fleet lane, which
             // does record its place, carries it.
           },
+          lineRow?.crm_mode ?? null,
         );
 
         const successes = results.filter((r) => r.success && !r.skipped);

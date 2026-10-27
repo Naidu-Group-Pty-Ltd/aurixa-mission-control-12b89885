@@ -3197,6 +3197,16 @@ export async function applyPrimeMigrations(
    * as before.
    */
   oversize?: OversizeApplyOptions,
+  /**
+   * The clone's recorded CRM line (`clones.crm_mode`), for the sweep after
+   * the replay. Given, that sweep also unschedules the jobs the line does not
+   * carry: four of the prime's migrations re-schedule the GoHighLevel jobs,
+   * and on the independent line they called functions it does not have until
+   * the half-hourly catch-up next swept them (`primeOnlyFunctionSweep.server.ts`).
+   * Absent or unread: the prime's own jobs alone, exactly as before, which
+   * sweeps less and never more.
+   */
+  crmMode?: string | null,
 ): Promise<{
   results: PrimeMigrationResult[];
   latestApplied: string | null;
@@ -3752,10 +3762,11 @@ export async function applyPrimeMigrations(
   // reached the clone — a pass that sent nothing scheduled nothing — and not
   // when the budget stopped the pass, because the pass that continues it will
   // sweep. See `sweepPrimeOnlyCronJobs`, which never throws and never acts on
-  // the prime.
+  // the prime. Told the clone's line, so what the line does not carry goes
+  // with them in the same pass rather than at the next catch-up.
   const primeOnlyCronSweep =
     (sentToClone || chunksApplied > 0) && !stoppedEarly
-      ? await sweepPrimeOnlyCronJobs(projectRef)
+      ? await sweepPrimeOnlyCronJobs(projectRef, { crmMode: crmMode ?? null })
       : null;
   if (primeOnlyCronSweep && primeOnlyCronSweep.unscheduled.length > 0) {
     console.info("[migrations] unscheduled the prime's own jobs from a clone", {

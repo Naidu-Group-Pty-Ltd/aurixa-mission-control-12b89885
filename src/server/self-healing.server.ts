@@ -1411,6 +1411,21 @@ async function executeSqlMigration(
       `the backend is ${backend.status} — the provisioning worker's, not this lane's`,
     );
   }
+  // The clone's CRM line, for the cron sweep after the replay, read before
+  // the claim so the claim covers the replay and nothing else. A read that
+  // failed is an unknown line, and an unknown line sweeps the prime's own
+  // jobs alone, as before: it can only sweep less.
+  const { data: lineRow, error: lineErr } = await admin
+    .from("clones")
+    .select("crm_mode")
+    .eq("id", run.clone_id)
+    .maybeSingle();
+  if (lineErr) {
+    console.warn("[sql_migration] the clone's CRM line could not be read", {
+      cloneId: run.clone_id,
+      error: lineErr.message,
+    });
+  }
   const claimedAt = new Date().toISOString();
   const { data: claimed, error: claimErr } = await admin
     .from("clone_backends")
@@ -1462,6 +1477,7 @@ async function executeSqlMigration(
             },
           }),
       },
+      lineRow?.crm_mode ?? null,
     );
   } finally {
     // Beats stopped BEFORE the release, as the fleet lane orders them, so no
