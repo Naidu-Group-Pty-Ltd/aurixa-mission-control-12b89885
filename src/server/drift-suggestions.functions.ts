@@ -4,6 +4,7 @@ import { analyzeCloneDrift, type AnalyzeDriftResult } from "./drift-suggestions.
 import { applyAutoPoliciesForClone } from "./drift-policies.server";
 import { executeCascade } from "./cascade-engine.server";
 import type { Database } from "@/integrations/supabase/types";
+import { assessBlastRadius } from "@/lib/blast-radius";
 
 export type { DriftSuggestion, AnalyzeDriftResult } from "./drift-suggestions.server";
 
@@ -73,13 +74,15 @@ export const applyDriftSuggestion = createServerFn({ method: "POST" })
 
     const mode: CascadeMode = data.mode ?? suggestion.recommended_mode ?? "pr";
 
-    // Spawn a cascade event scoped to this single clone.
+    // Spawn a cascade event scoped to this single clone, under the gate every
+    // operator-started cascade asks (one clone never waits today).
     const { data: ev, error: evErr } = await supabase
       .from("cascade_events")
       .insert({
         trigger: "manual",
         mode,
         status: "pending",
+        requires_approval: assessBlastRadius(mode, 1).requiresApproval,
         scope_filter: {
           scope: "ai_suggestion",
           clone_ids: [data.cloneId],

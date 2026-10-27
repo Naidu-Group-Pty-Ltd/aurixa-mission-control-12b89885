@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import type { Database } from "@/integrations/supabase/types";
+import { assessBlastRadius } from "@/lib/blast-radius";
 import {
   runDetection,
   analyzeModuleIntelligence,
@@ -248,7 +249,21 @@ export const batchUpdateModuleStatus = createServerFn({ method: "POST" })
     return { ok: true as const, count: data.moduleIds.length };
   });
 
-// Approve modules and optionally trigger cascade deploy
+/**
+ * Approve modules, then cascade the chosen clones.
+ *
+ * Asks the second-operator gate every operator-started cascade asks
+ * (`assessBlastRadius`). It used to write its event with no
+ * `requires_approval`, so an auto-merge across every clone from this dialog
+ * ran with one operator where the same push from the cascade page waited for
+ * two.
+ *
+ * And it says what it delivers. Approving a module does not narrow a cascade:
+ * the engine reads `scope_filter.module_globs` and nothing else of a module
+ * scope, and installed globs do not depend on approval, so each clone
+ * receives its whole sync scope, as any cascade does. The event's summary
+ * called it a module deploy.
+ */
 export const approveAndDeploy = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((data: { moduleIds: string[]; cloneIds: string[]; cascadeMode?: string }) => {
@@ -272,15 +287,19 @@ export const approveAndDeploy = createServerFn({ method: "POST" })
     if (modErr) return { ok: false as const, error: modErr.message };
 
     // Create cascade event
+    const mode: Database["public"]["Enums"]["cascade_mode"] =
+      data.cascadeMode === "auto_merge" ? "auto_merge" : "pr";
+    const blast = assessBlastRadius(mode, data.cloneIds.length);
     const insertRow: Database["public"]["Tables"]["cascade_events"]["Insert"] = {
       trigger: "manual",
-      mode: (data.cascadeMode === "auto_merge"
-        ? "auto_merge"
-        : "pr") as Database["public"]["Enums"]["cascade_mode"],
+      mode,
       status: "pending",
+      requires_approval: blast.requiresApproval,
       initiated_by: context.userId,
       scope_filter: { module_ids: data.moduleIds },
-      summary: `Module approval deploy: ${data.moduleIds.length} module(s) → ${data.cloneIds.length} clone(s)`,
+      summary:
+        `Cascade after approving ${data.moduleIds.length} module(s) → ` +
+        `${data.cloneIds.length} clone(s), each across its whole sync scope`,
     };
     const { data: event, error: evtErr } = await context.supabase
       .from("cascade_events")
@@ -309,6 +328,18 @@ export const approveAndDeploy = createServerFn({ method: "POST" })
     });
     if (jobErr) return { ok: false as const, error: jobErr.message };
 
+    if (blast.requiresApproval) {
+      await context.supabase.from("notifications").insert({
+        kind: "cascade_awaiting_approval",
+        severity: "warning",
+        title: "Approval needed · cascade after module approval",
+        body: `${blast.reason ?? ""} Cascade across ${data.cloneIds.length} clone(s).`,
+        cascade_event_id: event.id,
+        url: `/cascades/${event.id}`,
+        metadata: { mode, clone_count: data.cloneIds.length, module_ids: data.moduleIds },
+      });
+    }
+
     // Audit
     await context.supabase.from("audit_log").insert({
       action: "module.approve_and_deploy",
@@ -318,11 +349,18 @@ export const approveAndDeploy = createServerFn({ method: "POST" })
       metadata: {
         module_ids: data.moduleIds,
         clone_ids: data.cloneIds,
-        cascade_mode: data.cascadeMode ?? "pr",
+        cascade_mode: mode,
+        requires_approval: blast.requiresApproval,
       },
     });
 
-    return { ok: true as const, cascadeEventId: event.id, count: data.moduleIds.length };
+    return {
+      ok: true as const,
+      cascadeEventId: event.id,
+      count: data.moduleIds.length,
+      requiresApproval: blast.requiresApproval,
+      approvalReason: blast.reason,
+    };
   });
 
 // Get cascade deploy jobs

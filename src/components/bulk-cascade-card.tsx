@@ -49,7 +49,7 @@ import { toast } from "sonner";
 import { describeCascadeOutcome } from "@/lib/cascadeRunOutcome";
 import { useServerFn } from "@tanstack/react-start";
 import { runCascade } from "@/server/cascade-engine.functions";
-import { assessBlastRadius } from "@/lib/blast-radius";
+import { fireCascade } from "@/server/cascade-spawn.functions";
 
 type CloneProgress = {
   clone_id: string;
@@ -154,6 +154,7 @@ function persistPresets(presets: FilterPreset[]) {
 export function BulkCascadeCard() {
   const { data: clones } = useClones();
   const runCascadeFn = useServerFn(runCascade);
+  const fireCascadeFn = useServerFn(fireCascade);
   const [running, setRunning] = useState(false);
   const [eventId, setEventId] = useState<string | null>(null);
   const [progress, setProgress] = useState<CloneProgress[]>([]);
@@ -327,22 +328,22 @@ export function BulkCascadeCard() {
         return;
       }
 
-      const { data: ev, error } = await supabase
-        .from("cascade_events")
-        .insert({
-          trigger: "manual",
+      // Created by the server's own flow (`fireCascade`), as `/cascades` fires
+      // one: it asks the second-operator gate and arms the rows in one act,
+      // each with the clone's starting point for the rollback below. This card
+      // used to insert the event and its rows from the browser, with no
+      // `requires_approval` at all.
+      const answer = await fireCascadeFn({
+        data: {
           mode: "pr",
-          status: "pending",
-          scope_filter: {
-            scope: "filtered",
-            bulk: true,
-            clone_ids: targets.map((c) => c.id),
-          },
-          initiated_by: user?.id,
-        })
-        .select()
-        .single();
-      if (error || !ev) throw new Error(error?.message || "Failed to create cascade event");
+          scope: "selected",
+          tags: [],
+          cloneIds: targets.map((c) => c.id),
+          confirmedCount: targets.length,
+        },
+      });
+      if (!answer.ok) throw new Error(answer.error);
+      const ev = { id: answer.eventId };
       setEventId(ev.id);
 
       const initialProgress: CloneProgress[] = targets.map((c) => ({
@@ -353,15 +354,6 @@ export function BulkCascadeCard() {
       }));
       setProgress(initialProgress);
 
-      await supabase.from("cascade_results").insert(
-        targets.map((c) => ({
-          cascade_event_id: ev.id,
-          clone_id: c.id,
-          status: "queued" as const,
-          previous_sha: c.last_synced_sha,
-        })),
-      );
-
       await supabase.from("audit_log").insert({
         action: "cascade.bulk_fired",
         entity_type: "cascade_event",
@@ -369,6 +361,14 @@ export function BulkCascadeCard() {
         actor_user_id: user?.id,
         metadata: { clone_count: targets.length, mode: "pr" },
       });
+
+      if (answer.awaitingApproval) {
+        toast.warning(
+          `Waiting for approval: a second operator must approve before this reaches ${targets.length} clones.`,
+          { description: answer.reason ?? undefined },
+        );
+        return;
+      }
 
       toast.info(`Bulk cascade started — ${targets.length} clones queued`);
 
