@@ -20,12 +20,15 @@ function notice(id: string, kind: string, over: Partial<Row> = {}): Row {
 beforeEach(() => {
   db = createFakeDb({
     notifications: [
-      notice("drift-a", "drift_high"),
+      // An inbox kind. `drift_high` was the obvious one until 27 Oct 2026,
+      // when it became a record (`notificationDisposition.ts`); `drift_medium`
+      // stays in the inbox, which is what this fixture needs.
+      notice("drift-a", "drift_medium"),
       notice("blocked-a", "cascade_blocked", { severity: "error" }),
       notice("completed-b", "cascade_completed", { clone_id: B, severity: "success" }),
       notice("remediation-b", "remediation_failed", { clone_id: B, severity: "error" }),
       notice("blocked-b", "cascade_blocked", { clone_id: B, severity: "error" }),
-      notice("drift-read", "drift_high", { read_at: "2026-10-26T00:00:00Z" }),
+      notice("drift-read", "drift_medium", { read_at: "2026-10-26T00:00:00Z" }),
     ],
   });
 });
@@ -113,7 +116,7 @@ describe("Mark all matching", () => {
 
   it("marks only the kind chosen when one is chosen", async () => {
     const answer = await bulkMarkMatching(client(), {
-      kind: "drift_high",
+      kind: "drift_medium",
       severity: "all",
       clone: "all",
       scope: "attention",
