@@ -37,10 +37,13 @@ export const Route = createFileRoute("/hooks/backend-catchup")({
         beginGithubLane("backend-catchup");
 
         try {
-          // First, and not gated by the GitHub budget below because it reads
-          // nothing from GitHub: take the prime's own functions off every
-          // clone's project. Withholding them stops the next deploy and did
-          // nothing about the last one. It never fails the catch-up — a sweep
+          // First, and not gated by the GitHub budget below because taking the
+          // prime's own functions off every clone's project reads nothing from
+          // GitHub. Withholding them stops the next deploy and did nothing
+          // about the last one. The same pass takes off what the prime has
+          // retired; that half reads the prime's decommission lists and asks
+          // the budget itself, so a starved window costs it a pass and costs
+          // the prime-only half nothing. It never fails the catch-up — a sweep
           // that could not run is recorded and the catch-up goes on. See
           // `primeOnlyFunctionSweep.server.ts`.
           let primeOnlyFunctions: unknown = null;

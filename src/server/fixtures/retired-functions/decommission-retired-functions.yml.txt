@@ -1,0 +1,166 @@
+name: Decommission retired functions
+
+# Deletes the LIVE deployment of an edge function whose source this repository
+# has removed. Deleting a directory does not undeploy: the deploy workflow ships
+# what changed and never removes anything, so a retired function stays callable
+# — dormant surface, billed, and invisible to every check that reads the repo —
+# until somebody deletes the deployment. This is that somebody, and it follows
+# the rules `decommission-builder-portal-functions.yml` set:
+#
+# - workflow_dispatch only. Deleting a deployed function is a deliberate act
+#   with a name in the Actions log, never a side effect of a push.
+# - It can delete ONLY the names in RETIRED below. A deletion workflow that can
+#   delete arbitrary functions is a hazard this file must not be; adding a name
+#   is a reviewed edit, and each name says when and why it was retired.
+# - A function already absent is a no-op, not a failure: re-running after a
+#   partial run must finish the job.
+# - The project ref resolves exactly as the deploy workflow's does (variable,
+#   then this repo's own config.toml preamble, never a literal), so a clone that
+#   inherits this file deletes from ITS OWN project and nobody else's.
+# - A name whose source is still in the repository is refused: retiring a
+#   function means removing its code first, or the next deploy brings it back.
+#
+# Dispatch it only once the frontend that stopped calling the function is live:
+# a browser still running the previous build would otherwise call a function
+# that no longer exists.
+#
+# RETIRED:
+#   street-view — Street View was removed from every Listings surface on
+#     16 Oct 2026 (docs/listings/ADDRESS_SEARCH.md); the function's only caller
+#     was the Listings panel, and its Mapillary card and Google cap went with it
+#     (docs/integrations/GEOCODING_WITHOUT_GOOGLE.md §13.3).
+#   manage-partner-agreements, finance-portal-agreements,
+#   agreement-centre-render — the partner agreement lifecycle was removed and
+#     only the templates stay (docs/agreements/TEMPLATES_ONLY.md, "What was
+#     removed"). Their source and config.toml blocks are gone and
+#     agreementTemplatesOnly.spec.ts keeps them gone, but the prime still served
+#     all three on 18 Oct 2026, last deployed 15 Aug 2026, with no call in the
+#     24 hours read. Retired on the owner's approval, 19 Oct 2026 AEDT.
+#   mc-wallet-diag, mc-diag-tmp — diagnostic functions deployed on the prime
+#     with no source here, in aurixa-builders or in aurixa-systems
+#     (docs/admin/ADMIN_MODULE_AUDIT_2026-10.md, "Ten functions deployed on the
+#     prime have no source here"). No call in the 24 hours read on 18 Oct 2026.
+#     Retired on the owner's approval, 19 Oct 2026 AEDT.
+
+on:
+  workflow_dispatch:
+    inputs:
+      functions:
+        description: 'Space-separated subset of the retired list. Empty = the whole list.'
+        required: false
+        default: ''
+
+concurrency:
+  group: decommission-retired-functions
+  cancel-in-progress: false
+
+jobs:
+  decommission:
+    runs-on: ubuntu-latest
+    # The production environment. Where the owner restricts it to main and keeps
+    # the deploy token in it alone, GitHub refuses any other ref before a step
+    # runs, and a copy of this file on a branch cannot read the token
+    # (docs/operations/DEPLOYMENT_PROTECTION.md). Reviewers are the owner's
+    # setting; with none, this runs on merge as it always has.
+    environment: supabase-production
+    steps:
+      # The accident guard. A dispatch runs the copy of this file on the ref it
+      # names, so this stops a mistaken choice in "Run workflow" and nothing
+      # more: the environment above is what a modified copy cannot remove.
+      - name: Refuse any branch but main
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          if [ "$REF" != 'refs/heads/main' ]; then
+            echo "::error title=Decommission refused — not main::Functions are decommissioned only from main. This run was started on $REF, so nothing was deleted. Merge the change, then dispatch this workflow on main."
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: refuse to pretend
+        env:
+          TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          if [ -z "${TOKEN:-}" ]; then
+            echo '::error::No SUPABASE_ACCESS_TOKEN secret is configured — nothing was deleted. Add it to the supabase-production environment (Settings → Environments), then re-run.'
+            exit 1
+          fi
+
+      - name: Resolve this deployment's project
+        id: project
+        env:
+          PROJECT_REF_VAR: ${{ vars.SUPABASE_PROJECT_REF }}
+        run: |
+          set -uo pipefail
+          ref="${PROJECT_REF_VAR:-}"
+          if [ -z "$ref" ] && [ -f supabase/config.toml ]; then
+            ref=$(sed -n '/^\[/q; s/^[[:space:]]*project_id[[:space:]]*=[[:space:]]*"\([a-z]\{20\}\)".*/\1/p' \
+              supabase/config.toml | head -1)
+          fi
+          if [ -z "$ref" ]; then
+            echo '::error::no project ref could be resolved for this repository — nothing was deleted.'
+            exit 1
+          fi
+          echo "deleting from project $ref"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      # Installed from Supabase's own release, not through `supabase/setup-cli`:
+      # the Actions policy refuses a workflow naming a publisher other than
+      # GitHub before a job starts (CI_SCOPE.md, "Every action is pinned to a
+      # commit"). The tarball is checked against its sha256 before it is unpacked.
+      - name: Install the Supabase CLI
+        env:
+          SUPABASE_CLI_VERSION: 2.121.0
+          SUPABASE_CLI_SHA256: 4b481189efbdc57cf2d37bdee5f1a0d29574314398564b32a6dfb76c0fcf275f
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/supabase.tar.gz" \
+            "https://github.com/supabase/cli/releases/download/v${SUPABASE_CLI_VERSION}/supabase_linux_amd64.tar.gz"
+          echo "${SUPABASE_CLI_SHA256}  $RUNNER_TEMP/supabase.tar.gz" | sha256sum -c -
+          mkdir -p "$HOME/.supabase/bin"
+          tar -xzf "$RUNNER_TEMP/supabase.tar.gz" -C "$HOME/.supabase/bin" supabase
+          echo "$HOME/.supabase/bin" >> "$GITHUB_PATH"
+          "$HOME/.supabase/bin/supabase" --version
+
+      - name: delete the retired functions
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          REQUESTED: ${{ inputs.functions }}
+          PROJECT_REF: ${{ steps.project.outputs.ref }}
+        run: |
+          set -uo pipefail
+          RETIRED='street-view manage-partner-agreements finance-portal-agreements agreement-centre-render mc-wallet-diag mc-diag-tmp'
+          list="${REQUESTED:-$RETIRED}"
+          failed=""
+          for fn in $list; do
+            case " $RETIRED " in
+              *" $fn "*) ;;
+              *)
+                echo "::error::'$fn' is not on the retired list — this workflow deletes only retired functions."
+                exit 1
+                ;;
+            esac
+            if [ -e "supabase/functions/$fn" ]; then
+              echo "::error::'$fn' still has source under supabase/functions/ — remove the code first, or the next deploy brings it back."
+              exit 1
+            fi
+          done
+          for fn in $list; do
+            echo "::group::delete $fn"
+            out=$(supabase functions delete "$fn" --project-ref "$PROJECT_REF" 2>&1) && status=0 || status=$?
+            echo "$out"
+            if [ "$status" -ne 0 ]; then
+              # Already gone is the outcome this workflow exists to produce.
+              if printf '%s' "$out" | grep -qiE 'not[ _-]?found|does not exist|404'; then
+                echo "$fn was already absent"
+              else
+                failed="$failed $fn"
+              fi
+            fi
+            echo "::endgroup::"
+          done
+          if [ -n "$failed" ]; then
+            echo "::error::deletion failed for:$failed"
+            exit 1
+          fi
