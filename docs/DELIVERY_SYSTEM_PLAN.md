@@ -28,7 +28,7 @@ what became of it.
 | W8, and W7's prime half                     | prime #3392 | `edge-function-bundles` is in the prime's register, rule 119 is in its rules, and the apply preflight refuses both rollback scripts, `reapply` included (read at `d72032e`).                                                                                                                                                                                                               |
 | L8                                          | prime #3393 | The delivery summary is on every prime pull request's `security` job page.                                                                                                                                                                                                                                                                                                                 |
 | D4 (the owner's decision)                   | #372        | The sweep deleted 85 functions between 13:28 and 14:21 on 27 Oct, ten per clone per pass: 28 from each dependent clone and `street-view` from the CRM, none failed and none kept. Re-listed at 14:25, each dependent clone holds exactly its 402, no clone lists a retired name, and `builder-stock-marketplace` and `builder-network-inbound`, which the prime keeps, are still deployed. |
-| The second audit (§13)                      | #374        | Pending its publish: §13 says what each fix is read back by.                                                                                                                                                                                                                                                                                                                               |
+| The second audit (§13)                      | #374, #376  | Published at 17:59 and 18:37 on 27 Oct and read back the same evening (§13). C4 waits on the next lineage cascade.                                                                                                                                                                                                                                                                         |
 
 Still open: the rest of P1 (L1–L7, L9, L10), P2, and the owner's decisions in
 §10, among them the seven the second audit added (D13–D19). D3 and D8 are the
@@ -838,14 +838,45 @@ live divergence (E1) and live residue in three repositories (C2).
 
 ### What #374's publish is read back by
 
+#374 was published at 17:59 on 27 Oct and #376 at 18:37. Each line names its
+read-back, then what the first read showed.
+
 - The next lateral ledger row counts `lineOwn` and offers only paths neither
   line keeps as its own.
+  - **19:10:** the first row, after the dashboard's clean-up moved its head,
+    counted 280 paths as a line's own and offered 12.
+  - It carried nothing in either direction, and it left one path for a person
+    (`backendIsolation.spec.ts`, C7).
+  - The clean-up pull requests take the voice stack out of the dashboard
+    (`npc-client-dashboard#434`), NPC Test (`npc-test-76b3b3#266`) and
+    Preflight (`preflight-property-group#268`). The CRM still holds its 148
+    files.
 - A half-hour catch-up that queues nothing writes no `backend_catchup_cron`
   row and declares nothing.
+  - **18:50:** all four clones answered `no_backend_work`, and the sweep
+    filed no row. The 18:20 sweep, before #376, filed one.
 - The CRM's held-file drift sweep reads every held file the prime holds
   differently, and no run reads `capped` and `clean` together.
+  - **18:17:** it read all 39 such files and capped none.
+  - It filed 15 findings, and each is the independent line's own variant:
+    GoHighLevel wiring the line does not carry, its native calendar's own
+    booking checks, and a cleanup that calls no vendor.
 - After its next deploy, each clone's listing shows `mcp` and
   `builder-stock-marketplace` with `import_map_path` ending in their own
   `deno.json`.
+  - **NPC Test (18:16) and Preflight (18:42):** each run changed 2 bundles and
+    proved 400. Both functions now list their own `deno.json` on both clones.
+  - Three `mcp` handshakes each, at 19:15: 0.4–0.7 s on those two and on the
+    prime, and 1.6–2.2 s on the dashboard and the CRM, which still run without
+    the import map.
+  - The dashboard and the CRM take theirs at their next whole-fleet run, which
+    any change to `supabase/functions/_shared/` plans.
 - A cascade an operator starts carries `previous_sha` on its rows, and its
   page's diff lists the files its row records.
+  - **Live:** the page diffs each delivery's commit with its parent. No
+    operator cascade has run since.
+- The next lineage cascade writes the dashboard's three executable scripts at
+  `100755` in NPC Test and Preflight (C4): `scripts/check-clone-invariants.sh`
+  and the two `scripts/clone-backend/*.py`.
+  - **Not read yet.** A child's cascade runs inside a prime cascade, and none
+    has run since the publish.
