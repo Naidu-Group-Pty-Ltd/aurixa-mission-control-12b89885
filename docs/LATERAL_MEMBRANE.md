@@ -39,8 +39,9 @@ a file the prime never held (its deletion rule is history-based), and the
 lateral lane never touches a file the prime ever held. What one side keeps as
 its own is not parent-level work either, and never crosses: a line's rules for
 its agents (`.claude/rules/`, see [_24 October_](#24-october-a-lines-own-rules-never-cross)),
-a deployment's voice stack (`voice-agents/`), and, between two CRM lines, a file
-either line holds in its own shape (see [_27 October_](#27-october-a-deployments-voice-stack-and-a-lines-own-copies)).
+a deployment's voice stack (`voice-agents/`) and the spec that guards its own
+backend (`backendIsolation.spec.ts`), and, between two CRM lines, a file either
+line holds in its own shape (see [_27 October_](#27-october-a-deployments-voice-stack-and-a-lines-own-copies)).
 
 **Direction is read, not declared.** Neither parent is upstream of the other,
 so a file moves toward the side still holding the version the other side left
@@ -152,7 +153,8 @@ copied, except where the lateral case genuinely differs — and those are named.
 only, or on both with different blobs, and absent from the prime's CURRENT
 tree. A path the prime holds today is dropped without a history call, because
 the tree already answered. So is a file under `.claude/rules/` or
-`voice-agents/`, whichever side holds it (`isLineOwnPath`), and, where the two
+`voice-agents/`, or a deployment's `backendIsolation.spec.ts`, whichever side
+holds it (`isLineOwnPath`), and, where the two
 sides' recorded `crm_mode`s differ, a path `CRM_LINE_VARIANT_PATTERNS` names for
 either line (`isCrossLineVariant`). Those are counted in the report as
 `lineOwn`, and nothing else is done with them.
@@ -518,6 +520,17 @@ rule files.
 
 `lateral-exchange.server.test.ts` stages both harms. With the guard taken out,
 the second proposes deleting the palette from the independent.
+
+**A deployment's guard on its own backend is its own.** Each deployment's
+`src/lib/deploy/__tests__/backendIsolation.spec.ts` names that deployment's
+`OWN_PROJECT_REF` and the refs it must never reach, so no two copies can agree.
+The prime holds none, so the vertical cascade leaves each child's copy alone.
+From 21 October, when each deployment moved its spec where its CI runs it,
+every pass that read the file's history held the two parents' copies for a
+person as `both_changed`: 88 passes up to 27 October at 19:10, when it was the
+boundary's one conflict. No person could settle it: either copy, carried across,
+points the other parent's guard at the wrong project. The owner chose to keep both, so `isLineOwnPath` names the file
+at that one path, and it is counted with the rest as `lineOwn`.
 
 The same pass measured 81 differing paths, 65 of them one line's own. It held
 67 into the dependent, and the row's list, clipped at sixty in path order, lost

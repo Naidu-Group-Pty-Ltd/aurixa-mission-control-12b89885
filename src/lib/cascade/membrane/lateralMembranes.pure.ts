@@ -132,10 +132,11 @@ const LATERAL_STANDING: readonly StandingOrgan[] = [
     name: "isLineOwnPath",
     where: "lateralExchange.pure.ts",
     does:
-      "Never offers a file under `.claude/rules/` or `voice-agents/`, either way. Each line " +
-      "numbers its own rules for its own `CLAUDE.md` to index, and a voice stack is one " +
-      "deployment's numbers and webhooks, so either carried across is another deployment's on " +
-      "this one, and a mirror's cascade carries it on to every child.",
+      "Never offers a file under `.claude/rules/` or `voice-agents/`, or a deployment's " +
+      "`backendIsolation.spec.ts`, either way. Each line numbers its own rules for its own " +
+      "`CLAUDE.md` to index, a voice stack is one deployment's numbers and webhooks, and the " +
+      "spec names the deployment's own project, so any of them carried across is another " +
+      "deployment's on this one, and a mirror's cascade carries it on to every child.",
   },
   {
     kind: "channel",

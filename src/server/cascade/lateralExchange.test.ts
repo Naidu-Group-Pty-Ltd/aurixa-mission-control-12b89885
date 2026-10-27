@@ -169,6 +169,24 @@ describe("candidates: what the two parents disagree on that the prime does not h
     expect(lateralCandidates({ a: b, b: a, prime }).paths).toEqual(["src/ok.ts"]);
   });
 
+  it("never offers a deployment's backend isolation spec, and counts it aside", () => {
+    // Each copy names its own deployment's project. From 21 Oct 2026, 88 passes
+    // held the two parents' copies for a person, who could choose neither.
+    const spec = "src/lib/deploy/__tests__/backendIsolation.spec.ts";
+    const a = tree({ [spec]: "OWN_PROJECT_REF = the dependent's", "src/ok.ts": "y" });
+    const b = tree({ [spec]: "OWN_PROJECT_REF = the independent's" });
+    for (const [x, y] of [
+      [a, b],
+      [b, a],
+    ]) {
+      const out = lateralCandidates({ a: x, b: y, prime });
+      expect(out.paths).toEqual(["src/ok.ts"]);
+      expect(out.lineOwn).toEqual([spec]);
+    }
+    // Held by one side only, it stays that side's too.
+    expect(lateralCandidates({ a, b: tree({}), prime }).lineOwn).toEqual([spec]);
+  });
+
   it("sets aside a CRM line's own copy only between two lines", () => {
     // Measured 27 Oct 2026: the dependent took these off by hand on 8 Oct, and
     // the table then decided every pass to delete the LINE's own copies.
@@ -209,7 +227,7 @@ describe("candidates: what the two parents disagree on that the prime does not h
   });
 });
 
-describe("what a deployment keeps as its own is told apart by its directory", () => {
+describe("what a deployment keeps as its own is told apart by its path", () => {
   it("is a file under `.claude/rules/` or `voice-agents/`, at the root or in a nested project", () => {
     for (const path of [
       ".claude/rules/aml/014-the-sanctions-register-itself.md",
@@ -220,6 +238,21 @@ describe("what a deployment keeps as its own is told apart by its directory", ()
       "apps/portal/voice-agents/vapi/assistants.json",
     ]) {
       expect(isLineOwnPath(path), path).toBe(true);
+    }
+  });
+
+  it("is the backend isolation spec at its one path, and no other spec", () => {
+    expect(isLineOwnPath("src/lib/deploy/__tests__/backendIsolation.spec.ts")).toBe(true);
+    for (const path of [
+      "src/lib/__tests__/backendIsolation.spec.ts",
+      "src/lib/deploy/backendIsolation.spec.ts",
+      "src/lib/deploy/__tests__/backendIsolation.test.ts",
+      "src/lib/deploy/__tests__/backendIsolationParity.spec.ts",
+      "src/lib/deploy/__tests__/deployGuards.spec.ts",
+      "apps/portal/src/lib/deploy/__tests__/backendIsolation.spec.ts",
+      "docs/BACKEND_ISOLATION.md",
+    ]) {
+      expect(isLineOwnPath(path), path).toBe(false);
     }
   });
 
