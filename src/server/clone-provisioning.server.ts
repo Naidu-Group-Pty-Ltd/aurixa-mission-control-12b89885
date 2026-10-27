@@ -83,8 +83,10 @@ export async function provisionCloneCore(
   // that parent (see `crmLineage.pure.ts`). Every refusal here costs nothing
   // — no repository, no row — and names which of its five causes it is.
   //
-  // No choice keeps the path every clone had before this existed: created
-  // from the prime, module-scoped. The signed-agreement flow still takes it.
+  // No choice creates the clone from the prime itself, as a MIRROR of it —
+  // the arrangement `npc-client-dashboard` runs on. That is the path the
+  // signed-agreement flow takes, because an agreement does not yet record a
+  // CRM line (see the insert below for why it is no longer module-scoped).
   let crmParent: CrmParent | null = null;
   if (data.crmMode) {
     const { readCrmParent } = await import("./crmLineage.server");
@@ -290,13 +292,31 @@ export async function provisionCloneCore(
       entitled_plan_slug: data.planSlug ?? null,
       // The CRM line, written in the same insert as the row so no reader can
       // see a clone with a parent and no mode, or a mode and no parent. A
-      // clone provisioned with no choice keeps the prime-sourced, module
-      // scope every clone had before the choice existed, and records no mode:
-      // NULL is "nobody said", never a default.
+      // clone provisioned with no choice records no mode: NULL is "nobody
+      // said", never a default.
+      //
+      // And it is a MIRROR of the prime, never module-scoped. A module scope
+      // decides which of the prime's later changes a clone receives — only
+      // paths inside its installed modules' globs — while the repository was
+      // just created from the prime's WHOLE tree. Everything outside the
+      // globs is therefore frozen at creation for ever. Measured 27 Oct 2026
+      // with the engine's own scope functions over the prime's tree: a
+      // launch-tier agreement clone would never have received 3,624 app-code
+      // files or 285 edge functions, and the one module-scoped clone (the
+      // CRM) read `in_sync` while missing 495 prime files and holding 32
+      // stale ones. MC's own migration 20260909110000 had already moved two
+      // clones to mirror because "the invariant list cannot be finite". The
+      // modules a clone pays for are its `clone_modules` rows and its
+      // entitlements, which gate features at run time; they never were a
+      // good way to decide which files it receives.
+      //
+      // Written explicitly rather than left to the column default, which now
+      // says the same (20261027100000), so this line is the one place a
+      // reader learns why.
+      sync_scope: lineage?.sync_scope ?? "mirror",
       ...(lineage
         ? {
             parent_clone_id: lineage.parent_clone_id,
-            sync_scope: lineage.sync_scope,
             crm_mode: lineage.crm_mode,
           }
         : {}),
@@ -494,64 +514,15 @@ export async function provisionCloneCore(
       })),
     );
 
-    // ─── Scoped cascade for picked module files ──────────────────
-    // Push only the file_globs from picked modules to the freshly-created
-    // repo so it lands with the modules pre-populated. Fire-and-forget:
-    // failure here is non-fatal — the operator can re-cascade from the UI.
+    // The rows above are the entitlement record — what this clone has paid
+    // for, which gates features at run time. They are not a delivery.
     //
-    // Not for a clone created under a CRM parent. It already holds its
-    // parent's WHOLE tree — every module's files included, since a mirror is
-    // the tree rather than a selection of it — so there is nothing for this
-    // cascade to add. And the one thing it could do is harm: were lineage
-    // routing ever off, it would read these globs from the PRIME, and the
-    // files a CRM line owns (the provider routing, the crm-* functions) are
-    // exactly the ones whose prime copy differs. The `clone_modules` rows
-    // above are still written: they are the entitlement record, not a
-    // delivery.
-    if (data.method !== "clone" && githubUrl && !lineage) {
-      try {
-        const { data: mods } = await supabase
-          .from("modules")
-          .select("id, name, file_globs")
-          .in("id", data.moduleIds);
-        const globs = Array.from(new Set((mods ?? []).flatMap((m) => m.file_globs ?? [])));
-        if (globs.length > 0) {
-          const { data: ev } = await supabase
-            .from("cascade_events")
-            .insert({
-              trigger: "manual",
-              mode: "auto_merge",
-              status: "pending",
-              requires_approval: false,
-              scope_filter: {
-                scope: "clone_provision_modules",
-                clone_ids: [inserted.id],
-                module_ids: data.moduleIds,
-                module_globs: globs,
-              },
-              summary: `Provision cascade · ${mods?.length ?? 0} module(s) → ${data.name}`,
-              initiated_by: userId,
-            })
-            .select()
-            .single();
-          if (ev) {
-            await supabase.from("cascade_results").insert({
-              cascade_event_id: ev.id,
-              clone_id: inserted.id,
-              status: "queued" as const,
-            });
-            // Durable execution: the /hooks/cascade-drain worker (pg_cron
-            // every minute) atomically claims pending auto_merge events and
-            // runs executeCascade. This survives Cloudflare Worker request
-            // termination — previously a `void (async () => ...)` invocation
-            // could be killed mid-flight, leaving the fresh clone repo
-            // without its module files. (Audit finding #7.)
-          }
-        }
-      } catch (e) {
-        console.error("[provisionClone] module cascade setup failed:", e);
-      }
-    }
+    // A "provision cascade" of the picked modules' globs used to follow
+    // here, for a clone created from the prime with module scope. Every
+    // clone is created as a mirror now (see the insert above), from its
+    // source's WHOLE tree, so there is nothing such a cascade could add —
+    // every module's files are already in the repository. Its later changes
+    // arrive with every prime merge, through the ordinary cascade.
   }
 
   // ─── The clone's Mission Control key ──────────────────────────────

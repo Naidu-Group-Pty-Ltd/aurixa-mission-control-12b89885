@@ -1,0 +1,23 @@
+-- @asserts column:clones.sync_scope
+--
+-- A clone nobody gave a scope is a MIRROR of its source, never a module
+-- selection.
+--
+-- `sync_scope` was added with `DEFAULT 'modules'` on 26 Aug 2026
+-- (20260826040000), when every clone was module-scoped. Module scope decides
+-- which of the prime's LATER changes a clone receives: only paths inside its
+-- installed modules' globs. But a clone's repository is created from the
+-- prime's (or its parent's) WHOLE tree, so everything outside those globs is
+-- frozen at creation. Measured 27 Oct 2026 with the cascade engine's own scope
+-- functions over the prime's tree at 1e18e4b: a clone provisioned from a
+-- signed agreement at the launch tier would never have received 3,624 app-code
+-- files or 285 edge functions. The one module-scoped clone, the CRM, read
+-- `in_sync` while missing 495 prime files and holding 32 stale ones.
+--
+-- `provisionCloneCore` now writes the scope explicitly, mirror for every clone
+-- it creates. This default makes any other insert agree with it, so a clone
+-- can no longer become module-scoped by being inserted without a word.
+--
+-- It changes no existing row. The CRM keeps `modules` until its own move to
+-- mirror is rehearsed (docs/DELIVERY_SYSTEM_PLAN.md, D7).
+ALTER TABLE public.clones ALTER COLUMN sync_scope SET DEFAULT 'mirror';

@@ -104,6 +104,57 @@ types in `supabase-management-js` 2.0.2). Both are in every row of the
 function list, measured on npc-client-dashboard on 20 Oct: 427 functions, every
 one with a uuid `id`, an integer `version` and `status: "ACTIVE"`.
 
+### Or the same build, where a secret write moved the version (27 Oct 2026)
+
+"Every deploy increments the version" holds. "Only a deploy does" did not.
+Any write to a project's secrets bumps the `version` of every function on it
+without rebuilding one. `secretWriteDiff.pure.ts` had measured that first, but
+this rule assumed otherwise.
+
+On 26 Oct the database password was set on all four clones (19:30–19:31 UTC),
+and `ALLOWED_ORIGINS` on NPC Test at 22:05. The next morning the ledger proved
+**none** of about 1,580 bundles. Every one of them was still running the
+build this lane made, and the next shared-code merge would have redeployed
+the whole fleet: about ten hours, with any fix queued behind it.
+
+The platform names the running build in `entrypoint_path`:
+
+```
+file:///tmp/user_fn_<project ref>_<function id>_<N>/source/<slug>/index.ts
+```
+
+`N` is the deploy counter at the deploy that built it, which is the version the
+deploy call answered with. A secret write leaves it where it was. Any later
+deploy, by anybody, moves it.
+
+So a copy is also current where its function id matches and its **build**
+equals the ledger's version. Re-checked against the same morning's function
+lists:
+
+| Clone | Ledger rows | Proven by version | Proven by version or build |
+|---|---|---|---|
+| npc-client-dashboard | 402 | 0 | 400 |
+| Preflight | 402 | 0 | 400 |
+| NPC Test | 402 | 0 | 400 |
+| npc-crm-independent | 373 | 0 | 372 |
+
+The bundles still unproven are the compressed ones. Their path is the
+builder's checkout and names no build, so after a secret write they are owed
+and redeployed: two bundles per clone. Proving them would mean recording each
+bundle's `ezbr_sha256` in the ledger. That is a follow-up, not a gap in safety.
+
+Two other changes went in at the same time:
+
+- **Owed bundles carry a change first.** A bundle whose digest is no longer
+  the ledger's, or which has no ledger row, deploys ahead of one that is
+  merely unproven (`changedFirst` in `edgeDeployBatch.pure.ts`). On 26 Oct
+  `manage-agency-agreements` was in the middle of an NPC Test refill and
+  reached that clone 402nd of 402, at 18:42. It now goes first.
+- **The result says what was proven.** Each pass's `result.ledger` carries
+  `proven`, and `changed` where it deployed. The "nothing left" result carries
+  `proven` too. A run that skipped everything therefore says whether it did so
+  on the ledger's word.
+
 ### What the digest covers, and why exactly that
 
 The digest covers exactly what `deployEdgeFunction` sends:

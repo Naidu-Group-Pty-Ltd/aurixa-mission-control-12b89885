@@ -161,6 +161,49 @@ export function stalestFirst(freshness: ReadonlyMap<string, number>): (slug: str
 }
 
 /**
+ * Bundles the prime CHANGED go ahead of bundles that are merely unproven, each
+ * group in the inner order (`stalestFirst`).
+ *
+ * ## Why staleness alone is not enough
+ *
+ * Stalest-first is fair across a refill, and a refill is exactly when a fix
+ * cannot wait for fairness. On 26 Oct 2026 `manage-agency-agreements` changed
+ * on the prime at 06:18 and was live on three clones by 06:24 — and reached
+ * NPC Test 402nd of 402, at 18:42, because NPC Test was in the middle of a
+ * whole-fleet refill and the fixed bundle's copy was not the stalest. A
+ * refill is what the deploy ledger exists to make rare, but whatever starts
+ * one (a ledger that could not be read, a function deleted by hand, the first
+ * fill of a new clone) also queues every fix behind it.
+ *
+ * A changed bundle is one whose digest at this commit is not the one the
+ * ledger recorded, or that has no ledger row (`ledgerChangedSlugs`). Those are
+ * the bundles that carry a change somebody made; the rest are owed only
+ * because nothing proves the copy, and can take their turn.
+ *
+ * With nothing marked changed — the ledger could not be read — this is the
+ * inner order exactly, which is the order the lane used before.
+ *
+ * The keys stay numbers because the snapshot's `inDeployOrder` sorts by one.
+ * A changed bundle's key is its inner key less `CHANGED_AHEAD_MS`, which is
+ * larger than any epoch-millisecond timestamp the inner key can be (≈1.8e12
+ * today; 1e15 is the year 33,658), so every changed bundle sorts before every
+ * unchanged one and keeps its own staleness order within the group. A missing
+ * copy's `-Infinity` stays `-Infinity`: absent from the clone is first either
+ * way.
+ */
+export const CHANGED_AHEAD_MS = 1e15;
+
+export function changedFirst(
+  changed: ReadonlySet<string>,
+  inner: (slug: string) => number,
+): (slug: string) => number {
+  return (slug) => {
+    const key = inner(slug);
+    return changed.has(slug) ? key - CHANGED_AHEAD_MS : key;
+  };
+}
+
+/**
  * `items` in ascending `deployOrder`, keeping the given order between equal
  * keys. Without a `deployOrder` they come back as they arrived.
  *

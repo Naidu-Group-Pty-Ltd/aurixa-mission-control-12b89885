@@ -51,6 +51,7 @@ import { severityToPriority, type TicketPriority } from "@/lib/ticket-classifica
 import { asJson, asRow } from "@/lib/json-cast";
 import { chunkCursorFor } from "./chunkCursorStore.pure";
 import {
+  changedFirst,
   countLanded,
   planDeployGeneration,
   planEdgeDeployPass,
@@ -59,7 +60,7 @@ import {
   runWithinBudget,
   stalestFirst,
 } from "@/server/edgeDeployBatch.pure";
-import { ledgerCurrentSlugs } from "@/server/edgeBundleLedger.pure";
+import { ledgerChangedSlugs, ledgerCurrentSlugs } from "@/server/edgeBundleLedger.pure";
 import { freshnessOf } from "@/server/projectFunctionCopies.pure";
 import { planUpstreamDeferral, UPSTREAM_DEFERRAL_KEY } from "@/server/upstreamRefusal.pure";
 import { functionsRevisionOfSuccess } from "@/server/functionsBaseline.pure";
@@ -1740,12 +1741,19 @@ async function executeEdgeFunctionDeploy(
     generation: ReturnType<typeof planDeployGeneration> | null;
     refreshed: string[];
     proven: string[];
-  } = { generation: null, refreshed: [], proven: [] };
+    changed: ReadonlySet<string>;
+  } = { generation: null, refreshed: [], proven: [], changed: new Set() };
+  // Stalest first, with the bundles the prime CHANGED ahead of the rest
+  // (`changedFirst`). Which ones changed is known only once the snapshot has
+  // digested this commit, so the order is completed inside `planSkip` — the
+  // snapshot plans the skip list first and orders what is left after it.
+  const stalest = stalestFirst(freshness);
+  let deployOrder: (slug: string) => number = stalest;
   const snapshot = await timed("snapshot", () =>
     fetchPrimeBackendSnapshot(getAppOctokit(), source, {
       includeMigrationSql: false,
       skipFunctionSlugs: lineWithheld,
-      deployOrder: stalestFirst(freshness),
+      deployOrder: (slug) => deployOrder(slug),
       planSkip: ({ commitSha, bundleDigests }) => {
         const generation = planDeployGeneration({
           runStartedAt: run.started_at,
@@ -1761,6 +1769,14 @@ async function executeEdgeFunctionDeploy(
           ledger.state === "read"
             ? ledgerCurrentSlugs({ ledger: ledger.entries, digests: bundleDigests, copies })
             : [];
+        // Unreadable, the ledger marks nothing changed and the order is
+        // stalest-first exactly as before.
+        planned.changed = new Set(
+          ledger.state === "read"
+            ? ledgerChangedSlugs({ ledger: ledger.entries, digests: bundleDigests })
+            : [],
+        );
+        deployOrder = changedFirst(planned.changed, stalest);
         return [...planned.refreshed, ...planned.proven];
       },
       ...(wanted === null ? { functionLimit: EDGE_DEPLOY_BATCH } : {}),
@@ -1818,6 +1834,12 @@ async function executeEdgeFunctionDeploy(
       functions_revision: null,
       revision_recorded: false,
       generation_at: generation.baselineAt,
+      // How much of "nothing left" the ledger proved, so a pass that skipped
+      // everything says whether it did so on the ledger's word or the clock's.
+      ledger:
+        ledger.state === "read"
+          ? { proven: proven.length }
+          : { unavailable: ledger.why.slice(0, 300) },
       pass_ms: passTimings(),
     });
   }
@@ -1871,6 +1893,7 @@ async function executeEdgeFunctionDeploy(
     ledger.state === "read"
       ? {
           proven: proven.length,
+          changed: planned.changed.size,
           recorded: ledgerWrite.ok ? ledgerWrite.recorded : 0,
           ...(ledgerWrite.ok ? {} : { write_error: ledgerWrite.error.slice(0, 300) }),
         }
