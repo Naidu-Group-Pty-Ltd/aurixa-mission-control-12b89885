@@ -1023,7 +1023,12 @@ export async function executeCascade(
       continue;
     }
 
-    const pinErrors = blockedClones.get(clone.id);
+    // A pin swaps one module's globs for a library entry's files
+    // (`installedGlobs.server.ts`), and a mirror is delivered its whole tree
+    // whatever it installed. A pin cannot change what a mirror receives, so a
+    // stale one is no reason to fail every delivery to it: the fleet manager's
+    // bulk-pin dialog offers mirrors too.
+    const pinErrors = clone.sync_scope === "mirror" ? undefined : blockedClones.get(clone.id);
     if (pinErrors && pinErrors.length > 0) {
       await writeSettlement(supabase, r.id, {
         status: "failed",
