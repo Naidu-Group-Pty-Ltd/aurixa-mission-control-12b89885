@@ -19,8 +19,9 @@
  * itself. The two lanes' write sets are disjoint by this rule alone.
  *
  * What one side keeps as its own is never parent-level work either: its rules
- * for its agents and its voice stack (`isLineOwnPath`), and, between two CRM
- * lines, a file either line holds in its own shape (`isCrossLineVariant`).
+ * for its agents, its voice stack and the spec that guards its own backend
+ * (`isLineOwnPath`), and, between two CRM lines, a file either line holds in
+ * its own shape (`isCrossLineVariant`).
  * None of these is offered at all, in either direction, so none is written,
  * deleted or held, and a side removing its copy is never read as the other
  * side's deletion.
@@ -137,7 +138,7 @@ export const LATERAL_LEDGER_ENTITY = "lateral_boundary";
  * What a deployment keeps as its own, which this lane never carries either way.
  *
  * Two roots, each matched at any depth, because a nested project's are its own
- * just the same.
+ * just the same, and one file, matched at the repository root only.
  *
  * **`.claude/rules/`, a line's rules for its agents.** One topic a file, and
  * each line numbers its own: its `CLAUDE.md` indexes those files and no others.
@@ -166,11 +167,27 @@ export const LATERAL_LEDGER_ENTITY = "lateral_boundary";
  *
  * Shared guidance, or a stack meant for several deployments, belongs at the
  * prime, as any shared file does.
+ *
+ * **`src/lib/deploy/__tests__/backendIsolation.spec.ts`, a deployment's guard
+ * on its own backend.** One file, not a directory: each deployment's copy
+ * names that deployment's own `OWN_PROJECT_REF` and the refs it must never
+ * reach, so no two copies can agree. The prime holds none, so the vertical
+ * cascade leaves each child's copy alone, and this lane found the two parents'
+ * copies different and held the file for a person, as `both_changed`. No
+ * person could settle it: whichever copy they chose would point the other
+ * parent's guard at the wrong project. Measured on 27 Oct 2026: the copies date
+ * from 21 Oct, when each deployment moved its spec where its CI runs it, and
+ * every pass that read the file's history from 14:50 that day held it, 88 of
+ * them up to 19:10 on 27 Oct, when it was the boundary's one conflict.
  */
 const LINE_OWN_ROOTS = [/(?:^|\/)\.claude\/rules\//, /(?:^|\/)voice-agents\//];
 
+const DEPLOYMENT_OWN_FILES: ReadonlySet<string> = new Set([
+  "src/lib/deploy/__tests__/backendIsolation.spec.ts",
+]);
+
 export function isLineOwnPath(path: string): boolean {
-  return LINE_OWN_ROOTS.some((root) => root.test(path));
+  return LINE_OWN_ROOTS.some((root) => root.test(path)) || DEPLOYMENT_OWN_FILES.has(path);
 }
 
 /**

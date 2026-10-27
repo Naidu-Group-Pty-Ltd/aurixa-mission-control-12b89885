@@ -31,8 +31,9 @@ what became of it.
 | The second audit (§13)                      | #374, #376  | Published at 17:59 and 18:37 on 27 Oct and read back the same evening (§13). C4 waits on the next lineage cascade.                                                                                                                                                                                                                                                                         |
 
 Still open: the rest of P1 (L1–L7, L9, L10), P2, and the owner's decisions in
-§10, among them the seven the second audit added (D13–D19). D3 and D8 are the
-ones that stand between this fleet and a launch.
+§10. The owner answered D9 and D13–D19 on 27 Oct, and that work is under way
+(§10, "The owner's answers"). D3 and D8 are the ones that stand between this
+fleet and a launch.
 
 ---
 
@@ -722,6 +723,46 @@ without loss.
 | D18 | Contract exclusions never reach a clone, and the core reconcile installs an excluded module before the exclusion is written                                                                                                          | Before the first agreement that excludes a module (none does today): send exclusions in the balance response and subtract them in the prime's snapshot, pass them to `provisionCloneCore`, and store slugs, not ids.                                                                                                      |
 | D19 | The module catalogue was last detected on 31 Jul (61 of 430 functions belong to no module), and all 134 library entries are `pending`, so no pin can be used                                                                         | Decide whether pins stay; if they do, approve entries at publish and record a commit per entry. After D7, stop using module globs as a delivery scope and keep modules as entitlement vocabulary generated from the prime (§9.3).                                                                                         |
 
+### The owner's answers (27 Oct 2026, evening)
+
+The owner answered D9 and D13–D19 on 27 Oct, and C7 from §13. Each answer, as
+given:
+
+- **D9:** classify all 185 holes now, each as withdrawn, absorbed or owed, from
+  the CRM's drift report. The owner approves the owed list before anything is
+  applied, and clone ledgers are still never stamped.
+- **D13:** a clone's `apply-migration.yml` refuses a dispatch wherever
+  `BACKEND_DEPLOYED_BY` says `mission-control`, and Mission Control labels a
+  ledger row it did not write `external`. The file is protected, so each clone
+  keeps its own copy, and the guard goes into all five copies at once: the
+  prime's and four byte-identical clone copies.
+- **D14:** check each hook, rotate only those that take any caller, re-point the
+  voice agents at the new URLs, and delete the old hooks. Of the ten, the six
+  tool hooks and the unused launcher take any caller. The adapter, the notifier
+  and the loader check a body secret, and its value is not in the copied files.
+  The copied tree named 18 more hook URLs, and each is checked the same way
+  before anything is rotated.
+- **D15, and with it D7:** make the CRM a mirror now. A step-by-step plan and a
+  dry-run preview come first, and nothing reaches the CRM until the preview is
+  clean.
+- **D16:** NPC Test, Preflight and the CRM stay on `free` until launch.
+  Provisioning sets a new clone's metering plan from its agreement.
+- **D17:** gate the Solicitor Portal on its add-on, once it is known who uses
+  it. Only the prime does, with 2 firms, 4 users and 1 open matter. No clone
+  holds a firm, a user or a matter, and none has bought it.
+- **D18:** fix it now. The exclusions travel in the balance response, the
+  prime's snapshot subtracts them, and provisioning passes them through.
+- **D19:** pins stay, for clones that stay module-scoped. The catalogue is
+  detected again, and each entry is approved at publish with the commit it was
+  approved at.
+- **C7:** both copies of `backendIsolation.spec.ts` stay, and the lateral lane
+  stops holding the file for a person. Each copy names its own deployment's
+  project, so it is that deployment's own file (`isLineOwnPath`).
+
+The work runs in the order the owner set: the small fixes first (D13, C7, D18
+and D16's provisioning), each its own pull request with a read-back in
+production, then D14's rotation, then D17, D9 and D19, and D15 last.
+
 ---
 
 ## 11. Risks, and how each change backs out
@@ -796,7 +837,7 @@ live divergence (E1) and live residue in three repositories (C2).
 | C4  | Every file was written as `100644`, and neither the engine's diff nor the auditor compares modes, so the prime's 34 executables arrive non-executable. Sixteen scripts were restored by hand on 23 Oct.                                                                                                                                          | Fixed: each file is written at the prime's mode, a mode-only difference is owed and delivered, and a symbolic link is held.                                                                                                                                         |
 | C5  | "Retry N failed" left a claim neither reclaim rule could see.                                                                                                                                                                                                                                                                                    | Fixed: the reopen clears the claim, as the drain's revival does.                                                                                                                                                                                                    |
 | C6  | The held-file drift sweep read the same 24 of the CRM's 109 held files every hour and reported the run clean.                                                                                                                                                                                                                                    | Fixed: it reads up to 160, only those the prime holds differently, and a capped run reads `partial`.                                                                                                                                                                |
-| C7  | Three lateral paths waited "for a person", and no notice said so.                                                                                                                                                                                                                                                                                | Two are a line's own now (C2). `backendIsolation.spec.ts` changed on both parents and still needs a person.                                                                                                                                                         |
+| C7  | Three lateral paths waited "for a person", and no notice said so.                                                                                                                                                                                                                                                                                | Two are a line's own now (C2). `backendIsolation.spec.ts` names each deployment's own project, so it is that deployment's own file too, and nothing waits for a person (§10).                                                                                       |
 | C8  | W5's ledger-hole rule shipped differently from its text.                                                                                                                                                                                                                                                                                         | W5 now says what shipped, and why.                                                                                                                                                                                                                                  |
 | C9  | Smaller: `previous_sha` never written; a completion notice describes only the last pass; `checksUnreadable` reads Octokit's documentation link as a permission refusal; L11's second child waits a tick (111 s against 60 s); two dead exclusions.                                                                                               | `previous_sha` is written for every operator cascade. It is a prime commit, so the cascade page now diffs each delivery's own commit with its parent. The rest are recorded: each costs a sentence or a tick, and `checksUnreadable`'s hold is right in every case. |
 
