@@ -21,6 +21,8 @@ import {
   Download,
   AlertTriangle,
   RefreshCw,
+  Check,
+  Plus,
 } from "lucide-react";
 import { exportRowsAsCSV } from "@/lib/csv";
 import { SavedViewsBar } from "@/components/saved-views-bar";
@@ -28,12 +30,14 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
-import { describeCascadeOutcome } from "@/lib/cascadeRunOutcome";
 import { formatDistanceToNow } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { useServerFn } from "@tanstack/react-start";
 import { useDebouncedCallback } from "@/lib/use-debounced-callback";
-import { runCascade } from "@/server/cascade-engine.functions";
+import { useConfirm } from "@/components/confirm-dialog";
+import { countClones, resolveCascadeTargets } from "@/lib/cascadeTargets.pure";
+import { useLaunchCascade } from "@/lib/use-launch-cascade";
+import { fireCascade } from "@/server/cascade-spawn.functions";
 import { BulkCascadeCard } from "@/components/bulk-cascade-card";
 import { CardRowSkeleton } from "@/components/list-skeletons";
 import { EmptyState } from "@/components/empty-state";
@@ -53,8 +57,14 @@ const searchSchema = z.object({
   mode: fallback(z.enum(MODE_VALUES), "pr").default("pr"),
   scope: fallback(z.enum(SCOPE_VALUES), "all").default("all"),
   tags: fallback(z.string(), "").default(""),
+  // The clones picked under "Manual select", comma-separated, in the URL
+  // beside the tags so a reload keeps the selection the operator made.
+  picked: fallback(z.string(), "").default(""),
   schedule_id: fallback(z.string().uuid().optional(), undefined).optional(),
 });
+
+/** The names the confirmation lists before it says "and N more". */
+const CONFIRM_NAMES_SHOWN = 6;
 
 export const Route = createFileRoute("/cascades")({
   errorComponent: RouteError,
@@ -71,13 +81,19 @@ type Mode = (typeof MODE_VALUES)[number];
 
 function CascadesPage() {
   const { data: events, loading: eventsLoading, error: eventsError, refresh } = useCascadeEvents();
-  const { data: clones } = useClones();
+  const { data: clones, loading: clonesLoading, error: clonesError } = useClones();
   const search = Route.useSearch();
   const navigate = useNavigate({ from: "/cascades" });
+  const confirm = useConfirm();
   const mode = search.mode;
   const scope = search.scope;
   const scheduleId = search.schedule_id;
-  const selectedTags = (search.tags ?? "").split(",").filter(Boolean);
+  const selectedTags = useMemo(() => (search.tags ?? "").split(",").filter(Boolean), [search.tags]);
+  const pickedIds = useMemo(
+    () => (search.picked ?? "").split(",").filter(Boolean),
+    [search.picked],
+  );
+  const pickedSet = useMemo(() => new Set(pickedIds), [pickedIds]);
 
   // Collect all unique tags from the fleet
   const allTags = useMemo(() => {
@@ -86,11 +102,16 @@ function CascadesPage() {
     return Array.from(set).sort();
   }, [clones]);
 
-  // Filter clones by selected tags
-  const tagFilteredClones = useMemo(() => {
-    if (scope !== "tagged" || selectedTags.length === 0) return clones;
-    return clones.filter((c) => selectedTags.some((t: string) => (c.tags ?? []).includes(t)));
-  }, [clones, scope, selectedTags]);
+  // The clones this form reaches, or why it reaches none. The server answers
+  // the same question with the same function before it arms a single row, so
+  // the count on the button is the count that fires.
+  const targets = useMemo(
+    () => resolveCascadeTargets({ scope, tags: selectedTags, cloneIds: pickedIds }, clones),
+    [scope, selectedTags, pickedIds, clones],
+  );
+  const targetCount = targets.ok ? targets.cloneIds.length : 0;
+  // Nothing fires against a fleet that has not loaded, or failed to.
+  const canFire = targets.ok && !clonesLoading && !clonesError;
 
   type SearchState = typeof search;
   const setMode = useCallback(
@@ -125,6 +146,23 @@ function CascadesPage() {
       setTags(Array.from(set) as string[]);
     },
     [selectedTags, setTags],
+  );
+  const setPicked = useCallback(
+    (ids: string[]) =>
+      void navigate({
+        search: (prev: SearchState) => ({ ...prev, picked: ids.join(",") }),
+        replace: true,
+      }),
+    [navigate],
+  );
+  const togglePicked = useCallback(
+    (id: string) => {
+      const set = new Set(pickedIds);
+      if (set.has(id)) set.delete(id);
+      else set.add(id);
+      setPicked(Array.from(set));
+    },
+    [pickedIds, setPicked],
   );
   const clearScheduleFilter = useCallback(
     () =>
@@ -177,7 +215,8 @@ function CascadesPage() {
     : events;
 
   const [busy, setBusy] = useState(false);
-  const runCascadeFn = useServerFn(runCascade);
+  const fireCascadeFn = useServerFn(fireCascade);
+  const launch = useLaunchCascade();
 
   // Realtime: when any operator inserts/updates/deletes a cascade event
   // (e.g. another operator approves and the engine flips status to running),
@@ -196,84 +235,60 @@ function CascadesPage() {
     };
   }, [debouncedRefresh]);
 
-  // Effective target list based on scope
-  const targets = scope === "tagged" && selectedTags.length > 0 ? tagFilteredClones : clones;
+  // Live blast-radius preview based on current scope/mode + clone count. The
+  // server asks the same function of the same count before it writes.
+  const blast = assessBlastRadius(mode, targetCount);
 
-  // Live blast-radius preview based on current scope/mode + clone count.
-  const blast = assessBlastRadius(mode, targets.length);
+  /** Where the form reaches, in words: the line under it and the confirmation both say it. */
+  const reach =
+    scope === "all"
+      ? `every clone in the fleet (${countClones(targetCount)})`
+      : scope === "tagged"
+        ? `${countClones(targetCount)} tagged ${selectedTags.map((t) => `#${t}`).join(" or ")}`
+        : `the ${countClones(targetCount)} picked`;
 
   const fire = async () => {
+    if (!targets.ok || !canFire) return;
+    const names = targets.cloneIds.map((id) => clones.find((c) => c.id === id)?.name ?? id);
+    const listed =
+      names.length > CONFIRM_NAMES_SHOWN
+        ? `${names.slice(0, CONFIRM_NAMES_SHOWN).join(", ")} and ${names.length - CONFIRM_NAMES_SHOWN} more`
+        : names.join(", ");
+    const ok = await confirm({
+      title: `Fire a ${mode.replace("_", " ")} cascade at ${countClones(targetCount)}?`,
+      description:
+        `It reaches ${reach}: ${listed}.` +
+        (blast.requiresApproval
+          ? " It will wait for a second operator before anything reaches GitHub."
+          : ""),
+      confirmText: blast.requiresApproval
+        ? `Queue for approval · ${countClones(targetCount)}`
+        : `Fire at ${countClones(targetCount)}`,
+    });
+    if (!ok) return;
+
     setBusy(true);
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    const { data: ev, error } = await supabase
-      .from("cascade_events")
-      .insert({
-        trigger: "manual",
-        mode,
-        status: "pending",
-        scope_filter: {
-          scope,
-          ...(scope === "tagged" ? { tags: selectedTags } : {}),
-        },
-        initiated_by: user?.id,
-        requires_approval: blast.requiresApproval,
-      })
-      .select()
-      .single();
-    if (error || !ev) {
-      toast.error(error?.message || "Failed to start cascade");
-      setBusy(false);
-      return;
-    }
-    if (targets.length > 0) {
-      await supabase.from("cascade_results").insert(
-        targets.map((c) => ({
-          cascade_event_id: ev.id,
-          clone_id: c.id,
-          status: "queued" as const,
-        })),
-      );
-    }
-
-    if (blast.requiresApproval) {
-      // Pin a workspace-wide notification so other operators see it immediately.
-      await supabase.from("notifications").insert({
-        kind: "cascade_awaiting_approval",
-        severity: "warning",
-        title: `Approval needed · ${mode.replace("_", " ")} cascade`,
-        body: `${blast.reason} Initiated by you — needs a second operator to approve.`,
-        cascade_event_id: ev.id,
-        url: `/cascades/${ev.id}`,
-        metadata: { mode, clone_count: targets.length },
-      });
-      await supabase.from("audit_log").insert({
-        action: "cascade.awaiting_approval",
-        entity_type: "cascade_event",
-        entity_id: ev.id,
-        actor_user_id: user?.id,
-        metadata: { mode, clone_count: targets.length, reason: blast.reason },
-      });
-      toast.warning("Approval required — second operator must approve before this runs.");
-      void navigate({ to: "/cascades/$eventId", params: { eventId: ev.id } });
-      setBusy(false);
-      refresh();
-      return;
-    }
-
-    toast.info(`Queued ${targets.length} clones — executing…`);
-    refresh();
-
     try {
-      const res = await runCascadeFn({ data: { cascadeEventId: ev.id } });
-      const outcome = describeCascadeOutcome(res);
-      toast[outcome.level](outcome.message);
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Engine failed");
+      // The scope and the selection, never a list of rows: the server reads
+      // the fleet itself, resolves the targets with the same function, and
+      // refuses if they no longer number what the operator just confirmed.
+      await launch(
+        () =>
+          fireCascadeFn({
+            data: {
+              mode,
+              scope,
+              tags: scope === "tagged" ? selectedTags : [],
+              cloneIds: scope === "selected" ? pickedIds : [],
+              confirmedCount: targetCount,
+            },
+          }),
+        { navigate: "when-waiting", onCreated: () => void refresh() },
+      );
+    } finally {
+      setBusy(false);
+      void refresh();
     }
-    setBusy(false);
-    refresh();
   };
 
   return (
@@ -341,7 +356,7 @@ function CascadesPage() {
                 <Tag className="mr-1.5 h-3.5 w-3.5" /> By tag
                 {scope === "tagged" && selectedTags.length > 0 && (
                   <Badge variant="secondary" className="ml-1.5 text-[10px]">
-                    {tagFilteredClones.length}
+                    {targetCount}
                   </Badge>
                 )}
               </Button>
@@ -350,6 +365,11 @@ function CascadesPage() {
                 onClick={() => setScope("selected")}
               >
                 Manual select
+                {scope === "selected" && pickedIds.length > 0 && (
+                  <Badge variant="secondary" className="ml-1.5 text-[10px]">
+                    {targetCount}
+                  </Badge>
+                )}
               </Button>
             </div>
             {scope === "tagged" && (
@@ -361,8 +381,7 @@ function CascadesPage() {
                 ) : (
                   <>
                     <div className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
-                      select tags · {selectedTags.length} active → {tagFilteredClones.length} clone
-                      {tagFilteredClones.length === 1 ? "" : "s"}
+                      select tags · {selectedTags.length} active → {countClones(targetCount)}
                     </div>
                     <div className="flex flex-wrap gap-1.5">
                       {allTags.map((tag) => {
@@ -407,6 +426,63 @@ function CascadesPage() {
                 )}
               </div>
             )}
+            {scope === "selected" && (
+              <div className="mt-3 space-y-2">
+                {clonesLoading ? (
+                  <div className="border border-dashed p-3 text-center font-mono text-[11px] text-muted-foreground">
+                    Loading the fleet…
+                  </div>
+                ) : clonesError ? (
+                  <div className="border border-dashed border-destructive/40 p-3 text-center font-mono text-[11px] text-destructive">
+                    Couldn't load the fleet: {clonesError}
+                  </div>
+                ) : clones.length === 0 ? (
+                  <div className="border border-dashed p-3 text-center font-mono text-[11px] text-muted-foreground">
+                    No clones in the fleet yet.
+                  </div>
+                ) : (
+                  <>
+                    <div className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+                      pick clones · {clones.filter((c) => pickedSet.has(c.id)).length} of{" "}
+                      {clones.length} picked
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {clones.map((c) => {
+                        const active = pickedSet.has(c.id);
+                        return (
+                          <button
+                            key={c.id}
+                            type="button"
+                            aria-pressed={active}
+                            title={`${c.github_owner}/${c.github_repo}`}
+                            onClick={() => togglePicked(c.id)}
+                            className={cn(
+                              "inline-flex items-center gap-1 rounded-md border px-2 py-1 font-mono text-[11px] transition-colors",
+                              active
+                                ? "border-primary/50 bg-primary/10 text-primary"
+                                : "border-border bg-surface text-muted-foreground hover:border-primary/30 hover:text-foreground",
+                            )}
+                          >
+                            {active ? <Check className="h-3 w-3" /> : <Plus className="h-3 w-3" />}
+                            {c.name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {pickedIds.length > 0 && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-6 text-[10px] text-muted-foreground"
+                        onClick={() => setPicked([])}
+                      >
+                        Clear selection
+                      </Button>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
           </div>
           {blast.requiresApproval && (
             <div className="flex items-start gap-2 border border-warning/40 bg-warning/5 p-3 text-xs text-warning">
@@ -423,22 +499,37 @@ function CascadesPage() {
           <AiPreflightSummary
             scope={scope}
             mode={mode}
-            cloneCount={targets.length}
-            tags={selectedTags}
+            cloneCount={targetCount}
+            tags={scope === "tagged" ? selectedTags : []}
           />
-          <div className="flex items-center justify-between">
-            <div className="font-mono text-[11px] text-muted-foreground">
-              {scope === "tagged" && selectedTags.length > 0
-                ? `${tagFilteredClones.length} clone${tagFilteredClones.length === 1 ? "" : "s"} matching tags`
-                : `${clones.length} clone${clones.length === 1 ? "" : "s"} in fleet`}
+          <div className="flex items-center justify-between gap-3">
+            <div
+              className={cn(
+                "font-mono text-[11px]",
+                clonesError
+                  ? "text-destructive"
+                  : canFire || clonesLoading
+                    ? "text-muted-foreground"
+                    : "text-warning",
+              )}
+            >
+              {clonesLoading
+                ? "Loading the fleet…"
+                : clonesError
+                  ? `Couldn't load the fleet: ${clonesError}`
+                  : targets.ok
+                    ? `Reaches ${reach}`
+                    : targets.reason}
             </div>
-            <Button onClick={fire} disabled={busy || targets.length === 0}>
+            <Button onClick={fire} disabled={busy || !canFire} className="shrink-0">
               <Waves className="mr-2 h-4 w-4" />
               {busy
                 ? "Queueing…"
-                : blast.requiresApproval
-                  ? `Queue for approval (${targets.length})`
-                  : `Fire cascade (${targets.length})`}
+                : !canFire
+                  ? "Fire cascade"
+                  : blast.requiresApproval
+                    ? `Queue for approval · ${countClones(targetCount)}`
+                    : `Fire at ${countClones(targetCount)}`}
             </Button>
           </div>
         </CardContent>
@@ -453,14 +544,24 @@ function CascadesPage() {
           mode,
           scope: scope as "all" | "tagged" | "selected",
           tags: selectedTags,
-          cloneIds: [],
+          cloneIds: pickedIds,
         }}
         onApply={(v: CascadeTemplateValue) => {
-          setMode(v.mode);
-          if (v.scope === "all" || v.scope === "tagged" || v.scope === "selected")
-            setScope(v.scope as (typeof SCOPE_VALUES)[number]);
-          else setScope("selected");
-          if (v.tags.length > 0) setTags(v.tags);
+          const nextScope: (typeof SCOPE_VALUES)[number] =
+            v.scope === "all" || v.scope === "tagged" || v.scope === "selected"
+              ? v.scope
+              : "selected";
+          // One navigation, so no field's write can land on top of another's.
+          void navigate({
+            search: (prev: SearchState) => ({
+              ...prev,
+              mode: v.mode,
+              scope: nextScope,
+              ...(v.tags.length > 0 ? { tags: v.tags.join(",") } : {}),
+              ...(v.cloneIds.length > 0 ? { picked: v.cloneIds.join(",") } : {}),
+            }),
+            replace: true,
+          });
         }}
       />
 

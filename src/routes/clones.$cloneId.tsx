@@ -1,17 +1,23 @@
 import { createFileRoute, Link, useParams, useNavigate } from "@tanstack/react-router";
 import { lazy, Suspense, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useServerFn } from "@tanstack/react-start";
 import { toast } from "sonner";
 import {
   AlertTriangle,
   ArrowLeft,
+  Bell,
+  ChevronDown,
   ExternalLink,
+  GitMerge,
   Github,
   KeyRound,
+  Loader2,
   Megaphone,
   Pencil,
   Plus,
   RefreshCw,
+  Send,
   Trash2,
   Waves,
   X,
@@ -19,6 +25,14 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { EmptyState } from "@/components/empty-state";
 import { PageHeaderSkeleton } from "@/components/route-loading";
 import { CardRowSkeleton } from "@/components/list-skeletons";
@@ -57,8 +71,13 @@ import { supabase } from "@/integrations/supabase/client";
 import { formatDistanceToNow } from "@/lib/format";
 import type { Clone, Module } from "@/lib/queries";
 import { useModules } from "@/lib/queries";
+import { useLaunchCascade } from "@/lib/use-launch-cascade";
+import { spawnCascade } from "@/server/cascade-spawn.functions";
 import { bulkSyncModuleFn } from "@/server/module-sync.functions";
 import type { DriftSuggestion } from "@/server/drift-suggestions.functions";
+import type { Database } from "@/integrations/supabase/types";
+
+type CascadeMode = Database["public"]["Enums"]["cascade_mode"];
 
 const CloneHealthTimeline = lazy(() =>
   import("@/components/clone-health-timeline").then((module) => ({
@@ -82,6 +101,26 @@ function CloneDetail() {
   const { data: allModules } = useModules();
   const [resyncingId, setResyncingId] = useState<string | null>(null);
   const [editOpen, setEditOpen] = useState(false);
+  const [cascading, setCascading] = useState(false);
+  const spawnCascadeFn = useServerFn(spawnCascade);
+  const launch = useLaunchCascade();
+
+  /*
+    "Cascade now" used to navigate to /cascades and deliver nothing. It now
+    re-delivers THIS clone through the same one-clone spawn the cascade detail
+    page's "Retry as" uses: a fresh manual event carrying only this clone,
+    which reads its source's head when the pass runs. The server refuses while
+    a delivery to this clone is already in flight, and the toast links to
+    whichever cascade the answer names.
+  */
+  const cascadeNow = async (mode: CascadeMode) => {
+    setCascading(true);
+    try {
+      await launch(() => spawnCascadeFn({ data: { intent: "redeliver", mode, cloneId } }));
+    } finally {
+      setCascading(false);
+    }
+  };
 
   const query = useQuery({
     queryKey: ["clone-detail", cloneId],
@@ -326,9 +365,34 @@ function CloneDetail() {
           <Button variant="outline" onClick={() => setEditOpen(true)}>
             <Pencil className="mr-1.5 h-4 w-4" /> Edit
           </Button>
-          <Button variant="outline" onClick={() => navigate({ to: "/cascades" })}>
-            <Waves className="mr-1.5 h-4 w-4" /> Cascade now
-          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" disabled={cascading}>
+                {cascading ? (
+                  <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                ) : (
+                  <Waves className="mr-1.5 h-4 w-4" />
+                )}
+                {cascading ? "Cascading…" : "Cascade now"}
+                <ChevronDown className="ml-1 h-3.5 w-3.5" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-52">
+              <DropdownMenuLabel className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                Deliver to this clone as
+              </DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onSelect={() => void cascadeNow("pr")}>
+                <GitMerge className="mr-2 h-3.5 w-3.5" /> Open PR
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => void cascadeNow("auto_merge")}>
+                <Send className="mr-2 h-3.5 w-3.5" /> Auto-merge
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => void cascadeNow("notify")}>
+                <Bell className="mr-2 h-3.5 w-3.5" /> Notify only
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <Button
             variant="ghost"
             onClick={destroy}

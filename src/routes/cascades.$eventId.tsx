@@ -1,4 +1,4 @@
-import { createFileRoute, Link, useRouter, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Link, useRouter } from "@tanstack/react-router";
 import { ProtectedRoute } from "@/components/protected-route";
 import { RouteError } from "@/components/route-error";
 import { useEffect, useMemo, useState, useCallback, lazy, Suspense } from "react";
@@ -48,11 +48,12 @@ import {
 import { cn } from "@/lib/utils";
 import { formatDistanceToNow } from "@/lib/format";
 import { toast } from "sonner";
-import { describeCascadeOutcome } from "@/lib/cascadeRunOutcome";
 import { useServerFn } from "@tanstack/react-start";
 import { useConfirm } from "@/components/confirm-dialog";
 import { useDebouncedCallback } from "@/lib/use-debounced-callback";
+import { useLaunchCascade } from "@/lib/use-launch-cascade";
 import { runCascade, cancelCascade } from "@/server/cascade-engine.functions";
+import { spawnCascade } from "@/server/cascade-spawn.functions";
 import { CascadeLineagePanel } from "@/components/cascade-lineage-panel";
 import { InlineDiffSummary } from "@/components/inline-diff-summary";
 const RichDiffViewer = lazy(() =>
@@ -82,7 +83,6 @@ export const Route = createFileRoute("/cascades/$eventId")({
 function CascadeDetailPage() {
   const { eventId } = Route.useParams();
   const router = useRouter();
-  const navigate = useNavigate();
   const confirm = useConfirm();
   const [event, setEvent] = useState<CascadeEvent | null>(null);
   const [results, setResults] = useState<ResultWithClone[]>([]);
@@ -190,81 +190,22 @@ function CascadeDetailPage() {
     refresh();
   };
 
-  // Helper: create a brand-new cascade event scoped to a set of clones,
-  // queue cascade_results, and execute. Used by per-result retry-with-mode
-  // and the whole-event rollback action.
-  const spawnSubCascade = useCallback(
-    async (opts: {
-      mode: CascadeEvent["mode"];
-      cloneIds: string[];
-      summary?: string;
-      scopeMeta?: Record<string, unknown>;
-      navigateAfter?: boolean;
-    }) => {
-      if (opts.cloneIds.length === 0) {
-        toast.info("No clones to act on");
-        return null;
-      }
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      const { data: ev, error } = await supabase
-        .from("cascade_events")
-        .insert({
-          trigger: "manual",
-          mode: opts.mode,
-          status: "pending",
-          scope_filter: {
-            scope: "selected",
-            clone_ids: opts.cloneIds,
-            ...(opts.scopeMeta ?? {}),
-          },
-          summary: opts.summary,
-          initiated_by: user?.id,
-        })
-        .select()
-        .single();
-      if (error || !ev) {
-        toast.error(error?.message || "Failed to start cascade");
-        return null;
-      }
-      const { error: rerr } = await supabase.from("cascade_results").insert(
-        opts.cloneIds.map((id) => ({
-          cascade_event_id: ev.id,
-          clone_id: id,
-          status: "queued" as const,
-        })),
-      );
-      if (rerr) {
-        toast.error(rerr.message);
-        return null;
-      }
-      try {
-        const res = await runCascadeFn({ data: { cascadeEventId: ev.id } });
-        const outcome = describeCascadeOutcome(res);
-        toast[outcome.level](outcome.message);
-      } catch (e) {
-        toast.error(e instanceof Error ? e.message : "Cascade failed");
-      }
-      if (opts.navigateAfter) {
-        void navigate({ to: "/cascades/$eventId", params: { eventId: ev.id } });
-      }
-      return ev.id;
-    },
-    [navigate, runCascadeFn],
-  );
+  // Retry and rollback start a NEW delivery to named clones, through the same
+  // server function "Cascade now" on the clone page uses. The server composes
+  // the event (`operatorCascade.pure.ts`), refuses while this cascade is still
+  // in flight, asks the approval gate and arms the rows; this page runs the
+  // engine and reports, as it always did.
+  const spawnCascadeFn = useServerFn(spawnCascade);
+  const launch = useLaunchCascade();
 
   const retryWithMode = useCallback(
     async (cloneId: string, mode: CascadeEvent["mode"]) => {
-      await spawnSubCascade({
-        mode,
-        cloneIds: [cloneId],
-        summary: `Retry of cascade ${eventId.slice(0, 8)} for one clone in ${mode.replace("_", " ")} mode`,
-        scopeMeta: { retry_of: eventId },
-        navigateAfter: true,
-      });
+      await launch(
+        () => spawnCascadeFn({ data: { intent: "retry", mode, of: eventId, cloneId } }),
+        { navigate: "always" },
+      );
     },
-    [spawnSubCascade, eventId],
+    [launch, spawnCascadeFn, eventId],
   );
 
   // Rollback: reverse-apply prime by re-running cascade against clones that
@@ -282,19 +223,17 @@ function CascadeDetailPage() {
           toast.info("Nothing to roll back — no clones were updated.");
           return;
         }
-        await spawnSubCascade({
-          mode,
-          cloneIds: touched,
-          summary: `Rollback of cascade ${eventId.slice(0, 8)} (${touched.length} clones, ${mode.replace("_", " ")})`,
-          scopeMeta: { rollback_of: eventId, source_mode: event.mode },
-          navigateAfter: true,
-        });
+        await launch(
+          () =>
+            spawnCascadeFn({ data: { intent: "rollback", mode, of: eventId, cloneIds: touched } }),
+          { navigate: "always" },
+        );
       } finally {
         setRolling(false);
         setRollbackOpen(false);
       }
     },
-    [event, results, spawnSubCascade, eventId],
+    [event, results, launch, spawnCascadeFn, eventId],
   );
 
   if (loading) {
