@@ -14,12 +14,16 @@ import {
   Settings,
   UserPlus,
 } from "lucide-react";
+import { useServerFn } from "@tanstack/react-start";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { supabase } from "@/integrations/supabase/client";
 import { RECORD_KINDS_FILTER, isInboxKind } from "@/lib/notificationDisposition";
+import { BULK_READ_EXEMPT_NOTE, mayBulkMarkRead } from "@/lib/notificationBulkRead.pure";
+import { bulkMarkNotificationsRead } from "@/server/bulk-ops.functions";
 import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 import { formatDistanceToNow } from "@/lib/format";
@@ -136,17 +140,28 @@ export function NotificationsBell() {
   }, [session]);
 
   const unread = items.filter((n) => !n.read_at).length;
+  // "Mark all read" leaves a blocked-cascade notice standing: unread, it is
+  // the blockage ledger's record of a CI refusal, and it clears itself when
+  // its pull request closes. The badge keeps counting it until then.
+  const bulkReadable = items.filter((n) => !n.read_at && mayBulkMarkRead(n.kind));
+  const blockedUnread = unread - bulkReadable.length;
+  const markReadFn = useServerFn(bulkMarkNotificationsRead);
 
   const markAllRead = async () => {
-    const ids = items.filter((n) => !n.read_at).map((n) => n.id);
+    const ids = bulkReadable.map((n) => n.id);
     if (ids.length === 0) return;
-    setItems((prev) =>
-      prev.map((n) => (ids.includes(n.id) ? { ...n, read_at: new Date().toISOString() } : n)),
-    );
-    await supabase
-      .from("notifications")
-      .update({ read_at: new Date().toISOString() })
-      .in("id", ids);
+    const now = new Date().toISOString();
+    setItems((prev) => prev.map((n) => (ids.includes(n.id) ? { ...n, read_at: now } : n)));
+    // Through the server, which applies the same exemption to the write.
+    try {
+      const r = await markReadFn({ data: { ids, read: true } });
+      if (!r.ok) throw new Error(r.error);
+    } catch (err) {
+      setItems((prev) => prev.map((n) => (ids.includes(n.id) ? { ...n, read_at: null } : n)));
+      toast.error("Couldn't mark notifications read", {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
   };
 
   const markOneRead = async (id: string) => {
@@ -190,9 +205,10 @@ export function NotificationsBell() {
             <Button
               variant="ghost"
               size="sm"
-              disabled={unread === 0}
+              disabled={bulkReadable.length === 0}
               onClick={markAllRead}
               className="h-7 text-xs"
+              title={blockedUnread > 0 ? BULK_READ_EXEMPT_NOTE : undefined}
             >
               <CheckCheck className="mr-1 h-3 w-3" /> Mark all read
             </Button>
@@ -213,6 +229,11 @@ export function NotificationsBell() {
             </Button>
           </div>
         </div>
+        {blockedUnread > 0 && (
+          <p className="border-b border-border px-3 py-1.5 text-[11px] text-muted-foreground">
+            {BULK_READ_EXEMPT_NOTE}
+          </p>
+        )}
         <ScrollArea className="h-[420px]">
           {items.length === 0 ? (
             <div className="p-8 text-center text-sm text-muted-foreground">

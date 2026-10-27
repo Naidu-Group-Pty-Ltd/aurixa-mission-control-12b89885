@@ -4,6 +4,9 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import { Constants } from "@/integrations/supabase/types";
+import { NOTIFICATION_KIND_FILTER_VALUES } from "@/lib/notificationKinds.pure";
+import { bulkMarkByIds, bulkMarkMatching } from "./notificationBulkRead.server";
 
 const idArray = z.array(z.string().uuid()).min(1).max(200);
 
@@ -64,20 +67,32 @@ export const bulkDeleteNotifications = createServerFn({ method: "POST" })
     return { ok: true as const, count: data.ids.length };
   });
 
+// Every bulk mark goes through `notificationBulkRead.server.ts`, which never
+// changes a `cascade_blocked` notice: an unread one is the blockage ledger's
+// record of a standing CI refusal, and it clears itself when its pull request
+// closes. "Mark page read" and the bell's "Mark all read" call this one.
 export const bulkMarkNotificationsRead = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((d: { ids: string[]; read: boolean }) =>
     z.object({ ids: idArray, read: z.boolean() }).parse(d),
   )
-  .handler(async ({ data, context }) => {
-    const { supabase } = context;
-    const { error } = await supabase
-      .from("notifications")
-      .update({ read_at: data.read ? new Date().toISOString() : null })
-      .in("id", data.ids);
-    if (error) return { ok: false as const, error: error.message };
-    return { ok: true as const, count: data.ids.length };
-  });
+  .handler(async ({ data, context }) => bulkMarkByIds(context.supabase, data.ids, data.read));
+
+// "Mark all matching" on the inbox, with the page's filters as it holds them.
+export const markAllMatchingNotificationsRead = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator(
+    (d: { kind: string; severity: string; clone: string; scope: "attention" | "everything" }) =>
+      z
+        .object({
+          kind: z.enum(NOTIFICATION_KIND_FILTER_VALUES),
+          severity: z.enum(["all", ...Constants.public.Enums.notification_severity] as const),
+          clone: z.union([z.literal("all"), z.string().uuid()]),
+          scope: z.enum(["attention", "everything"]),
+        })
+        .parse(d),
+  )
+  .handler(async ({ data, context }) => bulkMarkMatching(context.supabase, data));
 
 export const purgeReadNotifications = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])

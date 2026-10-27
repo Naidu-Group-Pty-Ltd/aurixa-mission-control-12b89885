@@ -60,6 +60,20 @@ import {
   RECORD_KINDS_FILTER,
   RECORD_SCOPE_LABEL,
 } from "@/lib/notificationDisposition";
+import {
+  NOTIFICATION_KIND_FILTER_OPTIONS,
+  NOTIFICATION_KIND_FILTER_VALUES,
+} from "@/lib/notificationKinds.pure";
+import {
+  BULK_READ_EXEMPT_NOTE,
+  describeLeftUnread,
+  mayBulkMarkRead,
+} from "@/lib/notificationBulkRead.pure";
+import { useServerFn } from "@tanstack/react-start";
+import {
+  bulkMarkNotificationsRead,
+  markAllMatchingNotificationsRead,
+} from "@/server/bulk-ops.functions";
 import { Settings as SettingsIcon, BellMinus } from "lucide-react";
 
 type Notification = Database["public"]["Tables"]["notifications"]["Row"];
@@ -68,31 +82,6 @@ type Kind = Database["public"]["Enums"]["notification_kind"];
 type Severity = Database["public"]["Enums"]["notification_severity"];
 
 const PAGE_SIZE = 25;
-
-const KIND_VALUES = [
-  "cascade_started",
-  "cascade_completed",
-  "cascade_partial",
-  "cascade_failed",
-  "cascade_awaiting_approval",
-  "cascade_approved",
-  "cascade_rejected",
-  "drift_high",
-  "drift_medium",
-  "clone_created",
-  "clone_deleted",
-  "module_installed",
-  "module_removed",
-  "tokens_key_issued",
-  "tokens_key_rotated",
-  "seat_limit_approaching",
-  "seat_limit_reached",
-  "seat_plan_changed",
-  "device_limit_reached",
-  "device_registered",
-  "device_released",
-  "lead_captured",
-] as const;
 
 const SEVERITY_VALUES = ["info", "success", "warning", "error"] as const;
 const READ_VALUES = ["all", "unread", "read"] as const;
@@ -111,31 +100,9 @@ const READ_VALUES = ["all", "unread", "read"] as const;
 */
 const SCOPE_VALUES = ["attention", "everything"] as const;
 
-const KIND_OPTIONS: { value: Kind | "all"; label: string }[] = [
-  { value: "all", label: "All kinds" },
-  { value: "cascade_started", label: "Cascade started" },
-  { value: "cascade_completed", label: "Cascade completed" },
-  { value: "cascade_partial", label: "Cascade partial" },
-  { value: "cascade_failed", label: "Cascade failed" },
-  { value: "cascade_awaiting_approval", label: "Cascade awaiting approval" },
-  { value: "cascade_approved", label: "Cascade approved" },
-  { value: "cascade_rejected", label: "Cascade rejected" },
-  { value: "drift_high", label: "Drift — high" },
-  { value: "drift_medium", label: "Drift — medium" },
-  { value: "clone_created", label: "Clone created" },
-  { value: "clone_deleted", label: "Clone deleted" },
-  { value: "module_installed", label: "Module installed" },
-  { value: "module_removed", label: "Module removed" },
-  { value: "tokens_key_issued", label: "API key issued" },
-  { value: "tokens_key_rotated", label: "API key rotated" },
-  { value: "seat_limit_approaching" as Kind, label: "Seat limit approaching" },
-  { value: "seat_limit_reached" as Kind, label: "Seat limit reached" },
-  { value: "seat_plan_changed" as Kind, label: "Seat plan changed" },
-  { value: "device_limit_reached" as Kind, label: "Device limit reached" },
-  { value: "device_registered" as Kind, label: "Device registered" },
-  { value: "device_released" as Kind, label: "Device released" },
-  { value: "lead_captured" as Kind, label: "Lead captured" },
-];
+// The kind filter is every kind the database declares, from
+// `notificationKinds.pure.ts`. It was a hand list here, 22 kinds long, and
+// `cascade_blocked` was not on it.
 
 const SEVERITY_OPTIONS: { value: Severity | "all"; label: string }[] = [
   { value: "all", label: "All severities" },
@@ -152,7 +119,7 @@ const READ_OPTIONS: { value: (typeof READ_VALUES)[number]; label: string }[] = [
 ];
 
 const searchSchema = z.object({
-  kind: fallback(z.enum(["all", ...KIND_VALUES]), "all").default("all"),
+  kind: fallback(z.enum(NOTIFICATION_KIND_FILTER_VALUES), "all").default("all"),
   severity: fallback(z.enum(["all", ...SEVERITY_VALUES]), "all").default("all"),
   clone: fallback(z.string(), "all").default("all"),
   read: fallback(z.enum(READ_VALUES), "all").default("all"),
@@ -297,6 +264,17 @@ function NotificationsPage() {
   }, [refresh]);
 
   const unreadOnPage = useMemo(() => items.filter((n) => !n.read_at), [items]);
+  // What "Mark page read" may change: everything unread here except a
+  // blocked-cascade notice, which stands until its pull request closes.
+  const bulkReadableOnPage = useMemo(
+    () => unreadOnPage.filter((n) => mayBulkMarkRead(n.kind)),
+    [unreadOnPage],
+  );
+  const blockedUnreadOnPage = unreadOnPage.length - bulkReadableOnPage.length;
+  // A kind chosen in the filter that no bulk mark may change.
+  const kindIsExempt = search.kind !== "all" && !mayBulkMarkRead(search.kind);
+  const markReadFn = useServerFn(bulkMarkNotificationsRead);
+  const markMatchingFn = useServerFn(markAllMatchingNotificationsRead);
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   /*
     SCOPE IS A FILTER, AND THE DEFAULT ONE IS NARROWING.
@@ -314,11 +292,23 @@ function NotificationsPage() {
     search.scope !== "everything";
 
   const markAllOnPageRead = async () => {
-    const ids = unreadOnPage.map((n) => n.id);
+    const ids = bulkReadableOnPage.map((n) => n.id);
     if (ids.length === 0) return;
     const now = new Date().toISOString();
     setItems((prev) => prev.map((n) => (ids.includes(n.id) ? { ...n, read_at: now } : n)));
-    await supabase.from("notifications").update({ read_at: now }).in("id", ids);
+    // Through the server, which leaves blocked-cascade notices alone even if
+    // an id for one arrives here.
+    try {
+      const r = await markReadFn({ data: { ids, read: true } });
+      if (!r.ok) throw new Error(r.error);
+      if (blockedUnreadOnPage > 0) toast.info(describeLeftUnread(blockedUnreadOnPage));
+    } catch (err) {
+      toast.error("Failed to mark the page read", {
+        description: err instanceof Error ? err.message : String(err),
+      });
+      // The optimistic stamp above is not what the database holds.
+      await refresh();
+    }
   };
 
   const markOneRead = async (id: string) => {
@@ -331,24 +321,29 @@ function NotificationsPage() {
   const markAllMatching = async () => {
     setBulkBusy(true);
     try {
-      const now = new Date().toISOString();
-      // Build a query with the same filters PLUS unread, then update.
-      let q = supabase.from("notifications").update({ read_at: now }).is("read_at", null);
-      if (search.kind !== "all") q = q.eq("kind", search.kind as Kind);
-      // The same scope the page is SHOWING. A bulk mark that reached rows the
-      // operator cannot see would silently clear the record behind their back,
-      // and the confirmation dialog promises "matching the current filters".
-      else if (search.scope === "attention") q = q.not("kind", "in", RECORD_KINDS_FILTER);
-      if (search.severity !== "all") q = q.eq("severity", search.severity as Severity);
-      if (search.clone !== "all") q = q.eq("clone_id", search.clone);
       // `read === "read"` would zero out the work, so just guard:
       if (search.read === "read") {
         toast.info("No unread entries match these filters.");
         return;
       }
-      const { data, error } = await q.select("id");
-      if (error) throw error;
-      toast.success(`Marked ${data?.length ?? 0} notifications as read`);
+      // The server builds the write from the same filters the page is SHOWING
+      // (`planMarkMatching`): a bulk mark that reached rows the operator cannot
+      // see would silently clear the record behind their back, and the
+      // confirmation promises "matching the current filters". It also leaves
+      // every blocked-cascade notice unread, and says how many it left.
+      const r = await markMatchingFn({
+        data: {
+          kind: search.kind,
+          severity: search.severity,
+          clone: search.clone,
+          scope: search.scope,
+        },
+      });
+      if (!r.ok) throw new Error(r.error);
+      toast.success(
+        `Marked ${r.count} notification${r.count === 1 ? "" : "s"} as read`,
+        r.leftUnread ? { description: describeLeftUnread(r.leftUnread) } : undefined,
+      );
       await refresh();
     } catch (err) {
       toast.error("Failed to mark all as read", {
@@ -399,7 +394,8 @@ function NotificationsPage() {
             variant="outline"
             size="sm"
             onClick={markAllOnPageRead}
-            disabled={unreadOnPage.length === 0}
+            disabled={bulkReadableOnPage.length === 0}
+            title={blockedUnreadOnPage > 0 ? BULK_READ_EXEMPT_NOTE : undefined}
           >
             <CheckCheck className="mr-1.5 h-3.5 w-3.5" />
             Mark page read
@@ -429,7 +425,12 @@ function NotificationsPage() {
           </Button>
           <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
             <AlertDialogTrigger asChild>
-              <Button variant="default" size="sm" disabled={search.read === "read"}>
+              <Button
+                variant="default"
+                size="sm"
+                disabled={search.read === "read" || kindIsExempt}
+                title={kindIsExempt ? BULK_READ_EXEMPT_NOTE : undefined}
+              >
                 <CheckCheck className="mr-1.5 h-3.5 w-3.5" />
                 Mark all matching
               </Button>
@@ -439,7 +440,7 @@ function NotificationsPage() {
                 <AlertDialogTitle>Mark all matching as read?</AlertDialogTitle>
                 <AlertDialogDescription>
                   Every unread notification matching the current filters will be marked as read
-                  across all pages.
+                  across all pages. {BULK_READ_EXEMPT_NOTE}
                   {hasFilters ? (
                     <span className="mt-2 block font-mono text-[11px] text-muted-foreground">
                       filters: {filterSummary(search)}
@@ -493,7 +494,7 @@ function NotificationsPage() {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {KIND_OPTIONS.map((o) => (
+              {NOTIFICATION_KIND_FILTER_OPTIONS.map((o) => (
                 <SelectItem key={o.value} value={o.value}>
                   {o.label}
                 </SelectItem>
@@ -559,6 +560,11 @@ function NotificationsPage() {
           {search.scope === "attention" && search.kind === "all" && (
             <p className="text-xs text-muted-foreground md:col-span-3 lg:col-span-5">
               {INBOX_SCOPE_NOTE}
+            </p>
+          )}
+          {kindIsExempt && (
+            <p className="text-xs text-muted-foreground md:col-span-3 lg:col-span-5">
+              {BULK_READ_EXEMPT_NOTE}
             </p>
           )}
         </CardContent>
