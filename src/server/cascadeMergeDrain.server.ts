@@ -792,7 +792,7 @@ async function handleOne(args: {
     try {
       // Checks are read on the pull request's CURRENT head, so a push landing
       // between the read and the merge invalidates nothing silently — the merge
-      // below is by pull number and GitHub refuses a stale one.
+      // below names this head, and GitHub refuses it once the branch has moved.
       const { data: checkData } = await octokit.checks.listForRef({
         owner,
         repo,
@@ -910,12 +910,36 @@ async function handleOne(args: {
     // MERGE, never SQUASH — a squash rewrites the cascade commit naming the
     // prime SHA it came from, which is the one durable record of what a clone
     // has received.
-    const { data: merged } = await octokit.pulls.merge({
-      owner,
-      repo,
-      pull_number: number,
-      merge_method: "merge",
-    });
+    //
+    // Pinned to the head whose checks were judged above. Without `sha` GitHub
+    // merges whatever the branch holds when this call lands, and the engine
+    // refreshes an open proposal in place with a force push, so a refresh
+    // between the check read and this call would put a tree no CI has built on
+    // a tenant's `main`. Pinned, GitHub answers 409 instead, and the next pass
+    // judges the head that replaced it.
+    let merged: { sha?: string | null };
+    try {
+      ({ data: merged } = await octokit.pulls.merge({
+        owner,
+        repo,
+        pull_number: number,
+        merge_method: "merge",
+        sha: pr.head.sha,
+      }));
+    } catch (e) {
+      if ((e as { status?: number } | null)?.status === 409) {
+        return {
+          clone: label,
+          pr: number,
+          outcome: "held",
+          reason: "head_moved",
+          why:
+            `The proposal's head moved after its checks were read at ${pr.head.sha.slice(0, 7)}, ` +
+            "so GitHub refused the merge; the next pass judges the new head.",
+        };
+      }
+      throw e;
+    }
     facts = { state: "closed", merged: true, mergeCommitSha: merged.sha ?? null };
     mergedNow = true;
   }

@@ -6933,6 +6933,9 @@ export async function processClone(args: {
           pull_number: proposal.number,
           merge_method: "merge",
           commit_title: `Aurixa cascade ${sourceLabel}@${shortSha(sourceSha)} (#${proposal.number})`,
+          // The head these checks were read on. Unpinned, GitHub merges
+          // whatever the branch holds by the time this call lands.
+          sha: proposal.headSha,
         });
         return {
           status: "succeeded",
