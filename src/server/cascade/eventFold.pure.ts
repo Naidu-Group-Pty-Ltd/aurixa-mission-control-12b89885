@@ -41,8 +41,19 @@
  * (folding a `pr` proposal into an `auto_merge` one would change what
  * happens to the tree, not just when).
  *
- * Client-safe: pure, no imports.
+ * ## What is not folded YET
+ *
+ * An event younger than the arm grace (`armGrace.pure.ts`). Its result rows
+ * are inserted in a statement after the event's own, and the claim already
+ * waits out that gap — the fold did not. Measured: event `0a3c9817` was
+ * folded 0.29 s after it was created, closed "results and all" when it had no
+ * results yet, and its four rows arrived a moment later and sat `queued`
+ * under a completed event from 18 Oct 2026 onwards. Left alone for the grace,
+ * it is folded on a later tick with its rows, exactly as any other.
+ *
+ * Client-safe: pure.
  */
+import { CREATION_ARM_GRACE_MS } from "./armGrace.pure";
 
 export type FoldableEvent = {
   id: string;
@@ -72,16 +83,30 @@ export function scopeFilterIsEmpty(scopeFilter: unknown): boolean {
   return Object.keys(scopeFilter as Record<string, unknown>).length === 0;
 }
 
-/** Whether one event is a fold candidate at all — see the module header. */
-export function isFoldableCommitEvent(e: FoldableEvent): boolean {
+/**
+ * Whether one event is a fold candidate at all — see the module header.
+ *
+ * `nowMs` is when the fold runs. Given, an event created less than the arm
+ * grace before it is not a candidate yet: its rows may still be on their way.
+ * An unreadable creation time is treated as armed, which is what the fold did
+ * before it asked.
+ */
+export function isFoldableCommitEvent(e: FoldableEvent, nowMs?: number): boolean {
   return (
     e.trigger === "commit" &&
     e.status === "pending" &&
     e.worker_started_at === null &&
     e.requires_approval === false &&
     e.attempts < FOLD_MAX_ATTEMPTS &&
-    scopeFilterIsEmpty(e.scope_filter)
+    scopeFilterIsEmpty(e.scope_filter) &&
+    (nowMs === undefined || isArmed(e.created_at, nowMs))
   );
+}
+
+/** Whether an event created at `createdAt` is past the arm grace at `nowMs`. */
+export function isArmed(createdAt: string, nowMs: number): boolean {
+  const created = Date.parse(createdAt);
+  return !Number.isFinite(created) || nowMs - created >= CREATION_ARM_GRACE_MS;
 }
 
 export type FoldDecision = {
@@ -101,9 +126,9 @@ export type FoldDecision = {
  * alone, which at worst costs one redundant pass rather than changing what
  * lands on a clone.
  */
-export function decideEventFold(events: readonly FoldableEvent[]): FoldDecision {
+export function decideEventFold(events: readonly FoldableEvent[], nowMs?: number): FoldDecision {
   const foldable = events
-    .filter(isFoldableCommitEvent)
+    .filter((e) => isFoldableCommitEvent(e, nowMs))
     .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
   if (foldable.length === 0) return { keep: null, supersede: [] };
   const survivor = foldable[0];

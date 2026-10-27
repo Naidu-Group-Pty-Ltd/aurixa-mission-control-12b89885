@@ -164,9 +164,19 @@ describe("a rate limit defers the event", () => {
 describe("the invocation budget", () => {
   const loop = sliceFrom(engine, "let attempted = 0;", 4_000);
 
-  it("is asked before each clone, with the slowest pass so far as the reserve", () => {
-    expect(loop).toMatch(
-      /for \(const r of orderedRows\) \{\s*if \(attempted > 0 && opts\?\.budget\?\.isPastDeadline\(slowestMs\)\) \{\s*stoppedEarly = true;\s*break;/,
+  it("is asked before each clone, reserving the slowest pass so far and the clone's own last", () => {
+    // The slowest so far alone let a 20 s mirror wave the CRM in behind it
+    // with 24 s left for a 40 s pass (`cascade/passBudget.pure.ts`).
+    const body = sliceFrom(loop, "for (const r of orderedRows) {", 1_200);
+    expect(body).toMatch(
+      /const ownPassMs =\s*passBudgets\.get\(\(r as \{ clones: \{ id: string \} \| null \}\)\.clones\?\.id \?\? ""\)\?\.passMs \?\? 0;/,
+    );
+    expect(body).toMatch(
+      /if \(attempted > 0 && opts\?\.budget\?\.isPastDeadline\(Math\.max\(slowestMs, ownPassMs\)\)\) \{\s*stoppedEarly = true;\s*break;/,
+    );
+    // Read once for the event, only where there is a budget to ask.
+    expect(engine).toMatch(
+      /const passBudgets = opts\?\.budget\s*\?\s*await readClonePassBudgets\(supabase, cloneIds\)/,
     );
   });
 
@@ -314,13 +324,23 @@ describe("the drain", () => {
     expect(route).toMatch(
       /isPastDeadline: \(reserveMs\) => Date\.now\(\) \+ reserveMs >= deadlineAt/,
     );
+    // A claim is taken only with room for a pass (`claimHasHeadroom`), never
+    // merely before the deadline: one taken at second 44 of 45 ran its first
+    // clone past the platform's wait.
     expect(route).toMatch(
-      /if \(Date\.now\(\) >= deadlineAt\) break;\s*const r = await drainOne\(budget, failedThisTick\);/,
+      /if \(!claimHasHeadroom\(Date\.now\(\), deadlineAt\)\) break;\s*const r = await drainOne\(budget, ranThisTick\);/,
     );
   });
 
   it("leaves headroom inside the 60-second window", () => {
-    const m = /const INVOCATION_BUDGET_MS = ([\d_]+);/.exec(drain);
+    // The budget lives beside the engine's arithmetic against it now, and the
+    // drain reads that one constant rather than keeping its own.
+    expect(drain).toMatch(
+      /import \{[^}]*INVOCATION_BUDGET_MS[^}]*\} from "@\/server\/cascade\/passBudget\.pure";/,
+    );
+    expect(drain).not.toMatch(/const INVOCATION_BUDGET_MS = /);
+    const pure = readFileSync("src/server/cascade/passBudget.pure.ts", "utf8");
+    const m = /export const INVOCATION_BUDGET_MS = ([\d_]+);/.exec(pure);
     expect(m).not.toBeNull();
     const budget = Number(m![1].replace(/_/g, ""));
     expect(budget).toBeGreaterThan(20_000);
@@ -339,7 +359,7 @@ describe("the drain", () => {
     const one = sliceFrom(drain, "async function drainOne", 6_000);
     const held = one.slice(
       one.indexOf('res.status === "deferred"'),
-      one.indexOf("return { processed: true, ok: true, held: res.status };"),
+      one.indexOf("return { processed: true, ok: true, held: res.status, id: claimed.id };"),
     );
     expect(held).not.toMatch(/worker_finished_at: new Date\(\)\.toISOString\(\) \}\)/);
   });
@@ -528,8 +548,11 @@ describe("a pass resumes inside a clone", () => {
     // delivery it stayed 0 and this guard could never be satisfied. A carry
     // is all text by construction, which is how its budget bound came to be
     // the one bound it could never reach.
+    // And it leaves the clone's measured tail — the stages after this loop,
+    // which never ask — less the slack the platform allows past the budget
+    // (`cascade/passBudget.pure.ts`). Zero for every mirror at p90.
     expect(process).toMatch(
-      /const shouldStop = \(\) =>\s*resume\?\.budget !== undefined && filesRead > 0 && resume\.budget\.isPastDeadline\(slowestFileMs\);/,
+      /const shouldStop = \(\) =>\s*resume\?\.budget !== undefined &&\s*filesRead > 0 &&\s*resume\.budget\.isPastDeadline\(slowestFileMs \+ \(resume\.tailReserveMs \?\? 0\)\);/,
     );
     // Incremented once, where the read is attempted, rather than at each of
     // the four exits below it.

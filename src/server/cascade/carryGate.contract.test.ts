@@ -113,7 +113,7 @@ describe("the budget is measured in what costs the window", () => {
     // the one bound it could never reach, and `cutShort: "budget"`
     // unreachable with it.
     expect(engine).toMatch(
-      /const shouldStop = \(\) =>\s*resume\?\.budget !== undefined && filesRead > 0 &&/,
+      /const shouldStop = \(\) =>\s*resume\?\.budget !== undefined &&\s*filesRead > 0 &&/,
     );
     expect(engine).not.toMatch(/const shouldStop[\s\S]{0,120}freshlyPrepared > 0/);
   });

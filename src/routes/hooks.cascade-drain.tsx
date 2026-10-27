@@ -29,6 +29,7 @@ import {
   type FoldableEvent,
 } from "@/server/cascade/eventFold.pure";
 import { CREATION_ARM_GRACE_MS } from "@/server/cascade/armGrace.pure";
+import { carrierSettledMessage } from "@/server/cascade/carrierSettlement.pure";
 import { planGateReassessment, type RecordedGate } from "@/server/cascade/gateReassessment.pure";
 import { beaconSummary, decideDriftBeacon } from "@/server/cascade/driftBeacon.pure";
 import {
@@ -57,21 +58,22 @@ import { getAppOctokit } from "@/server/github-app.server";
 import { decideSpend } from "@/server/cascade/githubBudget.pure";
 import { readGitHubRemaining } from "@/server/githubAllowance.server";
 import { MAX_ATTEMPTS, STALL_MINUTES } from "@/server/cascade/drainLimits.pure";
+import { claimHasHeadroom, INVOCATION_BUDGET_MS } from "@/server/cascade/passBudget.pure";
 import { isLateralSlot } from "@/server/cascade/lateralExchange.pure";
 import { runLateralExchange } from "@/server/lateral-exchange.server";
 
 const admin = supabaseAdmin;
 
 const MAX_JOBS_PER_RUN = 3;
-/**
+/*
  * Wall clock one invocation may spend on cascades, out of the 60,000 ms the
- * pg_cron `net.http_post` that drives it will wait. The engine asks before
- * each clone whether one more pass like its slowest so far still fits, and a
- * pass that stops here is handed back `pending` with the work it did kept —
- * see `executeCascade`. The remainder is headroom for the reclaim, the claim
- * and the bookkeeping around the run.
+ * pg_cron `net.http_post` that drives it will wait: `INVOCATION_BUDGET_MS`,
+ * kept in `cascade/passBudget.pure.ts` beside the arithmetic the engine does
+ * against it. The engine asks before each clone whether that clone's own last
+ * pass, and the slowest so far, still fit, and a pass that stops here is
+ * handed back `pending` with the work it did kept — see `executeCascade`. The
+ * remainder is headroom for the reclaim, the claim and the bookkeeping.
  */
-const INVOCATION_BUDGET_MS = 45_000;
 
 async function reclaimStalled() {
   const cutoff = new Date(Date.now() - STALL_MINUTES * 60 * 1000).toISOString();
@@ -336,7 +338,9 @@ async function foldQueuedCommitEvents(): Promise<number> {
   if (error) {
     throw new Error(`cascade-drain fold: could not read the queue: ${error.message}`);
   }
-  const fold = decideEventFold((data ?? []) as FoldableEvent[]);
+  // Asked with the clock, so an event still inside its arm grace — whose rows
+  // may not have arrived — is left for a later tick (`eventFold.pure.ts`).
+  const fold = decideEventFold((data ?? []) as FoldableEvent[], Date.now());
   if (!fold.keep || fold.supersede.length === 0) return 0;
 
   const now = new Date().toISOString();
@@ -376,6 +380,54 @@ async function foldQueuedCommitEvents(): Promise<number> {
 }
 
 /**
+ * Rows still `queued` under an event that has already been settled.
+ *
+ * No claim will ever run them: a claim takes `pending` events only. They are
+ * not work, they are a strand — the four rows of event `0a3c9817`, folded
+ * 0.29 s after it was created and before its rows arrived, read `queued`
+ * under a completed event from 18 Oct 2026, and every reader that counts
+ * queued rows counted them as deliveries in flight. The fold now waits out the
+ * arm grace, which closes the way those four arrived; this settles any row
+ * that arrives late by another way, and the four themselves, with the
+ * carrier's sentence (`carrierSettledMessage`) so the row says what happened.
+ *
+ * Housekeeping, not delivery: a read or write that fails is reported in the
+ * tick's answer and costs nothing but one more tick of the strand.
+ */
+async function settleStrandedRows(): Promise<number | { error: string }> {
+  const { data, error } = await admin
+    .from("cascade_results")
+    .select("id, cascade_events!inner(status)")
+    .eq("status", "queued")
+    .in("cascade_events.status", ["completed", "failed"])
+    .limit(200);
+  if (error) {
+    console.error("[cascade-drain] could not read stranded rows:", error.message);
+    return { error: error.message };
+  }
+  const ids = (data ?? []).map((r) => r.id);
+  if (ids.length === 0) return 0;
+  const { data: settled, error: settleErr } = await admin
+    .from("cascade_results")
+    .update({
+      status: "skipped",
+      completed_at: new Date().toISOString(),
+      error_message: carrierSettledMessage(
+        "was already settled when this row arrived, so no pass could ever reach it; its " +
+          "delivery is carried by the event that superseded it.",
+      ),
+    })
+    .in("id", ids)
+    .eq("status", "queued")
+    .select("id");
+  if (settleErr) {
+    console.error("[cascade-drain] could not settle stranded rows:", settleErr.message);
+    return { error: settleErr.message };
+  }
+  return (settled ?? []).length;
+}
+
+/**
  * Claim one job.
  *
  * A READ THAT FAILED IS NOT A QUEUE THAT IS EMPTY, and a CLAIM that failed is
@@ -389,14 +441,15 @@ async function foldQueuedCommitEvents(): Promise<number> {
  * A genuine failure THROWS: the route's catch turns it into a non-200 that
  * lands in `net._http_response`, where `cron_delivery_health()` can see it.
  *
- * `excluded` is the tick's own failure memory: an event whose pass failed in
- * THIS invocation is not offered again by it. Without that, the loop's next
- * iteration re-claims the reverted event immediately — measured twice on
- * 16 Sep 2026 (10:24:02 and 10:45:03), the same carrier burned all three
- * attempts in under a second on one error, leaving no tick boundary for a
- * transient fault (a mid-publish build, a database blip) to clear. One
- * failure per event per tick turns three seconds of death into three
- * minutes of readable, separately-reported attempts.
+ * `excluded` is the tick's own memory: an event this invocation already ran is
+ * not offered again by it. It began as failure memory — without it, the
+ * loop's next iteration re-claimed a reverted event immediately; measured
+ * twice on 16 Sep 2026 (10:24:02 and 10:45:03), the same carrier burned all
+ * three attempts in under a second on one error, leaving no tick boundary for
+ * a transient fault to clear. Since 27 Oct 2026 it holds every event the tick
+ * ran, paused ones included: a pause hands the event back `pending`, and
+ * re-claiming it in the same tick started the same pass again late, with
+ * the budget nearly spent.
  */
 async function claimOne(
   excluded: ReadonlySet<string>,
@@ -1045,7 +1098,7 @@ async function drainOne(
             : "was failed at the attempt ceiling — one clone's pass is larger than one tick.",
         );
       }
-      return { processed: true, ok: true, held: res.status };
+      return { processed: true, ok: true, held: res.status, id: claimed.id };
     }
     // Fenced: a superseded invocation stamping `worker_finished_at` onto a
     // LIVE claim would exempt it from the stall reclaim — the stuck-forever
@@ -1055,7 +1108,7 @@ async function drainOne(
       .update({ worker_finished_at: new Date().toISOString() })
       .eq("id", claimed.id)
       .eq("worker_started_at", claimed.fence);
-    return { processed: true, ok: true };
+    return { processed: true, ok: true, id: claimed.id };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[cascade-drain] execute failed for ${claimed.id}:`, msg);
@@ -1107,6 +1160,7 @@ export const Route = createFileRoute("/hooks/cascade-drain")({
           // foldable in the same tick.
           const ungated = await reassessRecordedGates();
           const folded = await foldQueuedCommitEvents();
+          const stranded = await settleStrandedRows();
           const exhausted = await judgeExhaustedEvents();
           // One free call before any paid one: a claim into an empty window
           // spends an attempt, two tree listings and a probe chunk to learn
@@ -1117,17 +1171,24 @@ export const Route = createFileRoute("/hooks/cascade-drain")({
           const remaining = await readGitHubRemaining();
           const spend = decideSpend({ role: "cascade_claim", remaining });
           const results: Array<{ ok?: boolean; held?: string; error?: string }> = [];
-          // One failure per event per tick: a failed pass is remembered and
-          // its event is not offered to this tick's remaining claims, so the
-          // loop moves on to OTHER queued work instead of spending the whole
-          // attempt ceiling on one fault in one second.
-          const failedThisTick = new Set<string>();
+          // One pass per event per tick. A failed pass was always remembered
+          // and its event not offered again in this tick, so the loop moved on
+          // to OTHER queued work instead of spending the attempt ceiling on one
+          // fault in one second. A pass that PAUSED was not: the event it just
+          // handed back was claimable again at once, with whatever budget was
+          // left — the same pass, started late, which is the pass the platform
+          // ends. Every event this tick ran is now left for the next tick.
+          const ranThisTick = new Set<string>();
           if (spend.proceed) {
             for (let i = 0; i < MAX_JOBS_PER_RUN; i++) {
-              if (Date.now() >= deadlineAt) break;
-              const r = await drainOne(budget, failedThisTick);
+              // No claim without room for a pass: a claim runs its first clone
+              // whatever the budget says, so one taken at second 30 or 44 of
+              // 45 ran past the platform's wait. The next tick is a minute
+              // away and has the whole budget (`claimHasHeadroom`).
+              if (!claimHasHeadroom(Date.now(), deadlineAt)) break;
+              const r = await drainOne(budget, ranThisTick);
               if (!r.processed) break;
-              if (r.ok === false && r.id) failedThisTick.add(r.id);
+              if (r.id) ranThisTick.add(r.id);
               results.push({ ok: r.ok, held: r.held, error: r.error });
             }
           }
@@ -1152,6 +1213,7 @@ export const Route = createFileRoute("/hooks/cascade-drain")({
               processed: results.length,
               ungated,
               folded,
+              stranded,
               exhausted,
               starved: spend.proceed ? null : spend.why,
               beacon,

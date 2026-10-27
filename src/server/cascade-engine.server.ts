@@ -275,6 +275,8 @@ import {
   type PassPhase,
   type PassTrace,
 } from "./cascade/passTrace.pure";
+import type { ClonePassBudget } from "./cascade/passBudget.pure";
+import { readClonePassBudgets } from "./cascade/clonePassBudgets.server";
 import { carrierSettledMessage } from "./cascade/carrierSettlement.pure";
 import {
   describeTreePause,
@@ -810,6 +812,12 @@ export async function executeCascade(
     .map((r) => (r as { clones: { id: string } | null }).clones?.id)
     .filter((v): v is string => Boolean(v));
   const pinCheck = await validateClonePinsServer(supabase, cloneIds);
+  // Each clone's last pass, for asking the budget about THIS clone rather than
+  // the slowest one so far (`cascade/passBudget.pure.ts`). Only where there is
+  // a budget to ask: a pass with none never stops early anyway.
+  const passBudgets = opts?.budget
+    ? await readClonePassBudgets(supabase, cloneIds)
+    : new Map<string, ClonePassBudget>();
   const blockedClones = new Map<string, string[]>();
   if (pinCheck.ok && pinCheck.issues.length > 0) {
     for (const issue of pinCheck.issues) {
@@ -944,7 +952,14 @@ export async function executeCascade(
     : roundRobin;
 
   for (const r of orderedRows) {
-    if (attempted > 0 && opts?.budget?.isPastDeadline(slowestMs)) {
+    // Reserve the slowest clone so far AND this clone's own last pass. The
+    // first alone let a 20 s mirror wave the CRM in behind it with 24 s left
+    // for a pass that takes 40, which the platform then ended (48 of the CRM's
+    // 67 traced passes, 20–27 Oct 2026). A clone whose last pass the platform
+    // ended reserves the whole budget, so it only ever starts first.
+    const ownPassMs =
+      passBudgets.get((r as { clones: { id: string } | null }).clones?.id ?? "")?.passMs ?? 0;
+    if (attempted > 0 && opts?.budget?.isPastDeadline(Math.max(slowestMs, ownPassMs))) {
       stoppedEarly = true;
       break;
     }
@@ -1183,6 +1198,7 @@ export async function executeCascade(
             }
           },
           budget: opts?.budget,
+          tailReserveMs: passBudgets.get(clone.id)?.tailMs ?? 0,
           onPhase: (phase, atMs) => writeTrace(enterPhase(passTrace, phase, atMs, traceStartedAt)),
         },
       });
@@ -1901,6 +1917,14 @@ export async function processClone(args: {
     progress: unknown;
     onProgress: (progress: CascadeProgress) => Promise<void>;
     budget?: CascadeBudget;
+    /**
+     * What the prepare loop must leave of the budget for the stages after it,
+     * which never ask: this clone's last measured tail, less the slack the
+     * platform allows past the budget (`cascade/passBudget.pure.ts`). Zero —
+     * the old behaviour — for a clone with no finished trace, and for every
+     * mirror at p90.
+     */
+    tailReserveMs?: number;
     /**
      * Told each stage as the pass enters it, with the milliseconds since the
      * pass began (`cascade/passTrace.pure.ts`). Never awaited: a trace is for
@@ -3242,7 +3266,9 @@ export async function processClone(args: {
    * the window.
    */
   const shouldStop = () =>
-    resume?.budget !== undefined && filesRead > 0 && resume.budget.isPastDeadline(slowestFileMs);
+    resume?.budget !== undefined &&
+    filesRead > 0 &&
+    resume.budget.isPastDeadline(slowestFileMs + (resume.tailReserveMs ?? 0));
 
   /**
    * The lane for a file too large to read: carry it without ever holding it.

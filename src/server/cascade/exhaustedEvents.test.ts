@@ -385,10 +385,20 @@ describe("one tick cannot exhaust an event", () => {
      most one attempt per minute and every attempt gets its own tick body. */
   const drain = readFileSync("src/routes/hooks.cascade-drain.tsx", "utf8");
 
-  it("a failed pass is remembered and not re-claimed this tick", () => {
-    expect(drain).toContain("const failedThisTick = new Set<string>();");
-    expect(drain).toContain("if (r.ok === false && r.id) failedThisTick.add(r.id);");
-    expect(drain).toContain("await drainOne(budget, failedThisTick)");
+  it("a pass this tick ran — failed or paused — is remembered and not re-claimed this tick", () => {
+    // Failures were always remembered. A PAUSE was not: the event it handed
+    // back was claimed again at once with the budget nearly spent, which is
+    // the late pass the platform ends (27 Oct 2026).
+    expect(drain).toContain("const ranThisTick = new Set<string>();");
+    expect(drain).toContain("if (r.id) ranThisTick.add(r.id);");
+    expect(drain).toContain("await drainOne(budget, ranThisTick)");
+  });
+
+  it("every processed return names the event, paused and held ones included", () => {
+    expect(drain).toContain(
+      "return { processed: true, ok: true, held: res.status, id: claimed.id };",
+    );
+    expect(drain).toContain("return { processed: true, ok: true, id: claimed.id };");
   });
 
   it("the claim itself excludes them, so the tick moves on to other work", () => {
