@@ -31,6 +31,7 @@ import {
   resolveMigrationFrontier,
   type MigrationFrontier,
 } from "./migrationFrontier.pure";
+import { bodyWithLedgerRecord } from "./migrationRecordRequest.pure";
 import {
   joinSharedVersionSql,
   missingMembers,
@@ -3062,15 +3063,13 @@ export async function rescueScopedOrphans<T extends { id: string; name: string }
  * joined by ` + `, which is the form `cloneMigrationStanding` reads part by
  * part. One writer for both, so the two cannot come to record a version
  * differently.
+ *
+ * These are the statements. They travel in the request that applies the
+ * version wherever its body allows (`applyAndRecord`), and alone otherwise
+ * (`recordReplayedVersion`).
  */
-async function recordReplayedVersion(
-  projectRef: string,
-  version: string,
-  name: string,
-): Promise<void> {
-  await runSqlOnProject(
-    projectRef,
-    `insert into supabase_migrations.schema_migrations (version, name, statements)
+function ledgerRecordSql(version: string, name: string): string {
+  return `insert into supabase_migrations.schema_migrations (version, name, statements)
        values (${sqlLiteral(version)}, ${sqlLiteral(name)}, ARRAY[]::text[])
        on conflict (version) do nothing;
      insert into aurixa.schema_migrations (version, name)
@@ -3081,8 +3080,45 @@ async function recordReplayedVersion(
        on conflict (version) do update
          set provenance = 'applied',
              recorded_at = now(),
-             note = excluded.note;`,
-  );
+             note = excluded.note;`;
+}
+
+/** The record alone: a chunked seed's, after its last statement, and a body's that cannot share a request. */
+async function recordReplayedVersion(
+  projectRef: string,
+  version: string,
+  name: string,
+): Promise<void> {
+  await runSqlOnProject(projectRef, ledgerRecordSql(version, name));
+}
+
+/**
+ * Apply a version's body and record it, in ONE request wherever the body can
+ * share one — so no pass can end with the version applied and unrecorded.
+ * `migrationRecordRequest.pure.ts` says what one request buys for each kind
+ * of body, and which bodies must keep two.
+ *
+ * Throws what the request threw. A body the clone refuses is never recorded,
+ * in either form.
+ */
+async function applyAndRecord(
+  projectRef: string,
+  body: string,
+  version: string,
+  name: string,
+): Promise<void> {
+  const request = bodyWithLedgerRecord(body, ledgerRecordSql(version, name));
+  if (request.together) {
+    await runSqlOnProject(projectRef, request.sql);
+    return;
+  }
+  console.info("[migrations] a body and its record go in two requests", {
+    projectRef,
+    version,
+    why: request.why,
+  });
+  await runSqlOnProject(projectRef, body);
+  await recordReplayedVersion(projectRef, version, name);
 }
 
 /**
@@ -3499,8 +3535,9 @@ export async function applyPrimeMigrations(
       }
       try {
         sentToClone = true;
-        await runSqlOnProject(projectRef, sql);
-        await recordReplayedVersion(projectRef, unit.version, recordedName);
+        // The version's record rides in the same request as its files, so no
+        // pass can end with the version applied and unrecorded.
+        await applyAndRecord(projectRef, sql, unit.version, recordedName);
         for (const f of unit.members) {
           results.push({ id: f.id, name: f.name, success: true, ...together });
         }
@@ -3654,9 +3691,17 @@ export async function applyPrimeMigrations(
           break;
         }
         sentToClone = true;
-        await runSqlOnProject(projectRef, sql);
+        // Applied and recorded in one request: a pass ended between two
+        // requests left a change applied and unrecorded, and the next pass
+        // sent the whole file again into the objects it had already created.
+        await applyAndRecord(projectRef, sql, m.id, recordedName);
+      } else {
+        // A chunked seed's last statement has gone. Its record is a request
+        // of its own, and safe as one: a pass ended before it resumes at the
+        // cursor and records the seed once nothing is left to send, and a
+        // statement sent twice is a no-op under the seed's own ON CONFLICT.
+        await recordReplayedVersion(projectRef, m.id, recordedName);
       }
-      await recordReplayedVersion(projectRef, m.id, recordedName);
       results.push({ id: m.id, name: m.name, success: true });
       latestApplied = m.id;
       slowestMs = Math.max(slowestMs, Date.now() - startedAt);

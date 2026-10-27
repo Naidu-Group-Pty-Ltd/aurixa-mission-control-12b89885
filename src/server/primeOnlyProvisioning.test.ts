@@ -58,7 +58,11 @@ import {
 } from "./handoff-parity.server";
 import { isCloneFunctionPath } from "./prime-backend.server";
 import { shouldSkipFunctionSource, withoutPrimeOnlyFunctions } from "./primeScanCache.pure";
-import { CRON_UNSCHEDULE, recordingManagementApi } from "./managementApiRecorder.test-support";
+import {
+  CRON_UNSCHEDULE,
+  bodyOf,
+  recordingManagementApi,
+} from "./managementApiRecorder.test-support";
 
 const PRIME = "primeprimeprimeprime";
 const CLONE = "cloneclonecloneclone";
@@ -613,7 +617,7 @@ describe("applyPrimeMigrations — what a replay scheduled is swept after it", (
   it("sweeps after a migration that failed — it may have committed what it scheduled", async () => {
     const api = recordingManagementApi({
       cronJobs: dispatcherOnClone,
-      refuse: (q) => q === MIGRATION.sql,
+      refuse: (q) => bodyOf(q) === MIGRATION.sql,
     });
     vi.stubGlobal("fetch", vi.fn(api.fetch));
     const out = await applyPrimeMigrations(CLONE, [MIGRATION]);

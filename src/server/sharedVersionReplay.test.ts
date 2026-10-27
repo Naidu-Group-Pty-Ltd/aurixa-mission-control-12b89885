@@ -14,7 +14,11 @@ import { readCloneMigrationStanding } from "./cloneMigrationStanding.pure";
 import { OversizedMigrationError, PrimeBodyUnavailableError } from "./oversizedMigration.pure";
 import { MAX_MIGRATION_BYTES } from "./prime-backend.server";
 import { SHARED_VERSION_SEPARATOR } from "./sharedVersionDelivery.pure";
-import { LEDGER_RECORD, recordingManagementApi } from "./managementApiRecorder.test-support";
+import {
+  LEDGER_RECORD,
+  bodyOf,
+  recordingManagementApi,
+} from "./managementApiRecorder.test-support";
 
 const REF = "abcdefghijklmnopqrst";
 
@@ -76,9 +80,14 @@ describe("applyPrimeMigrations — a shared version travels whole", () => {
       { version: B1.id, name: SHARED_NAME },
       { version: C.id, name: C.name },
     ]);
-    // Recorded AFTER the request that ran both — never after the first file.
-    expect(api.sent.indexOf(SHARED_SQL)).toBeLessThan(
-      api.sent.findIndex((q) => LEDGER_RECORD.test(q) && q.includes(`'${B1.id}'`)),
+    // Recorded IN the request that ran both, after both — never after the
+    // first file, and never in a request of its own a pass could stop before.
+    const together = api.sent.findIndex((q) => bodyOf(q) === SHARED_SQL);
+    expect(together).toBeGreaterThan(-1);
+    expect(api.sent[together].slice(SHARED_SQL.length)).toMatch(LEDGER_RECORD);
+    expect(api.sent[together].slice(SHARED_SQL.length)).toContain(`'${B1.id}'`);
+    expect(api.sent.filter((q) => LEDGER_RECORD.test(q) && q.includes(`'${B1.id}'`))).toHaveLength(
+      1,
     );
     // Neither file ever travelled alone.
     expect(api.sent).not.toContain(B1.sql);
@@ -252,7 +261,7 @@ describe("applyPrimeMigrations — a shared version that cannot travel whole is 
 
 describe("applyPrimeMigrations — a shared version is one migration to a failure and a budget", () => {
   it("leaves the version unrecorded when the request fails, names every file sent, and halts", async () => {
-    const api = managementApi({ refuse: (q) => q === SHARED_SQL });
+    const api = managementApi({ refuse: (q) => bodyOf(q) === SHARED_SQL });
 
     const out = await applyPrimeMigrations(REF, [A, B1, B2, C]);
 

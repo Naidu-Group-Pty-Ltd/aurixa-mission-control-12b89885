@@ -123,7 +123,9 @@ describe("a pass is bounded", () => {
   it("the replay asks between migrations, never before the first, and only before a send", () => {
     const skip = replay.indexOf("skipped: true });");
     const check = replay.indexOf("if (attempted > 0 && budget?.isPastDeadline(slowestMs))");
-    const send = replay.indexOf("await runSqlOnProject(projectRef, sql);");
+    // The send applies a body and records it in one request (W7), so it is
+    // spelled `applyAndRecord` rather than as the bare query it used to be.
+    const send = replay.indexOf("await applyAndRecord(projectRef, sql, ");
     expect(skip).toBeGreaterThan(-1);
     expect(check).toBeGreaterThan(skip);
     expect(send).toBeGreaterThan(check);
@@ -153,8 +155,9 @@ describe("a pass is bounded", () => {
   });
 
   it("the replay measures what it applied, so the reserve is a measurement", () => {
-    const send = replay.indexOf("await runSqlOnProject(projectRef, sql);");
+    const send = replay.indexOf("await applyAndRecord(projectRef, sql, ");
     const measured = replay.indexOf("slowestMs = Math.max(slowestMs, Date.now() - startedAt);");
+    expect(send).toBeGreaterThan(-1);
     expect(measured).toBeGreaterThan(send);
     expect(replay.indexOf("const startedAt = Date.now();")).toBeLessThan(send);
   });
