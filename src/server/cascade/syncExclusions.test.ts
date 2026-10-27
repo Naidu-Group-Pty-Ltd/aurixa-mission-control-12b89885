@@ -19,6 +19,7 @@ import {
   approvableHeld,
   oversizeHold,
   oversizeHoldNotice,
+  PARENT_DEPLOYMENT_OWN_FILES,
 } from "./syncExclusions.pure";
 import { CASCADE_STREAM_MAX_FILE_BYTES } from "./blobStreamCarry.pure";
 
@@ -47,6 +48,37 @@ describe("the guarantee", () => {
     for (const e of DEFAULT_MIRROR_EXCLUSIONS) {
       expect(e.pattern.trim()).not.toBe("");
     }
+  });
+});
+
+describe("a parent deployment's own files", () => {
+  const VCR_PRUNE = ".github/workflows/vcr-prune.yml";
+
+  it("start with the dashboard's registry-prune workflow", () => {
+    expect(PARENT_DEPLOYMENT_OWN_FILES).toContain(VCR_PRUNE);
+  });
+
+  it("are each a PROTECTED default, so a parent's cascade never delivers one to a child", () => {
+    // The retarget deletes these from a repository copied from a parent; this
+    // is the other half, without which the parent's next cascade puts the file
+    // straight back. A list entry with no exclusion is the half-fix the
+    // children carried until 26 Oct 2026.
+    for (const path of PARENT_DEPLOYMENT_OWN_FILES) {
+      const entry = DEFAULT_MIRROR_EXCLUSIONS.find((e) => e.pattern === path);
+      expect(entry?.reason, path).toBe("protected");
+    }
+  });
+
+  it("are held silently on a mirror seeded with the defaults", () => {
+    // `protected`, not `manual_reconcile`: the child's correct copy of this file
+    // is its absence, and no decision is owed to anybody about it.
+    const { write, held } = partitionCascadePaths(
+      [VCR_PRUNE, ".github/workflows/ci.yml"],
+      DEFAULT_MIRROR_EXCLUSIONS,
+    );
+    expect(write).toEqual([".github/workflows/ci.yml"]);
+    expect(held).toMatchObject([{ path: VCR_PRUNE, reason: "protected" }]);
+    expect(reportableHeld(held)).toEqual([]);
   });
 });
 
@@ -467,14 +499,42 @@ describe("the seed migrations are a projection of this constant, not a second co
 
   const seeds = () => writers().filter((m) => m.rows.length > 0);
 
+  /**
+   * Defaults whose seed migration is owed rather than written.
+   *
+   * W3 of the delivery plan (27 Oct 2026) appended `vcr-prune.yml` under a
+   * rule that it carry no migration. Nothing live is waiting on one: the two
+   * mirrors that inherit the file from their parent have held this exact
+   * pattern since 26 Oct (written by hand), the third mirror is the parent
+   * that owns the file, and a mirror registered from now on is seeded from
+   * the constant (`seedSyncExclusions`).
+   *
+   * Narrow by construction: an owed entry must be the constant's TAIL, so the
+   * append-only rule still holds, and no migration may carry one — the day a
+   * migration does, the test below fails until the allowance is deleted, so it
+   * cannot outlive its reason.
+   */
+  const SEED_OWED: string[] = [".github/workflows/vcr-prune.yml"];
+  // Counted from the length, so emptying SEED_OWED leaves the whole constant.
+  const owedFrom = DEFAULT_MIRROR_EXCLUSIONS.length - SEED_OWED.length;
+  const seeded = () => DEFAULT_MIRROR_EXCLUSIONS.slice(0, owedFrom);
+
   it("carries every default, in order, with the same reason and note", () => {
     expect(seeds().flatMap((m) => m.rows)).toEqual(
-      DEFAULT_MIRROR_EXCLUSIONS.map((e) => ({
+      seeded().map((e) => ({
         pattern: e.pattern,
         reason: e.reason,
         note: e.note ?? "",
       })),
     );
+  });
+
+  it("owes only its newest entries, and none a migration already carries", () => {
+    expect(DEFAULT_MIRROR_EXCLUSIONS.slice(owedFrom).map((e) => e.pattern)).toEqual(SEED_OWED);
+    const carried = new Set(writers().flatMap((m) => m.rows.map((r) => r.pattern)));
+    for (const pattern of SEED_OWED) {
+      expect(carried.has(pattern), `${pattern} is seeded now; drop it from SEED_OWED`).toBe(false);
+    }
   });
 
   it("is more than one file, and the newest carries the newest entries", () => {
@@ -484,7 +544,9 @@ describe("the seed migrations are a projection of this constant, not a second co
     const files = seeds();
     expect(files.length).toBeGreaterThan(1);
     const last = files[files.length - 1];
-    const tail = DEFAULT_MIRROR_EXCLUSIONS.slice(-last.rows.length).map((e) => e.pattern);
+    const tail = seeded()
+      .slice(-last.rows.length)
+      .map((e) => e.pattern);
     expect(last.rows.map((r) => r.pattern)).toEqual(tail);
   });
 

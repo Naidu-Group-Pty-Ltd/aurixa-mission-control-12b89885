@@ -11,6 +11,14 @@
 // re-accept the App's updated permissions on the installation.
 import { getAppOctokit } from "@/server/github-app.server";
 import { isLocalEncryptionFailure, sealedBoxBase64 } from "@/server/github-sealed-box.server";
+import {
+  branchPolicyRowsOf,
+  branchPolicySettingsOf,
+  keptRulesOf,
+  needsSettingsChange,
+  planBranchPolicies,
+  restrictingPutBody,
+} from "@/server/environmentBranchPolicy.pure";
 
 /**
  * GitHub's own constraint on Actions secret names. Violating it returns a
@@ -154,10 +162,14 @@ export async function putRepoSecret(input: PutRepoSecretInput): Promise<void> {
  * and every workflow that reads one names it, so a clone's copy belongs there
  * too.
  *
- * An environment that does not exist yet is created, with no rules: exactly
- * what GitHub does itself the first time a job names one. Its protection
- * (a branch policy, reviewers) is the repository owner's, so this never
- * changes an environment that exists.
+ * An environment that does not exist yet is created admitting only
+ * `deploymentBranch` (`environmentBranchPolicy.pure.ts`). It used to be
+ * created bare, "exactly what GitHub does itself the first time a job names
+ * one" — which is to say open to every branch while it holds a service-role
+ * key, the hole the prime closed on its own copy. With no branch to name, an
+ * absent environment is refused rather than created open. One that exists is
+ * not changed here: the credential pass keeps its policy with
+ * `ensureEnvironmentBranchPolicy`, and reviewers are never this module's.
  *
  * The secret's metadata is read first, and says two things. Whether it is NEW:
  * GitHub never returns a value, so a re-write cannot be compared with what it
@@ -167,11 +179,16 @@ export async function putRepoSecret(input: PutRepoSecretInput): Promise<void> {
  * sweep's steady state into one read per secret rather than three calls and a
  * write. A caller that knows the value has just changed omits it.
  *
- * Required GitHub App permissions: `Environments: Read & write` (creating
- * one) and `Secrets: Read & write`.
+ * Required GitHub App permissions: `Administration: Read & write` (creating
+ * an environment and its branch policy) and `Secrets: Read & write`.
  */
 export async function putEnvironmentSecret(
-  input: PutRepoSecretInput & { environment: string; reassertAfterMs?: number },
+  input: PutRepoSecretInput & {
+    environment: string;
+    /** The only branch a created environment admits. Null: an absent one is refused. */
+    deploymentBranch: string | null;
+    reassertAfterMs?: number;
+  },
 ): Promise<{ created: boolean; written: boolean }> {
   const nameProblem = validateSecretName(input.name);
   if (nameProblem) {
@@ -211,7 +228,14 @@ export async function putEnvironmentSecret(
     pk = (await readKey()).data;
   } catch (e) {
     if ((e as { status?: number }).status !== 404) throw e;
-    await octokit.request("PUT /repos/{owner}/{repo}/environments/{environment_name}", where);
+    if (!input.deploymentBranch) {
+      throw new Error(
+        `${input.environment} does not exist on ${input.owner}/${input.repo} and no default ` +
+          "branch is recorded to restrict it to, so it was not created: an environment that " +
+          "holds a production credential is never created open to every branch.",
+      );
+    }
+    await restrictEnvironmentToBranch(octokit, where, input.deploymentBranch, []);
     pk = (await readKey()).data;
   }
 
@@ -222,6 +246,147 @@ export async function putEnvironmentSecret(
     { ...where, secret_name: input.name, encrypted_value, key_id: pk.key_id },
   );
   return { created, written: true };
+}
+
+type EnvironmentWhere = { owner: string; repo: string; environment_name: string };
+
+/**
+ * Bring one environment to "only `branch` may deploy", creating it if absent.
+ *
+ * Three steps, in an order chosen for what a failure between them leaves:
+ *
+ *  1. The settings, only where they admit more than selected branches. The
+ *     PUT carries back the reviewers and wait timer the environment already
+ *     enforces; an environment whose reviewers cannot be read is not
+ *     rewritten at all, because a rewrite that cannot send them back is one
+ *     that could remove them.
+ *  2. The default branch, added before anything is taken away, so there is
+ *     no moment in which the scheduled refreshes are refused. Between 1 and 2
+ *     a custom policy with no branches admits NOTHING: a failure there fails
+ *     closed, and the next pass adds the branch.
+ *  3. Every other pattern, removed — but only from a listing that was the
+ *     whole set.
+ *
+ * Throws on a refusal; `changes` holds what was done before it.
+ */
+async function restrictEnvironmentToBranch(
+  octokit: ReturnType<typeof getAppOctokit>,
+  where: EnvironmentWhere,
+  branch: string,
+  changes: string[],
+): Promise<void> {
+  const env = where.environment_name;
+  let existing: unknown = null;
+  try {
+    existing = (
+      await octokit.request("GET /repos/{owner}/{repo}/environments/{environment_name}", where)
+    ).data;
+  } catch (e) {
+    if ((e as { status?: number }).status !== 404) throw e;
+  }
+
+  if (!existing || needsSettingsChange(branchPolicySettingsOf(existing))) {
+    const kept = existing ? keptRulesOf(existing) : {};
+    if (kept === null) {
+      throw new Error(
+        `${env}'s reviewers could not be read, so its branch policy was not rewritten: ` +
+          "a rewrite that cannot send them back could remove them.",
+      );
+    }
+    await octokit.request("PUT /repos/{owner}/{repo}/environments/{environment_name}", {
+      ...where,
+      ...restrictingPutBody(kept),
+    });
+    changes.push(
+      existing ? `restricted ${env} to selected branches` : `created ${env} for selected branches`,
+    );
+  }
+
+  const listed = await octokit.request(
+    "GET /repos/{owner}/{repo}/environments/{environment_name}/deployment-branch-policies",
+    { ...where, per_page: 100 },
+  );
+  const rows = branchPolicyRowsOf(listed.data);
+  if (rows === null) {
+    throw new Error(`${env}'s branch policies could not be read in full, so none was changed.`);
+  }
+  const plan = planBranchPolicies(rows, branch);
+  if (plan.allow) {
+    try {
+      await octokit.request(
+        "POST /repos/{owner}/{repo}/environments/{environment_name}/deployment-branch-policies",
+        { ...where, name: branch, type: "branch" },
+      );
+    } catch (e) {
+      // 303 is GitHub's "that pattern already exists": a concurrent pass got
+      // there first, which is the state wanted.
+      if ((e as { status?: number }).status !== 303) throw e;
+    }
+    changes.push(`allowed ${branch} to deploy to ${env}`);
+  }
+  for (const row of plan.remove) {
+    await octokit.request(
+      "DELETE /repos/{owner}/{repo}/environments/{environment_name}/deployment-branch-policies/{branch_policy_id}",
+      { ...where, branch_policy_id: row.id },
+    );
+    changes.push(`removed the ${row.type} pattern ${row.name} from ${env}`);
+  }
+}
+
+export type EnvironmentPolicyOutcome =
+  /** Already admitted only the default branch. Nothing was written. */
+  | { state: "unchanged" }
+  | { state: "changed"; changes: string[] }
+  /** Refused or unreadable. `changes` is what was done before the refusal. */
+  | { state: "failed"; reason: string; changes: string[] };
+
+/**
+ * Keep an environment admitting only one branch. Idempotent and never throws.
+ *
+ * A settled environment costs two reads and writes nothing, so a half-hourly
+ * pass over a settled fleet changes nothing and reports nothing. A refusal is
+ * returned as an outcome, for the caller to put in its report: the credential
+ * pass this runs inside must not lose its other work to a permission this
+ * step lacks.
+ */
+export async function ensureEnvironmentBranchPolicy(input: {
+  owner: string;
+  repo: string;
+  environment: string;
+  branch: string;
+  installationId?: string | null;
+}): Promise<EnvironmentPolicyOutcome> {
+  const changes: string[] = [];
+  try {
+    const octokit = getAppOctokit(input.installationId ?? undefined);
+    await restrictEnvironmentToBranch(
+      octokit,
+      { owner: input.owner, repo: input.repo, environment_name: input.environment },
+      input.branch,
+      changes,
+    );
+  } catch (e) {
+    const status =
+      (e as { status?: number })?.status ??
+      (e as { response?: { status?: number } })?.response?.status ??
+      null;
+    const raw =
+      (e as { response?: { data?: { message?: string } } })?.response?.data?.message ??
+      (e instanceof Error ? e.message : String(e));
+    // GitHub answers a missing permission on these endpoints as 403 or 404,
+    // like the secrets endpoints above, and the remedy is a different
+    // permission from theirs, so it is named.
+    const reason =
+      status === 403 || status === 404
+        ? `${status}: GitHub refused a change to ${input.environment} on ${input.owner}/${input.repo}. ` +
+          `Creating an environment or changing its branch policy needs the App's ` +
+          `"Administration: Read & write" repository permission. Detail: ${raw}`
+        : status
+          ? `${status}: ${raw}`
+          : raw;
+    return { state: "failed", reason, changes };
+  }
+  return changes.length > 0 ? { state: "changed", changes } : { state: "unchanged" };
 }
 
 /**

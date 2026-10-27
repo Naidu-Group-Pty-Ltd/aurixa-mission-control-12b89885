@@ -9,6 +9,13 @@ import {
 } from "./convergence.pure";
 import { DEFAULT_MIRROR_EXCLUSIONS, type SyncExclusion } from "./syncExclusions.pure";
 import { CASCADE_STREAM_MAX_FILE_BYTES } from "./blobStreamCarry.pure";
+import { PUMPED_PATHS } from "./pumpedPaths.pure";
+import { classifyBlockages } from "./blockageTaxonomy.pure";
+import { planBlockageReconcile } from "./blockageReconcile.pure";
+import { API_SURFACE_PATH } from "./apiSurfaceReconcile.pure";
+import { CONFIG_TOML_PATH } from "./configTomlReconcile.pure";
+import { SECURITY_REGISTRY_PATH } from "./securityRegistryReconcile.pure";
+import { FUNCTION_COUNT_RATCHET_PATH, SECURITY_INVENTORY_PATH } from "./securityInventoryHold.pure";
 
 const tree = (entries: Record<string, string>) => new Map(Object.entries(entries));
 const NONE: SyncExclusion[] = [];
@@ -217,6 +224,191 @@ describe("measureConvergence", () => {
     });
     expect(m.kind === "measured" && m.owed).toEqual(["src/mod/a.ts"]);
     expect(m.kind === "measured" && m.compared).toBe(1);
+  });
+});
+
+/*
+  THE ENGINE'S OWN REWRITES WERE READ AS DEBT FOR NINETEEN DAYS.
+
+  Measured 27 Oct 2026: no mirror had converged since 8 Oct 00:22, and the
+  last reading on each owed exactly these four paths — the files the engine
+  writes each clone its own version of. A pump's output never matches prime's
+  blob, so the reading could never reach zero, and every tick opened an
+  `unclassified` blockage nothing could explain.
+*/
+describe("a path the engine composes for this clone", () => {
+  /** The four every mirror owed on 27 Oct 2026, and nothing else. */
+  const COMPOSED = [
+    SECURITY_INVENTORY_PATH,
+    API_SURFACE_PATH,
+    FUNCTION_COUNT_RATCHET_PATH,
+    SECURITY_REGISTRY_PATH,
+  ];
+  const each = (paths: readonly string[], sha: string) =>
+    Object.fromEntries(paths.map((p) => [p, sha]));
+  /** The mirrors' own policy holds `config.toml`, as the live rows do. */
+  const MIRROR_POLICY: SyncExclusion[] = [{ pattern: CONFIG_TOML_PATH, reason: "protected" }];
+
+  it("measures a mirror that differs only there as converged, with the four counted apart", () => {
+    const m = measureConvergence({
+      prime: tree({ ...each(COMPOSED, "PRIME"), "src/a.ts": "same" }),
+      clone: tree({ ...each(COMPOSED, "CLONE"), "src/a.ts": "same" }),
+      exclusions: MIRROR_POLICY,
+      primeTruncated: false,
+      cloneTruncated: false,
+    });
+    expect(m).toMatchObject({ kind: "measured", owed: [], fingerprint: null, held: 0 });
+    expect(m.kind === "measured" && m.reconciled).toEqual([...COMPOSED].sort());
+    expect(m.kind === "measured" && m.reconciled).toHaveLength(4);
+
+    // The next tick, on the reading the live row carried.
+    const r = judgeConvergence({
+      now: AT("2026-10-27T08:52:00Z"),
+      measurement: m,
+      prior: {
+        state: "falling_behind",
+        fingerprint: fingerprintPaths([...COMPOSED].sort()),
+        unchangedSince: "2026-10-26T21:37:10.188Z",
+        lastConvergedAt: "2026-10-08T00:22:41.539Z",
+      },
+      sloMinutes: 90,
+    });
+    expect(r.state).toBe("converged");
+    expect(r.escalates).toBe(false);
+    expect(r.lastConvergedAt).toBe("2026-10-27T08:52:00.000Z");
+    expect(r.why).toContain("4 path(s) the cascade composes for this clone");
+  });
+
+  it("still owes a real difference beside them", () => {
+    const m = measureConvergence({
+      prime: tree({ ...each(COMPOSED, "PRIME"), "src/a.ts": "PRIME" }),
+      clone: tree({ ...each(COMPOSED, "CLONE"), "src/a.ts": "CLONE" }),
+      exclusions: MIRROR_POLICY,
+      primeTruncated: false,
+      cloneTruncated: false,
+    });
+    expect(m.kind === "measured" && m.owed).toEqual(["src/a.ts"]);
+    expect(m.kind === "measured" && m.reconciled).toHaveLength(4);
+    // The identity of the owed set is the owed set's alone, so a composed
+    // file can never make a stall look like movement.
+    expect(m.kind === "measured" && m.fingerprint).toBe(fingerprintPaths(["src/a.ts"]));
+  });
+
+  /*
+    A pump composes from BOTH sides. A clone with nothing there is sent a
+    file — prime's, or one composed for it — which is a write like any other.
+  */
+  it("owes a composed path the clone does not hold at all", () => {
+    const m = measureConvergence({
+      prime: tree({ [SECURITY_REGISTRY_PATH]: "PRIME" }),
+      clone: tree({}),
+      exclusions: MIRROR_POLICY,
+      primeTruncated: false,
+      cloneTruncated: false,
+    });
+    expect(m.kind === "measured" && m.owed).toEqual([SECURITY_REGISTRY_PATH]);
+    expect(m.kind === "measured" && m.reconciled).toEqual([]);
+  });
+
+  it("leaves a composed path a rule holds where the rule put it", () => {
+    const m = measureConvergence({
+      prime: tree({ [CONFIG_TOML_PATH]: "PRIME" }),
+      clone: tree({ [CONFIG_TOML_PATH]: "CLONE" }),
+      exclusions: MIRROR_POLICY,
+      primeTruncated: false,
+      cloneTruncated: false,
+    });
+    expect(m).toMatchObject({ kind: "measured", owed: [], held: 1, reconciled: [] });
+  });
+
+  it("says nothing extra where nothing composed differs", () => {
+    const r = judgeConvergence({
+      now: AT("2026-10-27T08:52:00Z"),
+      measurement: measureConvergence({
+        prime: tree({ "src/a.ts": "same" }),
+        clone: tree({ "src/a.ts": "same" }),
+        exclusions: NONE,
+        primeTruncated: false,
+        cloneTruncated: false,
+      }),
+      prior: null,
+      sloMinutes: 90,
+    });
+    expect(r.why).toBe("Holds everything the cascade owes it (1 path(s) compared).");
+  });
+
+  /*
+    The three open `unclassified` rows on 27 Oct 2026 each carried
+    `unclassified:4:34461c79` — the fingerprint of exactly these four paths.
+    Nothing but that reading opened them, so the next converged reading must
+    leave nothing to detect and the ledger's ordinary pass clears them.
+  */
+  it("clears the unclassified row that reading opened, by the ledger's ordinary path", () => {
+    const owedThen = [...COMPOSED].sort();
+    expect(fingerprintPaths(owedThen)).toBe("4:34461c79");
+    const base = {
+      cloneId: "37b3e65a",
+      label: "NPC Client Dashboard",
+      syncScope: "mirror",
+      exclusionCount: 31,
+      repoFullName: "Naidu-Group-Pty-Ltd/npc-client-dashboard",
+      openProposals: [],
+      events: [],
+      consecutiveFailures: 0,
+      blockedNotices: [],
+      primeLedgerHoles: [],
+      sloMinutes: 90,
+    };
+    const before = classifyBlockages(
+      {
+        ...base,
+        convergence: {
+          state: "falling_behind",
+          owedCount: 4,
+          owedFingerprint: "4:34461c79",
+          unchangedSince: "2026-10-26T21:37:10.188Z",
+        },
+      },
+      AT("2026-10-27T08:37:00Z"),
+    );
+    expect(before.map((b) => b.fingerprint)).toEqual(["unclassified:4:34461c79"]);
+
+    const m = measureConvergence({
+      prime: tree(each(COMPOSED, "PRIME")),
+      clone: tree(each(COMPOSED, "CLONE")),
+      exclusions: MIRROR_POLICY,
+      primeTruncated: false,
+      cloneTruncated: false,
+    });
+    const r = judgeConvergence({
+      now: AT("2026-10-27T08:52:00Z"),
+      measurement: m,
+      prior: null,
+      sloMinutes: 90,
+    });
+    const after = classifyBlockages(
+      {
+        ...base,
+        convergence: {
+          state: r.state,
+          owedCount: m.kind === "measured" ? m.owed.length : 0,
+          owedFingerprint: m.kind === "measured" ? m.fingerprint : null,
+          unchangedSince: r.unchangedSince,
+        },
+      },
+      AT("2026-10-27T08:52:00Z"),
+    );
+    expect(after).toEqual([]);
+    const plan = planBlockageReconcile(
+      [{ id: "row", fingerprint: "unclassified:4:34461c79" }],
+      after,
+    );
+    expect(plan.clear).toEqual(["row"]);
+  });
+
+  it("reads the list the engine itself rewrites, built from the reconcilers' own constants", () => {
+    for (const p of [...COMPOSED, CONFIG_TOML_PATH]) expect(PUMPED_PATHS.has(p)).toBe(true);
+    expect(PUMPED_PATHS.has("src/a.ts")).toBe(false);
   });
 });
 

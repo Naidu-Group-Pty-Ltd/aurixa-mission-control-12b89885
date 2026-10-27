@@ -72,6 +72,20 @@ export type CloneConvergenceOutcome = {
   clone: string;
   state: ConvergenceState;
   owed: number;
+  /**
+   * Differing paths the engine composes for this clone, counted apart and
+   * never owed (`measureConvergence`). Carried here because the observation
+   * table has no column for it and no JSON column to hold one; the
+   * observation's own `why` says it in words.
+   */
+  reconciled: number;
+  /**
+   * True when the auditor declined to measure this clone BY DESIGN — it
+   * measures mirrors, and this is not one. Its reading is `unknown` like a
+   * failed read, and never converged; it differs only in being the same
+   * standing fact on every tick rather than news.
+   */
+  outOfScope: boolean;
   why: string;
 };
 
@@ -82,6 +96,8 @@ export type ConvergenceAuditReport = {
   stalled: number;
   fallingBehind: number;
   unknown: number;
+  /** Of `unknown`, the clones declined by scope rather than by a failed read. */
+  outOfScope: number;
   /** Observations removed by the retention pass. */
   pruned: number;
   detail: CloneConvergenceOutcome[];
@@ -97,6 +113,7 @@ export async function auditFleetConvergence(supabase: Db): Promise<ConvergenceAu
     stalled: 0,
     fallingBehind: 0,
     unknown: 0,
+    outOfScope: 0,
     pruned: 0,
     detail: [],
   };
@@ -172,7 +189,14 @@ export async function auditFleetConvergence(supabase: Db): Promise<ConvergenceAu
       // One unreachable repository, one unreadable exclusion policy, one
       // database fault — none of them is a reading, and none of them blinds
       // the sweep to the rest of the fleet.
-      outcome = { clone: label, state: "unknown", owed: 0, why: msg(e) };
+      outcome = {
+        clone: label,
+        state: "unknown",
+        owed: 0,
+        reconciled: 0,
+        outOfScope: false,
+        why: msg(e),
+      };
       await writeObservation(supabase, {
         cloneId: clone.id,
         state: "unknown",
@@ -182,7 +206,10 @@ export async function auditFleetConvergence(supabase: Db): Promise<ConvergenceAu
         lastConvergedAt: null,
         sloMinutes,
         scope: clone.sync_scope ?? null,
-        primeSha: null,
+        // Prime's head was read once for the whole pass, so it is known here
+        // whatever went wrong with this clone; the clone's head is not in hand
+        // here, and null says exactly that.
+        primeSha: primeTree?.headSha ?? null,
         cloneSha: null,
       }).catch(() => undefined);
     }
@@ -193,6 +220,7 @@ export async function auditFleetConvergence(supabase: Db): Promise<ConvergenceAu
     else if (outcome.state === "stalled") report.stalled += 1;
     else if (outcome.state === "falling_behind") report.fallingBehind += 1;
     else report.unknown += 1;
+    if (outcome.outOfScope) report.outOfScope += 1;
   }
 
   report.pruned = await pruneObservations(supabase);
@@ -219,7 +247,23 @@ async function auditOneClone(args: {
 
   const prior = await readPrior(supabase, clone.id);
 
-  const unmeasurable = async (why: string): Promise<CloneConvergenceOutcome> => {
+  /*
+    THE TWO HEADS A READING WAS TAKEN AT, WHEREVER THEY WERE READ.
+
+    `listTreeEntries` reads each branch's head and then the tree of THAT head,
+    so the SHA and the tree it returns are one commit. Both columns were
+    written null on every row since the table was created, which left a
+    reading impossible to tie to the commits it compared — the one question
+    an operator asks of a surprising number. A side that was not read stays
+    null: an absent SHA is "not read", never a guess.
+  */
+  const primeSha = primeTree?.headSha ?? null;
+  let cloneSha: string | null = null;
+
+  const unmeasurable = async (
+    why: string,
+    opts: { outOfScope?: boolean } = {},
+  ): Promise<CloneConvergenceOutcome> => {
     const reading = judgeConvergence({
       now: new Date(),
       measurement: { kind: "unmeasurable", why },
@@ -235,10 +279,17 @@ async function auditOneClone(args: {
       lastConvergedAt: reading.lastConvergedAt,
       sloMinutes,
       scope: clone.sync_scope ?? null,
-      primeSha: null,
-      cloneSha: null,
+      primeSha,
+      cloneSha,
     });
-    return { clone: label, state: reading.state, owed: 0, why: reading.why };
+    return {
+      clone: label,
+      state: reading.state,
+      owed: 0,
+      reconciled: 0,
+      outOfScope: opts.outOfScope === true,
+      why: reading.why,
+    };
   };
 
   if (primeReadError) return unmeasurable(`Could not read prime's tree: ${primeReadError}`);
@@ -259,6 +310,14 @@ async function auditOneClone(args: {
     of `20260909110000`; when a module-scoped clone needs measuring the right
     move is to extract the engine's resolver into a shared function, not to
     approximate it here. Named in CASCADE_PIPELINE_HEALTH.md §9.
+
+    It is flagged `outOfScope` as well, because it is the same declared fact
+    on every tick rather than a read that failed. Measured 27 Oct 2026: the
+    CRM independent (`modules`) read `unknown` on all 96 ticks a day, and
+    `unknown > 0` alone was enough to file a cascade-audit row on every one of
+    them, whatever the rest of the fleet was doing. The reading stays
+    `unknown`, never converged; only the tick's decision to write an audit row
+    about it changes.
   */
   if (clone.sync_scope !== "mirror") {
     return unmeasurable(
@@ -266,6 +325,7 @@ async function auditOneClone(args: {
         `A module clone's section of prime is resolved by the engine's own glob and pin ` +
         `logic, and a second implementation of it here would be the disagreement this ` +
         `reading exists to find.`,
+      { outOfScope: true },
     );
   }
 
@@ -281,6 +341,7 @@ async function auditOneClone(args: {
   } catch (e) {
     return unmeasurable(`Could not read ${cloneRef.owner}/${cloneRef.repo}: ${msg(e)}`);
   }
+  cloneSha = cloneTree.headSha;
 
   // Fail-closed: an exclusion set that could not be READ is not an empty one,
   // and an empty one here would report every identity file as owed.
@@ -329,14 +390,16 @@ async function auditOneClone(args: {
     lastConvergedAt: reading.lastConvergedAt,
     sloMinutes,
     scope: "mirror",
-    primeSha: null,
-    cloneSha: null,
+    primeSha,
+    cloneSha,
   });
 
   return {
     clone: label,
     state: reading.state,
     owed: measurement.kind === "measured" ? measurement.owed.length : 0,
+    reconciled: measurement.kind === "measured" ? measurement.reconciled.length : 0,
+    outOfScope: false,
     why: reading.why,
   };
 }

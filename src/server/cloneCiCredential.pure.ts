@@ -73,6 +73,12 @@
  * where the prime keeps its own (`docs/operations/DEPLOYMENT_PROTECTION.md`),
  * so that is where a clone's are written.
  *
+ * An environment is only a boundary if it says which refs may enter it, and
+ * the clones' were created saying nothing. The pass now creates it admitting
+ * the clone's default branch alone, as the prime's admits `main`, and brings
+ * an existing one to that before it writes anything into it
+ * (`environmentBranchPolicy.pure.ts`).
+ *
  * ## A password nobody kept
  *
  * Measured the same day: no clone had a stored password, so this sweep had
@@ -94,6 +100,13 @@ export const CI_SERVICE_ROLE_SECRET = "SUPABASE_SERVICE_ROLE_KEY";
 
 /** The environment every job that reads either credential names. */
 export const CI_ENVIRONMENT = "supabase-production";
+
+/**
+ * The name a report files the environment's branch policy under, beside the
+ * two credentials it guards. The policy is the clone's default branch only,
+ * the rule the prime keeps on its own copy (`environmentBranchPolicy.pure.ts`).
+ */
+export const CI_ENVIRONMENT_POLICY = `${CI_ENVIRONMENT} branch policy`;
 
 /** Not a credential: which project the repository belongs to, readable by anyone who can read it. */
 export const CI_PROJECT_REF_VARIABLE = "SUPABASE_PROJECT_REF";
@@ -310,6 +323,8 @@ export type CredentialOutcome =
   | { repo: string; secret: string; state: "kept" }
   /** The clone has no provisioned backend yet; nothing to distribute. */
   | { repo: string; state: "no_backend" }
+  /** The environment had to be brought to the default branch only; `detail` says how. */
+  | { repo: string; state: "restricted"; detail: string }
   /** Composed nothing, and said why. */
   | { repo: string; secret: string; state: "cannot"; reason: string }
   /** GitHub or Supabase refused. */
@@ -325,6 +340,11 @@ export type CredentialSweep = {
   noBackend: string[];
   /** Repositories whose database Mission Control gave a password this pass. */
   passwordsSet: string[];
+  /**
+   * `owner/repo: what changed`, where the production environment admitted
+   * more than the default branch and was brought to it. Empty once settled.
+   */
+  restricted: string[];
   cannot: Array<{ repo: string; secret: string; reason: string }>;
   failed: Array<{ repo: string; secret: string; reason: string }>;
 };
@@ -336,6 +356,7 @@ export function emptyCredentialSweep(): CredentialSweep {
     kept: [],
     noBackend: [],
     passwordsSet: [],
+    restricted: [],
     cannot: [],
     failed: [],
   };
@@ -343,6 +364,8 @@ export function emptyCredentialSweep(): CredentialSweep {
 
 export function recordOutcome(sweep: CredentialSweep, outcome: CredentialOutcome): CredentialSweep {
   if (outcome.state === "no_backend") sweep.noBackend.push(outcome.repo);
+  else if (outcome.state === "restricted")
+    sweep.restricted.push(`${outcome.repo}: ${outcome.detail}`);
   else if (outcome.state === "distributed")
     sweep.distributed.push(`${outcome.repo} ${outcome.secret}`);
   else if (outcome.state === "kept") sweep.kept.push(`${outcome.repo} ${outcome.secret}`);
@@ -358,12 +381,14 @@ export function recordOutcome(sweep: CredentialSweep, outcome: CredentialOutcome
  * A settled fleet re-asserts the same secrets in the same repositories every
  * half hour. Filing that is how an audit log becomes something nobody reads,
  * so a re-assertion (`kept`) is quiet and only a first write, a password set,
- * a refusal or a failure is filed.
+ * an environment that had to be restricted, a refusal or a failure is filed.
+ * An environment already admitting only its default branch reports nothing.
  */
 export function sweepIsNoteworthy(sweep: CredentialSweep): boolean {
   return (
     sweep.distributed.length > 0 ||
     sweep.passwordsSet.length > 0 ||
+    sweep.restricted.length > 0 ||
     sweep.cannot.length > 0 ||
     sweep.failed.length > 0
   );
@@ -379,6 +404,9 @@ export function describeCredentialSweep(sweep: CredentialSweep): string {
   if (sweep.distributed.length) parts.push(`${sweep.distributed.length} distributed`);
   if (sweep.kept.length) parts.push(`${sweep.kept.length} kept`);
   if (sweep.passwordsSet.length) parts.push(`${sweep.passwordsSet.length} given a password`);
+  if (sweep.restricted.length) {
+    parts.push(`${sweep.restricted.length} restricted to the default branch`);
+  }
   if (sweep.noBackend.length) parts.push(`${sweep.noBackend.length} without a backend`);
   if (sweep.cannot.length) parts.push(`${sweep.cannot.length} could not be composed`);
   if (sweep.failed.length) parts.push(`${sweep.failed.length} failed`);

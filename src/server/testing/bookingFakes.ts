@@ -1,17 +1,35 @@
 // Test doubles for the booking paths: an in-memory stand-in for the slice of
-// the PostgREST builder they use, and a Cal.com API.
+// the PostgREST builder they use, and a Cal.com API. The database double is
+// also what the operator-cascade and inbox bulk-mark tests run against.
 //
 // Both EVALUATE what they are asked rather than replaying canned answers. The
 // database double applies every filter it is handed — JSON paths such as
 // `metadata->calcom->>uid` included — and the Cal.com double books, lists and
 // moves real bookings, and refuses a time it no longer has. A double that ignores its own filters is how a test and
 // the code under it come to agree while the server disagrees; this repository
-// has paid for that more than once.
+// has paid for that more than once. A filter it cannot evaluate throws rather
+// than matching everything.
 import { randomUUID } from "node:crypto";
 
 export type Row = Record<string, unknown>;
 type Filter = (row: Row) => boolean;
-type Result = { data: unknown; error: { message: string; code?: string } | null };
+type Result = {
+  data: unknown;
+  error: { message: string; code?: string } | null;
+  /** Present when the select asked for `count`, as PostgREST answers it. */
+  count?: number | null;
+};
+
+/** A PostgREST group, `(a,b,"c d")`, as the list of values it names. */
+function parseGroup(group: unknown): string[] {
+  const text = String(group).trim();
+  if (!text.startsWith("(") || !text.endsWith(")")) {
+    throw new Error(`fake db: ${text} is not a PostgREST group`);
+  }
+  const inner = text.slice(1, -1);
+  if (!inner) return [];
+  return inner.split(",").map((v) => v.trim().replace(/^"(.*)"$/, "$1"));
+}
 
 export type FakeDb = {
   tables: Record<string, Row[]>;
@@ -73,6 +91,8 @@ function builder(db: FakeDb, table: string): QueryBuilder {
   let op: "select" | "insert" | "update" | "upsert" = "select";
   let values: unknown = null;
   let returning = false;
+  let counting = false;
+  let head = false;
   let conflict: string | null = null;
   const filters: Filter[] = [];
   let order: { column: string; ascending: boolean } | null = null;
@@ -85,8 +105,11 @@ function builder(db: FakeDb, table: string): QueryBuilder {
     db.log.push({ table, op, values });
 
     let result: Row[] = [];
+    // Every row the filters match, before any limit: what PostgREST counts.
+    let matched = 0;
     if (op === "select") {
       result = rows().filter((r) => filters.every((f) => f(r)));
+      matched = result.length;
       if (order) {
         const { column, ascending } = order;
         result = [...result].sort((a, b) => (ascending ? 1 : -1) * compare(a[column], b[column]));
@@ -119,7 +142,11 @@ function builder(db: FakeDb, table: string): QueryBuilder {
       }
     }
 
+    // `head: true` answers the count and no rows.
+    if (op === "select" && head) return { data: null, error: null, count: matched };
     const data = op === "select" || returning ? result.map((r) => structuredClone(r)) : null;
+    if (op === "select" && counting && mode === "many")
+      return { data, error: null, count: matched };
     if (mode === "single") {
       return data && data.length === 1
         ? { data: data[0], error: null }
@@ -141,8 +168,10 @@ function builder(db: FakeDb, table: string): QueryBuilder {
   };
 
   const b: QueryBuilder = {
-    select: () => {
+    select: (_columns?: string, opts?: { count?: string; head?: boolean }) => {
       if (op !== "select") returning = true;
+      if (opts?.count) counting = true;
+      if (opts?.head) head = true;
       return b;
     },
     insert: (v: unknown) => ((op = "insert"), (values = v), b),
@@ -163,6 +192,14 @@ function builder(db: FakeDb, table: string): QueryBuilder {
     is: (c: string, v: unknown) => (filters.push((r) => (readPath(r, c) ?? null) === v), b),
     not: (c: string, operator: string, v: unknown) => {
       if (operator === "is") filters.push((r) => (readPath(r, c) ?? null) !== v);
+      else if (operator === "in") {
+        const group = parseGroup(v);
+        // SQL's `NOT IN` is unknown, so false, for a null value.
+        filters.push((r) => {
+          const value = readPath(r, c);
+          return value !== null && value !== undefined && !group.includes(String(value));
+        });
+      } else throw new Error(`fake db: not("${c}", "${operator}") is not implemented`);
       return b;
     },
     ilike: (c: string, pattern: string) => {

@@ -223,6 +223,89 @@ export function mayCustodianAct(blockage: {
   return { may: true, act: policy.act, what: policy.what };
 }
 
+/** One custodial row, as far as deciding whether writing it says anything new. */
+export type CustodialRecord = {
+  act: string;
+  outcome: "performed" | "would_perform" | "refused" | "failed";
+  rows: number;
+  detail: string;
+  dryRun: boolean;
+};
+
+/**
+ * The newest row already written for one blockage, as the custodian read it.
+ *
+ * Three states, because "nothing written yet" and "could not tell" are
+ * different facts and are decided differently below.
+ */
+export type NewestCustodialRecord =
+  | { read: true; row: CustodialRecord | null }
+  | { read: false; why: string };
+
+/**
+ * Should this row be written?
+ *
+ * ## Why this is asked at all
+ *
+ * The custodian decides every open blockage again on every tick, and wrote
+ * each decision down unconditionally. A blockage a person owns is refused in
+ * the same words on every tick until that person acts, so the table filled
+ * with copies. Measured 27 Oct 2026: over 200,000 rows (115 MB) since 19 Sep,
+ * about 5,300 a day — 5,141 of one day's were refusals of the CRM
+ * independent's 50 `prime_ledger_hole` blockages — and one act actually
+ * performed, ever. A record nobody can find the one real act in is not doing
+ * its job either.
+ *
+ * ## The rule
+ *
+ * An act that ACTED is always written: `performed` changed something, and
+ * `failed` may have changed part of what it set out to before it threw — its
+ * row is the only record of either, and the reversal lives on it.
+ *
+ * Anything else is written only when it differs from the newest row for the
+ * same blockage — its act, outcome, row count, rehearsal flag or detail. The
+ * detail is compared whole rather than through a digest: the newest row is
+ * read anyway, and a digest would add exactly one failure mode, a collision
+ * that reads a changed refusal as unchanged and loses it.
+ *
+ * ## A read that failed writes
+ *
+ * "Could not tell" is not "nothing written yet", and of the two ways to treat
+ * it, only one is safe. Skipping loses a record: a blockage whose first read
+ * failed would have no row at all, which is indistinguishable from a custodian
+ * that never saw it — the silence the table exists to end. Writing costs one
+ * duplicate row. So it writes.
+ */
+export function decideCustodialRecord(input: {
+  next: CustodialRecord;
+  newest: NewestCustodialRecord;
+}): { write: boolean; why: string } {
+  const { next, newest } = input;
+  if (next.outcome === "performed" || next.outcome === "failed") {
+    const acted = next.outcome === "performed" ? "acted" : "may have partly acted";
+    return { write: true, why: `An act that ${acted} is always recorded.` };
+  }
+  if (!newest.read) {
+    return {
+      write: true,
+      why: `The newest record could not be read (${newest.why}); an extra row is safer than a lost one.`,
+    };
+  }
+  const prior = newest.row;
+  if (prior === null) {
+    return { write: true, why: "Nothing has been recorded for this blockage yet." };
+  }
+  const same =
+    prior.act === next.act &&
+    prior.outcome === next.outcome &&
+    prior.rows === next.rows &&
+    prior.dryRun === next.dryRun &&
+    prior.detail === next.detail;
+  return same
+    ? { write: false, why: "The newest record for this blockage already says this." }
+    : { write: true, why: "This differs from the newest record for this blockage." };
+}
+
 /** Acts performed in one tick, across the whole fleet. */
 export const MAX_ACTS_PER_TICK = 4;
 /** Rows one act may rewrite in one tick. */

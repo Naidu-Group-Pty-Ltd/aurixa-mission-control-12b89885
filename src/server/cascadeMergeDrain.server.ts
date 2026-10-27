@@ -94,6 +94,7 @@ import {
   describeBlockedProposal,
 } from "./cascade/blockedEscalation.pure";
 import { choosePointerAdvance } from "./cascade/syncPointer.pure";
+import { shouldWakeHeldEvent } from "./cascade/childWake.pure";
 
 type Db = SupabaseClient<Database>;
 
@@ -1389,5 +1390,71 @@ async function advanceClone(supabase: Db, cloneId: string): Promise<boolean> {
   } catch (e) {
     console.error("[cascade-merge-drain] backend sync request failed:", e);
   }
+
+  // The clones that read THIS clone's branch were waiting for exactly this
+  // move: a child is held until its parent's pointer equals the prime commit
+  // its pass delivers, and re-polled every five minutes. Measured 27 Oct 2026:
+  // 2.5–5 minutes from the dashboard's merge to its children's next pass, on
+  // every delivery. Woken here instead (`cascade/childWake.pure.ts`).
+  //
+  // Never throws: waking is a shortcut, and the pace still runs without it.
+  try {
+    await wakeChildrenOf(supabase, cloneId);
+  } catch (e) {
+    console.error("[cascade-merge-drain] could not wake the children:", e);
+  }
   return true;
+}
+
+/**
+ * Bring forward the pending events holding this clone's children, so the
+ * next drain tick runs them rather than the one five minutes on. Only events
+ * paced on the lineage cadence are moved (`shouldWakeHeldEvent`); a claimed
+ * event, and one waiting out a longer window, are left as they are. Re-checked
+ * at the write, so a claim that raced this one keeps its event.
+ */
+async function wakeChildrenOf(supabase: Db, parentId: string): Promise<number> {
+  const { data: children, error: childErr } = await supabase
+    .from("clones")
+    .select("id")
+    .eq("parent_clone_id", parentId);
+  if (childErr) throw new Error(`could not read ${parentId}'s children: ${childErr.message}`);
+  const childIds = (children ?? []).map((c) => c.id);
+  if (childIds.length === 0) return 0;
+
+  const { data: held, error: heldErr } = await supabase
+    .from("cascade_results")
+    .select("cascade_event_id, cascade_events!inner(status, worker_started_at, next_attempt_at)")
+    .in("clone_id", childIds)
+    .eq("status", "queued")
+    .eq("cascade_events.status", "pending")
+    .is("cascade_events.worker_started_at", null)
+    .limit(100);
+  if (heldErr) throw new Error(`could not read the children's held events: ${heldErr.message}`);
+
+  const nowMs = Date.now();
+  type HeldRow = {
+    cascade_event_id: string;
+    cascade_events: { next_attempt_at: string | null } | null;
+  };
+  const due = [
+    ...new Set(
+      ((held ?? []) as unknown as HeldRow[])
+        .filter((r) => shouldWakeHeldEvent(r.cascade_events?.next_attempt_at ?? null, nowMs))
+        .map((r) => r.cascade_event_id),
+    ),
+  ];
+  if (due.length === 0) return 0;
+
+  const nowIso = new Date(nowMs).toISOString();
+  const { data: woken, error: wakeErr } = await supabase
+    .from("cascade_events")
+    .update({ next_attempt_at: nowIso })
+    .in("id", due)
+    .eq("status", "pending")
+    .is("worker_started_at", null)
+    .gt("next_attempt_at", nowIso)
+    .select("id");
+  if (wakeErr) throw new Error(`could not wake the children's events: ${wakeErr.message}`);
+  return (woken ?? []).length;
 }

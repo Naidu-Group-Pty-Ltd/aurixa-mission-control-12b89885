@@ -4,10 +4,12 @@ import {
   MIGRATION_LANE_DETAIL_PREFIXES,
   PRIME_LEDGER_HOLE_NOTE_CAP,
   blockageDetailFor,
+  holeNoteDetail,
   holesNamedBy,
   isBlockageNote,
   migrationLaneWroteDetail,
   primeLedgerHoleNote,
+  primeLedgerHoleNotes,
   primeLedgerHoleSentence,
   primeLedgerHoleSpan,
   primeLedgerHoleTally,
@@ -307,13 +309,13 @@ describe("what an operator is told", () => {
   });
 
   /*
-    The CRM independent, 27 Sep 2026: 189 holes by version, 50 noted oldest first, the
-    notes ending at 20260721160000 — and the two newest, the pair every mirror
-    reports, in no note and in no sentence. A span read from the notes names
-    the fiftieth-oldest as the newest, so the sentence is read from every hole
-    and names both ends.
+    The CRM independent, 27 Sep 2026: 189 holes by version, 50 noted oldest
+    first, the notes ending at 20260721160000 — and the two newest, the pair
+    every mirror reports, in no note and in no sentence. The notes are the
+    newest now, so read from them a span would lose the OLDEST end instead.
+    Either way the sentence is read from every hole and names both ends.
   */
-  it("names the newest hole, which the capped notes do not hold", () => {
+  it("names both ends, which the capped notes cannot hold together", () => {
     const holes = [
       "20250124120000",
       ...Array.from({ length: 186 }, (_, i) => `2026${String(i).padStart(10, "0")}`),
@@ -321,8 +323,10 @@ describe("what an operator is told", () => {
       "20261219050000",
     ];
     expect(holes).toHaveLength(189);
-    const notes = holes.slice(0, PRIME_LEDGER_HOLE_NOTE_CAP);
-    expect(notes).not.toContain("20261219050000");
+    const noted = primeLedgerHoleNotes(holes).map((n) => n.id);
+    expect(noted).toHaveLength(PRIME_LEDGER_HOLE_NOTE_CAP);
+    expect(noted).toContain("20261219050000");
+    expect(noted).not.toContain("20250124120000");
 
     const sentence = primeLedgerHoleSentence(holes);
     expect(sentence).toContain("189 versions, 20250124120000 to 20261219050000");
@@ -647,6 +651,135 @@ describe("a legacy blockedBy entry is replaced even when the holes are unchanged
 });
 
 /*
+  THE NEWEST HOLES ARE THE ONES NOTED.
+
+  The CRM independent carried 185 legacy holes, 20250124120000 onward, open
+  since 22 Sep and holding nothing back. Noted oldest first, they filled the
+  fifty notes for good: `20270103090000` waited 16 days for its dispatch with a
+  blockage row on all three mirrors and none on the CRM.
+*/
+describe("which holes are noted", () => {
+  const legacy = Array.from({ length: 185 }, (_, i) => `2025${String(i).padStart(10, "0")}`);
+  const withFresh = [...legacy, "20270103090000"];
+
+  it("notes the newest, so a hole merged after the legacy ones is never hidden", () => {
+    const noted = primeLedgerHoleNotes(withFresh).map((n) => n.id);
+    expect(noted).toHaveLength(PRIME_LEDGER_HOLE_NOTE_CAP);
+    expect(noted.at(-1)).toBe("20270103090000");
+    expect(noted[0]).toBe(withFresh[withFresh.length - PRIME_LEDGER_HOLE_NOTE_CAP]);
+    // Corpus order, so the ledger's rows and the record read the same way.
+    expect(noted).toEqual([...noted].sort());
+  });
+
+  it("counts what it leaves out on its oldest note, and only there", () => {
+    const notes = primeLedgerHoleNotes(withFresh);
+    expect(notes[0].olderUnlisted).toBe(withFresh.length - PRIME_LEDGER_HOLE_NOTE_CAP);
+    expect(notes.slice(1).every((n) => !("olderUnlisted" in n))).toBe(true);
+  });
+
+  it("notes every hole, and counts nothing unlisted, under the cap", () => {
+    const notes = primeLedgerHoleNotes(["20261219040000", "20261219050000"]);
+    expect(notes.map((n) => n.id)).toEqual(["20261219040000", "20261219050000"]);
+    expect(notes.some((n) => "olderUnlisted" in n)).toBe(false);
+  });
+
+  it("ignores a repeated or empty hole", () => {
+    expect(primeLedgerHoleNotes(["h", "", "h", "h2"]).map((n) => n.id)).toEqual(["h", "h2"]);
+  });
+
+  it("names the files that carry each version, from the corpus", () => {
+    const notes = primeLedgerHoleNotes(
+      ["20250124120001", "20260723000000"],
+      [
+        { id: "20250124120000", name: "20250124120000_fix_client_data_rls_policies.sql" },
+        { id: "20250124120001", name: "20250124120001_rollback_client_data_rls_policies.sql" },
+        { id: "20260723000000", name: "20260723000000_a.sql" },
+        { id: "20260723000000", name: "20260723000000_b.sql" },
+      ],
+    );
+    expect(notes[0].files).toEqual(["20250124120001_rollback_client_data_rls_policies.sql"]);
+    // A version two files share is one hole, and it names both.
+    expect(notes[1].files).toEqual(["20260723000000_a.sql", "20260723000000_b.sql"]);
+  });
+
+  it("names no files where it was given no corpus, rather than an empty list", () => {
+    expect("files" in primeLedgerHoleNotes(["h"])[0]).toBe(false);
+    expect(primeLedgerHoleNotes(["h"])[0]).toEqual(primeLedgerHoleNote("h"));
+  });
+});
+
+describe("reconciling the record past the cap", () => {
+  const legacy = Array.from({ length: 185 }, (_, i) => `2025${String(i).padStart(10, "0")}`);
+  const withFresh = [...legacy, "20270103090000"];
+
+  it("replaces a record of the oldest with the newest, and discharges nothing still a hole", () => {
+    const stored = [
+      { id: "20270202090000", name: "20270202090000_restate.sql", success: true },
+      ...legacy.slice(0, PRIME_LEDGER_HOLE_NOTE_CAP).map((v) => primeLedgerHoleNote(v)),
+    ];
+    const out = reconcileBlockageRecord({ stored, measured: withFresh });
+    expect(out.entries?.[0]).toEqual(stored[0]);
+    expect(out.entries?.slice(1).map((e) => e.id)).toEqual(
+      withFresh.slice(-PRIME_LEDGER_HOLE_NOTE_CAP),
+    );
+    expect(out.opened).toContain("20270103090000");
+    // Out of the window is not disproved: those versions are still holes.
+    expect(out.discharged).toEqual([]);
+    expect(out.holes).toEqual(withFresh);
+  });
+
+  /*
+    The column is JSONB, which hands an object's keys back in its own order.
+    A record compared as text would read as changed on every pass.
+  */
+  it("writes nothing when the record already is these notes, whatever order its keys are in", () => {
+    const corpus = withFresh.map((v) => ({ id: v, name: `${v}_x.sql` }));
+    const notes = primeLedgerHoleNotes(withFresh, corpus);
+    const asStored = notes.map((n) => Object.fromEntries(Object.entries(n).reverse()));
+    expect(
+      reconcileBlockageRecord({ stored: asStored, measured: withFresh, corpus }).entries,
+    ).toBeNull();
+  });
+
+  it("rewrites a note that does not yet name its files", () => {
+    const corpus = [
+      { id: "20250124120001", name: "20250124120001_rollback_client_data_rls_policies.sql" },
+    ];
+    const out = reconcileBlockageRecord({
+      stored: [primeLedgerHoleNote("20250124120001")],
+      measured: ["20250124120001"],
+      corpus,
+    });
+    expect(out.entries).toEqual(primeLedgerHoleNotes(["20250124120001"], corpus));
+    expect(out.opened).toEqual([]);
+    expect(out.discharged).toEqual([]);
+  });
+});
+
+describe("a hole note read back", () => {
+  it("reads the files and the count left unlisted", () => {
+    const [oldest] = primeLedgerHoleNotes(
+      Array.from({ length: 52 }, (_, i) => `v${String(i).padStart(2, "0")}`),
+      [{ id: "v02", name: "v02_x.sql" }],
+    );
+    expect(holeNoteDetail(oldest)).toEqual({ files: ["v02_x.sql"], olderUnlisted: 2 });
+  });
+
+  it("reads a field it cannot trust as not known, never as none", () => {
+    expect(holeNoteDetail(primeLedgerHoleNote("h"))).toEqual({ files: null, olderUnlisted: 0 });
+    expect(holeNoteDetail({ id: "h", files: "not a list", olderUnlisted: "3" })).toEqual({
+      files: null,
+      olderUnlisted: 0,
+    });
+    expect(holeNoteDetail({ id: "h", files: [], olderUnlisted: -1 })).toEqual({
+      files: null,
+      olderUnlisted: 0,
+    });
+    expect(holeNoteDetail(null)).toEqual({ files: null, olderUnlisted: 0 });
+  });
+});
+
+/*
   THE HOLE THE PARTITION USED TO DISCARD.
 
   `holes` was accumulated for the whole corpus walk and never returned, so a
@@ -729,21 +862,46 @@ describe("the fix is mounted", () => {
 
   it("the replay files a note for every hole it measured", () => {
     const replay = read("src/server/backend-provisioning.server.ts");
-    expect(replay).toContain("primeLedgerHoleNote(version)");
-    expect(replay).toContain("PRIME_LEDGER_HOLE_NOTE_CAP");
+    // Through the one selection the no-op pass reconciles with, handed every
+    // hole and the corpus that names their files.
+    expect(replay).toContain("primeLedgerHoleNotes(part.holes, scope.corpus)");
+    expect(replay).not.toMatch(/part\.holes\.slice\(/);
     // Filed BEFORE the loop: that is what makes it complete on a pass the
     // budget stopped, and on one that broke on a cursor it could not honour.
-    const holeNote = replay.indexOf("primeLedgerHoleNote(version)");
+    const holeNote = replay.indexOf("primeLedgerHoleNotes(part.holes, scope.corpus)");
     const loop = replay.indexOf("for (const unit of versionUnits(ordered))");
     expect(holeNote).toBeGreaterThan(-1);
     expect(loop).toBeGreaterThan(holeNote);
   });
 
   /*
+    TWO LANES FILE NOTES, AND THEY CHOOSE THE SAME ONES.
+
+    The replay files them and the no-op pass reconciles them. Were each to cap
+    the list its own way, every pass would find the record "wrong" and rewrite
+    it, and the ledger would clear and reopen rows that never changed.
+  */
+  it("the no-op pass hands over every hole and the corpus, never a capped list", () => {
+    const lane = read("src/server/fleet-migration.server.ts");
+    const call = callArgs(lane, "reconcileBlockageRecord({");
+    expect(call).toHaveLength(1);
+    expect(call[0]).toContain("measured: primeLedgerHoles,");
+    expect(call[0]).toContain("corpus: scopedMetas,");
+    expect(lane).not.toMatch(/primeLedgerHoles\.slice\(/);
+  });
+
+  it("the blockage ledger reads what a hole note adds", () => {
+    const ledger = read("src/server/blockageLedger.server.ts");
+    expect(ledger).toContain("noted.set(entry.id, holeNoteDetail(entry as AppliedRecordEntry));");
+    expect(ledger).toContain("files: noted.get(version)?.files ?? null,");
+    expect(ledger).toContain("olderUnlisted: noted.get(version)?.olderUnlisted ?? 0,");
+  });
+
+  /*
     The sentences name the count and both ends, so they read EVERY hole. The
-    notes are capped and kept oldest first; handed those, a sentence reports
-    the cap as the count and the fiftieth-oldest hole as the newest — which is
-    what the held-back sentence did by saying nothing at all.
+    notes are capped; handed those, a sentence reports the cap as the count
+    and one end wherever the cap fell — which is what the held-back sentence
+    did by saying nothing at all.
   */
   it("the lane's sentences are composed from every hole, never the capped notes", () => {
     const lane = read("src/server/fleet-migration.server.ts");

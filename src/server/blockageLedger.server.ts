@@ -46,6 +46,7 @@ import {
 import { planBlockageReconcile, type OpenBlockageRow } from "./cascade/blockageReconcile.pure";
 import { readUnreadBlockedNotices } from "./cascade/blockedNoticeRead.server";
 import { DEFAULT_CONVERGENCE_SLO_MINUTES } from "./convergenceAudit.server";
+import { holeNoteDetail, type AppliedRecordEntry } from "./fleetBlockageRecord.pure";
 
 type Db = SupabaseClient<Database>;
 
@@ -322,6 +323,9 @@ async function gatherFacts(
     const applied = Array.isArray(row.migrations_applied) ? row.migrations_applied : [];
     // version → the migrations it holds, in the order the pass recorded them.
     const held = new Map<string, string[]>();
+    // version → what its note adds: the files that carry it, and on the
+    // oldest note how many older holes the record counts and does not list.
+    const noted = new Map<string, ReturnType<typeof holeNoteDetail>>();
     for (const entry of applied as Array<Record<string, unknown>>) {
       /*
         A HOLE THAT WITHHOLDS NOTHING IS STILL A HOLE.
@@ -340,6 +344,7 @@ async function gatherFacts(
       */
       if (entry?.primeLedgerHole === true && typeof entry?.id === "string" && entry.id !== "") {
         if (!held.has(entry.id)) held.set(entry.id, []);
+        noted.set(entry.id, holeNoteDetail(entry as AppliedRecordEntry));
       }
       const blockedBy = Array.isArray(entry?.blockedBy) ? entry.blockedBy : [];
       const name = typeof entry?.name === "string" ? entry.name : null;
@@ -359,6 +364,10 @@ async function gatherFacts(
           version,
           heldCount: names.length,
           firstHeld: names[0] ?? null,
+          // A version known only from a `blockedBy` has no note, so its files
+          // are not known — null, never an empty list.
+          files: noted.get(version)?.files ?? null,
+          olderUnlisted: noted.get(version)?.olderUnlisted ?? 0,
         })),
     );
   }

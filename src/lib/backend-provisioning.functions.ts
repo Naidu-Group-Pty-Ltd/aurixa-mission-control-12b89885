@@ -344,7 +344,7 @@ async function runBackendProvisioning(
     // are read separately now that the origins have their own resolver.
     const { data: cloneRow } = await supabase
       .from("clones")
-      .select("github_owner, github_repo, default_branch")
+      .select("github_owner, github_repo, default_branch, parent_clone_id")
       .eq("id", input.cloneId)
       .maybeSingle();
 
@@ -580,6 +580,10 @@ async function runBackendProvisioning(
           // the reads have been split out, and a named path that has moved
           // reads as `absent`, which does not fail a retarget.
           result.anonKey,
+          // A clone copied from a parent clone carries the parent's own
+          // files (`PARENT_DEPLOYMENT_OWN_FILES`), and the retarget drops
+          // them. A parent records no parent, so its own copies are safe.
+          { fromParentClone: Boolean(cloneRow.parent_clone_id) },
         );
         // Each failure carries its own reason, and they are not all the same
         // kind of thing: "this file still names another project" and "nothing

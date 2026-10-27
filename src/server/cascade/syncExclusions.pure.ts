@@ -616,7 +616,56 @@ export const DEFAULT_MIRROR_EXCLUSIONS: readonly SyncExclusion[] = [
       "silent, but a guard catching it afterwards is not a reason to let the " +
       "cascade write prime's database into a tenant's resolver.",
   },
+
+  // ── A parent deployment's own workflow (W3, 27 Oct 2026) ──────────────────
+  //
+  // The first entry that is not the prime's at all. A child cascades from its
+  // PARENT's tree (lineage), so a file only the parent carries reaches every
+  // child, and a cascade from the prime never writes it anywhere. This one is
+  // listed in `PARENT_DEPLOYMENT_OWN_FILES` below, which is what the retarget
+  // deletes from a repository copied from a parent; this row is what stops the
+  // parent's next cascade putting it back.
+  //
+  // Its seed migration is OWED, not written: W3 carried no migrations. The live
+  // table needs nothing from one today — the two mirrors that inherit it have
+  // held this exact pattern since 26 Oct 2026, by hand, and the third mirror is
+  // the parent, which owns the file — and a mirror registered from now on is
+  // seeded from this array. `syncExclusions.test.ts` names it as owed, and
+  // fails once a migration carries it until that allowance is removed.
+  {
+    pattern: ".github/workflows/vcr-prune.yml",
+    reason: "protected",
+    note:
+      "NPC Client Dashboard's own retention job: it prunes the Vercel container registry of " +
+      "that deployment's project, prj_Mi3Wyu1ZsY7C9u6Q3ElzR7xRS3tj, and with redeploy=true " +
+      "creates a production deployment of it, using a VERCEL_TOKEN or VERCEL_API_TOKEN secret " +
+      "that only the dashboard's repository holds. The prime has no such file. Lineage " +
+      "cascades delivered it to the dashboard's two children on 21 Sep 2026, where it failed " +
+      "every Sunday for want of a token until it was deleted by hand on 26 Oct 2026, and a " +
+      "clone created from the dashboard's repository receives it in its first commit. Held so " +
+      "no cascade delivers it again.",
+  },
 ];
+
+/**
+ * Files a PARENT deployment owns that a child must not inherit.
+ *
+ * A clone created from a parent clone is a whole-tree copy of the parent's
+ * repository (`createUsingTemplate`), so it arrives carrying whatever the
+ * parent keeps for itself alone — and nothing in that copy says which files
+ * those are. The retarget commit deletes each of these from a repository whose
+ * clone records a parent (`clone-repo-retarget.server.ts`, step 5b), and each
+ * is also a `protected` default above, so the parent's next cascade does not
+ * deliver it back. A repository that does not hold one has nothing deleted;
+ * the parent's own copy is never touched, because a parent records no parent.
+ *
+ * A hand list for now, of the kind the delivery plan sets out to retire. The
+ * prime's delivery policy (`docs/DELIVERY_SYSTEM_PLAN.md` §9, a declared
+ * `supabase/delivery-policy.json` naming every deployment's identity files) is
+ * meant to replace it; until then an entry added here must also be appended
+ * to `DEFAULT_MIRROR_EXCLUSIONS`, which `syncExclusions.test.ts` enforces.
+ */
+export const PARENT_DEPLOYMENT_OWN_FILES: readonly string[] = [".github/workflows/vcr-prune.yml"];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The content rule: a clone's backend identity is not a file the cascade owns,

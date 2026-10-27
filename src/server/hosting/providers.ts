@@ -23,6 +23,19 @@ export type CreateProjectInput = {
   repo: { owner: string; name: string; defaultBranch: string };
   framework?: string | null;
   rootDirectory?: string | null;
+  /**
+   * Variables the project holds from the instant it exists — the clone's own
+   * Supabase pair, from `buildCloneEnv`.
+   *
+   * Vercel builds the linked repository as soon as a project is created with
+   * its git link — 64 seconds after creation on the CRM, two drain passes
+   * before `syncing_env` publishes anything — and a build with no
+   * `VITE_SUPABASE_*` inlines whichever backend the repository itself declares
+   * (`projectCreationGate.pure.ts` has the measurements). Only a project this
+   * call CREATES is given these: an adopted one already exists, and
+   * `syncing_env` owns what it holds.
+   */
+  env?: CloneEnvVar[];
 };
 
 export type ProjectResult = {

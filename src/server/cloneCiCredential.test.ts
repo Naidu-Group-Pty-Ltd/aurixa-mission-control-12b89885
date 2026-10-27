@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   CI_DB_URL_SECRET,
   CI_ENVIRONMENT,
+  CI_ENVIRONMENT_POLICY,
   CI_SERVICE_ROLE_SECRET,
   PENDING_PASSWORD_PREFIX,
   SESSION_POOLER_PORT,
@@ -258,6 +259,39 @@ describe("the sweep", () => {
     expect(describeCredentialSweep(sweep)).toBe(
       "2 considered · 1 could not be composed · 1 failed.",
     );
+  });
+
+  it("files an environment it had to restrict, and names what changed", () => {
+    const sweep = emptyCredentialSweep();
+    sweep.considered = 1;
+    recordOutcome(sweep, {
+      repo: "o/a",
+      state: "restricted",
+      detail:
+        "restricted supabase-production to selected branches; allowed main to deploy to supabase-production",
+    });
+    expect(sweepIsNoteworthy(sweep)).toBe(true);
+    expect(sweep.restricted).toEqual([
+      "o/a: restricted supabase-production to selected branches; allowed main to deploy to supabase-production",
+    ]);
+    expect(describeCredentialSweep(sweep)).toBe(
+      "1 considered · 1 restricted to the default branch.",
+    );
+  });
+
+  it("files a policy it could not set under the environment's own name", () => {
+    const sweep = emptyCredentialSweep();
+    recordOutcome(sweep, {
+      repo: "o/a",
+      secret: CI_ENVIRONMENT_POLICY,
+      state: "failed",
+      reason: "403",
+    });
+    expect(sweepIsNoteworthy(sweep)).toBe(true);
+    expect(sweep.failed).toEqual([
+      { repo: "o/a", secret: "supabase-production branch policy", reason: "403" },
+    ]);
+    expect(CI_ENVIRONMENT_POLICY.startsWith(CI_ENVIRONMENT)).toBe(true);
   });
 
   it("says nothing about an empty fleet beyond that it is empty", () => {

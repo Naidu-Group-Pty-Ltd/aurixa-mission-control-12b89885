@@ -167,6 +167,8 @@ export const vercelApi = {
       framework?: string | null;
       gitRepository?: { type: "github"; repo: string };
       rootDirectory?: string | null;
+      /** Held by the project from creation, before the link's first build reads it. */
+      environmentVariables?: Array<{ key: string; value: string; type: string; target: string[] }>;
     },
     teamId?: string | null,
   ): Promise<VercelProject> {
