@@ -1361,15 +1361,22 @@ async function sweepBundleIdentity() {
   // "nothing was due", and the backup for one silent failure becomes a second.
   if (error) {
     console.error("deployment-drain bundle sweep: could not read live rows:", error.message);
-    return { checked: 0, wrong: 0, billingFallback: 0, error: error.message };
+    return { checked: 0, wrong: 0, unproven: 0, billingFallback: 0, error: error.message };
   }
 
   const { verifyCloneBundleIdentity } =
     await import("@/server/hosting/deployedBundleIdentity.server");
-  const { isWrongBackend } = await import("@/server/hosting/deployedBundleIdentity.pure");
+  const { isUnprovenBackend, isWrongBackend } =
+    await import("@/server/hosting/deployedBundleIdentity.pure");
 
   let checked = 0;
   let wrong = 0;
+  // `carries_both` stopped being a wrong backend on 27 Oct 2026 (see
+  // `isWrongBackend`: the reading of a clone whose build does not declare its
+  // backend, which no rebuild changes). Counted here rather than dropped,
+  // because a summary saying only `wrong: 0` over bundles nobody could prove
+  // would be green while true of nothing.
+  let unproven = 0;
   // Counted apart from `wrong`, because the two faults fail apart: a clone can
   // serve its own database perfectly while every purchase made on it credits
   // the prime. Folded into one number, a sweep that queued two rebuilds for a
@@ -1383,6 +1390,7 @@ async function sweepBundleIdentity() {
       if (!out.probed) continue;
       checked++;
       if (out.reading && isWrongBackend(out.reading.verdict)) wrong++;
+      if (out.reading && isUnprovenBackend(out.reading.verdict)) unproven++;
       if (out.reading?.billingUid === "fallback") billingFallback++;
     } catch (e) {
       // `verifyCloneBundleIdentity` stamps `bundle_checked_at` itself, so a
@@ -1391,7 +1399,7 @@ async function sweepBundleIdentity() {
       console.error("deployment-drain bundle sweep failed:", e instanceof Error ? e.message : e);
     }
   }
-  return { checked, wrong, billingFallback, error: null as string | null };
+  return { checked, wrong, unproven, billingFallback, error: null as string | null };
 }
 
 async function drain() {
