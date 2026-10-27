@@ -22,7 +22,12 @@
 
 import { LEDGER_RECORD_SEPARATOR } from "./migrationRecordRequest.pure";
 
-const LEDGER_READ = /select version from supabase_migrations\.schema_migrations\s+union/i;
+/**
+ * The ledger union, as `readCloneMigrationLedger` asks it: the replay reads
+ * through that one fail-closed reader, which selects each row's name as well.
+ */
+const LEDGER_READ =
+  /select version(?:, name)? from supabase_migrations\.schema_migrations\s+union/i;
 const TABLE_COUNT = /from pg_tables/i;
 const TRACKING = /create schema if not exists supabase_migrations/i;
 /**
