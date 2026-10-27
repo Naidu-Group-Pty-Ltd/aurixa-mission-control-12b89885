@@ -149,6 +149,16 @@ describe("the /cascades page fires through the server", () => {
     expect(page).toContain("resolveCascadeTargets");
   });
 
+  it("applies a template's selection whole, so an empty one clears the picks before it", () => {
+    // Kept when the template's list was empty, the earlier picks made Fire
+    // reach clones the template never named (Codex, on #370).
+    const apply = page.slice(page.indexOf("onApply={(v: CascadeTemplateValue)"));
+    const search = apply.slice(0, apply.indexOf("replace: true"));
+    expect(search).toContain('tags: v.tags.join(",")');
+    expect(search).toContain('picked: v.cloneIds.join(",")');
+    expect(search).not.toMatch(/v\.(tags|cloneIds)\.length > 0/);
+  });
+
   it("no longer falls back to the whole fleet", () => {
     expect(page).not.toMatch(/\?\s*tagFilteredClones\s*:\s*clones/);
   });

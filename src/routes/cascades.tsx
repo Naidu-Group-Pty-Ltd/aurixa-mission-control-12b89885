@@ -552,13 +552,17 @@ function CascadesPage() {
               ? v.scope
               : "selected";
           // One navigation, so no field's write can land on top of another's.
+          // The template's selection is taken WHOLE: an empty list clears the
+          // tags or picks already in the URL. Kept, they would make Fire reach
+          // the clones picked before the template was applied, not the ones it
+          // names — and templates saved with an empty list already exist.
           void navigate({
             search: (prev: SearchState) => ({
               ...prev,
               mode: v.mode,
               scope: nextScope,
-              ...(v.tags.length > 0 ? { tags: v.tags.join(",") } : {}),
-              ...(v.cloneIds.length > 0 ? { picked: v.cloneIds.join(",") } : {}),
+              tags: v.tags.join(","),
+              picked: v.cloneIds.join(","),
             }),
             replace: true,
           });
