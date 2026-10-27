@@ -277,6 +277,41 @@ async function primeBackendRefBestEffort(): Promise<string | null> {
   }
 }
 
+/**
+ * This clone's OWN billing identity for a build, given one first where the
+ * clone has none (`ensureCloneBillingIdForDeployment`), with the heal recorded.
+ *
+ * Asked by both steps that publish an environment — `creating_project`, whose
+ * git link starts a production build, and `syncing_env` — because Vite inlines
+ * `VITE_*` at BUILD time: an identity a build does not carry is one its bundle
+ * does not have. One function, so the two steps cannot come to give the same
+ * clone different answers. `by` names the step in the audit row.
+ */
+async function billingIdentityForBuild(
+  cloneId: string,
+  clone: { slug: string; billing_user_id: string | null },
+  by: string,
+) {
+  const { ensureCloneBillingIdForDeployment } =
+    await import("@/server/clone-billing-identity.server");
+  const billing = await ensureCloneBillingIdForDeployment({
+    cloneId,
+    slug: clone.slug,
+    current: clone.billing_user_id,
+  });
+  if (billing.healed) {
+    const { writeAuditLog } = await import("@/server/audit.server");
+    await writeAuditLog({
+      action: "clone.billing_identity_derived",
+      entityType: "clone",
+      entityId: cloneId,
+      actorUserId: null,
+      metadata: { from: null, to: billing.billingId, by, note: billing.note },
+    });
+  }
+  return billing;
+}
+
 async function step(row: DeploymentRow): Promise<StepOutcome> {
   const provider = getHostingProvider(asHostingSlug(row.provider_slug));
   const { clone, backend, config } = await loadContext(row.clone_id);
@@ -353,6 +388,10 @@ async function step(row: DeploymentRow): Promise<StepOutcome> {
       // a pair to give, and `buildCloneEnv` refuses an incoherent pair or the
       // prime's here exactly as it does at `syncing_env`. A row past its first
       // build whose backend publishes no pair gets none, as it always did.
+      //
+      // The billing identity travels with the pair, for the same reason: a
+      // first build without it carries no identity of its own, and
+      // `syncing_env` publishes it only two passes later.
       const envAtCreation: CloneEnvVar[] =
         backend?.supabase_url && backend?.anon_key
           ? buildCloneEnv({
@@ -360,6 +399,13 @@ async function step(row: DeploymentRow): Promise<StepOutcome> {
               supabaseProjectRef: backend.supabase_project_ref,
               supabaseAnonKey: backend.anon_key,
               primeProjectRef: await primeBackendRefBestEffort(),
+              billingUserId: (
+                await billingIdentityForBuild(
+                  row.clone_id,
+                  clone,
+                  "deployment-drain:creating_project",
+                )
+              ).billingId,
             })
           : [];
       const res = await provider.createOrAdoptProject({
@@ -660,29 +706,12 @@ async function step(row: DeploymentRow): Promise<StepOutcome> {
       // identity of its own. See `ensureCloneBillingIdForDeployment`. What
       // cannot be given one still publishes nothing, and the clone's own
       // resolver then declines to spend the prime's built-in identity.
-      const { ensureCloneBillingIdForDeployment } =
-        await import("@/server/clone-billing-identity.server");
-      const billing = await ensureCloneBillingIdForDeployment({
-        cloneId: row.clone_id,
-        slug: clone.slug,
-        current: clone.billing_user_id,
-      });
+      const billing = await billingIdentityForBuild(
+        row.clone_id,
+        clone,
+        "deployment-drain:syncing_env",
+      );
       const billingUserId = billing.billingId;
-      if (billing.healed) {
-        const { writeAuditLog } = await import("@/server/audit.server");
-        await writeAuditLog({
-          action: "clone.billing_identity_derived",
-          entityType: "clone",
-          entityId: row.clone_id,
-          actorUserId: null,
-          metadata: {
-            from: null,
-            to: billingUserId,
-            by: "deployment-drain:syncing_env",
-            note: billing.note,
-          },
-        });
-      }
       if (!billingUserId) {
         console.warn("[drain] clone has no billing identity; its bundle will carry none", {
           clone_id: row.clone_id,
