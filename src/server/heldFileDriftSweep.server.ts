@@ -46,16 +46,38 @@
  * a module still in flight, and the cascade's own guard will speak when it
  * lands. Reporting it here would turn every open cascade into a notification.
  *
+ * ## What it reads
+ *
+ * Only a held file the prime also holds, in another version, can lack wiring
+ * the prime's copy has: a copy the prime does not hold has nothing to compare
+ * against, and one byte-identical to the prime's is missing nothing. So the
+ * prime's tree is listed once a run, and only those files are read, both copies
+ * by blob id, eighty to a query (`fetchBlobTextsBatched`), as are the modules
+ * they import.
+ *
+ * Measured 27 Oct 2026, before this: the sweep read the first 24 of the held
+ * source files in path order and stopped. `npc-crm-independent-6505dc` holds
+ * 114, most of them the line's own files the prime has never held, so each
+ * hour it read the same 24, never reached 25 of the 39 that can drift
+ * (`Conversations.tsx`, `ClientTracker.tsx` and the line's copies of shared
+ * functions among them), and reported the clone `clean`.
+ *
  * ## Cost
  *
- * Per clone: one tree read, two blob reads per held TypeScript path, and a blob
- * read for each module that actually differs — which on a reconciled fleet is
- * zero. Roughly ten calls for the mirror and two for a module-scoped clone,
- * against an hourly budget of 5,000.
+ * Per run: one listing of the prime. Per clone: one tree listing, a query per
+ * eighty held copies on each side, and one per eighty modules they import from,
+ * about four calls for the clone with the most held files, against an hourly
+ * budget of 5,000.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
-import { getAppOctokit, getFileContent, listTreeEntries, type RepoRef } from "./github-app.server";
+import {
+  getAppOctokit,
+  listTreeEntries,
+  type RepoRef,
+  type TreeListing,
+} from "./github-app.server";
+import { decodeBase64Utf8, fetchBlobTextsBatched } from "./prime-backend.server";
 import { notifyOperators, writeAuditLog } from "./audit.server";
 import {
   decideDriftReport,
@@ -82,16 +104,24 @@ export const HELD_DRIFT_ACTION = "held_file_drift_sweep";
 
 /**
  * Ceilings, so one pathologically divergent clone cannot spend the fleet's
- * GitHub budget. Both are far above anything observed — the mirror holds six
- * `manual_reconcile` patterns — and being capped is reported rather than
- * silently trimmed, because a truncated sweep that looks complete is the
- * failure this whole module exists to stop.
+ * GitHub budget. Two batches each, far above what can drift on any clone today
+ * (39 held files on the CRM line, 27 Oct 2026). A sweep that reaches one is
+ * `partial`, never `clean`, and records no clearance, because a truncated
+ * sweep that looks complete is the failure this whole module exists to stop.
  */
-const MAX_HELD_PATHS = 24;
-const MAX_TARGETS = 12;
+export const MAX_HELD_PATHS = 160;
+export const MAX_TARGETS = 160;
 
 export type CloneDriftOutcome =
-  | { clone: string; outcome: "clean"; capped?: boolean }
+  | { clone: string; outcome: "clean" }
+  | {
+      /** A ceiling was reached and nothing was found in what was read. */
+      clone: string;
+      outcome: "partial";
+      read: number;
+      of: number;
+      why: string;
+    }
   | {
       clone: string;
       outcome: "drifted";
@@ -156,6 +186,12 @@ export async function sweepHeldFileDrift(supabase: Db): Promise<HeldFileDriftRep
   if (error) throw new Error(`Could not list clones: ${error.message}`);
 
   const octokit = getAppOctokit();
+  // Listed once for the whole fleet. Without it no held file can be told from
+  // one the prime holds identically, and a run that cannot compare is a fault.
+  const primeTree = await listTreeEntries(octokit, primeRef);
+  if (primeTree.truncated) {
+    throw new Error("The prime's tree listing was truncated, so no held file can be compared");
+  }
 
   for (const raw of data ?? []) {
     const clone = raw as {
@@ -176,6 +212,7 @@ export async function sweepHeldFileDrift(supabase: Db): Promise<HeldFileDriftRep
         supabase,
         octokit,
         primeRef,
+        primeTree,
         label,
         clone: {
           id: clone.id,
@@ -198,7 +235,7 @@ export async function sweepHeldFileDrift(supabase: Db): Promise<HeldFileDriftRep
         report.cleared += 1;
       } else if (outcome.outcome === "skipped") {
         report.skipped += 1;
-      } else if (outcome.outcome === "clean" && outcome.capped) {
+      } else if (outcome.outcome === "partial") {
         report.capped += 1;
       }
     } catch (e) {
@@ -217,6 +254,7 @@ async function sweepOneClone(args: {
   supabase: Db;
   octokit: ReturnType<typeof getAppOctokit>;
   primeRef: RepoRef;
+  primeTree: TreeListing;
   clone: {
     id: string;
     github_owner: string;
@@ -227,7 +265,7 @@ async function sweepOneClone(args: {
   };
   label: string;
 }): Promise<CloneDriftOutcome> {
-  const { supabase, octokit, primeRef, clone, label } = args;
+  const { supabase, octokit, primeRef, primeTree, clone, label } = args;
 
   const cloneRef: RepoRef = {
     owner: clone.github_owner,
@@ -276,12 +314,19 @@ async function sweepOneClone(args: {
   )
     .map((h) => h.path)
     .filter(isSource)
-    // Sorted so the ceiling below takes the same paths every run. An unsorted
-    // cap whose membership drifted would read as a changed finding.
+    // Only a copy the prime also holds, in another version, can be behind it:
+    // see the header. Sorted so the ceiling below takes the same paths every
+    // run. An unsorted cap whose membership drifted would read as a changed
+    // finding.
+    .filter((path) => {
+      const primeSha = primeTree.entries.get(path);
+      return primeSha !== undefined && primeSha !== tree.entries.get(path);
+    })
     .sort();
   if (held.length === 0) {
     // Not "clean" in the interesting sense and not a failure either: this clone
-    // holds no source file back, so there is no held file to be behind.
+    // holds no source file back in a version the prime has, so there is no held
+    // file to be behind.
     return { clone: label, outcome: "clean" };
   }
   const heldPaths = held.slice(0, MAX_HELD_PATHS);
@@ -290,58 +335,28 @@ async function sweepOneClone(args: {
   // Both copies of each held path: the one the clone keeps and the one the
   // cascade declined to write. Comparing them in general is meaningless — they
   // differ on purpose, which is what "held" means — but comparing what each
-  // takes from a module the clone already has is not.
-  const heldFilesClone: Record<string, string> = {};
-  const heldFilesPrime: Record<string, string> = {};
-  await Promise.all(
-    heldPaths.flatMap((path) => [
-      // A read that failed is not a file with no imports. Leaving it out costs
-      // a finding; inventing an empty one would claim the clone is reconciled.
-      (async () => {
-        try {
-          const f = await getFileContent(octokit, cloneRef, path);
-          if (f) heldFilesClone[path] = f.content;
-        } catch {
-          /* leave it out — see above */
-        }
-      })(),
-      (async () => {
-        try {
-          const f = await getFileContent(octokit, primeRef, path);
-          if (f) heldFilesPrime[path] = f.content;
-        } catch {
-          /* leave it out — see above */
-        }
-      })(),
-    ]),
-  );
+  // takes from a module the clone already has is not. Read by the blob ids the
+  // listings hold, so both copies are the ones just listed. A read that fails
+  // fails the clone: an unread file is not a file with no imports, and leaving
+  // it out would let the sweep call a clone reconciled that it never read.
+  const [heldFilesClone, heldFilesPrime] = await Promise.all([
+    readTexts(octokit, cloneRef, tree, heldPaths),
+    readTexts(octokit, primeRef, primeTree, heldPaths),
+  ]);
 
   const plans: DriftFetchPlan[] = [];
   for (const path of heldPaths) {
     const primeSource = heldFilesPrime[path];
     const cloneSource = heldFilesClone[path];
-    // A held path prime does not have is not a gap in the clone; a held path
-    // the clone does not have is a different question, and the guard skips it
-    // anyway.
     if (typeof primeSource !== "string" || typeof cloneSource !== "string") continue;
     plans.push(...planHeldFileDrift({ heldPath: path, primeSource, cloneSource, clonePaths }));
   }
 
-  const targets = [...new Set(plans.map((p) => p.target))];
+  const targets = [...new Set(plans.map((p) => p.target))].sort();
   const fetchTargets = targets.slice(0, MAX_TARGETS);
   capped = capped || fetchTargets.length < targets.length;
 
-  const modules: Record<string, string> = {};
-  await Promise.all(
-    fetchTargets.map(async (target) => {
-      try {
-        const f = await getFileContent(octokit, cloneRef, target);
-        if (f) modules[target] = f.content;
-      } catch {
-        /* a module we could not read cannot support a claim about it */
-      }
-    }),
-  );
+  const modules = await readTexts(octokit, cloneRef, tree, fetchTargets);
 
   // The finding, from the function the cascade uses, over the content actually
   // fetched. The plan above only decided what was worth reading.
@@ -350,6 +365,21 @@ async function sweepOneClone(args: {
     heldFilesPrime,
     cascadedFiles: modules,
   });
+
+  // What a ceiling left unread may hold a gap, so a capped sweep that found
+  // nothing in what it read is `partial`, and records no clearance of a gap
+  // announced before: a clearance is a statement about the whole clone.
+  if (capped && findings.length === 0) {
+    return {
+      clone: label,
+      outcome: "partial",
+      read: heldPaths.length,
+      of: held.length,
+      why:
+        `Read ${heldPaths.length} of ${held.length} held files and ${fetchTargets.length} of ` +
+        `${targets.length} modules they import, past this sweep's ceilings, and found no gap in them.`,
+    };
+  }
 
   const previous = await lastFingerprint(supabase, clone.id);
   const decision = decideDriftReport({ previous, findings });
@@ -364,7 +394,7 @@ async function sweepOneClone(args: {
           announced: false,
           capped,
         }
-      : { clone: label, outcome: "clean", capped };
+      : { clone: label, outcome: "clean" };
   }
 
   const lines = describeMissingHeldReferences(findings);
@@ -408,6 +438,32 @@ async function sweepOneClone(args: {
   });
 
   return { clone: label, outcome: "drifted", findings, lines, announced: true, capped };
+}
+
+/**
+ * The texts of these paths, read by the blob ids the listing holds.
+ *
+ * Throws where a blob cannot be read at all (`fetchBlobTextsBatched` falls back
+ * to REST and raises what REST raises), so an unread file fails the clone
+ * rather than reading as a file with nothing in it.
+ */
+async function readTexts(
+  octokit: ReturnType<typeof getAppOctokit>,
+  ref: RepoRef,
+  listing: TreeListing,
+  paths: readonly string[],
+): Promise<Record<string, string>> {
+  const entries: Array<{ rel: string; sha: string }> = [];
+  for (const rel of paths) {
+    const sha = listing.entries.get(rel);
+    if (sha) entries.push({ rel, sha });
+  }
+  const out: Record<string, string> = {};
+  if (entries.length === 0) return out;
+  for (const [rel, b64] of await fetchBlobTextsBatched(octokit, ref, entries)) {
+    out[rel] = decodeBase64Utf8(b64);
+  }
+  return out;
 }
 
 /**
