@@ -1161,4 +1161,27 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20261027100000",
     assertions: [{ kind: "column", table: "clones", column: "sync_scope" }],
   },
+  {
+    migration: "20261027120000_workspace_message_reply_kind.sql",
+    version: "20261027120000",
+    assertions: [{ kind: "enum", type: "notification_kind" }],
+  },
+  {
+    migration: "20261027120100_workspace_message_replies.sql",
+    version: "20261027120100",
+    assertions: [
+      { kind: "table", table: "clone_announcement_replies" },
+      { kind: "column", table: "clone_announcements", column: "replies_enabled" },
+      { kind: "column", table: "clone_announcements", column: "audience_match" },
+      { kind: "column", table: "clone_announcements", column: "client_request_id" },
+      { kind: "column", table: "clone_announcement_deliveries", column: "seen_count" },
+      { kind: "check", table: "clone_announcements", column: "audience_match", value: "any" },
+      {
+        kind: "check",
+        table: "clone_announcement_replies",
+        column: "direction",
+        value: "operator",
+      },
+    ],
+  },
 ];

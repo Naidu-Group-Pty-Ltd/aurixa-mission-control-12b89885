@@ -1,0 +1,15 @@
+-- @asserts enum:notification_kind
+--
+-- The alarm a workspace's reply to a Mission Control message raises
+-- (`announcementReplies.server.ts`): somebody in a workspace has answered a
+-- message that was sent with replies enabled, and an operator should read it
+-- in Workspace messages.
+--
+-- Its own value rather than `clone_announcement_published`:
+-- `notification_preferences.muted_kinds` is keyed on this enum, so an operator
+-- who mutes the publish receipts must not also stop hearing that a customer
+-- wrote back.
+--
+-- ALTER TYPE lives in its own migration on purpose: a new enum value cannot be
+-- added and used in the same transaction.
+ALTER TYPE public.notification_kind ADD VALUE IF NOT EXISTS 'clone_announcement_reply';
