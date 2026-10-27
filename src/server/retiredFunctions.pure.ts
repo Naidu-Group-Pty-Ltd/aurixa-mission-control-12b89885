@@ -51,6 +51,15 @@
  *     four clones on 16 and 17 Oct, after the prime had removed it, and why
  *     every clone's lane record still lists it as owned once (`retired`).
  *     Deleting it in that window would only see that lane put it back.
+ * - **Never before the prime has deleted it from its own project.** The
+ *   prime's workflows make deleting a deployed function "a deliberate act
+ *   with a name in the Actions log, never a side effect of a push", and they
+ *   ask for it only "once the frontend that stopped calling the function is
+ *   live". Reading the list alone would make a clone's deletion the side
+ *   effect of the push that merged the list. So a function goes from the
+ *   clones only once the prime's own project no longer runs it: the dispatch
+ *   is the decision, and the clones follow it. Measured 27 Oct 2026, the
+ *   prime ran none of the thirty-four.
  * - **The ones anybody can call go first.** A pass deletes a bounded number
  *   from each project. A function answering without a JWT
  *   (`verify_jwt = false`) is open to anyone, so it goes before one that
@@ -211,6 +220,15 @@ export function retiredCandidatesIn(
 }
 
 /**
+ * What still stands for one clone's retired functions: the functions the
+ * prime's own project runs, and the directories the clone's own tree carries.
+ */
+export type RetiredFunctionGuards = {
+  primeRuns: ReadonlySet<string>;
+  cloneCarries: ReadonlySet<string>;
+};
+
+/**
  * Which retired functions a project may lose, and which it keeps and why.
  *
  * `found` is ordered for the delete cap: those answering without a JWT first,
@@ -220,7 +238,7 @@ export function retiredCandidatesIn(
 export function retiredFunctionsToDelete(
   candidates: readonly DeployedFunction[],
   register: RetiredFunctionRegister,
-  cloneCarries: ReadonlySet<string>,
+  guards: RetiredFunctionGuards,
 ): {
   found: Array<{ slug: string; reason: string }>;
   kept: Array<{ slug: string; why: string }>;
@@ -235,7 +253,14 @@ export function retiredFunctionsToDelete(
           `the prime's tree still carries supabase/functions/${fn.slug}/ at ${register.readAt}, ` +
           "so it is retired on paper only: the next deploy would bring it back",
       });
-    } else if (cloneCarries.has(fn.slug)) {
+    } else if (guards.primeRuns.has(fn.slug)) {
+      kept.push({
+        slug: fn.slug,
+        why:
+          "the prime's own project still runs it: it goes from the clones once the prime's " +
+          `${register.retiredBy.get(fn.slug)} has been dispatched and has deleted it there`,
+      });
+    } else if (guards.cloneCarries.has(fn.slug)) {
       kept.push({
         slug: fn.slug,
         why:
@@ -252,7 +277,8 @@ export function retiredFunctionsToDelete(
     .map((fn) => ({
       slug: fn.slug,
       reason:
-        `retired by the prime's ${register.retiredBy.get(fn.slug)}, and no tree carries its source` +
+        `retired by the prime's ${register.retiredBy.get(fn.slug)}, which has deleted it from the ` +
+        "prime's own project, and no tree carries its source" +
         (fn.verifyJwt === false ? "; it answers without a JWT" : ""),
     }));
   return { found, kept: kept.sort((a, b) => a.slug.localeCompare(b.slug)) };

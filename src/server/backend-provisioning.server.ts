@@ -57,6 +57,7 @@ import {
   retiredCandidatesIn,
   retiredFunctionsToDelete,
   type DeployedFunction,
+  type RetiredFunctionGuards,
   type RetiredFunctionRegister,
 } from "./retiredFunctions.pure";
 import { deployedVerifyJwt } from "./anonymousFunctionSlugs.pure";
@@ -2194,10 +2195,12 @@ export type PrimeOnlyFunctionSweep = {
 export type RetiredFunctionSweepInput = {
   register: RetiredFunctionRegister;
   /**
-   * The function directories the clone's own tree carries. Asked only when
-   * the project runs a retired function, so a clean project costs no read.
+   * What still stands for this clone: the functions the prime's own project
+   * runs, and the directories the clone's own tree carries. Asked only when
+   * the project runs a retired function, so a clean project costs no read. A
+   * refusal keeps every retired function on the clone, named.
    */
-  cloneCarries: () => Promise<{ carries: ReadonlySet<string> } | { refused: string }>;
+  guards: () => Promise<RetiredFunctionGuards | { refused: string }>;
 };
 
 /**
@@ -2239,10 +2242,10 @@ export const PRIME_ONLY_FUNCTION_DELETES_PER_PASS = 10;
  * from the feature's BUCKET, which this platform never deletes.
  *
  * Given the prime's RETIRED functions, it takes those off too, last and under
- * the same cap (`retiredFunctions.pure.ts`). Their source has left the prime's
- * tree, and the prime's own decommission workflow already deleted them there.
- * A retired function whose source a tree still carries is `kept`, with the
- * reason, never deleted. The ones that answer without a JWT go first.
+ * the same cap (`retiredFunctions.pure.ts`). One goes only once its source has
+ * left the prime's tree and the clone's, and the prime's own decommission
+ * workflow has deleted it from the prime's project. Otherwise it is `kept`,
+ * with the reason, never deleted. The ones that answer without a JWT go first.
  */
 export async function sweepPrimeOnlyFunctions(
   targetRef: string,
@@ -2304,21 +2307,23 @@ export async function sweepPrimeOnlyFunctions(
       (fn) => !taken.has(fn.slug),
     );
     if (candidates.length > 0) {
-      let clone: { carries: ReadonlySet<string> } | { refused: string };
+      let guards: RetiredFunctionGuards | { refused: string };
       try {
-        clone = await opts.retired.cloneCarries();
+        guards = await opts.retired.guards();
       } catch (err) {
-        clone = { refused: err instanceof Error ? err.message : String(err) };
+        guards = {
+          refused: `what still stands for it could not be read: ${err instanceof Error ? err.message : String(err)}`,
+        };
       }
-      if ("refused" in clone) {
-        // Unread is not empty: a clone whose tree cannot be read might be the
-        // one carrying the source, so nothing retired is taken off it.
-        const why = `the clone's own tree could not be read, so its source cannot be ruled out: ${clone.refused}`;
+      if ("refused" in guards) {
+        // Unread is not empty: a guard this pass could not read might be the
+        // one that keeps the function, so nothing retired is taken off.
+        const why = guards.refused;
         sweep.kept = candidates
           .map((fn) => ({ slug: fn.slug, why }))
           .sort((a, b) => a.slug.localeCompare(b.slug));
       } else {
-        const decided = retiredFunctionsToDelete(candidates, opts.retired.register, clone.carries);
+        const decided = retiredFunctionsToDelete(candidates, opts.retired.register, guards);
         found.push(...decided.found);
         if (decided.kept.length > 0) sweep.kept = decided.kept;
       }

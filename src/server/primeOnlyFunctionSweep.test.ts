@@ -253,6 +253,13 @@ describe("what the prime has retired, taken off with the rest", () => {
     "street-view",
   ];
 
+  /**
+   * The clones' projects, and the prime's own: by default it runs none of the
+   * retired functions, as measured on 27 Oct 2026.
+   */
+  const fleet = (deployed: Record<string, string[]>) =>
+    projects({ [PRIME]: ["listings-cache:jwt", "builder-stock-marketplace:open"], ...deployed });
+
   beforeEach(() => {
     db.clones = {
       data: [
@@ -277,7 +284,7 @@ describe("what the prime has retired, taken off with the rest", () => {
   });
 
   it("deletes them by exact name, after the prime's own and the ones anybody can call first", async () => {
-    const api = projects({
+    const api = fleet({
       [DASHBOARD]: [
         "builder-portal-admin:jwt",
         "builder-portal-login:open",
@@ -303,7 +310,8 @@ describe("what the prime has retired, taken off with the rest", () => {
     const dashboard = result.outcomes.find((o) => o.cloneId === "cd")?.sweep;
     expect(dashboard?.deleted.find((d) => d.slug === "builder-portal-login")?.reason).toBe(
       "retired by the prime's .github/workflows/decommission-builder-portal-functions.yml, " +
-        "and no tree carries its source; it answers without a JWT",
+        "which has deleted it from the prime's own project, and no tree carries its source; " +
+        "it answers without a JWT",
     );
     expect(result.retired).toEqual({
       readAt: "Naidu-Group-Pty-Ltd/npc-property-dashbord@d72032e1abcd",
@@ -316,7 +324,7 @@ describe("what the prime has retired, taken off with the rest", () => {
   });
 
   it("reads the register once a pass, and a clone's own tree only where its project runs a retired function", async () => {
-    const api = projects({
+    const api = fleet({
       [DASHBOARD]: ["builder-portal-login:open"],
       [CRM]: ["crm-send-message:jwt"],
     });
@@ -331,8 +339,71 @@ describe("what the prime has retired, taken off with the rest", () => {
     });
   });
 
+  it("reads the prime's own project once a pass, and only when a clone runs a retired function", async () => {
+    const primeReads = (api: ReturnType<typeof projects>) =>
+      api.requests.filter(
+        (r) => r.method === "GET" && r.url.endsWith(`/projects/${PRIME}/functions`),
+      ).length;
+    const busy = fleet({
+      [DASHBOARD]: ["builder-portal-login:open"],
+      [CRM]: ["street-view:open"],
+    });
+    vi.stubGlobal("fetch", busy.fetch);
+    await sweepPrimeOnlyFunctionsFromFleet();
+    expect(primeReads(busy)).toBe(1);
+
+    const clean = fleet({ [DASHBOARD]: ["listings-cache:jwt"], [CRM]: ["crm-send-message:jwt"] });
+    vi.stubGlobal("fetch", clean.fetch);
+    await sweepPrimeOnlyFunctionsFromFleet();
+    expect(primeReads(clean)).toBe(0);
+  });
+
+  it("keeps what the prime's own project still runs: dispatching its decommission is the decision", async () => {
+    // A name merged onto a RETIRED list before the prime's workflow has run.
+    const api = fleet({
+      [PRIME]: ["listings-cache:jwt", "builder-portal-login:open"],
+      [DASHBOARD]: ["builder-portal-login:open", "street-view:open"],
+      [CRM]: ["builder-portal-login:open"],
+    });
+    vi.stubGlobal("fetch", api.fetch);
+    const result = await sweepPrimeOnlyFunctionsFromFleet();
+    expect(api.deletes()).toEqual([`${DASHBOARD}:street-view`]);
+    for (const id of ["cd", "crm"]) {
+      expect(result.outcomes.find((o) => o.cloneId === id)?.sweep?.kept).toEqual([
+        {
+          slug: "builder-portal-login",
+          why:
+            "the prime's own project still runs it: it goes from the clones once the prime's " +
+            ".github/workflows/decommission-builder-portal-functions.yml has been dispatched and has deleted it there",
+        },
+      ]);
+    }
+  });
+
+  it("deletes nothing retired when the prime's own project cannot be listed, and still takes the prime's own off", async () => {
+    // The prime's project answers 404: a token that cannot see it, or no project.
+    const api = projects({
+      [DASHBOARD]: ["builder-portal-login:open", "migration-dispatcher:jwt"],
+      [CRM]: ["street-view:open"],
+    });
+    vi.stubGlobal("fetch", api.fetch);
+    const result = await sweepPrimeOnlyFunctionsFromFleet();
+    expect(api.deletes()).toEqual([`${DASHBOARD}:migration-dispatcher`]);
+    const why =
+      "the prime's own project could not be listed, so whether its decommission has run cannot be told";
+    expect(result.outcomes.find((o) => o.cloneId === "cd")?.sweep?.kept).toEqual([
+      { slug: "builder-portal-login", why },
+    ]);
+    expect(result.outcomes.find((o) => o.cloneId === "crm")?.sweep?.kept).toEqual([
+      { slug: "street-view", why },
+    ]);
+    // Neither clone's tree is worth reading on a pass that cannot decide.
+    expect(retired.cloneCarries).not.toHaveBeenCalled();
+    expect(fleetFunctionSweepIsNoteworthy({ ...result, deleted: 0 })).toBe(true);
+  });
+
   it("asks a clone recording no default branch for its tree on main", async () => {
-    const api = projects({ [DASHBOARD]: [], [CRM]: ["street-view:open"] });
+    const api = fleet({ [DASHBOARD]: [], [CRM]: ["street-view:open"] });
     vi.stubGlobal("fetch", api.fetch);
     await sweepPrimeOnlyFunctionsFromFleet();
     expect(retired.cloneCarries).toHaveBeenCalledWith({
@@ -345,7 +416,7 @@ describe("what the prime has retired, taken off with the rest", () => {
   it("keeps a retired function a tree still carries, and says which tree", async () => {
     retired.cloneCarries = vi.fn(async () => ({ carries: new Set(["builder-portal-login"]) }));
     openWith(registerOf(RETIRED, ["street-view"]));
-    const api = projects({
+    const api = fleet({
       [DASHBOARD]: ["builder-portal-login:open", "street-view:open", "builder-portal-admin:jwt"],
       [CRM]: [],
     });
@@ -366,7 +437,7 @@ describe("what the prime has retired, taken off with the rest", () => {
       refused: "Naidu-Group-Pty-Ltd/npc-client-dashboard@main could not be read",
     }));
     openWith(registerOf(RETIRED));
-    const api = projects({
+    const api = fleet({
       [DASHBOARD]: ["builder-portal-login:open", "migration-dispatcher:jwt"],
       [CRM]: [],
     });
@@ -386,7 +457,7 @@ describe("what the prime has retired, taken off with the rest", () => {
 
   it("and from a clone recording no repository at all", async () => {
     db.clones = { data: [{ id: "cd", name: "NPC Client Dashboard" }], error: null };
-    const api = projects({ [DASHBOARD]: ["builder-portal-login:open"] });
+    const api = fleet({ [DASHBOARD]: ["builder-portal-login:open"] });
     vi.stubGlobal("fetch", api.fetch);
     const result = await sweepPrimeOnlyFunctionsFromFleet();
     expect(api.deletes()).toEqual([]);
@@ -402,7 +473,7 @@ describe("what the prime has retired, taken off with the rest", () => {
       postponed: false,
       why: "the prime's workflows could not be listed at x@y: HTTP 502",
     };
-    const api = projects({
+    const api = fleet({
       [DASHBOARD]: ["builder-portal-login:open", "migration-dispatcher:jwt"],
       [CRM]: ["street-view:open"],
     });
@@ -426,7 +497,7 @@ describe("what the prime has retired, taken off with the rest", () => {
       postponed: true,
       why: "900 call(s) left in the installation's window, below the scan floor of 1500",
     };
-    const api = projects({ [DASHBOARD]: ["builder-portal-login:open"], [CRM]: [] });
+    const api = fleet({ [DASHBOARD]: ["builder-portal-login:open"], [CRM]: [] });
     vi.stubGlobal("fetch", api.fetch);
     const result = await sweepPrimeOnlyFunctionsFromFleet();
     expect(api.deletes()).toEqual([]);
@@ -452,7 +523,7 @@ describe("what the prime has retired, taken off with the rest", () => {
         primeTreePaths: [],
       }),
     );
-    const api = projects({
+    const api = fleet({
       [DASHBOARD]: ["builder-portal-login:open", "street-view:open"],
       [CRM]: [],
     });
@@ -469,20 +540,24 @@ describe("what the prime has retired, taken off with the rest", () => {
   });
 
   it("never sweeps a retired function off the prime, even where a clone's row names the prime's project", async () => {
+    // The prime's own list is the project being swept, so whatever it runs is
+    // kept before the prime's ref is even compared; the comparison still
+    // stands behind it for the prime-only functions.
     db.backends = { data: [{ clone_id: "cd", supabase_project_ref: PRIME }], error: null };
-    const api = projects({ [PRIME]: ["builder-portal-login:open"] });
+    const api = fleet({ [PRIME]: ["builder-portal-login:open", "migration-dispatcher:jwt"] });
     vi.stubGlobal("fetch", api.fetch);
     const result = await sweepPrimeOnlyFunctionsFromFleet();
     expect(api.deletes()).toEqual([]);
-    expect(result.outcomes.find((o) => o.cloneId === "cd")?.sweep?.skipped).toMatch(
-      /prime's own project/,
-    );
+    const sweep = result.outcomes.find((o) => o.cloneId === "cd")?.sweep;
+    expect(sweep?.kept?.map((k) => k.slug)).toEqual(["builder-portal-login"]);
+    expect(sweep?.kept?.[0].why).toMatch(/^the prime's own project still runs it/);
+    expect(sweep?.skipped).toMatch(/prime's own project/);
   });
 
   it("shares the pass's cap with the prime's own functions, and names the rest for the next pass", async () => {
     const many = Array.from({ length: 12 }, (_, i) => `retired-fn-${String(i).padStart(2, "0")}`);
     openWith(registerOf(many));
-    const api = projects({ [DASHBOARD]: many.map((n) => `${n}:open`), [CRM]: [] });
+    const api = fleet({ [DASHBOARD]: many.map((n) => `${n}:open`), [CRM]: [] });
     vi.stubGlobal("fetch", api.fetch);
     const result = await sweepPrimeOnlyFunctionsFromFleet();
     expect(result.deleted).toBe(10);

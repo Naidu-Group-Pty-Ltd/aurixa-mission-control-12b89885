@@ -268,7 +268,11 @@ describe("the register, put together at one commit", () => {
     const { found, kept } = retiredFunctionsToDelete(
       retiredCandidatesIn(dependentClone, register),
       register,
-      new Set(["listings-cache", "builder-stock-marketplace"]),
+      // As measured: the prime runs neither the portal nor Street View any more.
+      {
+        primeRuns: new Set(["listings-cache", "builder-stock-marketplace"]),
+        cloneCarries: new Set(["listings-cache", "builder-stock-marketplace"]),
+      },
     );
     expect(kept).toEqual([]);
     expect(found).toHaveLength(28);
@@ -289,7 +293,8 @@ describe("the register, put together at one commit", () => {
       "builder-workspace-admin",
     ]);
     expect(found[0].reason).toBe(
-      `retired by the prime's ${BUILDER_PATH}, and no tree carries its source; it answers without a JWT`,
+      `retired by the prime's ${BUILDER_PATH}, which has deleted it from the prime's own project, ` +
+        "and no tree carries its source; it answers without a JWT",
     );
   });
 
@@ -297,10 +302,32 @@ describe("the register, put together at one commit", () => {
     const { found } = retiredFunctionsToDelete(
       [{ slug: "street-view" }, { slug: "mc-diag-tmp", verifyJwt: false }],
       register,
-      new Set(),
+      { primeRuns: new Set(), cloneCarries: new Set() },
     );
     expect(found.map((f) => f.slug)).toEqual(["mc-diag-tmp", "street-view"]);
     expect(found[1].reason).not.toContain("without a JWT");
+  });
+
+  it("keeps one the prime's own project still runs, until the prime's decommission has deleted it there", () => {
+    // Merging a name onto a RETIRED list is not the decision; dispatching the
+    // workflow is. A clone never loses a function the prime still serves.
+    const { found, kept } = retiredFunctionsToDelete(
+      [
+        { slug: "street-view", verifyJwt: false },
+        { slug: "builder-portal-login", verifyJwt: false },
+      ],
+      register,
+      { primeRuns: new Set(["builder-portal-login"]), cloneCarries: new Set() },
+    );
+    expect(found.map((f) => f.slug)).toEqual(["street-view"]);
+    expect(kept).toEqual([
+      {
+        slug: "builder-portal-login",
+        why:
+          "the prime's own project still runs it: it goes from the clones once the prime's " +
+          `${BUILDER_PATH} has been dispatched and has deleted it there`,
+      },
+    ]);
   });
 
   it("keeps one the prime's tree still carries, and one the clone's own tree still carries", () => {
@@ -316,7 +343,7 @@ describe("the register, put together at one commit", () => {
         { slug: "mc-wallet-diag", verifyJwt: false },
       ],
       revived,
-      new Set(["mc-diag-tmp"]),
+      { primeRuns: new Set(), cloneCarries: new Set(["mc-diag-tmp"]) },
     );
     expect(found.map((f) => f.slug)).toEqual(["mc-wallet-diag"]);
     expect(kept).toEqual([

@@ -51,12 +51,14 @@
  * a JWT. The register is read once a pass from the prime's repository. That
  * half yields to the GitHub budget on its own, and a pass that cannot read it
  * deletes nothing retired anywhere while still taking the prime-only functions
- * off. A clone's own tree is read only for a clone that runs a retired
- * function, so a clean fleet costs no read of a clone repository at all.
+ * off. What still stands is read only when a clone runs a retired function:
+ * the prime's own project once a pass, and that clone's own tree. A clean
+ * fleet therefore costs no read of either.
  */
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import {
+  readProjectEdgeFunctionSlugs,
   sweepPrimeOnlyCronJobs,
   sweepPrimeOnlyFunctions,
   type PrimeOnlyCronSweep,
@@ -173,6 +175,14 @@ export async function sweepPrimeOnlyFunctionsFromFleet(): Promise<FleetFunctionS
         postponed: opening.postponed ? opening.why : null,
       };
 
+  // What the prime's own project runs: read once, and only when the first
+  // clone running a retired function asks.
+  let primeLive: Promise<ReadonlySet<string> | null> | null = null;
+  const primeRuns = () =>
+    (primeLive ??= readProjectEdgeFunctionSlugs(primeRef).then((slugs) =>
+      slugs ? new Set(slugs) : null,
+    ));
+
   for (const clone of clones ?? []) {
     const row = clone as {
       id: string;
@@ -201,10 +211,24 @@ export async function sweepPrimeOnlyFunctionsFromFleet(): Promise<FleetFunctionS
       const repo = (row.github_repo ?? "").trim();
       retired = {
         register,
-        cloneCarries: async () =>
-          owner && repo
-            ? cloneCarries({ owner, repo, branch: row.default_branch || "main" })
-            : { refused: "the clone records no repository to read its own tree from" },
+        guards: async () => {
+          const prime = await primeRuns();
+          if (!prime) {
+            return {
+              refused:
+                "the prime's own project could not be listed, so whether its decommission has run cannot be told",
+            };
+          }
+          if (!owner || !repo) {
+            return { refused: "the clone records no repository to read its own tree from" };
+          }
+          const own = await cloneCarries({ owner, repo, branch: row.default_branch || "main" });
+          return "refused" in own
+            ? {
+                refused: `the clone's own tree could not be read, so its source cannot be ruled out: ${own.refused}`,
+              }
+            : { primeRuns: prime, cloneCarries: own.carries };
+        },
       };
     }
     const sweep = await sweepPrimeOnlyFunctions(ref, {
