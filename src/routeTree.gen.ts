@@ -231,6 +231,8 @@ import { Route as ApiPublicUsageReportRouteImport } from './routes/api.public.us
 import { Route as ApiPublicVerificationOperationRouteImport } from './routes/api.public.verification.$operation'
 import { Route as ApiPublicVoiceAutomationOperationRouteImport } from './routes/api.public.voice-automation.$operation'
 import { Route as ApiPublicVoiceWebhookRouteImport } from './routes/api.public.voice.webhook'
+import { Route as ApiPublicClonesAnnouncementsRepliesRouteImport } from './routes/api.public.clones.announcements.replies'
+import { Route as ApiPublicClonesAnnouncementsSeenRouteImport } from './routes/api.public.clones.announcements.seen'
 import { Route as ApiPublicClonesGateCheckoutRouteImport } from './routes/api.public.clones.gate.checkout'
 import { Route as ApiPublicSeatsDevicesHeartbeatRouteImport } from './routes/api.public.seats.devices.heartbeat'
 import { Route as ApiPublicSeatsDevicesListRouteImport } from './routes/api.public.seats.devices.list'
@@ -1408,6 +1410,18 @@ const ApiPublicVoiceWebhookRoute = ApiPublicVoiceWebhookRouteImport.update({
   path: '/api/public/voice/webhook',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiPublicClonesAnnouncementsRepliesRoute =
+  ApiPublicClonesAnnouncementsRepliesRouteImport.update({
+    id: '/replies',
+    path: '/replies',
+    getParentRoute: () => ApiPublicClonesAnnouncementsRoute,
+  } as any)
+const ApiPublicClonesAnnouncementsSeenRoute =
+  ApiPublicClonesAnnouncementsSeenRouteImport.update({
+    id: '/seen',
+    path: '/seen',
+    getParentRoute: () => ApiPublicClonesAnnouncementsRoute,
+  } as any)
 const ApiPublicClonesGateCheckoutRoute =
   ApiPublicClonesGateCheckoutRouteImport.update({
     id: '/checkout',
@@ -1624,7 +1638,7 @@ export interface FileRoutesByFullPath {
   '/api/public/builders/apply': typeof ApiPublicBuildersApplyRoute
   '/api/public/builders/identity': typeof ApiPublicBuildersIdentityRoute
   '/api/public/builders/jwks': typeof ApiPublicBuildersJwksRoute
-  '/api/public/clones/announcements': typeof ApiPublicClonesAnnouncementsRoute
+  '/api/public/clones/announcements': typeof ApiPublicClonesAnnouncementsRouteWithChildren
   '/api/public/clones/gate': typeof ApiPublicClonesGateRouteWithChildren
   '/api/public/clones/rotate-key': typeof ApiPublicClonesRotateKeyRoute
   '/api/public/edge/status': typeof ApiPublicEdgeStatusRoute
@@ -1674,6 +1688,8 @@ export interface FileRoutesByFullPath {
   '/api/public/verification/$operation': typeof ApiPublicVerificationOperationRoute
   '/api/public/voice-automation/$operation': typeof ApiPublicVoiceAutomationOperationRoute
   '/api/public/voice/webhook': typeof ApiPublicVoiceWebhookRoute
+  '/api/public/clones/announcements/replies': typeof ApiPublicClonesAnnouncementsRepliesRoute
+  '/api/public/clones/announcements/seen': typeof ApiPublicClonesAnnouncementsSeenRoute
   '/api/public/clones/gate/checkout': typeof ApiPublicClonesGateCheckoutRoute
   '/api/public/seats/devices/heartbeat': typeof ApiPublicSeatsDevicesHeartbeatRoute
   '/api/public/seats/devices/list': typeof ApiPublicSeatsDevicesListRoute
@@ -1853,7 +1869,7 @@ export interface FileRoutesByTo {
   '/api/public/builders/apply': typeof ApiPublicBuildersApplyRoute
   '/api/public/builders/identity': typeof ApiPublicBuildersIdentityRoute
   '/api/public/builders/jwks': typeof ApiPublicBuildersJwksRoute
-  '/api/public/clones/announcements': typeof ApiPublicClonesAnnouncementsRoute
+  '/api/public/clones/announcements': typeof ApiPublicClonesAnnouncementsRouteWithChildren
   '/api/public/clones/gate': typeof ApiPublicClonesGateRouteWithChildren
   '/api/public/clones/rotate-key': typeof ApiPublicClonesRotateKeyRoute
   '/api/public/edge/status': typeof ApiPublicEdgeStatusRoute
@@ -1903,6 +1919,8 @@ export interface FileRoutesByTo {
   '/api/public/verification/$operation': typeof ApiPublicVerificationOperationRoute
   '/api/public/voice-automation/$operation': typeof ApiPublicVoiceAutomationOperationRoute
   '/api/public/voice/webhook': typeof ApiPublicVoiceWebhookRoute
+  '/api/public/clones/announcements/replies': typeof ApiPublicClonesAnnouncementsRepliesRoute
+  '/api/public/clones/announcements/seen': typeof ApiPublicClonesAnnouncementsSeenRoute
   '/api/public/clones/gate/checkout': typeof ApiPublicClonesGateCheckoutRoute
   '/api/public/seats/devices/heartbeat': typeof ApiPublicSeatsDevicesHeartbeatRoute
   '/api/public/seats/devices/list': typeof ApiPublicSeatsDevicesListRoute
@@ -2085,7 +2103,7 @@ export interface FileRoutesById {
   '/api/public/builders/apply': typeof ApiPublicBuildersApplyRoute
   '/api/public/builders/identity': typeof ApiPublicBuildersIdentityRoute
   '/api/public/builders/jwks': typeof ApiPublicBuildersJwksRoute
-  '/api/public/clones/announcements': typeof ApiPublicClonesAnnouncementsRoute
+  '/api/public/clones/announcements': typeof ApiPublicClonesAnnouncementsRouteWithChildren
   '/api/public/clones/gate': typeof ApiPublicClonesGateRouteWithChildren
   '/api/public/clones/rotate-key': typeof ApiPublicClonesRotateKeyRoute
   '/api/public/edge/status': typeof ApiPublicEdgeStatusRoute
@@ -2135,6 +2153,8 @@ export interface FileRoutesById {
   '/api/public/verification/$operation': typeof ApiPublicVerificationOperationRoute
   '/api/public/voice-automation/$operation': typeof ApiPublicVoiceAutomationOperationRoute
   '/api/public/voice/webhook': typeof ApiPublicVoiceWebhookRoute
+  '/api/public/clones/announcements/replies': typeof ApiPublicClonesAnnouncementsRepliesRoute
+  '/api/public/clones/announcements/seen': typeof ApiPublicClonesAnnouncementsSeenRoute
   '/api/public/clones/gate/checkout': typeof ApiPublicClonesGateCheckoutRoute
   '/api/public/seats/devices/heartbeat': typeof ApiPublicSeatsDevicesHeartbeatRoute
   '/api/public/seats/devices/list': typeof ApiPublicSeatsDevicesListRoute
@@ -2368,6 +2388,8 @@ export interface FileRouteTypes {
     | '/api/public/verification/$operation'
     | '/api/public/voice-automation/$operation'
     | '/api/public/voice/webhook'
+    | '/api/public/clones/announcements/replies'
+    | '/api/public/clones/announcements/seen'
     | '/api/public/clones/gate/checkout'
     | '/api/public/seats/devices/heartbeat'
     | '/api/public/seats/devices/list'
@@ -2597,6 +2619,8 @@ export interface FileRouteTypes {
     | '/api/public/verification/$operation'
     | '/api/public/voice-automation/$operation'
     | '/api/public/voice/webhook'
+    | '/api/public/clones/announcements/replies'
+    | '/api/public/clones/announcements/seen'
     | '/api/public/clones/gate/checkout'
     | '/api/public/seats/devices/heartbeat'
     | '/api/public/seats/devices/list'
@@ -2828,6 +2852,8 @@ export interface FileRouteTypes {
     | '/api/public/verification/$operation'
     | '/api/public/voice-automation/$operation'
     | '/api/public/voice/webhook'
+    | '/api/public/clones/announcements/replies'
+    | '/api/public/clones/announcements/seen'
     | '/api/public/clones/gate/checkout'
     | '/api/public/seats/devices/heartbeat'
     | '/api/public/seats/devices/list'
@@ -2982,7 +3008,7 @@ export interface RootRouteChildren {
   ApiPublicBuildersApplyRoute: typeof ApiPublicBuildersApplyRoute
   ApiPublicBuildersIdentityRoute: typeof ApiPublicBuildersIdentityRoute
   ApiPublicBuildersJwksRoute: typeof ApiPublicBuildersJwksRoute
-  ApiPublicClonesAnnouncementsRoute: typeof ApiPublicClonesAnnouncementsRoute
+  ApiPublicClonesAnnouncementsRoute: typeof ApiPublicClonesAnnouncementsRouteWithChildren
   ApiPublicClonesGateRoute: typeof ApiPublicClonesGateRouteWithChildren
   ApiPublicClonesRotateKeyRoute: typeof ApiPublicClonesRotateKeyRoute
   ApiPublicEdgeStatusRoute: typeof ApiPublicEdgeStatusRoute
@@ -4595,6 +4621,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicVoiceWebhookRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/clones/announcements/replies': {
+      id: '/api/public/clones/announcements/replies'
+      path: '/replies'
+      fullPath: '/api/public/clones/announcements/replies'
+      preLoaderRoute: typeof ApiPublicClonesAnnouncementsRepliesRouteImport
+      parentRoute: typeof ApiPublicClonesAnnouncementsRoute
+    }
+    '/api/public/clones/announcements/seen': {
+      id: '/api/public/clones/announcements/seen'
+      path: '/seen'
+      fullPath: '/api/public/clones/announcements/seen'
+      preLoaderRoute: typeof ApiPublicClonesAnnouncementsSeenRouteImport
+      parentRoute: typeof ApiPublicClonesAnnouncementsRoute
+    }
     '/api/public/clones/gate/checkout': {
       id: '/api/public/clones/gate/checkout'
       path: '/checkout'
@@ -4761,6 +4801,24 @@ const ClonesCloneIdRouteChildren: ClonesCloneIdRouteChildren = {
 const ClonesCloneIdRouteWithChildren = ClonesCloneIdRoute._addFileChildren(
   ClonesCloneIdRouteChildren,
 )
+
+interface ApiPublicClonesAnnouncementsRouteChildren {
+  ApiPublicClonesAnnouncementsRepliesRoute: typeof ApiPublicClonesAnnouncementsRepliesRoute
+  ApiPublicClonesAnnouncementsSeenRoute: typeof ApiPublicClonesAnnouncementsSeenRoute
+}
+
+const ApiPublicClonesAnnouncementsRouteChildren: ApiPublicClonesAnnouncementsRouteChildren =
+  {
+    ApiPublicClonesAnnouncementsRepliesRoute:
+      ApiPublicClonesAnnouncementsRepliesRoute,
+    ApiPublicClonesAnnouncementsSeenRoute:
+      ApiPublicClonesAnnouncementsSeenRoute,
+  }
+
+const ApiPublicClonesAnnouncementsRouteWithChildren =
+  ApiPublicClonesAnnouncementsRoute._addFileChildren(
+    ApiPublicClonesAnnouncementsRouteChildren,
+  )
 
 interface ApiPublicClonesGateRouteChildren {
   ApiPublicClonesGateCheckoutRoute: typeof ApiPublicClonesGateCheckoutRoute
@@ -4933,7 +4991,8 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicBuildersApplyRoute: ApiPublicBuildersApplyRoute,
   ApiPublicBuildersIdentityRoute: ApiPublicBuildersIdentityRoute,
   ApiPublicBuildersJwksRoute: ApiPublicBuildersJwksRoute,
-  ApiPublicClonesAnnouncementsRoute: ApiPublicClonesAnnouncementsRoute,
+  ApiPublicClonesAnnouncementsRoute:
+    ApiPublicClonesAnnouncementsRouteWithChildren,
   ApiPublicClonesGateRoute: ApiPublicClonesGateRouteWithChildren,
   ApiPublicClonesRotateKeyRoute: ApiPublicClonesRotateKeyRoute,
   ApiPublicEdgeStatusRoute: ApiPublicEdgeStatusRoute,

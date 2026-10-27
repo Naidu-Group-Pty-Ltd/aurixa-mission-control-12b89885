@@ -1592,24 +1592,33 @@ export type Database = {
           clone_id: string
           delivery_count: number
           first_delivered_at: string
+          first_seen_at: string | null
           last_delivered_at: string
           last_revision: number
+          last_seen_at: string | null
+          seen_count: number
         }
         Insert: {
           announcement_id: string
           clone_id: string
           delivery_count?: number
           first_delivered_at?: string
+          first_seen_at?: string | null
           last_delivered_at?: string
           last_revision?: number
+          last_seen_at?: string | null
+          seen_count?: number
         }
         Update: {
           announcement_id?: string
           clone_id?: string
           delivery_count?: number
           first_delivered_at?: string
+          first_seen_at?: string | null
           last_delivered_at?: string
           last_revision?: number
+          last_seen_at?: string | null
+          seen_count?: number
         }
         Relationships: [
           {
@@ -1619,19 +1628,58 @@ export type Database = {
             referencedRelation: "clone_announcements"
             referencedColumns: ["id"]
           },
+        ]
+      }
+      clone_announcement_replies: {
+        Row: {
+          announcement_id: string
+          author_email: string | null
+          author_name: string
+          author_ref: string | null
+          author_role: string | null
+          body: string
+          client_request_id: string | null
+          created_at: string
+          direction: string
+          id: string
+          operator_read_at: string | null
+          workspace_id: string
+        }
+        Insert: {
+          announcement_id: string
+          author_email?: string | null
+          author_name: string
+          author_ref?: string | null
+          author_role?: string | null
+          body: string
+          client_request_id?: string | null
+          created_at?: string
+          direction: string
+          id?: string
+          operator_read_at?: string | null
+          workspace_id: string
+        }
+        Update: {
+          announcement_id?: string
+          author_email?: string | null
+          author_name?: string
+          author_ref?: string | null
+          author_role?: string | null
+          body?: string
+          client_request_id?: string | null
+          created_at?: string
+          direction?: string
+          id?: string
+          operator_read_at?: string | null
+          workspace_id?: string
+        }
+        Relationships: [
           {
-            foreignKeyName: "clone_announcement_deliveries_clone_id_fkey"
-            columns: ["clone_id"]
+            foreignKeyName: "clone_announcement_replies_announcement_id_fkey"
+            columns: ["announcement_id"]
             isOneToOne: false
-            referencedRelation: "clones"
+            referencedRelation: "clone_announcements"
             referencedColumns: ["id"]
-          },
-          {
-            foreignKeyName: "clone_announcement_deliveries_clone_id_fkey"
-            columns: ["clone_id"]
-            isOneToOne: false
-            referencedRelation: "clones_missing_isolated_backend"
-            referencedColumns: ["clone_id"]
           },
         ]
       }
@@ -1639,8 +1687,10 @@ export type Database = {
         Row: {
           archived_at: string | null
           audience_clone_ids: string[] | null
+          audience_match: string
           audience_plan_slugs: string[] | null
           body: string
+          client_request_id: string | null
           created_at: string
           created_by: string | null
           dismissible: boolean
@@ -1650,6 +1700,7 @@ export type Database = {
           link_label: string | null
           link_url: string | null
           published_at: string | null
+          replies_enabled: boolean
           revision: number
           severity: string
           starts_at: string | null
@@ -1659,8 +1710,10 @@ export type Database = {
         Insert: {
           archived_at?: string | null
           audience_clone_ids?: string[] | null
+          audience_match?: string
           audience_plan_slugs?: string[] | null
           body: string
+          client_request_id?: string | null
           created_at?: string
           created_by?: string | null
           dismissible?: boolean
@@ -1670,6 +1723,7 @@ export type Database = {
           link_label?: string | null
           link_url?: string | null
           published_at?: string | null
+          replies_enabled?: boolean
           revision?: number
           severity?: string
           starts_at?: string | null
@@ -1679,8 +1733,10 @@ export type Database = {
         Update: {
           archived_at?: string | null
           audience_clone_ids?: string[] | null
+          audience_match?: string
           audience_plan_slugs?: string[] | null
           body?: string
+          client_request_id?: string | null
           created_at?: string
           created_by?: string | null
           dismissible?: boolean
@@ -1690,6 +1746,7 @@ export type Database = {
           link_label?: string | null
           link_url?: string | null
           published_at?: string | null
+          replies_enabled?: boolean
           revision?: number
           severity?: string
           starts_at?: string | null
@@ -16629,6 +16686,7 @@ export type Database = {
         | "crm_appointment_booked"
         | "clone_announcement_published"
         | "clone_announcement_archived"
+        | "clone_announcement_reply"
         | "deployment_bundle_identity"
         | "lead_stage_email_failed"
         | "calendar_booking_failed"
@@ -17133,6 +17191,7 @@ export const Constants = {
         "crm_appointment_booked",
         "clone_announcement_published",
         "clone_announcement_archived",
+        "clone_announcement_reply",
         "deployment_bundle_identity",
         "lead_stage_email_failed",
         "calendar_booking_failed",
