@@ -8,6 +8,23 @@ their drains) and [`CLONE_PIPELINE_GAPS.md`](./CLONE_PIPELINE_GAPS.md) (the
 nine gaps hand-cloning found, all closed). Everything countable below was
 measured against the live Mission Control database on 2026-08-28.
 
+> **27 Oct 2026: modules no longer decide which files a new clone receives.**
+>
+> Every clone `provisionCloneCore` creates is now a mirror of the tree it was
+> created from, and `clones.sync_scope` defaults to `mirror`
+> (`20261027100000`). The modules a clone has are still its `clone_modules`
+> rows and its entitlements, and they still gate features at run time.
+>
+> What they no longer do is narrow the cascade. A module scope let through
+> only the later changes inside the installed globs of a repository that had
+> been created whole, so everything else was frozen at creation. Measured on
+> the prime at `1e18e4b`, a launch-tier clone would never have received 3,624
+> app-code files or 285 functions.
+>
+> The CRM is the one clone still module-scoped. Its move to mirror waits on a
+> rehearsal (`DELIVERY_SYSTEM_PLAN.md`, W1 and D7). Where this runbook
+> describes a module cascade for a new clone, read it as history.
+
 ---
 
 ## The two vocabularies, and the join

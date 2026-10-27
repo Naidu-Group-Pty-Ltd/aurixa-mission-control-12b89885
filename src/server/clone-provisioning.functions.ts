@@ -90,9 +90,10 @@ export type ProvisionCloneInput = {
    * `independent` from the CRM-independent parent (the native CRM); the parent
    * is the one `prime_config` names for that line, and the new clone is
    * recorded as its mirror child so every later cascade reaches it through
-   * that parent. Absent keeps the path every clone had before the choice
-   * existed — created from the prime, module-scoped — which is what the
-   * signed-agreement flow still asks for.
+   * that parent. Absent creates the clone from the prime itself, as a mirror
+   * of it — which is what the signed-agreement flow asks for, since an
+   * agreement does not yet record a CRM line. It was module-scoped until
+   * 27 Oct 2026; see the insert in `provisionCloneCore` for why it is not.
    */
   crmMode?: CrmMode | null;
 };

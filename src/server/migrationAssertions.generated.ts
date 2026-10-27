@@ -1156,4 +1156,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20261026220000",
     assertions: [{ kind: "enum", type: "notification_kind" }],
   },
+  {
+    migration: "20261027100000_clones_default_to_mirror_scope.sql",
+    version: "20261027100000",
+    assertions: [{ kind: "column", table: "clones", column: "sync_scope" }],
+  },
 ];

@@ -420,11 +420,16 @@ describe("provisionCloneCore — the CRM parent is the source", () => {
     const end = insert.indexOf(".select()");
     const body = insert.slice(0, end);
     expect(body).toContain("parent_clone_id: lineage.parent_clone_id");
-    expect(body).toContain("sync_scope: lineage.sync_scope");
+    // The line's scope where there is a line, else mirror — never left to a
+    // default (cloneScopeAtCreation.contract.test.ts).
+    expect(body).toContain('sync_scope: lineage?.sync_scope ?? "mirror"');
     expect(body).toContain("crm_mode: lineage.crm_mode");
   });
 
-  it("does not run the prime-sourced module cascade for a CRM child", () => {
-    expect(src).toMatch(/if \(data\.method !== "clone" && githubUrl && !lineage\)/);
+  it("does not run the prime-sourced module cascade for a CRM child — or for any clone", () => {
+    // It ran only for a clone with no parent, which was module-scoped. Every
+    // clone is a mirror now, created from its source's whole tree, so the
+    // cascade had nothing to add for any of them and is gone.
+    expect(src).not.toContain("clone_provision_modules");
   });
 });

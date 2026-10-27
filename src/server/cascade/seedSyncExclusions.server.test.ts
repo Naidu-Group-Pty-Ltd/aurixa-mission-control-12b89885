@@ -114,16 +114,24 @@ describe("seeding a clone's sync exclusion policy", () => {
 });
 
 describe("provisioning asks for it", () => {
-  it("seeds before the provision cascade that writes into the new repository", () => {
+  it("seeds right after the clone row exists, before anything could cascade into it", () => {
     // A policy that arrives after the first cascade protects nothing that
-    // cascade did. Pinned by position in the source, because both are steps in
-    // one long function and no unit test of either can see their order.
+    // cascade did. Pinned by position in the source, because these are steps
+    // in one long function and no unit test of either can see their order.
+    //
+    // The provision cascade this used to be measured against is gone — every
+    // clone is a mirror now and it had nothing to add (27 Oct 2026) — so the
+    // first cascade is the drain's, which needs the clone row. Seeding must
+    // therefore follow the insert, and this function must create no cascade
+    // of its own ahead of it.
     const src = readFileSync("src/server/clone-provisioning.server.ts", "utf8");
+    const insert = src.search(/\.from\("clones"\)\s*\n\s*\.insert\(\{/);
     const seed = src.indexOf("seedSyncExclusions(supabase");
-    const cascade = src.indexOf("clone_provision_modules");
+    expect(insert, "the clone insert moved or was renamed").toBeGreaterThan(-1);
     expect(seed, "provisioning does not seed the policy").toBeGreaterThan(-1);
-    expect(cascade, "the provision cascade moved or was renamed").toBeGreaterThan(-1);
-    expect(seed).toBeLessThan(cascade);
+    expect(seed).toBeGreaterThan(insert);
+    const firstCascade = src.search(/from\("cascade_events"\)\s*\n?\s*\.insert/);
+    if (firstCascade > -1) expect(seed).toBeLessThan(firstCascade);
   });
 
   it("does not make a seeding failure fatal to a clone that already exists", () => {
