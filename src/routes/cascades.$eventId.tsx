@@ -774,7 +774,14 @@ function ResultRow({
               />
             </div>
           )}
-          {clone && result.previous_sha && result.commit_sha && (
+          {/*
+            What this delivery's own commit changed: its parent against itself.
+            Not `previous_sha`, which is the PRIME commit the clone was synced
+            to (the bulk card's rollback target). A clone's repository does not
+            hold the prime's commits, so a compare against one is a 404
+            (measured 27 Oct 2026, `d72032e1...5415a47` on the dashboard).
+          */}
+          {clone && result.commit_sha && (
             <div className="mt-2">
               <Suspense
                 fallback={<div className="text-xs text-muted-foreground">Loading diff viewer…</div>}
@@ -782,7 +789,7 @@ function ResultRow({
                 <RichDiffViewer
                   cloneOwner={clone.github_owner}
                   cloneRepo={clone.github_repo}
-                  baseSha={result.previous_sha}
+                  baseSha={`${result.commit_sha}^`}
                   headSha={result.commit_sha}
                   filesChanged={result.files_changed}
                 />

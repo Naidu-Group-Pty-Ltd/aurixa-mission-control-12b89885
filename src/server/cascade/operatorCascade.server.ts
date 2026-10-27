@@ -240,11 +240,13 @@ async function createOperatorCascade(
     return refused(`Could not create the cascade: ${evErr?.message ?? "no row came back"}`);
   }
 
-  // What each clone was at when the cascade was started: the base of the diff
-  // on the cascade's page and the target of the bulk card's rollback. The
-  // engine never writes it, so it was set only where the bulk card inserted its
-  // own rows. Read, never invented: a clone this read does not answer for
-  // carries none, and a failed read costs the diff, not the cascade.
+  // The prime commit each clone was synced to when the cascade was started:
+  // the target of the bulk card's rollback, which sets `last_synced_sha` back
+  // to it. A prime commit, not one in the clone's repository, so the cascade's
+  // page diffs a delivery's own commit instead. The engine never writes it, so
+  // it was set only where the bulk card inserted its own rows. Read, never
+  // invented: a clone this read does not answer for carries none, and a failed
+  // read costs the rollback target, not the cascade.
   const { data: before } = await supabase
     .from("clones")
     .select("id, last_synced_sha")
