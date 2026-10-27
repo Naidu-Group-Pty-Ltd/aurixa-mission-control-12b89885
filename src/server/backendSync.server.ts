@@ -90,14 +90,25 @@ export type BackendSyncRequest =
   | {
       requested: true;
       work: CascadeBackendWork;
-      /** One entry per run planned or widened; empty when everything was already queued. */
-      runs: Array<{ action: "edge_function_deploy" | "sql_migration"; outcome: string }>;
+      /**
+       * One entry per lane the work was put to, with what that lane said.
+       * `queued` is true only where this call inserted a run or widened an
+       * open one; an entry that found its work already queued, or handed it to
+       * the fleet migration lane, queued nothing.
+       */
+      runs: Array<{
+        action: "edge_function_deploy" | "sql_migration";
+        outcome: string;
+        queued: boolean;
+      }>;
       /**
        * Whether Mission Control could tell this repository's CI who deploys
-       * it. Carried out rather than swallowed: the write is best-effort, but
-       * a fleet-wide permission gap must not look like nothing happening.
+       * it, where this call queued a run; null where it queued nothing, and
+       * so had nothing new to declare. Carried out rather than swallowed: the
+       * write is best-effort, but a fleet-wide permission gap must not look
+       * like nothing happening.
        */
-      deployer: DeployerDeclaration;
+      deployer: DeployerDeclaration | null;
     }
   | { requested: false; reason: BackendSyncSkip };
 
@@ -150,18 +161,25 @@ export async function requestBackendSyncAfterCascade(input: {
   }
   if (!hasBackendWork(work)) return { requested: false, reason: "no_backend_work" };
 
-  const runs: Array<{ action: "edge_function_deploy" | "sql_migration"; outcome: string }> = [];
+  const runs: Array<{
+    action: "edge_function_deploy" | "sql_migration";
+    outcome: string;
+    queued: boolean;
+  }> = [];
 
   if (work.staleFunctions === null || work.staleFunctions.length > 0) {
     runs.push({
       action: "edge_function_deploy",
-      outcome: await planFunctionDeploy(input, work.staleFunctions, work.reasons),
+      ...(await planFunctionDeploy(input, work.staleFunctions, work.reasons)),
     });
   }
   if (work.migrationsOwed) {
+    // Planned by nobody here: the fleet migration lane applies what a clone's
+    // ledger lacks, whoever asked.
     runs.push({
       action: "sql_migration",
       outcome: await handMigrationsToFleetLane(input),
+      queued: false,
     });
   }
 
@@ -176,8 +194,12 @@ export async function requestBackendSyncAfterCascade(input: {
   //
   // Idempotent (create, then update on 409) and only on a cascade that
   // actually queued backend work, so it is neither a per-push cost nor a
-  // claim made before it is warranted.
-  const deployer = await declareDeployer(input.cloneId);
+  // claim made before it is warranted. It was asked on every request that
+  // found work, queued or not: measured 27 Oct 2026, every half-hour catch-up
+  // found each clone's migrations already the fleet lane's, queued nothing,
+  // and declared all four repositories again, a declaration
+  // `reconcileCloneDeployerDeclarations` already keeps standing on its own.
+  const deployer = runs.some((r) => r.queued) ? await declareDeployer(input.cloneId) : null;
 
   return { requested: true, work, runs, deployer };
 }
@@ -285,6 +307,15 @@ async function workForCascade(
 }
 
 /**
+ * One run's outcome, and whether this call changed what will run: a run
+ * inserted, or an open one widened. "Already queued", a refusal and a hand-off
+ * to the fleet lane queue nothing, so nothing is claimed for them.
+ */
+type PlannedRun = { outcome: string; queued: boolean };
+
+const notQueued = (outcome: string): PlannedRun => ({ outcome, queued: false });
+
+/**
  * One open run per clone per lane.
  *
  * The drain runs every minute and a busy fleet cascades often, so inserting
@@ -311,7 +342,7 @@ async function planFunctionDeploy(
   input: { cloneId: string; reason: string; toSha: string },
   slugs: readonly string[] | null,
   reasons: readonly string[],
-): Promise<string> {
+): Promise<PlannedRun> {
   const { data: open, error } = await admin
     .from("remediation_runs")
     .select("id, plan, status, updated_at, last_error, policy, result")
@@ -321,7 +352,7 @@ async function planFunctionDeploy(
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
-  if (error) return `not planned — could not read open runs: ${error.message}`;
+  if (error) return notQueued(`not planned — could not read open runs: ${error.message}`);
 
   // What the run inserted below owes, what its plan reaches, and which parked
   // runs it replaces. Adjusted only where a parked run is retired first.
@@ -375,10 +406,12 @@ async function planFunctionDeploy(
         .eq("status", "awaiting_validation")
         .select("id");
       if (retireErr) {
-        return `not planned — could not retire the parked run: ${retireErr.message}`;
+        return notQueued(`not planned — could not retire the parked run: ${retireErr.message}`);
       }
       if (!retired || retired.length === 0) {
-        return "not planned — the parked run changed state while it was being retired; the next plan reads it again";
+        return notQueued(
+          "not planned — the parked run changed state while it was being retired; the next plan reads it again",
+        );
       }
 
       const parkedSlugs = plannedSlugsOf(open.plan);
@@ -435,7 +468,9 @@ async function planFunctionDeploy(
           ? (open.plan as Record<string, unknown>)
           : {};
       const existing = plannedSlugsOf(open.plan);
-      if (existing === null) return `already queued (that run covers every function)${parked}`;
+      if (existing === null) {
+        return notQueued(`already queued (that run covers every function)${parked}`);
+      }
       /*
         A WIDENING KEEPS WHAT THE PLAN ALREADY SAID.
 
@@ -454,12 +489,12 @@ async function planFunctionDeploy(
           })
           .eq("id", open.id);
         return wErr
-          ? `could not widen the open run: ${wErr.message}`
-          : `widened the open run to every function${parked}`;
+          ? notQueued(`could not widen the open run: ${wErr.message}`)
+          : { queued: true, outcome: `widened the open run to every function${parked}` };
       }
       const union = [...new Set([...existing, ...slugs])].sort();
       if (union.length === existing.length)
-        return `already queued (that run covers these functions)${parked}`;
+        return notQueued(`already queued (that run covers these functions)${parked}`);
       const { error: wErr } = await admin
         .from("remediation_runs")
         .update({
@@ -467,8 +502,8 @@ async function planFunctionDeploy(
         })
         .eq("id", open.id);
       return wErr
-        ? `could not widen the open run: ${wErr.message}`
-        : `widened the open run to ${union.length} functions${parked}`;
+        ? notQueued(`could not widen the open run: ${wErr.message}`)
+        : { queued: true, outcome: `widened the open run to ${union.length} functions${parked}` };
     }
   }
 
@@ -494,11 +529,13 @@ async function planFunctionDeploy(
       ...(besideParked ? { beside_parked: besideParked } : {}),
     },
   });
-  if (insErr) return `not planned: ${insErr.message}${retiredNote}`;
-  return (
-    (owed === null ? "planned for every function" : `planned for ${owed.length} function(s)`) +
-    retiredNote
-  );
+  if (insErr) return notQueued(`not planned: ${insErr.message}${retiredNote}`);
+  return {
+    queued: true,
+    outcome:
+      (owed === null ? "planned for every function" : `planned for ${owed.length} function(s)`) +
+      retiredNote,
+  };
 }
 
 /**
@@ -517,11 +554,12 @@ export async function requestNamedFunctionDeploy(input: {
   slugs: readonly string[];
 }): Promise<string> {
   if (input.slugs.length === 0) return "nothing to deploy";
-  return planFunctionDeploy(
+  const { outcome } = await planFunctionDeploy(
     { cloneId: input.cloneId, reason: input.reason, toSha: "" },
     [...input.slugs].sort(),
     [input.reason],
   );
+  return outcome;
 }
 
 /** A plan's slug list, read the way the deploy lane reads it: absent is every function. */

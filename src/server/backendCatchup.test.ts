@@ -51,7 +51,10 @@ describe("the catch-up plans and never advances the baseline", () => {
 describe("a read that failed is not a fleet that owes nothing", () => {
   it("plans nothing when the prime's HEAD cannot be read", () => {
     const s = server();
-    const head = s.slice(s.indexOf("async function primeHead"), s.indexOf("export async function runBackendCatchup"));
+    const head = s.slice(
+      s.indexOf("async function primeHead"),
+      s.indexOf("export async function runBackendCatchup"),
+    );
     // Every exit from the read is either a sha or a named refusal.
     expect(head).toContain("could not read the prime's HEAD");
     expect(head).toContain("prime_not_configured");
@@ -118,6 +121,13 @@ describe("it reuses the planner rather than copying it", () => {
     const s = server();
     expect(s).not.toContain("staleFunctions");
     expect(s).not.toContain("compareCommits");
+  });
+
+  it("counts a clone as planned only where a run was queued for it", () => {
+    // Every half hour on 27 Oct 2026 it counted four, on clones whose only
+    // work was migrations left to the fleet lane.
+    expect(server()).toContain("if (request.runs.some((r) => r.queued)) planned += 1;");
+    expect(server()).not.toMatch(/^\s*planned \+= 1;/m);
   });
 
   it("the planner it calls is still idempotent", () => {

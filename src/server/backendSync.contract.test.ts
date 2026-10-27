@@ -22,7 +22,6 @@ import { stripComments } from "./sourceComments.pure";
 
 const read = (p: string) => readFileSync(join(process.cwd(), p), "utf8");
 
-
 const engine = read("src/server/cascade-engine.server.ts");
 const drain = read("src/server/cascadeMergeDrain.server.ts");
 const planner = read("src/server/backendSync.server.ts");
@@ -160,7 +159,9 @@ describe("the policy is consulted, not imitated", () => {
     expect(hand).toContain('.eq("plan->>mode", "catch_up")');
     // Compare-and-swap on the status it was read in: a pass that claimed it,
     // or a person who approved it, in the meantime wins.
-    expect(hand).toMatch(/\.eq\("id", row\.id\)\s*\.in\("status", \["planned", "awaiting_validation"\]\)/);
+    expect(hand).toMatch(
+      /\.eq\("id", row\.id\)\s*\.in\("status", \["planned", "awaiting_validation"\]\)/,
+    );
     expect(hand).not.toContain('"executing"');
     expect(hand).not.toContain('"approved"');
     // Retired, with the record of why, never deleted.
@@ -183,5 +184,36 @@ describe("the policy is consulted, not imitated", () => {
     // P0/P1 never execute unattended, so planning routine maintenance there
     // would queue work that only ever sits.
     expect(planner).toContain('const CASCADE_PRIORITY = "P3"');
+  });
+});
+
+describe("a request claims only what it queued", () => {
+  // Measured 27 Oct 2026: every half-hour catch-up found each clone's work to
+  // be migrations already the fleet lane's, queued nothing, and still reported
+  // four clones planned and declared all four repositories again.
+  const code = stripComments(planner);
+  const fn = code.slice(
+    code.indexOf("async function planFunctionDeploy("),
+    code.indexOf("export async function requestNamedFunctionDeploy("),
+  );
+
+  it("names, on every way out of the function planner, whether it queued a run", () => {
+    expect(fn).toContain("): Promise<PlannedRun> {");
+    // No bare text return is left to read as a plan.
+    expect(fn).not.toMatch(/return [`"]/);
+    expect(fn.match(/queued: true/g)).toHaveLength(3);
+  });
+
+  it("queues nothing by handing migrations to the fleet lane", () => {
+    expect(code).toMatch(
+      /action: "sql_migration",\s*outcome: await handMigrationsToFleetLane\(input\),\s*queued: false,/,
+    );
+  });
+
+  it("declares the deployer only where a run was queued", () => {
+    expect(code).toContain(
+      "const deployer = runs.some((r) => r.queued) ? await declareDeployer(input.cloneId) : null;",
+    );
+    expect(code.match(/await declareDeployer\(/g)).toHaveLength(1);
   });
 });
