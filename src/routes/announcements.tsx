@@ -307,11 +307,16 @@ function AnnouncementsPage() {
     to ? "new" : null,
   );
   const [presetCloneId, setPresetCloneId] = useState<string | undefined>(to);
-  // A reply notification lands on that message's conversations.
+  // A reply notification lands on that message's conversations — on arrival,
+  // and again when one is clicked while this page is already open (the bell's
+  // link changes the search without remounting the page).
   const [conversations, setConversations] = useState<{
     id: string;
     workspaceId?: string;
   } | null>(() => (threadParam ? { id: threadParam, workspaceId: workspaceParam } : null));
+  useEffect(() => {
+    if (threadParam) setConversations({ id: threadParam, workspaceId: workspaceParam });
+  }, [threadParam, workspaceParam]);
 
   const query = useQuery({
     queryKey: ["clone-announcements"],
@@ -516,6 +521,7 @@ function AnnouncementsPage() {
 
       {conversations && query.data && (
         <ConversationsDialog
+          key={conversations.id}
           item={conversationRow}
           announcementId={conversations.id}
           focusWorkspaceId={conversations.workspaceId}
@@ -1534,11 +1540,29 @@ function ConversationsDialog({
   const threads: ThreadView[] = query.data?.threads ?? [];
   const reachable = item?.reaches ?? [];
   const [active, setActive] = useState<string | null>(focusWorkspaceId ?? null);
+  // A notification naming another workspace while this is open moves to it.
+  useEffect(() => {
+    if (focusWorkspaceId) setActive(focusWorkspaceId);
+  }, [focusWorkspaceId]);
   const shownId = active ?? threads[0]?.workspaceId ?? null;
   const thread = threads.find((t) => t.workspaceId === shownId) ?? null;
-  const [draft, setDraft] = useState("");
-  const [requestId, setRequestId] = useState(newRequestId);
+  // One reply box PER WORKSPACE, each with its own request id. A shared box
+  // let words typed for one business be sent to another after a switch.
+  const [drafts, setDrafts] = useState<Record<string, { body: string; requestId: string }>>({});
+  const draft = shownId ? (drafts[shownId]?.body ?? "") : "";
+  const setDraft = (body: string) => {
+    if (!shownId) return;
+    setDrafts((prev) => ({
+      ...prev,
+      [shownId]: { body, requestId: prev[shownId]?.requestId ?? newRequestId() },
+    }));
+  };
   const [sending, setSending] = useState(false);
+  // No switching threads while a reply is in flight: its completion clears
+  // the box it was sent from, and only that one.
+  const choose = (workspaceId: string) => {
+    if (!sending) setActive(workspaceId);
+  };
   const endRef = useRef<HTMLDivElement | null>(null);
 
   const nameOf = (id: string) => cloneNames[id] ?? `${id.slice(0, 8)}…`;
@@ -1568,19 +1592,30 @@ function ConversationsDialog({
   const startable = reachable.filter((r) => !threads.some((t) => t.workspaceId === r.id));
 
   async function sendReply() {
-    if (!shownId || draft.trim().length === 0) return;
+    // Captured once: the workspace, words and request id of THIS send.
+    const to = shownId;
+    const entry = to ? drafts[to] : undefined;
+    if (!to || !entry || entry.body.trim().length === 0 || sending) return;
     setSending(true);
     try {
       const result = (await reply({
-        data: { id: announcementId, workspaceId: shownId, body: draft, clientRequestId: requestId },
+        data: {
+          id: announcementId,
+          workspaceId: to,
+          body: entry.body,
+          clientRequestId: entry.requestId,
+        },
       })) as { ok: boolean; error?: string };
       if (!result.ok) {
         toast.error(result.error ?? "The reply was not sent");
         return;
       }
-      toast.success(`Sent to ${nameOf(shownId)} as Aurixa Systems`);
-      setDraft("");
-      setRequestId(newRequestId());
+      toast.success(`Sent to ${nameOf(to)} as Aurixa Systems`);
+      setDrafts((prev) => {
+        const next = { ...prev };
+        delete next[to];
+        return next;
+      });
       await qc.invalidateQueries({ queryKey: ["clone-announcement-replies", announcementId] });
       onChanged();
     } catch (err) {
@@ -1633,7 +1668,8 @@ function ConversationsDialog({
                     key={t.workspaceId}
                     type="button"
                     aria-current={on ? "true" : undefined}
-                    onClick={() => setActive(t.workspaceId)}
+                    onClick={() => choose(t.workspaceId)}
+                    disabled={sending}
                     className={cn(
                       "glass-inset flex w-full items-center justify-between gap-2 rounded-md border px-3 py-2 text-left text-sm",
                       on ? "border-primary/60" : "border-transparent hover:border-border",
@@ -1655,7 +1691,7 @@ function ConversationsDialog({
               {canAnswer && startable.length > 0 && (
                 <div className="pt-2">
                   <Label className="label-mono text-muted-foreground">Write to a workspace</Label>
-                  <Select value="" onValueChange={(v) => setActive(v)}>
+                  <Select value="" onValueChange={choose} disabled={sending}>
                     <SelectTrigger className="mt-1 h-8">
                       <SelectValue placeholder="Choose…" />
                     </SelectTrigger>
