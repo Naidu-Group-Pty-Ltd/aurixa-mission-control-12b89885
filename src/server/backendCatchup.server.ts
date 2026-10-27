@@ -118,7 +118,9 @@ async function primeHead(): Promise<{ sha: string } | { error: string }> {
   } catch (e) {
     // A rate limit or a network blip is a fact about this pass, not about the
     // fleet. Nothing is planned and nothing is recorded as owing nothing.
-    return { error: `could not read the prime's HEAD: ${e instanceof Error ? e.message : "unknown"}` };
+    return {
+      error: `could not read the prime's HEAD: ${e instanceof Error ? e.message : "unknown"}`,
+    };
   }
 }
 
@@ -129,7 +131,9 @@ async function primeHead(): Promise<{ sha: string } | { error: string }> {
  * `remediation_runs` can tell a sweep-planned deploy from a cascade-planned
  * one without guessing.
  */
-export async function runBackendCatchup(reason = "backend catch-up sweep"): Promise<BackendCatchupResult> {
+export async function runBackendCatchup(
+  reason = "backend catch-up sweep",
+): Promise<BackendCatchupResult> {
   const head = await primeHead();
   if ("error" in head) {
     return { primeSha: null, considered: 0, planned: 0, outcomes: [], refused: head.error };
@@ -216,7 +220,11 @@ export async function runBackendCatchup(reason = "backend catch-up sweep"): Prom
       });
       continue;
     }
-    planned += 1;
+    // Counted only where a run was inserted or widened. A clone whose work was
+    // already queued, or was the fleet migration lane's, had nothing planned
+    // for it, and counting it filed a breadcrumb every half hour saying four
+    // clones were planned when none was (27 Oct 2026).
+    if (request.runs.some((r) => r.queued)) planned += 1;
     outcomes.push({
       cloneId: row.id,
       cloneName: row.name ?? null,

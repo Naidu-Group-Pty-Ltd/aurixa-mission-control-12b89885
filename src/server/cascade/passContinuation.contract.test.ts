@@ -389,7 +389,7 @@ describe("the module-scope pass reads the clone only when the tree could not say
   it("skips the per-path clone read when the SHAs are known", () => {
     const prepare = sliceFrom(engine, "let cloneFileRead = false;", 1_500);
     expect(prepare).toMatch(
-      /if \(cloneShaByPath !== null\) \{[\s\S]*?if \(cloneShaByPath\.get\(path\) === primeFile\.sha\) return null;\s*\} else if \(!isMirror\) \{\s*cloneFile = await getFileContent\(octokit, cloneRef, path\);/,
+      /if \(cloneShaByPath !== null\) \{[\s\S]*?if \(\s*cloneShaByPath\.get\(path\) === primeFile\.sha &&\s*!executableBitDiffers\(path, primeModeByPath, cloneModeByPath\)\s*\) \{\s*return null;\s*\}\s*\} else if \(!isMirror\) \{\s*cloneFile = await getFileContent\(octokit, cloneRef, path\);/,
     );
   });
 

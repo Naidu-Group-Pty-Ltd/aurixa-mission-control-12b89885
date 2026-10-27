@@ -1,7 +1,11 @@
+import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
+import { stripComments } from "@/server/sourceComments.pure";
 import {
   migrationIdFromFilename,
   groupFunctionPaths,
+  importMapFor,
+  planFunctionBundles,
   pickEntrypoint,
   parseFunctionConfig,
   extractSecretNames,
@@ -63,6 +67,64 @@ describe("groupFunctionPaths", () => {
   });
 });
 
+describe("a function deploys with its own import map, as the CLI deploys it", () => {
+  // The prime's CI deploys `mcp` and `builder-stock-marketplace` with their own
+  // `deno.json` as `import_map_path`. Every clone took the root map alone, so
+  // NPC Test's `mcp` was live from `index.ts` alone (27 Oct 2026).
+  const grouped = groupFunctionPaths([
+    "mcp/index.ts",
+    "mcp/deno.json",
+    "typed/index.ts",
+    "typed/deno.jsonc",
+    "both/index.ts",
+    "both/deno.jsonc",
+    "both/deno.json",
+    "plain/index.ts",
+    "plain/lib/deno.json",
+    "_shared/cors.ts",
+    "import_map.json",
+  ]);
+
+  it("is the function's own deno.json, preferred over deno.jsonc, else the tree's root map", () => {
+    expect(importMapFor("mcp", grouped)).toBe("mcp/deno.json");
+    expect(importMapFor("typed", grouped)).toBe("typed/deno.jsonc");
+    expect(importMapFor("both", grouped)).toBe("both/deno.json");
+    // Only the file beside the entrypoint is the function's config.
+    expect(importMapFor("plain", grouped)).toBe("import_map.json");
+    expect(importMapFor("mcp", groupFunctionPaths(["mcp/index.ts"]))).toBeNull();
+  });
+
+  it("is what a planned bundle carries, and the file travels in it", () => {
+    const sha = (n: number) => String(n).padStart(40, "0");
+    const files = ["mcp/index.ts", "mcp/deno.json", "plain/index.ts", "_shared/cors.ts"].map(
+      (rel, i) => ({ rel, sha: sha(i) }),
+    );
+    const plans = planFunctionBundles(
+      {
+        sourceRepo: "o/prime",
+        sourceRef: "main",
+        sourceSha: sha(9),
+        files,
+        configToml: null,
+        declaredFunctionSlugs: ["mcp", "plain"],
+      },
+      ["mcp", "plain"],
+    );
+    const mcp = plans.find((p) => p.slug === "mcp")!;
+    expect(mcp.importMapPath).toBe("mcp/deno.json");
+    expect(mcp.files.map((f) => f.rel)).toContain("mcp/deno.json");
+    expect(plans.find((p) => p.slug === "plain")!.importMapPath).toBeNull();
+  });
+
+  it("is chosen the same way where the prime's snapshot assembles every bundle", () => {
+    const code = stripComments(readFileSync("src/server/prime-backend.server.ts", "utf8"));
+    // Both planners ask one rule, and nothing hands every bundle the root map.
+    expect(code.match(/importMapPath: importMapFor\(slug, grouped\)/g)).toHaveLength(2);
+    expect(code).not.toContain("importMapPath: grouped.importMapPath");
+    expect(code).not.toContain("const { slugs, sharedFiles, importMapPath } = groupFunctionPaths(");
+  });
+});
+
 describe("pickEntrypoint", () => {
   it("prefers index.ts", () => {
     expect(pickEntrypoint("fn", ["fn/util.ts", "fn/index.ts", "_shared/cors.ts"])).toBe(
@@ -104,6 +166,37 @@ verify_jwt = true
   it("defaults verify_jwt to true when a section omits it", () => {
     const cfg = parseFunctionConfig(`[functions.fn]\nimport_map = "./import_map.json"\n`);
     expect(cfg.get("fn")?.verifyJwt).toBe(true);
+  });
+
+  it("reads the flag after an array value, which once cut the section short", () => {
+    // The body used to end at the first `[`, so this read as true and the
+    // function deployed checking a JWT its callers never send.
+    const cfg = parseFunctionConfig(
+      `[functions.hook]\nstatic_files = ["./functions/hook/*.html"]\nverify_jwt = false\n` +
+        `[functions.multi]\nstatic_files = [\n  "./a.html",\n  "./b.html",\n]\nverify_jwt = false # public\n`,
+    );
+    expect(cfg.get("hook")?.verifyJwt).toBe(false);
+    expect(cfg.get("multi")?.verifyJwt).toBe(false);
+  });
+
+  it("reads no section out of a comment, and no flag out of a sub-table", () => {
+    const cfg = parseFunctionConfig(
+      `# An omitted \`[functions.X]\` block asserts the gateway checks a JWT.\n` +
+        `# [functions.retired]\n# verify_jwt = false\n` +
+        `[functions.fn]\nverify_jwt = true\n` +
+        `[functions.fn.env]\nverify_jwt = false\n` +
+        `[[functions.fn.hooks]]\nverify_jwt = false\n`,
+    );
+    expect([...cfg.keys()]).toEqual(["fn"]);
+    expect(cfg.get("fn")?.verifyJwt).toBe(true);
+  });
+
+  it("reads a flag written as a dotted key in the functions table", () => {
+    const cfg = parseFunctionConfig(
+      `[functions]\nhook.verify_jwt = false\n"q-fn".verify_jwt = false\n`,
+    );
+    expect(cfg.get("hook")?.verifyJwt).toBe(false);
+    expect(cfg.get("q-fn")?.verifyJwt).toBe(false);
   });
 });
 
@@ -173,6 +266,10 @@ describe("selectProjectKeys", () => {
   });
 
   it("returns nulls when nothing matches", () => {
-    expect(selectProjectKeys([])).toEqual({ anonKey: null, serviceRoleKey: null, gatewayKey: null });
+    expect(selectProjectKeys([])).toEqual({
+      anonKey: null,
+      serviceRoleKey: null,
+      gatewayKey: null,
+    });
   });
 });

@@ -1437,6 +1437,7 @@ function emptyBoundary(boundary: LateralBoundary): LateralBoundaryReport {
     mode: null,
     candidates: 0,
     primeOwned: 0,
+    lineOwn: 0,
     conflicts: [],
     deferred: [],
     reconcile: [],
@@ -1685,12 +1686,14 @@ async function passBoundary(
     for (const [name, s] of sides) rules.set(name, await readDestinationRule(ctx.supabase, s));
 
     // ── 1. Candidates, and which are parent-level work ──────────────────────
-    const candidates = lateralCandidates({
+    const { paths: candidates, lineOwn } = lateralCandidates({
       a: treeA.entries,
       b: treeB.entries,
       prime: primeTree.entries,
+      crmModes: { a: cloneA.crm_mode, b: cloneB.crm_mode },
     });
     report.candidates = candidates.length;
+    report.lineOwn = lineOwn.length;
     const deferred: Array<{ path: string; why: string }> = [];
     const parentLevel: string[] = [];
     const toAsk: string[] = [];
@@ -1828,8 +1831,9 @@ async function passBoundary(
     const moved = report.directions.filter((d) => d.writes.length + d.deletes.length > 0).length;
     return await record(
       "ran",
-      `${candidates.length} path(s) differ between the parents outside the prime's tree; ` +
-        `${report.primeOwned} of them the prime once held. ${settled.length} settled, ` +
+      `${candidates.length + lineOwn.length} path(s) differ between the parents outside the prime's tree; ` +
+        `${lineOwn.length} of them one side keeps as its own and never offers, and ` +
+        `${report.primeOwned} the prime once held. ${settled.length} settled, ` +
         `${report.conflicts.length} for a person, ${deferred.length} deferred; ${moved} direction(s) had something to carry.`,
       deferredCount,
     );

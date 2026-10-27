@@ -50,7 +50,9 @@ describe("both trees are read once, and the SHAs decide what is read", () => {
   });
 
   it("narrows the candidates to paths whose blob SHA differs, before anything is read", () => {
-    const narrowed = branch.indexOf("cloneTree.entries.get(path) !== primeTree.entries.get(path)");
+    // Or whose executable bit does: `differsFromPrime` asks both, from the
+    // listings alone (`treeDelivery.test.ts` pins what it answers).
+    const narrowed = branch.indexOf("differsFromPrime(path, primeTree, cloneTree)");
     expect(narrowed).toBeGreaterThan(-1);
     // Before the first content read: the import closure reads prime's text
     // of the candidates, so the candidates are narrowed before it runs.

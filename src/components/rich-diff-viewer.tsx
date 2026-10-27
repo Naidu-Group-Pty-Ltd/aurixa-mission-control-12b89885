@@ -19,6 +19,12 @@ type DiffFile = {
   newContent?: string;
 };
 
+/** A commit's short form, keeping a parent suffix (`abc1234^`) so the ref still names the same commit. */
+function shortRef(ref: string): string {
+  const m = /^([0-9a-f]{7,40})([\^~]\d*)?$/i.exec(ref);
+  return m ? `${m[1].slice(0, 7)}${m[2] ?? ""}` : ref;
+}
+
 /**
  * Rich side-by-side diff viewer for cascade results.
  * Fetches the GitHub compare diff on demand and renders with react-diff-viewer-continued.
@@ -64,7 +70,7 @@ export function RichDiffViewer({
     }
   }, [fetchDiff, cloneOwner, cloneRepo, baseSha, headSha]);
 
-  const ghCompareUrl = `https://github.com/${cloneOwner}/${cloneRepo}/compare/${baseSha.slice(0, 7)}...${headSha.slice(0, 7)}`;
+  const ghCompareUrl = `https://github.com/${cloneOwner}/${cloneRepo}/compare/${shortRef(baseSha)}...${shortRef(headSha)}`;
 
   if (!files && !loading && !error) {
     return (
@@ -73,7 +79,7 @@ export function RichDiffViewer({
           <div className="flex items-center gap-2 font-mono text-xs text-muted-foreground">
             <FileDiff className="h-3.5 w-3.5" />
             <span>
-              {baseSha.slice(0, 7)}…{headSha.slice(0, 7)}
+              {shortRef(baseSha)}…{shortRef(headSha)}
               {typeof filesChanged === "number" &&
                 ` · ${filesChanged} file${filesChanged === 1 ? "" : "s"}`}
             </span>

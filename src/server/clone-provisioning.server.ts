@@ -504,15 +504,40 @@ export async function provisionCloneCore(
     }
   }
 
-  // Install picked modules
+  // Install picked modules. After the reconcile above, which has already
+  // installed what the PLAN entitles, so a ticked module the plan gives is a row
+  // already: a plain insert of the batch failed on that row's unique
+  // (clone_id, module_id) and dropped every pick with it, unseen. The plan's row
+  // stands, and the failure is recorded as the reconcile's is.
   if (data.moduleIds.length > 0) {
-    await supabase.from("clone_modules").insert(
+    const { error: pickErr } = await supabase.from("clone_modules").upsert(
       data.moduleIds.map((module_id) => ({
         clone_id: inserted.id,
         module_id,
         installed_by: userId,
       })),
+      { onConflict: "clone_id,module_id", ignoreDuplicates: true },
     );
+    if (pickErr) {
+      console.error("[provisionCloneCore] picked modules not recorded", {
+        cloneId: inserted.id,
+        error: pickErr.message,
+      });
+      const { error: noticeErr } = await supabase.from("notifications").insert({
+        kind: "clone_created",
+        severity: "warning",
+        title: `Modules not recorded: ${data.name}`,
+        body:
+          `The clone was created, and the ${data.moduleIds.length} module(s) picked for it ` +
+          `could not be recorded: ${pickErr.message}. Install them from the clone's page.`,
+        clone_id: inserted.id,
+        url: `/clones/${inserted.id}`,
+        metadata: { stage: "modules", module_ids: data.moduleIds },
+      });
+      if (noticeErr) {
+        console.error("[provisionCloneCore] its notice did not land either", noticeErr.message);
+      }
+    }
 
     // The rows above are the entitlement record — what this clone has paid
     // for, which gates features at run time. They are not a delivery.

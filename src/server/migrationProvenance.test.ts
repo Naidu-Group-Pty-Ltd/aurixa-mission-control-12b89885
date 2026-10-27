@@ -250,7 +250,11 @@ describe("the rules this module exists to keep", () => {
       "src/server/backend-provisioning.server.ts",
     ]) {
       const src = read(file);
-      const unions = src.match(/UNION\s+SELECT\s+version\s+FROM\s+aurixa\.schema_migrations/gi);
+      // Either spelling of the union: the replay reads it through
+      // `readCloneMigrationLedger`, which names each row too.
+      const unions = src.match(
+        /UNION\s+SELECT\s+version(?:\s*,\s*null::text\s+as\s+name)?\s+FROM\s+aurixa\.schema_migrations/gi,
+      );
       expect(unions, `${file} should still union the legacy ledger`).not.toBeNull();
       // No reader of the applied-set may narrow it by provenance.
       expect(src).not.toMatch(/schema_migrations[\s\S]{0,200}provenance\s*=\s*'applied'/i);

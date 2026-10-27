@@ -19,7 +19,11 @@ import {
 import {
   canonicalDeliveryOrder,
   chunkTreeEntries,
+  differsFromPrime,
+  executableBitDiffers,
+  isSymbolicLink,
   toGitTreeParam,
+  withDeliveryModes,
   type DeliveryTreeEntry,
 } from "./cascade/treeDelivery.pure";
 import { readInstalledGlobs } from "./cascade/installedGlobs.server";
@@ -548,9 +552,18 @@ export async function executeCascade(
       .eq("status", "queued"),
   ]);
 
+  // Every refusal before the event is first written is `untouched`: nothing
+  // was recorded, so a claim the caller holds is still its own to release.
   const event = eventRes.data;
-  if (eventRes.error || !event) {
-    return { ok: false, error: "Cascade event not found" };
+  if (eventRes.error) {
+    return {
+      ok: false,
+      error: `Could not read the cascade event: ${eventRes.error.message}`,
+      untouched: true,
+    };
+  }
+  if (!event) {
+    return { ok: false, error: "Cascade event not found", untouched: true };
   }
   if (event.status === "completed" || event.status === "failed") {
     return { ok: false, error: `Already ${event.status}` };
@@ -559,11 +572,24 @@ export async function executeCascade(
   // and not yet recorded. Engine will re-run via approveCascade.
   const gate = await isBlockedByApproval(supabase, cascadeEventId);
   if (gate.blocked) {
-    return { ok: false, error: gate.reason ?? "Awaiting approval" };
+    return { ok: false, error: gate.reason ?? "Awaiting approval", untouched: true };
+  }
+  // A failed read is not an unconfigured prime: the first is a moment, the
+  // second a setup step, and only the second sends someone to Settings.
+  if (primeRes.error) {
+    return {
+      ok: false,
+      error: `Could not read prime_config: ${primeRes.error.message}`,
+      untouched: true,
+    };
   }
   const prime = primeRes.data;
   if (!prime) {
-    return { ok: false, error: "Prime not configured — set it up in Settings first" };
+    return {
+      ok: false,
+      error: "Prime not configured — set it up in Settings first",
+      untouched: true,
+    };
   }
 
   // Every write that moves the EVENT goes through this. With a fence it
@@ -997,7 +1023,12 @@ export async function executeCascade(
       continue;
     }
 
-    const pinErrors = blockedClones.get(clone.id);
+    // A pin swaps one module's globs for a library entry's files
+    // (`installedGlobs.server.ts`), and a mirror is delivered its whole tree
+    // whatever it installed. A pin cannot change what a mirror receives, so a
+    // stale one is no reason to fail every delivery to it: the fleet manager's
+    // bulk-pin dialog offers mirrors too.
+    const pinErrors = clone.sync_scope === "mirror" ? undefined : blockedClones.get(clone.id);
     if (pinErrors && pinErrors.length > 0) {
       await writeSettlement(supabase, r.id, {
         status: "failed",
@@ -2192,8 +2223,8 @@ export async function processClone(args: {
       );
     }
     candidatePaths = [];
-    for (const [path, sha] of primeTree.entries) {
-      if (cloneTree.entries.get(path) !== sha) candidatePaths.push(path);
+    for (const path of primeTree.entries.keys()) {
+      if (differsFromPrime(path, primeTree, cloneTree)) candidatePaths.push(path);
     }
     cloneShaByPath = cloneTree.entries;
     cloneHeadSha = cloneTree.headSha;
@@ -2295,8 +2326,8 @@ export async function processClone(args: {
     // been listed — so the narrowing is skipped and every path is read, as
     // before. The safe direction costs requests; the other loses a file.
     if (!primeTree.truncated && !cloneTree.truncated) {
-      candidatePaths = candidatePaths.filter(
-        (path) => cloneTree.entries.get(path) !== primeTree.entries.get(path),
+      candidatePaths = candidatePaths.filter((path) =>
+        differsFromPrime(path, primeTree, cloneTree),
       );
       cloneShaByPath = cloneTree.entries;
       cloneHeadSha = cloneTree.headSha;
@@ -3380,6 +3411,23 @@ export async function processClone(args: {
    * what a membrane is for.
    */
   const prepareOne = async (path: string): Promise<Prepared | null> => {
+    // A symbolic link read as text and written as a blob becomes a file
+    // holding its target's path. Held before any read, as the lateral lane
+    // holds one.
+    if (isSymbolicLink(path, primeModeByPath)) {
+      return {
+        kind: "held",
+        held: {
+          path,
+          pattern: "(mode: 120000)",
+          reason: "protected",
+          note:
+            "A symbolic link on the prime. This engine writes files, and a link written as one " +
+            "becomes a file holding its target's path, so it is not carried; make it by hand " +
+            "where a clone needs it.",
+        },
+      };
+    }
     // Reused from the previous pass: no read, no create. The tree
     // comparison already established the path differs, and the list
     // established prime's blob is still the one this was made from.
@@ -3471,8 +3519,15 @@ export async function processClone(args: {
       // cascade to `preflight-property-group`, repeated on each of the
       // attempts that followed, which is a third of what spent the App's
       // hourly budget on 2 Sep 2026. The clone's content is still fetched
-      // below, lazily, where the backend-identity hold needs it.
-      if (cloneShaByPath.get(path) === primeFile.sha) return null;
+      // below, lazily, where the backend-identity hold needs it. The same
+      // bytes under another executable bit are still owed: the delivery
+      // writes the prime's mode (`withDeliveryModes`).
+      if (
+        cloneShaByPath.get(path) === primeFile.sha &&
+        !executableBitDiffers(path, primeModeByPath, cloneModeByPath)
+      ) {
+        return null;
+      }
     } else if (!isMirror) {
       cloneFile = await getFileContent(octokit, cloneRef, path);
       cloneFileRead = true;
@@ -6209,7 +6264,11 @@ export async function processClone(args: {
   // chunks are cut from the delivery sorted by path (`canonicalDeliveryOrder`)
   // and two passes that will write the same tree cut the same chain.
   markPhase("tree");
-  const chunks = chunkTreeEntries(canonicalDeliveryOrder(treeEntries));
+  // Every written file at the prime's own mode, decided here so no stage
+  // above can write one of its own (`deliveryModeFor`).
+  const chunks = chunkTreeEntries(
+    canonicalDeliveryOrder(withDeliveryModes(treeEntries, primeModeByPath, cloneModeByPath)),
+  );
   const chainKey = treeChainKey(cloneCommit.tree.sha, chunks);
   const chain = await writeTreeChain({
     chunks,
@@ -6933,6 +6992,9 @@ export async function processClone(args: {
           pull_number: proposal.number,
           merge_method: "merge",
           commit_title: `Aurixa cascade ${sourceLabel}@${shortSha(sourceSha)} (#${proposal.number})`,
+          // The head these checks were read on. Unpinned, GitHub merges
+          // whatever the branch holds by the time this call lands.
+          sha: proposal.headSha,
         });
         return {
           status: "succeeded",

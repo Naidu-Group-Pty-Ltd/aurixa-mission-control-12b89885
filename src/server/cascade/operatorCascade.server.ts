@@ -240,6 +240,24 @@ async function createOperatorCascade(
     return refused(`Could not create the cascade: ${evErr?.message ?? "no row came back"}`);
   }
 
+  // The prime commit each clone was synced to when the cascade was started:
+  // the target of the bulk card's rollback, which sets `last_synced_sha` back
+  // to it. A prime commit, not one in the clone's repository, so the cascade's
+  // page diffs a delivery's own commit instead. The engine never writes it, so
+  // it was set only where the bulk card inserted its own rows. Read, never
+  // invented: a clone this read does not answer for carries none, and a failed
+  // read costs the rollback target, not the cascade.
+  const { data: before } = await supabase
+    .from("clones")
+    .select("id, last_synced_sha")
+    .in("id", cloneIds);
+  const previousSha = new Map(
+    ((before ?? []) as Array<{ id: string; last_synced_sha: string | null }>).map((c) => [
+      c.id,
+      c.last_synced_sha,
+    ]),
+  );
+
   // ARMED IN THE SAME ACT, as the custodian's re-queue is. One statement, so
   // the rows land together or not at all.
   const { error: rowsErr } = await supabase.from("cascade_results").insert(
@@ -247,6 +265,7 @@ async function createOperatorCascade(
       cascade_event_id: ev.id,
       clone_id,
       status: "queued" as const,
+      previous_sha: previousSha.get(clone_id) ?? null,
     })),
   );
   if (rowsErr) {

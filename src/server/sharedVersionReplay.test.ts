@@ -173,15 +173,22 @@ describe("applyPrimeMigrations — a shared version travels whole", () => {
 
 describe("applyPrimeMigrations — a shared version that cannot travel whole is held", () => {
   it("holds a version the corpus carries in a file the replay was not handed, and sends nothing at it", async () => {
-    const api = managementApi();
+    // A scoped replay serves a provisioned clone: one earlier version on its
+    // ledger, recorded on the prime, and a table.
+    const BASE: File = {
+      id: "20251231000000",
+      name: "20251231000000_baseline.sql",
+      sql: "create table public.baseline (id int);",
+    };
+    const api = managementApi({ applied: [BASE.id], tables: 1 });
     const scope = {
-      corpus: [A, B1, B2, C].map(meta),
+      corpus: [BASE, A, B1, B2, C].map(meta),
       // A caller that cleared the VERSION on the strength of one file — the
       // defect `wholeRunnableVersions` closes — and handed the replay only it.
-      runnableIds: new Set([A.id, B1.id, C.id]),
+      runnableIds: new Set([BASE.id, A.id, B1.id, C.id]),
     };
 
-    const out = await applyPrimeMigrations(REF, [A, B1, C], undefined, undefined, scope);
+    const out = await applyPrimeMigrations(REF, [BASE, A, B1, C], undefined, undefined, scope);
 
     expect(api.bodies()).toEqual([A.sql]);
     expect(api.recorded()).toEqual([{ version: A.id, name: A.name }]);

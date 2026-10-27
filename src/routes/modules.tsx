@@ -42,6 +42,7 @@ import { LibraryReingestDialog } from "@/components/library-reingest-dialog";
 import { PricingMapPanel } from "@/components/pricing-map-panel";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
+import { AUTO_MERGE_THRESHOLD, HIGH_RISK_CLONE_COUNT } from "@/lib/blast-radius";
 import { useState, useMemo, useCallback, useEffect } from "react";
 import { useConfirm } from "@/components/confirm-dialog";
 import { Input } from "@/components/ui/input";
@@ -1520,8 +1521,16 @@ function ApproveAndDeployButton({
       });
       if (!res.ok) {
         toast.error(res.error);
+      } else if (res.requiresApproval) {
+        toast.warning(
+          `Approved ${res.count} module(s). The cascade waits for a second operator: ${res.approvalReason ?? "approval required"}`,
+        );
+        setOpen(false);
+        onDone();
       } else {
-        toast.success(`Approved ${res.count} module(s) & queued cascade deploy`);
+        toast.success(
+          `Approved ${res.count} module(s) and queued a cascade of the selected clones`,
+        );
         setOpen(false);
         onDone();
       }
@@ -1545,7 +1554,10 @@ function ApproveAndDeployButton({
             <Rocket className="h-4 w-4" /> Approve & Cascade Deploy
           </DialogTitle>
           <DialogDescription>
-            Approve {moduleIds.length} module(s) and trigger a cascade deploy to selected clones.
+            Approve {moduleIds.length} module(s), then cascade the selected clones. Each clone
+            receives its whole sync scope, as any cascade does: approving a module does not narrow
+            what is delivered. An auto-merge across more than {AUTO_MERGE_THRESHOLD} clones, or any
+            cascade across more than {HIGH_RISK_CLONE_COUNT}, waits for a second operator.
           </DialogDescription>
         </DialogHeader>
 

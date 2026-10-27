@@ -18,9 +18,12 @@
  * sides, and two lanes writing one path is how a cascade comes to argue with
  * itself. The two lanes' write sets are disjoint by this rule alone.
  *
- * A line's own rules for its agents are never parent-level work either
- * (`isLineOwnRule`). A file under `.claude/rules/` is not offered at all, in
- * either direction, so it is never written, deleted or held.
+ * What one side keeps as its own is never parent-level work either: its rules
+ * for its agents and its voice stack (`isLineOwnPath`), and, between two CRM
+ * lines, a file either line holds in its own shape (`isCrossLineVariant`).
+ * None of these is offered at all, in either direction, so none is written,
+ * deleted or held, and a side removing its copy is never read as the other
+ * side's deletion.
  *
  * **2. Which way?** (`decideLateral`) Neither parent is upstream, so direction
  * is read from each side's own history of the path:
@@ -97,6 +100,7 @@ import {
 } from "./deletionPropagation.pure";
 import type { HeldPathEvidence } from "./heldEvidence.pure";
 import { globsForModuleScopedClone } from "./repositoryInvariants.pure";
+import { crmLineVariantPattern } from "@/server/crmLineFeatures.pure";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Naming
@@ -130,31 +134,83 @@ export const LATERAL_LEDGER_ENTITY = "lateral_boundary";
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * A line's own rules for its agents, which this lane never carries either way.
+ * What a deployment keeps as its own, which this lane never carries either way.
  *
- * `.claude/rules/` holds a repository's guidance for its agents, one topic a
- * file, and each line numbers its own: its `CLAUDE.md` indexes those files and
- * no others. So the two parents hold the same rule at different paths, and every
- * one of the other side's files reads to this lane as parent-level work — a path
- * the prime has never held. Carried across, it is a duplicate in another line's
+ * Two roots, each matched at any depth, because a nested project's are its own
+ * just the same.
+ *
+ * **`.claude/rules/`, a line's rules for its agents.** One topic a file, and
+ * each line numbers its own: its `CLAUDE.md` indexes those files and no others.
+ * So the two parents hold the same rule at different paths, and every one of
+ * the other side's files reads to this lane as parent-level work — a path the
+ * prime has never held. Carried across, it is a duplicate in another line's
  * numbering that the destination's `CLAUDE.md` does not index, and a mirror's
- * cascade carries it on to every child.
+ * cascade carries it on to every child. Measured on 23 Oct 2026, the day the
+ * fleet's guidance moved into these files: lateral #416 wrote 64 of the
+ * CRM-independent line's rule files into `npc-client-dashboard`, and the
+ * dependent's own cascade carried them on into `npc-test-76b3b3` and
+ * `preflight-property-group`. All three were cleaned by hand; lateral #419
+ * wrote the same 64 again, the cascade carried them on again, and all three
+ * were cleaned by hand a second time the next day.
  *
- * Measured on 23 Oct 2026, the day the fleet's guidance moved into these files:
- * lateral #416 wrote 64 of the CRM-independent line's rule files into
- * `npc-client-dashboard`, and the dependent's own cascade carried them on into
- * `npc-test-76b3b3` and `preflight-property-group`. All three were cleaned by
- * hand; lateral #419 wrote the same 64 again, the cascade carried them on again,
- * and all three were cleaned by hand a second time the next day.
+ * **`voice-agents/`, a deployment's own voice stack.** Its agents, the numbers
+ * they answer and the webhooks they call: what the directory holds is the
+ * deployment's identity on Vapi and Make, not code another deployment can run.
+ * Measured on 27 Oct 2026: lateral #349 (10 Oct) wrote 142 files of
+ * `voice-agents/crm-independent/` into `npc-client-dashboard`, `make/hooks.json`
+ * with the independent line's ten live Make webhook URLs and the Vapi dumps of
+ * its phone numbers among them, #350 updated two of them the same afternoon, and
+ * the dependent's own cascade carried all 142 on into `npc-test-76b3b3` and
+ * `preflight-property-group` on 14 Oct. Nothing in either lane would ever have
+ * taken them off again.
  *
- * Matched at any depth, because a nested project's rules are its own just the
- * same. A rule meant for both lines belongs at the prime, as any shared file does.
+ * Shared guidance, or a stack meant for several deployments, belongs at the
+ * prime, as any shared file does.
  */
-const LINE_OWN_RULES = /(?:^|\/)\.claude\/rules\//;
+const LINE_OWN_ROOTS = [/(?:^|\/)\.claude\/rules\//, /(?:^|\/)voice-agents\//];
 
-export function isLineOwnRule(path: string): boolean {
-  return LINE_OWN_RULES.test(path);
+export function isLineOwnPath(path: string): boolean {
+  return LINE_OWN_ROOTS.some((root) => root.test(path));
 }
+
+/**
+ * A file one CRM line holds in its own shape, on a boundary between two lines.
+ *
+ * `CRM_LINE_VARIANT_PATTERNS` names them: the native CRM, its functions, the
+ * line's palette and gates. A write of one across lines was already refused at
+ * the destination (`partitionCascadePaths`' `originCrmMode`), but the direction
+ * table still read the files, and its deletion row has no line in it. A copy
+ * carried to the other line before that refusal existed, and then taken off
+ * there, reads as the other line retiring the file, and the table decides to
+ * delete the LINE's own copy from the line. Measured on 27 Oct 2026: a hand
+ * reconcile took `src/branding/linePalette.ts` and both
+ * `scripts/lib/crmLineFeatures.*` off `npc-client-dashboard` on 8 Oct, and each
+ * of the 435 passes that ran from the next morning decided to delete them from
+ * `npc-crm-independent-6505dc`, kept out of a proposal only because no module
+ * that parent installs covers them; and
+ * `NativePipelineCreator.tsx` and `decommission-crm-line-functions.yml` were held
+ * for a person to choose between keeping the line's file and deleting it.
+ *
+ * Only where both lines are known and differ. Two parents on one line share
+ * that line's copies, and the lane carries them as it carries any other work.
+ */
+export function isCrossLineVariant(
+  path: string,
+  crmModes: { a: string | null; b: string | null },
+): boolean {
+  if ((crmModes.a ?? null) === (crmModes.b ?? null)) return false;
+  return (
+    crmLineVariantPattern(path, crmModes.a) !== null ||
+    crmLineVariantPattern(path, crmModes.b) !== null
+  );
+}
+
+export type LateralCandidates = {
+  /** Offered to the questions below, sorted. */
+  paths: string[];
+  /** Set aside as one side's own, sorted. Never written, deleted or held; counted in the report. */
+  lineOwn: string[];
+};
 
 /**
  * Every path the two parents disagree on and the prime does not currently hold.
@@ -164,14 +220,17 @@ export function isLineOwnRule(path: string): boolean {
  * binary as exactly as it settles text. A path in the prime's CURRENT tree is
  * dropped here without a question: the vertical cascade owns it on both sides,
  * and asking its history would spend a call to learn what the tree already said.
- * A line's own rule file (`isLineOwnRule`) is dropped here too, before any
- * history is walked for it, so it is never written, deleted or held.
+ * What one side keeps as its own (`isLineOwnPath`, `isCrossLineVariant`) is set
+ * aside here too, before any history is walked for it, so it is never written,
+ * deleted or held. `crmModes` is each side's recorded `crm_mode`; absent, no
+ * line is told from another.
  */
 export function lateralCandidates(args: {
   a: TreeIndex;
   b: TreeIndex;
   prime: TreeIndex;
-}): string[] {
+  crmModes?: { a: string | null; b: string | null };
+}): LateralCandidates {
   const { a, b, prime } = args;
   const out = new Set<string>();
   for (const [path, sha] of a) {
@@ -180,7 +239,14 @@ export function lateralCandidates(args: {
   for (const path of b.keys()) {
     if (!a.has(path) && !prime.has(path)) out.add(path);
   }
-  return [...out].filter((path) => isSafeRepoPath(path) && !isLineOwnRule(path)).sort();
+  const paths: string[] = [];
+  const lineOwn: string[] = [];
+  for (const path of [...out].filter(isSafeRepoPath).sort()) {
+    const own =
+      isLineOwnPath(path) || (args.crmModes ? isCrossLineVariant(path, args.crmModes) : false);
+    (own ? lineOwn : paths).push(path);
+  }
+  return { paths, lineOwn };
 }
 
 /**
@@ -1778,6 +1844,21 @@ export type LateralDirectionReport = {
   pr: { number: number; url: string } | null;
   /** What the merge gate said, where this pass asked it. */
   merge: string | null;
+  /**
+   * Each list's length before the ledger row clipped it, and the held list's
+   * reasons counted in full, so a row whose list was cut still says what it
+   * left out. Written by `compactLateralReport`; absent from a report a pass
+   * hands back directly, whose lists are whole, and from rows written before
+   * 27 Oct 2026.
+   */
+  totals?: LateralDirectionTotals;
+};
+
+export type LateralDirectionTotals = {
+  writes: number;
+  deletes: number;
+  held: number;
+  heldByReason: Partial<Record<ExclusionReason, number>>;
 };
 
 export type LateralReconcileState = ProposalState | "unreadable";
@@ -1805,10 +1886,19 @@ export type LateralBoundaryReport = {
   outcome: LateralBoundaryOutcome;
   why: string;
   mode: LateralMode | null;
-  /** Paths the two parents disagree on that the prime's current tree does not hold. */
+  /**
+   * Paths the two parents disagree on that the prime's current tree does not
+   * hold and neither side keeps as its own — what the questions below ask about.
+   */
   candidates: number;
   /** Of those, paths the prime's history once held — the vertical lane's, left alone. */
   primeOwned: number;
+  /**
+   * Paths the two parents disagree on that one side keeps as its own
+   * (`lateralCandidates`' `lineOwn`), set aside before any question and never
+   * written, deleted or held. Absent from rows written before 27 Oct 2026.
+   */
+  lineOwn?: number;
   /** Paths both sides changed, or one removed and the other changed: a person decides. */
   conflicts: Array<{ path: string; kind: string; why: string }>;
   /** Paths not settled this pass, and why. */
@@ -1817,6 +1907,8 @@ export type LateralBoundaryReport = {
   directions: LateralDirectionReport[];
   /** Whether the pass's ledger row was written. Null where nothing was to be written. */
   ledgerWritten: boolean | null;
+  /** As a direction's `totals`, for the boundary's own two lists. */
+  totals?: { conflicts: number; deferred: number };
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1833,14 +1925,32 @@ const REPORT_NOTE_CAP = 400;
 const clip = (text: string, n = REPORT_NOTE_CAP) =>
   text.length > n ? `${text.slice(0, n - 1)}…` : text;
 
-/** The report as a row keeps it: every list bounded, every note clipped. */
+/**
+ * The report as a row keeps it: every list bounded, every note clipped, and
+ * the length of each list a person is told the size of kept whole.
+ *
+ * A clipped list read back as a whole one undercounts: on 27 Oct 2026 the
+ * panel said 60 held into `npc-client-dashboard` where 67 were, and the seven
+ * it dropped were the ones a reader needed (the clip runs in path order, and
+ * `voice-agents/` sorts last). `totals` is taken before the clip, and kept from
+ * a report compacted once already, whose lists are no longer whole.
+ */
 export function compactLateralReport(report: LateralBoundaryReport): LateralBoundaryReport {
   const cap = <T>(xs: readonly T[]) => xs.slice(0, REPORT_LIST_CAP);
   const why = <T extends { why: string }>(xs: readonly T[]) =>
     cap(xs).map((x) => ({ ...x, why: clip(x.why) }));
+  const byReason = (held: readonly HeldPath[]) => {
+    const out: Partial<Record<ExclusionReason, number>> = {};
+    for (const h of held) out[h.reason] = (out[h.reason] ?? 0) + 1;
+    return out;
+  };
   return {
     ...report,
     why: clip(report.why),
+    totals: report.totals ?? {
+      conflicts: report.conflicts.length,
+      deferred: report.deferred.length,
+    },
     conflicts: why(report.conflicts),
     deferred: why(report.deferred),
     reconcile: cap(report.reconcile).map((r) => ({
@@ -1849,6 +1959,12 @@ export function compactLateralReport(report: LateralBoundaryReport): LateralBoun
     })),
     directions: report.directions.map((d) => ({
       ...d,
+      totals: d.totals ?? {
+        writes: d.writes.length,
+        deletes: d.deletes.length,
+        held: d.held.length,
+        heldByReason: byReason(d.held),
+      },
       why: clip(d.why),
       writes: cap(d.writes),
       deletes: cap(d.deletes),

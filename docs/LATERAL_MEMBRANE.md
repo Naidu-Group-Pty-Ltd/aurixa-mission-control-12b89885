@@ -36,9 +36,11 @@ path two authors and a cascade that argued with itself. The two lanes
 therefore write disjoint sets of paths by construction — which is what lets
 them run without knowing about each other. The vertical cascade never deletes
 a file the prime never held (its deletion rule is history-based), and the
-lateral lane never touches a file the prime ever held. A line's own rules for
-its agents (`.claude/rules/`) are not parent-level work either, and never
-cross: see [_24 October_](#24-october-a-lines-own-rules-never-cross).
+lateral lane never touches a file the prime ever held. What one side keeps as
+its own is not parent-level work either, and never crosses: a line's rules for
+its agents (`.claude/rules/`, see [_24 October_](#24-october-a-lines-own-rules-never-cross)),
+a deployment's voice stack (`voice-agents/`), and, between two CRM lines, a file
+either line holds in its own shape (see [_27 October_](#27-october-a-deployments-voice-stack-and-a-lines-own-copies)).
 
 **Direction is read, not declared.** Neither parent is upstream of the other,
 so a file moves toward the side still holding the version the other side left
@@ -149,8 +151,11 @@ copied, except where the lateral case genuinely differs — and those are named.
 **Candidates are compared by blob SHA, never by content.** Present on one side
 only, or on both with different blobs, and absent from the prime's CURRENT
 tree. A path the prime holds today is dropped without a history call, because
-the tree already answered. So is a file under `.claude/rules/`, whichever side
-holds it (`isLineOwnRule`).
+the tree already answered. So is a file under `.claude/rules/` or
+`voice-agents/`, whichever side holds it (`isLineOwnPath`), and, where the two
+sides' recorded `crm_mode`s differ, a path `CRM_LINE_VARIANT_PATTERNS` names for
+either line (`isCrossLineVariant`). Those are counted in the report as
+`lineOwn`, and nothing else is done with them.
 
 **Origin is one `listCommits` page of one.** An empty page means the prime
 never held the path; any commit at all means it did. `held` is remembered for
@@ -188,8 +193,9 @@ shape, then the membrane's channels, then the whole-delivery rules.
 - **Shape.** Only a regular or executable file crosses, and it carries its own
   mode: a script that crosses without its executable bit is a script that no
   longer runs, and a symbolic link written as `100644` becomes a file holding
-  its target's path. The vertical engine still writes every file `100644`, as
-  it always has. A file past the read ceiling stays where it was written.
+  its target's path. The vertical engine now writes the prime's own mode too,
+  and holds a prime symbolic link rather than write it (`deliveryModeFor`, 27
+  October). A file past the read ceiling stays where it was written.
 - **Channels.** `permeate`, against the membrane INTO the destination.
 - **Workflows.** `judgingWorkflowHold`, exactly as vertically.
 - **A spec crosses with its subject, or not at all.** Vertically a stranded
@@ -420,7 +426,7 @@ lane. They were the two largest deliveries the independent had been sent (276
 files, then 254), and they met two defects in the vertical engine. The Edge
 Function type baseline one is fixed on `main` but not yet deployed. The other
 was a missing half of the spec channel, and it is in
-[*The other half*](./CASCADE_MEMBRANES.md#the-other-half-a-spec-the-clone-keeps-left-behind-by-its-subject).
+[_The other half_](./CASCADE_MEMBRANES.md#the-other-half-a-spec-the-clone-keeps-left-behind-by-its-subject).
 
 ### 24 October: a line's own rules never cross
 
@@ -446,7 +452,7 @@ A rule file is not shared work, whatever its history. The destination's
 `CLAUDE.md` indexes its own rules and no others, so a rule carried across is a
 duplicate in another line's numbering that nothing indexes, and a mirror's
 cascade hands it to every child. So the lane now drops every path under
-`.claude/rules/` before it is a candidate (`isLineOwnRule`), the way it drops a
+`.claude/rules/` before it is a candidate (`isLineOwnRule`, now `isLineOwnPath`), the way it drops a
 path in the prime's current tree. Nothing is written, deleted or held for it,
 in either direction, and no history is walked. That covers both harms
 `lateral-exchange.server.test.ts` stages without the rule:
@@ -479,18 +485,58 @@ delivered copy is therefore carried back to the other side as a deletion — the
 table's second row — wherever that side's scope, exclusions and imports allow.
 For the 64 rule files it never arises: they are no longer candidates at all.
 
+### 27 October: a deployment's voice stack, and a line's own copies
+
+The audit of 27 October found the rule above drawn one directory too narrow.
+
+**A voice stack is one deployment's identity.** Lateral #349 (10 October) wrote
+142 files of `voice-agents/crm-independent/` into `npc-client-dashboard`, and
+#350 updated two of them the same afternoon. Among them were `make/hooks.json`
+with the independent line's ten live Make webhook URLs, and the Vapi dumps of
+its phone numbers. The dependent's own cascade carried all 142 on into
+`npc-test-76b3b3` and `preflight-property-group` on 14 October. No rule could
+refuse them: no project ref is named, the dependent is a mirror, and the table
+read each file correctly as one side's alone. They are not shared work, so
+`voice-agents/` is dropped at any depth before it is a candidate, exactly as
+`.claude/rules/` is.
+
+**A line's own copy is not the other line's to retire.** The destination
+already refused a write of another line's copies (`partitionCascadePaths`'
+`originCrmMode`), but the direction table still read those paths, and its
+deletion row has no line in it. The palette and gate scripts that reached the
+dependent before that refusal existed were taken off it by hand on 8 October.
+From then on the table read the dependent as having retired them: each of the
+435 passes that ran from 9 October to 27 October decided to delete the line's
+own `src/branding/linePalette.ts` and `scripts/lib/crmLineFeatures.*` from
+`npc-crm-independent-6505dc`. Only the
+fact that no module that parent installs covers those paths kept the deletion
+out of a proposal. `NativePipelineCreator.tsx` and
+`decommission-crm-line-functions.yml` were held for a person to choose between
+keeping the line's file and deleting it. Where the two sides' recorded lines
+differ, a path the register names for either line is now set aside with the
+rule files.
+
+`lateral-exchange.server.test.ts` stages both harms. With the guard taken out,
+the second proposes deleting the palette from the independent.
+
+The same pass measured 81 differing paths, 65 of them one line's own. It held
+67 into the dependent, and the row's list, clipped at sixty in path order, lost
+the seven that sort last: the voice stack. So a row now keeps each list's whole
+length and the held list's reasons counted in full (`totals`), and the panel
+reads its counts from there.
+
 ## What is asserted
 
-| file                               | what it pins                                                                                                                                                                                                                                                                                                                                                                                                  |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `lateralMembranes.test.ts`         | the boundary joins the two parents and nobody else; the CRM line holds both ways; what never crosses either way; that the new species change nothing on any vertical membrane; every channel explains itself                                                                                                                                                                                                  |
-| `lateralExchange.test.ts`          | candidates (never a line's own rule file), origin, every row of the direction table, the destination's rulebook in order, spec-with-subject, the import and overwrite rules, deletions to a fixed point, when a pass runs, memory (forgotten once a delivery merges), declines, the proposal text                                                                                                             |
-| `lateral-exchange.server.test.ts`  | a first pass proposes both ways under each destination's rulebook; a line's own rules neither written nor deleted, either way; the next slot; a person's push, before or during a rebuild, is never overwritten; declines remembered; a person's removal of a merged delivery read, never answered from memory; auto-merge through the vertical gate; the pause; a failed read never taken for an absent fact |
-| `lateralBand.test.ts`              | the arch's midpoint and tangent against an independent evaluation; each pore's lanes; a lane never more permeable than its rule; the flow along the arch                                                                                                                                                                                                                                                      |
-| `lateralBandRenders.test.ts`       | what the component actually EMITS: where the band lands, each direction's marks, the flow and its arrowheads, the wall framing every mouth (the passage's included), an undeclared lane                                                                                                                                                                                                                       |
-| `membraneClearsLabels.test.ts`     | the arch, band, particles and arrowheads clear every caption, node and vertical band at every corner of the layout's jitter; nothing lit is drawn under either parent                                                                                                                                                                                                                                         |
-| `membraneIsDrawn.contract.test.ts` | the band and panel are mounted, in the right layer, keyed on the boundary; the panel's words come from the shared vocabulary; a selected parent names its lateral boundary                                                                                                                                                                                                                                    |
-| `membraneIsWired.contract.test.ts` | the vertical engine never passes the fleet's ref list, so the prime's cascade reads project refs exactly as it did                                                                                                                                                                                                                                                                                            |
+| file                               | what it pins                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `lateralMembranes.test.ts`         | the boundary joins the two parents and nobody else; the CRM line holds both ways; what never crosses either way; that the new species change nothing on any vertical membrane; every channel explains itself                                                                                                                                                                                                                                                                                |
+| `lateralExchange.test.ts`          | candidates (never a line's own rule file or voice stack, nor a CRM line's own copy across lines), origin, every row of the direction table, the destination's rulebook in order, spec-with-subject, the import and overwrite rules, deletions to a fixed point, when a pass runs, memory (forgotten once a delivery merges), declines, the proposal text                                                                                                                                    |
+| `lateral-exchange.server.test.ts`  | a first pass proposes both ways under each destination's rulebook; a line's own rules and a deployment's voice stack neither written nor deleted, either way; a line's own copy never deleted from its line; the next slot; a person's push, before or during a rebuild, is never overwritten; declines remembered; a person's removal of a merged delivery read, never answered from memory; auto-merge through the vertical gate; the pause; a failed read never taken for an absent fact |
+| `lateralBand.test.ts`              | the arch's midpoint and tangent against an independent evaluation; each pore's lanes; a lane never more permeable than its rule; the flow along the arch                                                                                                                                                                                                                                                                                                                                    |
+| `lateralBandRenders.test.ts`       | what the component actually EMITS: where the band lands, each direction's marks, the flow and its arrowheads, the wall framing every mouth (the passage's included), an undeclared lane                                                                                                                                                                                                                                                                                                     |
+| `membraneClearsLabels.test.ts`     | the arch, band, particles and arrowheads clear every caption, node and vertical band at every corner of the layout's jitter; nothing lit is drawn under either parent                                                                                                                                                                                                                                                                                                                       |
+| `membraneIsDrawn.contract.test.ts` | the band and panel are mounted, in the right layer, keyed on the boundary; the panel's words come from the shared vocabulary; a selected parent names its lateral boundary                                                                                                                                                                                                                                                                                                                  |
+| `membraneIsWired.contract.test.ts` | the vertical engine never passes the fleet's ref list, so the prime's cascade reads project refs exactly as it did                                                                                                                                                                                                                                                                                                                                                                          |
 
 The render and geometry guards were each proven non-vacuous by planting the
 defect they describe — the passage's walls removed, a particle lit under a

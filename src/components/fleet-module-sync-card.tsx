@@ -118,8 +118,9 @@ export function FleetModuleSyncCard() {
           <CardTitle className="text-base">Fleet module sync</CardTitle>
         </div>
         <CardDescription>
-          Install or remove an approved module across many clones at once. Installs can fire a
-          cascade scoped to the module&apos;s file_globs only.
+          Install or remove an approved module across many clones at once. An install can fire a
+          cascade: a module-scoped clone receives only the module&apos;s files, and a mirror its
+          whole tree, as every cascade delivers it.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">

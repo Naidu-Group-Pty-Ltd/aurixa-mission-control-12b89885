@@ -19,7 +19,8 @@ import { useClones, type Clone } from "@/lib/queries";
 import { useServerFn } from "@tanstack/react-start";
 import { triggerFleetDriftScan } from "@/server/fleet-drift.functions";
 import { refreshFleetDrift } from "@/server/drift-refresh.functions";
-import { runCascade } from "@/server/cascade-engine.functions";
+import { fireCascade } from "@/server/cascade-spawn.functions";
+import { useLaunchCascade } from "@/lib/use-launch-cascade";
 import { DriftListSkeleton } from "@/components/list-skeletons";
 import { FleetMigrationSyncCard } from "@/components/fleet-migration-sync-card";
 import { ReferenceDataSyncCard } from "@/components/reference-data-sync-card";
@@ -30,7 +31,6 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { formatDistanceToNow } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { supabase } from "@/integrations/supabase/client";
 import type { Database } from "@/integrations/supabase/types";
 
 type CascadeMode = Database["public"]["Enums"]["cascade_mode"];
@@ -82,7 +82,8 @@ function FleetManager() {
   const [bulkApplying, setBulkApplying] = useState(false);
   const scanFn = useServerFn(triggerFleetDriftScan);
   const driftRefreshFn = useServerFn(refreshFleetDrift);
-  const cascadeFn = useServerFn(runCascade);
+  const fireCascadeFn = useServerFn(fireCascade);
+  const launch = useLaunchCascade();
 
   // Silent drift refresh: real GitHub commits-behind compare on mount + every 5 min.
   useEffect(() => {
@@ -198,87 +199,46 @@ function FleetManager() {
 
     setApplyingKey(key);
     try {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      const { data: ev, error } = await supabase
-        .from("cascade_events")
-        .insert({
-          trigger: "manual",
-          mode,
-          status: "pending",
-          scope_filter: { scope: "selected", clone_ids: [cloneId], source: "drift_suggestion" },
-          initiated_by: user?.id,
-        })
-        .select()
-        .single();
-      if (error || !ev) throw new Error(error?.message ?? "Failed to create cascade");
-
-      const { error: insErr } = await supabase
-        .from("cascade_results")
-        .insert({ cascade_event_id: ev.id, clone_id: cloneId, status: "queued" });
-      if (insErr) throw new Error(insErr.message);
-
-      toast.info(`Applying ${mode.replace("_", " ")} to ${cloneName}…`);
-      const res = await cascadeFn({ data: { cascadeEventId: ev.id } });
-      if (!res.ok) {
-        toast.error(res.error);
-      } else {
-        toast.success(`Cascade ${res.status} for ${cloneName}`);
-        navigate({ to: "/cascades/$eventId", params: { eventId: ev.id } });
-      }
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Apply failed");
+      // Through the server's own flow, as the bulk apply below and `/cascades`
+      // go: one clone never waits for a second operator today, but the gate is
+      // the server's to ask, not this page's to skip.
+      await launch(
+        () =>
+          fireCascadeFn({
+            data: { mode, scope: "selected", tags: [], cloneIds: [cloneId], confirmedCount: 1 },
+          }),
+        { navigate: "always" },
+      );
     } finally {
       setApplyingKey(null);
       refresh();
     }
   };
 
+  // Through the server's own flow (`fireCascade`), as `/cascades` fires one:
+  // the server resolves the selection, asks the second-operator gate and arms
+  // the rows in one act. This used to insert the event from the browser with
+  // no `requires_approval`, so an auto-merge across every selected clone ran
+  // with one operator where the same push from `/cascades` waited for two.
   const applyBulk = async () => {
     const ids = Array.from(selected);
     if (ids.length === 0) return;
     setBulkApplying(true);
     try {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      const { data: ev, error } = await supabase
-        .from("cascade_events")
-        .insert({
-          trigger: "manual",
-          mode: bulkMode,
-          status: "pending",
-          scope_filter: {
-            scope: "selected",
-            clone_ids: ids,
-            source: "fleet_manager_bulk",
-          },
-          initiated_by: user?.id,
-        })
-        .select()
-        .single();
-      if (error || !ev) throw new Error(error?.message ?? "Failed to create cascade");
-
-      const rows = ids.map((cloneId) => ({
-        cascade_event_id: ev.id,
-        clone_id: cloneId,
-        status: "queued" as const,
-      }));
-      const { error: insErr } = await supabase.from("cascade_results").insert(rows);
-      if (insErr) throw new Error(insErr.message);
-
-      toast.info(
-        `Applying ${bulkMode.replace("_", " ")} to ${ids.length} clone${ids.length === 1 ? "" : "s"}…`,
+      const eventId = await launch(
+        () =>
+          fireCascadeFn({
+            data: {
+              mode: bulkMode,
+              scope: "selected",
+              tags: [],
+              cloneIds: ids,
+              confirmedCount: ids.length,
+            },
+          }),
+        { navigate: "always" },
       );
-      const res = await cascadeFn({ data: { cascadeEventId: ev.id } });
-      if (!res.ok) toast.error(res.error);
-      else toast.success(`Bulk cascade ${res.status} (${ids.length})`);
-
-      clearSelection();
-      navigate({ to: "/cascades/$eventId", params: { eventId: ev.id } });
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Bulk apply failed");
+      if (eventId) clearSelection();
     } finally {
       setBulkApplying(false);
       refresh();

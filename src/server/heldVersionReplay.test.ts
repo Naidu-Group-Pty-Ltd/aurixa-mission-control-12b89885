@@ -64,6 +64,18 @@ const OTHER: File = {
   sql: "create table public.unrelated_things (id int);",
 };
 
+/**
+ * What a provisioned clone already holds: a version before all of the above,
+ * recorded on the clone and on the prime. A scoped replay only ever serves a
+ * clone that has been provisioned, and refuses one that reads as an empty
+ * project (`applyPrimeMigrations`), so every scoped case here starts from it.
+ */
+const BASE: File = {
+  id: "20260101000000",
+  name: "20260101000000_baseline.sql",
+  sql: "create table public.baseline (id int);",
+};
+
 const CORPUS = [HOLE, SEED, REFRESH, OTHER];
 
 /** The corpus row the fleet sync builds for a body it decoded: facts AND names. */
@@ -81,7 +93,7 @@ const meta = (f: File) => ({ id: f.id, name: f.name });
 /** Bodies by file, as the fleet sync's loader serves them from GitHub. */
 function loaderFor(opts: { oversize?: readonly File[] } = {}) {
   const tooLarge = new Set((opts.oversize ?? []).map((f) => f.name));
-  const bodies = new Map(CORPUS.map((f) => [f.name, f.sql]));
+  const bodies = new Map([BASE, ...CORPUS].map((f) => [f.name, f.sql]));
   return vi.fn(async (m: { id: string; name: string }) => {
     if (tooLarge.has(m.name)) {
       throw new OversizedMigrationError(m.name, 41_600_000, MAX_MIGRATION_BYTES);
@@ -90,6 +102,11 @@ function loaderFor(opts: { oversize?: readonly File[] } = {}) {
     if (sql === undefined) throw new Error(`no body for ${m.name}`);
     return sql;
   });
+}
+
+/** The clone a scoped sync serves: provisioned, with `BASE` on its ledger. */
+function provisionedClone() {
+  return managementApi({ applied: [BASE.id], tables: 1 });
 }
 
 function managementApi(opts?: Parameters<typeof recordingManagementApi>[0]) {
@@ -114,16 +131,16 @@ afterEach(() => {
 
 describe("applyPrimeMigrations — a refresh waits for the seed it names", () => {
   it("sends neither while the seed is held, sends what is unrelated, and names the hole behind both", async () => {
-    const api = managementApi();
+    const api = provisionedClone();
     const scope = {
-      corpus: CORPUS.map(decoded),
+      corpus: [BASE, ...CORPUS].map(decoded),
       // The prime's ledger records everything but the hole.
-      runnableIds: new Set([SEED.id, REFRESH.id, OTHER.id]),
+      runnableIds: new Set([BASE.id, SEED.id, REFRESH.id, OTHER.id]),
     };
 
     const out = await applyPrimeMigrations(
       REF,
-      [SEED, REFRESH, OTHER].map(meta),
+      [BASE, SEED, REFRESH, OTHER].map(meta),
       undefined,
       loaderFor(),
       scope,
@@ -154,17 +171,17 @@ describe("applyPrimeMigrations — a refresh waits for the seed it names", () =>
   });
 
   it("holds everything after a seed nobody could read, rather than guessing what it creates", async () => {
-    const api = managementApi();
+    const api = provisionedClone();
     const loadSql = loaderFor({ oversize: [SEED] });
     const scope = {
       // The seed's body was never decoded, so its row carries no facts.
-      corpus: [decoded(HOLE), undecoded(SEED), decoded(REFRESH), decoded(OTHER)],
-      runnableIds: new Set([SEED.id, REFRESH.id, OTHER.id]),
+      corpus: [decoded(BASE), decoded(HOLE), undecoded(SEED), decoded(REFRESH), decoded(OTHER)],
+      runnableIds: new Set([BASE.id, SEED.id, REFRESH.id, OTHER.id]),
     };
 
     const out = await applyPrimeMigrations(
       REF,
-      [SEED, REFRESH, OTHER].map(meta),
+      [BASE, SEED, REFRESH, OTHER].map(meta),
       undefined,
       loadSql,
       scope,
@@ -187,13 +204,13 @@ describe("applyPrimeMigrations — a refresh waits for the seed it names", () =>
   });
 
   it("waits for nothing when the version it names travels in the same pass", async () => {
-    const api = managementApi();
+    const api = provisionedClone();
     const scope = {
-      corpus: [SEED, REFRESH].map(decoded),
-      runnableIds: new Set([SEED.id, REFRESH.id]),
+      corpus: [BASE, SEED, REFRESH].map(decoded),
+      runnableIds: new Set([BASE.id, SEED.id, REFRESH.id]),
     };
 
-    await applyPrimeMigrations(REF, [SEED, REFRESH].map(meta), undefined, loaderFor(), scope);
+    await applyPrimeMigrations(REF, [BASE, SEED, REFRESH].map(meta), undefined, loaderFor(), scope);
 
     expect(api.bodies()).toEqual([SEED.sql, REFRESH.sql]);
   });

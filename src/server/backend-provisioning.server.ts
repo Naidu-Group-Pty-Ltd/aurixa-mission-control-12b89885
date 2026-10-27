@@ -2799,20 +2799,21 @@ export function sqlLiteral(value: string): string {
  * two are identical from the ledger's point of view and need opposite
  * treatment.
  */
-async function countReplicatedTables(projectRef: string): Promise<number> {
+async function countReplicatedTables(projectRef: string): Promise<number | null> {
   try {
     const raw = await runSqlOnProject(
       projectRef,
       `select count(*)::int as n from pg_tables where schemaname in ('public', 'aml');`,
     );
-    const rows = Array.isArray(raw) ? raw : [];
-    const n = (rows[0] as { n?: unknown } | undefined)?.n;
-    return typeof n === "number" ? n : Number(n ?? 0) || 0;
+    const rows = Array.isArray(raw) ? raw : null;
+    const n = (rows?.[0] as { n?: unknown } | undefined)?.n;
+    const count = typeof n === "number" ? n : typeof n === "string" ? Number(n) : NaN;
+    return Number.isInteger(count) && count >= 0 ? count : null;
   } catch {
-    // A project we cannot read is not a project we can judge. Returning 0 lets
-    // the replay proceed exactly as it did before this check existed, which is
-    // the right failure mode for a check whose only job is to refuse earlier.
-    return 0;
+    // A project we cannot read is not a project we can judge, and null says
+    // so. It used to answer 0, which beside an empty ledger reads as a fresh
+    // project, and a fresh project is replayed from its first migration.
+    return null;
   }
 }
 
@@ -3320,34 +3321,48 @@ export async function applyPrimeMigrations(
   // Union both the canonical Supabase ledger and the legacy aurixa ledger,
   // so a clone that was partially applied under either scheme stays
   // idempotent. (Issue #14.)
-  const appliedRaw = await runSqlOnProject(
-    projectRef,
-    `select version from supabase_migrations.schema_migrations
-     union
-     select version from aurixa.schema_migrations;`,
-  );
-  // The query endpoint returns rows as a bare array; tolerate wrapped shapes too.
-  const appliedRows = Array.isArray(appliedRaw)
-    ? appliedRaw
-    : Array.isArray((appliedRaw as { rows?: unknown[] })?.rows)
-      ? (appliedRaw as { rows: unknown[] }).rows
-      : Array.isArray((appliedRaw as { result?: unknown[] })?.result)
-        ? (appliedRaw as { result: unknown[] }).result
-        : [];
-  const applied = new Set(
-    appliedRows
-      .map((r) => (r as { version?: unknown })?.version)
-      .filter((v): v is string => typeof v === "string"),
-  );
+  //
+  // Read through the one reader that fails CLOSED. This read used to turn an
+  // answer it did not recognise into an EMPTY ledger, and the table count
+  // below turned a failure into 0, and an empty ledger beside no tables reads
+  // as a fresh project. That replays the whole corpus from its first file at
+  // a live tenant: on the 27 Oct 2026 tree the second file re-creates
+  // `update_updated_at_column()` as SECURITY DEFINER over today's invoker
+  // body, and the replay then halts on an ADD COLUMN that is not idempotent,
+  // in every clone in one sweep.
+  const ledger = await readCloneMigrationLedger(projectRef);
+  if (!ledger.ok) {
+    throw new Error(
+      `Migration sync refused: the clone's migration ledger could not be read (${ledger.error}), ` +
+        "so what it has applied is not known.",
+    );
+  }
+  const applied = new Set(ledger.rows.map((r) => r.version));
 
   // Pre-flight: refuse a replay that cannot succeed, rather than starting one
   // that halts on migration #1 and reports the migration as the fault.
   const cloneTableCount = await countReplicatedTables(projectRef);
+  if (cloneTableCount === null) {
+    throw new Error(
+      "Migration sync refused: the clone's tables could not be counted, so a fresh project " +
+        "cannot be told from a built one.",
+    );
+  }
   const assessment = assessLedgerState({
     appliedVersions: [...applied],
     corpusVersions: migrations.map((m) => m.id),
     cloneTableCount,
   });
+  // A scoped caller serves a clone that has been provisioned, so "fresh" is
+  // not a reading it can act on. Provisioning, the one caller that does build
+  // an empty project, passes no scope.
+  if (scope && assessment.state === "fresh") {
+    throw new Error(
+      "Migration sync refused: the clone reads as an empty project, with no recorded version " +
+        "and no table, and a scoped sync only serves a clone that has been provisioned. " +
+        "Replaying the whole corpus at it would start at the first migration.",
+    );
+  }
   const refusal = ledgerRepairHint(assessment);
   if (refusal) throw new Error(refusal);
 

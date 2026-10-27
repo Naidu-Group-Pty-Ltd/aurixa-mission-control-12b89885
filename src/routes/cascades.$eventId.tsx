@@ -172,10 +172,22 @@ function CascadeDetailPage() {
       return;
     }
 
-    // Reopen the event
+    // Reopen the event as the drain revives one: claimable. Reopened with the
+    // last pass's claim still on it, an event the run below never reached, or
+    // refused before writing, sat `pending` with `worker_started_at` set, which
+    // no claim, reclaim or retirement can reach. `attempts` starts again
+    // because a person asked: the ceiling stops a loop of automatic attempts,
+    // and a retried event at it could otherwise never be claimed again.
     await supabase
       .from("cascade_events")
-      .update({ status: "pending", completed_at: null })
+      .update({
+        status: "pending",
+        completed_at: null,
+        worker_started_at: null,
+        worker_finished_at: null,
+        next_attempt_at: new Date().toISOString(),
+        attempts: 0,
+      })
       .eq("id", event.id);
 
     toast.info(`Retrying ${failedIds.length} clone(s)…`);
@@ -762,7 +774,14 @@ function ResultRow({
               />
             </div>
           )}
-          {clone && result.previous_sha && result.commit_sha && (
+          {/*
+            What this delivery's own commit changed: its parent against itself.
+            Not `previous_sha`, which is the PRIME commit the clone was synced
+            to (the bulk card's rollback target). A clone's repository does not
+            hold the prime's commits, so a compare against one is a 404
+            (measured 27 Oct 2026, `d72032e1...5415a47` on the dashboard).
+          */}
+          {clone && result.commit_sha && (
             <div className="mt-2">
               <Suspense
                 fallback={<div className="text-xs text-muted-foreground">Loading diff viewer…</div>}
@@ -770,7 +789,7 @@ function ResultRow({
                 <RichDiffViewer
                   cloneOwner={clone.github_owner}
                   cloneRepo={clone.github_repo}
-                  baseSha={result.previous_sha}
+                  baseSha={`${result.commit_sha}^`}
                   headSha={result.commit_sha}
                   filesChanged={result.files_changed}
                 />

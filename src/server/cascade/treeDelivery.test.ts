@@ -11,12 +11,18 @@
  */
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { stripComments } from "@/server/sourceComments.pure";
 import {
   TREE_CHUNK_MAX_CONTENT_BYTES,
   TREE_CHUNK_MAX_ENTRIES,
   canonicalDeliveryOrder,
   chunkTreeEntries,
+  deliveryModeFor,
+  differsFromPrime,
+  executableBitDiffers,
+  isSymbolicLink,
   toGitTreeParam,
+  withDeliveryModes,
   type DeliveryTreeEntry,
 } from "./treeDelivery.pure";
 
@@ -182,9 +188,7 @@ describe("the engine delivers text inline and chains the tree", () => {
     // each chunk over the previous call's tree and is held to that, and to
     // ending where one uninterrupted chain ends, in treeChain.test.ts. The
     // engine supplies the chunks and the call.
-    const at = engine.indexOf(
-      "const chunks = chunkTreeEntries(canonicalDeliveryOrder(treeEntries));",
-    );
+    const at = engine.indexOf("const chunks = chunkTreeEntries(\n    canonicalDeliveryOrder(");
     expect(at).toBeGreaterThan(-1);
     const chain = engine.slice(at, at + 1_200);
     expect(chain).toContain("baseTreeSha: cloneCommit.tree.sha,");
@@ -198,5 +202,142 @@ describe("the engine delivers text inline and chains the tree", () => {
     // Inline entries carry no `sha` at all, so `t.sha === null` stays a
     // deletion test and an inline write is never narrated as a removal.
     expect(engine).toContain('`- ${t.sha === null ? "DELETE " : ""}${t.path}`');
+  });
+});
+
+describe("a delivery writes the prime's own mode", () => {
+  // Measured 27 Oct 2026: cascades took the executable bit off two scripts on
+  // `npc-crm-independent-6505dc` (27 and 28 Sep), and the three mirrors each
+  // held 16 of the prime's executable scripts as plain files until a hand sync.
+  const prime = new Map([
+    ["scripts/run.sh", "100755"],
+    ["src/a.ts", "100644"],
+    ["docs/link", "120000"],
+  ]);
+  const clone = new Map([
+    ["scripts/run.sh", "100644"],
+    ["scripts/clone-own.sh", "100755"],
+    ["src/a.ts", "100644"],
+  ]);
+
+  it("is the prime's where the prime gives one, executable included", () => {
+    expect(deliveryModeFor("scripts/run.sh", prime, clone)).toBe("100755");
+    expect(deliveryModeFor("src/a.ts", prime, clone)).toBe("100644");
+    // An executable on the clone the prime holds as a plain file is the prime's to decide.
+    expect(deliveryModeFor("src/a.ts", prime, new Map([["src/a.ts", "100755"]]))).toBe("100644");
+  });
+
+  it("keeps the clone's executable bit where the prime gives no mode, and is plain otherwise", () => {
+    // A composed file at a path the prime does not hold, or a listing not read.
+    expect(deliveryModeFor("scripts/clone-own.sh", prime, clone)).toBe("100755");
+    expect(deliveryModeFor("scripts/clone-own.sh", null, clone)).toBe("100755");
+    expect(deliveryModeFor("supabase/config.toml", prime, clone)).toBe("100644");
+    expect(deliveryModeFor("anything", null, null)).toBe("100644");
+    // A link is never written as one; the engine holds it before this is asked.
+    expect(deliveryModeFor("docs/link", prime, null)).toBe("100644");
+  });
+
+  it("is applied to every written entry in one place, and leaves a deletion as it was", () => {
+    const entries: DeliveryTreeEntry[] = [
+      text("scripts/run.sh", "#!/bin/sh\n"),
+      blob("src/a.ts", "s1"),
+      blob("gone.sh", null),
+    ];
+    const out = withDeliveryModes(entries, prime, clone);
+    expect(out.map((e) => [e.path, e.mode])).toEqual([
+      ["scripts/run.sh", "100755"],
+      ["src/a.ts", "100644"],
+      ["gone.sh", "100644"],
+    ]);
+    expect(out[2]).toBe(entries[2]);
+    expect(toGitTreeParam(out[0])).toEqual({
+      path: "scripts/run.sh",
+      mode: "100755",
+      type: "blob",
+      content: "#!/bin/sh\n",
+    });
+    // The input is not changed under the caller.
+    expect(entries[0].mode).toBe("100644");
+  });
+
+  it("tells a changed blob or a changed executable bit from a file that is the prime's", () => {
+    const p = {
+      entries: new Map([
+        ["run.sh", "S1"],
+        ["a.ts", "A1"],
+      ]),
+      modes: prime,
+    };
+    const sameBits = {
+      entries: new Map([
+        ["run.sh", "S1"],
+        ["a.ts", "A1"],
+      ]),
+      modes: new Map([
+        ["run.sh", "100755"],
+        ["a.ts", "100644"],
+      ]),
+    };
+    expect(
+      differsFromPrime("run.sh", { ...p, modes: new Map([["run.sh", "100755"]]) }, sameBits),
+    ).toBe(false);
+    // The same bytes without the bit: a prime commit that only made it executable.
+    expect(
+      differsFromPrime(
+        "run.sh",
+        { ...p, modes: new Map([["run.sh", "100755"]]) },
+        { ...sameBits, modes: new Map([["run.sh", "100644"]]) },
+      ),
+    ).toBe(true);
+    expect(differsFromPrime("a.ts", p, { ...sameBits, entries: new Map([["a.ts", "A2"]]) })).toBe(
+      true,
+    );
+    // A mode either listing does not give is not a difference.
+    expect(executableBitDiffers("run.sh", null, new Map([["run.sh", "100644"]]))).toBe(false);
+    expect(executableBitDiffers("run.sh", new Map([["run.sh", "100755"]]), new Map())).toBe(false);
+    expect(executableBitDiffers("docs/link", prime, new Map([["docs/link", "100644"]]))).toBe(
+      false,
+    );
+  });
+
+  it("names a symbolic link on the prime", () => {
+    expect(isSymbolicLink("docs/link", prime)).toBe(true);
+    expect(isSymbolicLink("scripts/run.sh", prime)).toBe(false);
+    expect(isSymbolicLink("docs/link", null)).toBe(false);
+  });
+});
+
+describe("the engine asks the mode rule wherever it asks whether a file differs", () => {
+  const code = stripComments(readFileSync("src/server/cascade-engine.server.ts", "utf8"));
+
+  it("cuts its tree chain from the delivery at the prime's modes", () => {
+    expect(code).toContain(
+      "canonicalDeliveryOrder(withDeliveryModes(treeEntries, primeModeByPath, cloneModeByPath)),",
+    );
+    // The chain is the only place the delivery is written from.
+    expect(code.match(/chunkTreeEntries\(/g)).toHaveLength(1);
+  });
+
+  it("forms both scopes' candidates with the mode as well as the blob", () => {
+    expect(code.match(/differsFromPrime\(path, primeTree, cloneTree\)/g)).toHaveLength(2);
+    expect(code).not.toContain(
+      "if (cloneTree.entries.get(path) !== sha) candidatePaths.push(path);",
+    );
+  });
+
+  it("does not skip a file whose bytes match while its executable bit does not", () => {
+    const at = code.indexOf("if (\n        cloneShaByPath.get(path) === primeFile.sha &&");
+    expect(at).toBeGreaterThan(-1);
+    expect(code.slice(at, at + 200)).toContain(
+      "!executableBitDiffers(path, primeModeByPath, cloneModeByPath)",
+    );
+    expect(code).not.toContain("if (cloneShaByPath.get(path) === primeFile.sha) return null;");
+  });
+
+  it("holds a symbolic link before it reads it", () => {
+    const prepare = code.slice(code.indexOf("const prepareOne = async (path: string)"));
+    const hold = prepare.indexOf("if (isSymbolicLink(path, primeModeByPath)) {");
+    expect(hold).toBeGreaterThan(-1);
+    expect(hold).toBeLessThan(prepare.indexOf("filesRead += 1;"));
   });
 });
