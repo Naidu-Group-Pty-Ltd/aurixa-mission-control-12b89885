@@ -32,7 +32,10 @@ import { beginGithubLane } from "@/server/githubUsageMeter";
 // from here, rather than asking somebody to go and set it. What it distributes
 // is a session-pooler database URL and never a Supabase access token — see
 // `cloneCiCredential.pure.ts`, which records why a token cannot be minted at
-// scale and must not be put in a tenant's repository even if it could.
+// scale and must not be put in a tenant's repository even if it could. The
+// environment it writes them into admits the clone's default branch and no
+// other ref, as the prime's admits `main`; the pass keeps it that way, and an
+// environment already restricted costs two reads and reports nothing.
 //
 // And last, it reads back what that CI then DID (`cloneCiWatch.server.ts`): a
 // scheduled workflow failing or stopped on a clone, or a protected workflow

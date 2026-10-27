@@ -9,15 +9,16 @@
  * The pass is idempotent and settles: GitHub never returns a secret's value,
  * so there is nothing to compare against and the write is repeated, once a
  * day (`REASSERT_AFTER_MS`) or at once when Mission Control has just changed
- * the value. A settled clone costs one variable listing and one metadata read
- * per secret a pass, and a re-write is recorded as `kept`, so a settled fleet
- * files nothing.
+ * the value. A settled clone costs one variable listing, two reads of its
+ * environment's branch policy and one metadata read per secret a pass, and a
+ * re-write is recorded as `kept`, so a settled fleet files nothing.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import {
   CI_DB_URL_SECRET,
   CI_ENVIRONMENT,
+  CI_ENVIRONMENT_POLICY,
   CI_PROJECT_REF_VARIABLE,
   CI_SERVICE_ROLE_SECRET,
   claimedSealedPassword,
@@ -232,6 +233,8 @@ async function writeEnvironmentSecret(input: {
   name: string;
   value: string;
   changed: boolean;
+  /** The only branch the environment admits if this write has to create it. */
+  deploymentBranch: string | null;
 }): Promise<CredentialOutcome> {
   const label = `${input.owner}/${input.repo}`;
   try {
@@ -240,6 +243,7 @@ async function writeEnvironmentSecret(input: {
       owner: input.owner,
       repo: input.repo,
       environment: CI_ENVIRONMENT,
+      deploymentBranch: input.deploymentBranch,
       name: input.name,
       value: input.value,
       ...(input.changed ? {} : { reassertAfterMs: REASSERT_AFTER_MS }),
@@ -250,6 +254,57 @@ async function writeEnvironmentSecret(input: {
     const { message } = describeSecretError(e, input.owner, input.repo);
     return { repo: label, secret: input.name, state: "failed", reason: message };
   }
+}
+
+/**
+ * Keep the clone's production environment admitting its default branch and
+ * nothing else, as outcomes for the sweep.
+ *
+ * Settled is silent: an environment already restricted produces no outcome at
+ * all, so a quiet fleet files nothing. A refusal is reported beside the
+ * credentials and never thrown, the way a refused secret is, because the
+ * credentials are what keep this clone's scheduled refreshes running and they
+ * must not wait on a permission this step lacks.
+ */
+async function restrictProductionEnvironment(input: {
+  owner: string;
+  repo: string;
+  branch: string | null;
+}): Promise<CredentialOutcome[]> {
+  const label = `${input.owner}/${input.repo}`;
+  if (!input.branch) {
+    return [
+      {
+        repo: label,
+        secret: CI_ENVIRONMENT_POLICY,
+        state: "cannot",
+        reason:
+          "no default branch is recorded for this clone, so its production environment was " +
+          "not restricted to one; naming a guessed branch would refuse its scheduled jobs",
+      },
+    ];
+  }
+  const { ensureEnvironmentBranchPolicy } = await import("./github-secrets.server");
+  const outcome = await ensureEnvironmentBranchPolicy({
+    owner: input.owner,
+    repo: input.repo,
+    environment: CI_ENVIRONMENT,
+    branch: input.branch,
+  });
+  if (outcome.state === "unchanged") return [];
+  const outcomes: CredentialOutcome[] = [];
+  if (outcome.changes.length > 0) {
+    outcomes.push({ repo: label, state: "restricted", detail: outcome.changes.join("; ") });
+  }
+  if (outcome.state === "failed") {
+    outcomes.push({
+      repo: label,
+      secret: CI_ENVIRONMENT_POLICY,
+      state: "failed",
+      reason: outcome.reason,
+    });
+  }
+  return outcomes;
 }
 
 /**
@@ -280,6 +335,8 @@ export async function distributeCloneCiCredentials(input: {
   serviceRoleKey: HeldCredential;
   /** The repository's variables, or null when GitHub could not be asked. */
   variables: Readonly<Record<string, string>> | null;
+  /** `clones.default_branch`: all a newly created environment admits. */
+  deploymentBranch: string | null;
 }): Promise<CredentialOutcome[]> {
   const label = `${input.owner}/${input.repo}`;
   const outcomes: CredentialOutcome[] = [];
@@ -320,6 +377,7 @@ export async function distributeCloneCiCredentials(input: {
             name: CI_DB_URL_SECRET,
             value: composed.url,
             changed: input.password.changed === true,
+            deploymentBranch: input.deploymentBranch,
           })
         : { repo: label, secret: CI_DB_URL_SECRET, state: "cannot", reason: composed.reason },
     );
@@ -339,6 +397,7 @@ export async function distributeCloneCiCredentials(input: {
             name: CI_SERVICE_ROLE_SECRET,
             value: key.key,
             changed: false,
+            deploymentBranch: input.deploymentBranch,
           })
         : { repo: label, secret: CI_SERVICE_ROLE_SECRET, state: "cannot", reason: key.reason },
     );
@@ -353,7 +412,7 @@ export async function reconcileCloneCiCredentials(supabase: Db): Promise<Credent
 
   const { data: clones, error } = await supabase
     .from("clones")
-    .select("id, github_owner, github_repo")
+    .select("id, github_owner, github_repo, default_branch")
     .not("github_owner", "is", null)
     .not("github_repo", "is", null);
   if (error) {
@@ -409,6 +468,20 @@ export async function reconcileCloneCiCredentials(supabase: Db): Promise<Credent
     if (!backend?.supabase_project_ref) {
       recordOutcome(sweep, { repo: label, state: "no_backend" });
       continue;
+    }
+
+    // Which refs may read what this pass writes, settled BEFORE it writes:
+    // created restricted when absent, brought to the default branch when it
+    // admits more. Ahead of the target check below as well, because an
+    // environment that already holds a credential is worth restricting even
+    // on a pass that refuses to write it another.
+    const deploymentBranch = clone.default_branch ?? null;
+    for (const outcome of await restrictProductionEnvironment({
+      owner,
+      repo,
+      branch: deploymentBranch,
+    })) {
+      recordOutcome(sweep, outcome);
     }
 
     // The one sanctioned way to a clone's project ref for a credential: it
@@ -498,6 +571,7 @@ export async function reconcileCloneCiCredentials(supabase: Db): Promise<Credent
       password,
       serviceRoleKey: readStored(backend.service_role_key, "service-role key"),
       variables,
+      deploymentBranch,
     });
     for (const outcome of outcomes) recordOutcome(sweep, outcome);
   }

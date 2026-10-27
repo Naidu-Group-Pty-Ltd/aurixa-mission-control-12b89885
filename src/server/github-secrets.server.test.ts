@@ -5,6 +5,7 @@ import {
   RETIRED_CODEX_REPO_SECRETS,
   buildCodexRepoSecrets,
   describeSecretError,
+  ensureEnvironmentBranchPolicy,
   listEnvironmentSecretNames,
   previewCodexRepoSecrets,
   putEnvironmentSecret,
@@ -311,6 +312,7 @@ describe("putEnvironmentSecret", () => {
     owner: "acme",
     repo: "widgets",
     environment: "supabase-production",
+    deploymentBranch: "main",
     name: "SUPABASE_SERVICE_ROLE_KEY",
     value: "the-value",
   };
@@ -366,15 +368,24 @@ describe("putEnvironmentSecret", () => {
     expect(r).toEqual({ created: false, written: true });
   });
 
-  it("creates an environment that does not exist yet, with no rules, and writes into it", async () => {
+  it("creates an environment that does not exist yet admitting only the default branch, then writes into it", async () => {
     let created = false;
     request.mockImplementation((route: string, params: Record<string, unknown>) => {
       if (route === "PUT /repos/{owner}/{repo}/environments/{environment_name}") {
-        // Created bare, exactly as GitHub creates one on first use: no
-        // branch policy, no reviewers, nothing of the owner's decided here.
-        expect(Object.keys(params).sort()).toEqual(["environment_name", "owner", "repo"]);
+        // Not bare: an environment that will hold a service-role key is born
+        // admitting selected branches, and nothing else of the owner's —
+        // no reviewer, no wait timer — is decided here.
+        expect(params).toEqual({
+          owner: "acme",
+          repo: "widgets",
+          environment_name: "supabase-production",
+          deployment_branch_policy: { protected_branches: false, custom_branch_policies: true },
+        });
         created = true;
         return { data: {} };
+      }
+      if (route.endsWith("/deployment-branch-policies") && route.startsWith("GET")) {
+        return { data: { total_count: 0, branch_policies: [] } };
       }
       if (route.endsWith("/secrets/public-key")) {
         return created ? { data: { key: publicKey, key_id: "kid" } } : notFound();
@@ -384,7 +395,30 @@ describe("putEnvironmentSecret", () => {
     });
 
     expect((await putEnvironmentSecret(input)).created).toBe(true);
-    expect(created).toBe(true);
+    const routes = request.mock.calls.map(([route]) => String(route));
+    const put = routes.indexOf("PUT /repos/{owner}/{repo}/environments/{environment_name}");
+    const allow = routes.indexOf(
+      "POST /repos/{owner}/{repo}/environments/{environment_name}/deployment-branch-policies",
+    );
+    const write = routes.findIndex((r) =>
+      r.startsWith("PUT /repos/{owner}/{repo}/environments/{environment_name}/secrets/{"),
+    );
+    // Restricted, then the branch admitted, and only then the secret written.
+    expect(put).toBeGreaterThan(-1);
+    expect(allow).toBeGreaterThan(put);
+    expect(write).toBeGreaterThan(allow);
+    expect(request.mock.calls[allow][1]).toMatchObject({ name: "main", type: "branch" });
+  });
+
+  it("refuses to create one open to every branch when no default branch is known", async () => {
+    request.mockImplementation((route: string) =>
+      route.startsWith("GET") ? notFound() : { data: {} },
+    );
+    await expect(putEnvironmentSecret({ ...input, deploymentBranch: null })).rejects.toThrow(
+      /never created open to every branch/,
+    );
+    const routes = request.mock.calls.map(([route]) => String(route));
+    expect(routes.some((r) => r.startsWith("PUT"))).toBe(false);
   });
 
   it("never changes an environment that exists", async () => {
@@ -400,6 +434,193 @@ describe("putEnvironmentSecret", () => {
     request.mockRejectedValue(Object.assign(new Error("Forbidden"), { status: 403 }));
     await expect(putEnvironmentSecret(input)).rejects.toMatchObject({ status: 403 });
     expect(request).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("ensureEnvironmentBranchPolicy", () => {
+  const ENV = "/repos/{owner}/{repo}/environments/{environment_name}";
+  const POLICIES = `${ENV}/deployment-branch-policies`;
+  const input = {
+    owner: "acme",
+    repo: "widgets",
+    environment: "supabase-production",
+    branch: "main",
+  };
+  const status = (n: number) => Object.assign(new Error(`HTTP ${n}`), { status: n });
+
+  type Policy = { id: number; name: string; type: "branch" | "tag" };
+  /**
+   * GitHub's environments, as far as these calls go: a PUT replaces the
+   * settings and the rules it is sent, a POST is refused (404) until custom
+   * policies are on, and a duplicate pattern answers 303.
+   */
+  function fakeGitHub(start: {
+    env: null | { deployment_branch_policy: unknown; protection_rules?: unknown[] };
+    policies?: Policy[];
+  }) {
+    const state = { env: start.env, policies: [...(start.policies ?? [])], nextId: 100 };
+    request.mockImplementation(async (route: string, params: Record<string, unknown>) => {
+      if (route === `GET ${ENV}`) {
+        if (!state.env) throw status(404);
+        return { data: state.env };
+      }
+      if (route === `PUT ${ENV}`) {
+        state.env = {
+          deployment_branch_policy: params.deployment_branch_policy,
+          protection_rules: state.env?.protection_rules ?? [],
+        };
+        return { data: state.env };
+      }
+      if (route === `GET ${POLICIES}`) {
+        return { data: { total_count: state.policies.length, branch_policies: state.policies } };
+      }
+      if (route === `POST ${POLICIES}`) {
+        const policy = state.env?.deployment_branch_policy as { custom_branch_policies?: boolean };
+        if (!policy?.custom_branch_policies) throw status(404);
+        if (state.policies.some((p) => p.name === params.name)) throw status(303);
+        state.policies.push({
+          id: state.nextId++,
+          name: params.name as string,
+          type: params.type as "branch",
+        });
+        return { data: {} };
+      }
+      if (route === `DELETE ${POLICIES}/{branch_policy_id}`) {
+        state.policies = state.policies.filter((p) => p.id !== params.branch_policy_id);
+        return { data: undefined };
+      }
+      throw new Error(`unexpected ${route}`);
+    });
+    return state;
+  }
+  const writes = () =>
+    request.mock.calls.map(([route]) => String(route)).filter((r) => !r.startsWith("GET"));
+
+  it("creates a missing environment restricted, then admits the default branch", async () => {
+    const github = fakeGitHub({ env: null });
+    const outcome = await ensureEnvironmentBranchPolicy(input);
+    expect(outcome).toEqual({
+      state: "changed",
+      changes: [
+        "created supabase-production for selected branches",
+        "allowed main to deploy to supabase-production",
+      ],
+    });
+    expect(writes()).toEqual([`PUT ${ENV}`, `POST ${POLICIES}`]);
+    expect(github.policies.map((p) => p.name)).toEqual(["main"]);
+  });
+
+  it("restricts a bare one — the four clones' — and settles: the second pass reads and writes nothing", async () => {
+    const github = fakeGitHub({ env: { deployment_branch_policy: null, protection_rules: [] } });
+
+    expect((await ensureEnvironmentBranchPolicy(input)).state).toBe("changed");
+    expect(github.env?.deployment_branch_policy).toEqual({
+      protected_branches: false,
+      custom_branch_policies: true,
+    });
+    expect(github.policies.map((p) => `${p.type}:${p.name}`)).toEqual(["branch:main"]);
+
+    request.mockClear();
+    expect(await ensureEnvironmentBranchPolicy(input)).toEqual({ state: "unchanged" });
+    expect(request.mock.calls.map(([route]) => String(route))).toEqual([
+      `GET ${ENV}`,
+      `GET ${POLICIES}`,
+    ]);
+  });
+
+  it("keeps the reviewers and the wait timer an administrator set", async () => {
+    fakeGitHub({
+      env: {
+        deployment_branch_policy: null,
+        protection_rules: [
+          { id: 1, type: "wait_timer", wait_timer: 10 },
+          {
+            id: 2,
+            type: "required_reviewers",
+            prevent_self_review: false,
+            reviewers: [{ type: "Team", reviewer: { id: 77 } }],
+          },
+        ],
+      },
+    });
+    await ensureEnvironmentBranchPolicy(input);
+    const put = request.mock.calls.find(([route]) => route === `PUT ${ENV}`)?.[1];
+    expect(put).toMatchObject({
+      wait_timer: 10,
+      prevent_self_review: false,
+      reviewers: [{ type: "Team", id: 77 }],
+      deployment_branch_policy: { protected_branches: false, custom_branch_policies: true },
+    });
+  });
+
+  it("admits the default branch BEFORE it removes any other pattern", async () => {
+    const github = fakeGitHub({
+      env: {
+        deployment_branch_policy: { protected_branches: false, custom_branch_policies: true },
+      },
+      policies: [
+        { id: 5, name: "release/*", type: "branch" },
+        { id: 6, name: "v*", type: "tag" },
+      ],
+    });
+    const outcome = await ensureEnvironmentBranchPolicy(input);
+    expect(writes()).toEqual([
+      `POST ${POLICIES}`,
+      `DELETE ${POLICIES}/{branch_policy_id}`,
+      `DELETE ${POLICIES}/{branch_policy_id}`,
+    ]);
+    expect(github.policies.map((p) => p.name)).toEqual(["main"]);
+    expect(outcome.state === "changed" && outcome.changes).toContain(
+      "removed the branch pattern release/* from supabase-production",
+    );
+  });
+
+  it("reports a refusal, naming the permission, and never throws", async () => {
+    request.mockImplementation(async (route: string) => {
+      if (route === `GET ${ENV}`) return { data: { deployment_branch_policy: null } };
+      throw Object.assign(new Error("Resource not accessible by integration"), { status: 403 });
+    });
+    const outcome = await ensureEnvironmentBranchPolicy(input);
+    expect(outcome.state).toBe("failed");
+    if (outcome.state !== "failed") return;
+    expect(outcome.reason).toMatch(/^403: /);
+    expect(outcome.reason).toContain("Administration: Read & write");
+    expect(outcome.changes).toEqual([]);
+  });
+
+  it("says what it had already done when a later step is refused", async () => {
+    fakeGitHub({ env: { deployment_branch_policy: null } });
+    const fake = request.getMockImplementation()!;
+    request.mockImplementation(async (route: string, params: Record<string, unknown>) =>
+      route === `POST ${POLICIES}` ? Promise.reject(status(502)) : fake(route, params),
+    );
+    const outcome = await ensureEnvironmentBranchPolicy(input);
+    expect(outcome).toEqual({
+      state: "failed",
+      reason: "502: HTTP 502",
+      changes: ["restricted supabase-production to selected branches"],
+    });
+  });
+
+  it("takes a duplicate pattern from a concurrent pass as the state it wanted", async () => {
+    fakeGitHub({ env: { deployment_branch_policy: null } });
+    const fake = request.getMockImplementation()!;
+    request.mockImplementation(async (route: string, params: Record<string, unknown>) =>
+      route === `POST ${POLICIES}` ? Promise.reject(status(303)) : fake(route, params),
+    );
+    expect((await ensureEnvironmentBranchPolicy(input)).state).toBe("changed");
+  });
+
+  it("will not rewrite an environment whose reviewers it cannot read", async () => {
+    fakeGitHub({
+      env: {
+        deployment_branch_policy: null,
+        protection_rules: [{ type: "required_reviewers", reviewers: [{ type: "User" }] }],
+      },
+    });
+    const outcome = await ensureEnvironmentBranchPolicy(input);
+    expect(outcome.state).toBe("failed");
+    expect(writes()).toEqual([]);
   });
 });
 

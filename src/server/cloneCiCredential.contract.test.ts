@@ -31,6 +31,24 @@ describe("what is distributed", () => {
     expect(server).not.toContain("putRepoSecret");
   });
 
+  it("into an environment that admits the clone's default branch alone, settled before any write", () => {
+    // The prime's copy admits `main` only; a clone's was created admitting
+    // every branch while it held the clone's service-role key.
+    const loop = server.slice(server.indexOf("for (const clone of targets)"));
+    const restrict = loop.indexOf("await restrictProductionEnvironment({");
+    expect(restrict).toBeGreaterThan(-1);
+    expect(restrict).toBeLessThan(loop.indexOf("await distributeCloneCiCredentials({"));
+    expect(restrict).toBeLessThan(loop.indexOf("await setCloneDbPassword({"));
+    // The branch is the one the clone records, never a guess.
+    expect(server).toContain('.select("id, github_owner, github_repo, default_branch")');
+    expect(loop).toContain("const deploymentBranch = clone.default_branch ?? null;");
+    expect(loop).not.toMatch(/default_branch \?\? ["']main["']/);
+    // And a write that has to create the environment creates it the same way.
+    expect(server).toMatch(
+      /putEnvironmentSecret\(\{[\s\S]{0,200}deploymentBranch: input\.deploymentBranch/,
+    );
+  });
+
   it("hands over the stored service-role key only after judging it the clone's own", () => {
     const at = server.indexOf("name: CI_SERVICE_ROLE_SECRET");
     expect(at).toBeGreaterThan(-1);
