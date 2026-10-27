@@ -12,6 +12,12 @@
  *   * The wire projection leaks nothing: a clone is never told which plans or
  *     clones a notice targets, only what to draw. `WIRE_KEYS` exists so a
  *     test can assert the projection's exact surface instead of trusting it.
+ *
+ * A "workspace" is a clone or the prime. The prime has no `clones` row and
+ * its key carries no clone, so it is addressed by a reserved id
+ * (`PRIME_WORKSPACE_ID`) that every rule here treats as one more workspace
+ * with no plan on record. Until 27 Oct 2026 the prime was served an empty
+ * list forever, which is why the operator's own staff never saw a message.
  */
 
 export type AnnouncementSeverity = "info" | "success" | "warning" | "critical";
@@ -35,6 +41,23 @@ export const ANNOUNCEMENT_DISPLAYS: readonly AnnouncementDisplay[] = [
   "modal",
 ] as const;
 
+/**
+ * The prime's workspace id: the nil UUID, which no `gen_random_uuid()` clone
+ * id can ever be. It is stored in `audience_clone_ids`, in delivery stamps
+ * and in reply threads exactly where a clone's id would be.
+ */
+export const PRIME_WORKSPACE_ID = "00000000-0000-0000-0000-000000000000";
+
+export function isPrimeWorkspace(id: string | null | undefined): boolean {
+  return id === PRIME_WORKSPACE_ID;
+}
+
+/** The name a workspace reads on everything Mission Control sends it. */
+export const AURIXA_SYSTEMS_NAME = "Aurixa Systems";
+
+/** How a plan list and a workspace list combine when both are set. */
+export type AudienceMatch = "all" | "any";
+
 /** The columns of `clone_announcements` this module reasons over. Structural
  *  on purpose — the route hands it rows, the console hands it drafts. */
 export interface AnnouncementFacts {
@@ -48,6 +71,10 @@ export interface AnnouncementFacts {
   dismissible: boolean;
   audience_plan_slugs: string[] | null;
   audience_clone_ids: string[] | null;
+  /** 'all' (the original AND) when absent — every row written before it. */
+  audience_match?: string | null;
+  /** False (an announcement) when absent — every row written before it. */
+  replies_enabled?: boolean | null;
   starts_at: string | null;
   ends_at: string | null;
   revision: number;
@@ -55,8 +82,15 @@ export interface AnnouncementFacts {
   archived_at: string | null;
 }
 
-/** What audience matching needs to know about a clone. `planSlug` is
- *  `clones.entitled_plan_slug` — the same authority the gate console lists. */
+/** The scope columns, and how they combine. */
+export type AudienceScopeFacts = Pick<
+  AnnouncementFacts,
+  "audience_plan_slugs" | "audience_clone_ids" | "audience_match"
+>;
+
+/** What audience matching needs to know about a workspace. `planSlug` is
+ *  `clones.entitled_plan_slug` — the same authority the gate console lists —
+ *  and always null for the prime, which has no plan. */
 export interface AudienceClone {
   id: string;
   planSlug: string | null;
@@ -82,23 +116,51 @@ export function resolveAnnouncementState(
 }
 
 /**
- * Does this announcement reach this clone? NULL lists match everyone; a plan
- * list can only match a clone whose entitled plan is known — a clone with no
- * plan on record is excluded from plan-scoped notices rather than guessed at.
+ * Does this announcement reach this workspace? NULL lists match everyone; a
+ * plan list can only match a workspace whose entitled plan is known — one with
+ * no plan on record (the prime among them) is excluded from plan-scoped
+ * notices rather than guessed at.
+ *
+ * When both lists are set, `audience_match` says how they combine: 'all' (the
+ * original rule, and the reading of every row that predates the column) needs
+ * both, 'any' needs either — "everyone on Scale, plus these two".
  */
 export function announcementReachesClone(
-  row: Pick<AnnouncementFacts, "audience_plan_slugs" | "audience_clone_ids">,
+  row: AudienceScopeFacts,
   clone: AudienceClone,
 ): boolean {
-  if (row.audience_clone_ids && !row.audience_clone_ids.includes(clone.id)) {
-    return false;
-  }
-  if (row.audience_plan_slugs) {
-    if (!clone.planSlug) return false;
-    if (!row.audience_plan_slugs.includes(clone.planSlug)) return false;
-  }
-  return true;
+  const byWorkspace = row.audience_clone_ids
+    ? row.audience_clone_ids.includes(clone.id)
+    : null;
+  const byPlan = row.audience_plan_slugs
+    ? clone.planSlug !== null && row.audience_plan_slugs.includes(clone.planSlug)
+    : null;
+  if (byWorkspace === null && byPlan === null) return true;
+  if (byWorkspace === null) return byPlan === true;
+  if (byPlan === null) return byWorkspace;
+  return row.audience_match === "any" ? byWorkspace || byPlan : byWorkspace && byPlan;
 }
+
+/**
+ * One message in a workspace's own thread. An operator's message is signed
+ * "Aurixa Systems", never with the operator's name: the workspace is talking
+ * to the platform, not to whoever is on shift.
+ */
+export interface ThreadMessageWire {
+  id: string;
+  from: "workspace" | "aurixa";
+  authorName: string;
+  body: string;
+  createdAt: string;
+}
+
+export const THREAD_WIRE_KEYS: readonly (keyof ThreadMessageWire)[] = [
+  "id",
+  "from",
+  "authorName",
+  "body",
+  "createdAt",
+] as const;
 
 /** What a clone is allowed to see. Exactly these keys, nothing else. */
 export interface CloneAnnouncementWire {
@@ -112,6 +174,10 @@ export interface CloneAnnouncementWire {
   dismissible: boolean;
   revision: number;
   publishedAt: string;
+  /** False: an announcement, nothing to reply to. */
+  repliesEnabled: boolean;
+  /** This workspace's thread, oldest first. Always empty when replies are off. */
+  thread: ThreadMessageWire[];
 }
 
 export const WIRE_KEYS: readonly (keyof CloneAnnouncementWire)[] = [
@@ -125,7 +191,53 @@ export const WIRE_KEYS: readonly (keyof CloneAnnouncementWire)[] = [
   "dismissible",
   "revision",
   "publishedAt",
+  "repliesEnabled",
+  "thread",
 ] as const;
+
+/** The columns of `clone_announcement_replies` the wire and console reason over. */
+export interface ReplyFacts {
+  id: string;
+  announcement_id: string;
+  workspace_id: string;
+  direction: string;
+  body: string;
+  author_name: string;
+  created_at: string;
+}
+
+/** The newest this many messages of a thread travel; the console keeps all. */
+export const MAX_THREAD_ON_WIRE = 50;
+
+/** One reply as its own workspace reads it. Email, role and refs never travel. */
+export function toThreadWire(reply: ReplyFacts): ThreadMessageWire {
+  const fromAurixa = reply.direction === "operator";
+  return {
+    id: reply.id,
+    from: fromAurixa ? "aurixa" : "workspace",
+    authorName: fromAurixa ? AURIXA_SYSTEMS_NAME : reply.author_name,
+    body: reply.body,
+    createdAt: reply.created_at,
+  };
+}
+
+/**
+ * A thread for the wire: only the replies of THIS announcement and THIS
+ * workspace (the caller's filter is checked again here, because the
+ * projection is the last line before another tenant's words would leak),
+ * oldest first, the newest `MAX_THREAD_ON_WIRE` kept.
+ */
+export function threadForWorkspace(
+  replies: readonly ReplyFacts[],
+  announcementId: string,
+  workspaceId: string,
+): ThreadMessageWire[] {
+  return replies
+    .filter((r) => r.announcement_id === announcementId && r.workspace_id === workspaceId)
+    .sort((a, b) => (Date.parse(a.created_at) || 0) - (Date.parse(b.created_at) || 0))
+    .slice(-MAX_THREAD_ON_WIRE)
+    .map(toThreadWire);
+}
 
 const isSeverity = (v: string): v is AnnouncementSeverity =>
   (ANNOUNCEMENT_SEVERITIES as readonly string[]).includes(v);
@@ -139,10 +251,14 @@ const isDisplay = (v: string): v is AnnouncementDisplay =>
  * forced dismissible here as well as by the CHECK constraint, because the
  * projection is the last line before somebody's screen.
  */
-export function toCloneWire(row: AnnouncementFacts): CloneAnnouncementWire {
+export function toCloneWire(
+  row: AnnouncementFacts,
+  thread: ThreadMessageWire[] = [],
+): CloneAnnouncementWire {
   const display: AnnouncementDisplay = isDisplay(row.display)
     ? row.display
     : "banner";
+  const repliesEnabled = row.replies_enabled === true;
   return {
     id: row.id,
     title: row.title,
@@ -154,6 +270,8 @@ export function toCloneWire(row: AnnouncementFacts): CloneAnnouncementWire {
     dismissible: display === "modal" ? true : row.dismissible,
     revision: row.revision,
     publishedAt: row.published_at ?? "",
+    repliesEnabled,
+    thread: repliesEnabled ? thread : [],
   };
 }
 
@@ -164,6 +282,7 @@ export function activeAnnouncementsForClone(
   rows: AnnouncementFacts[],
   clone: AudienceClone,
   now: Date = new Date(),
+  replies: readonly ReplyFacts[] = [],
 ): CloneAnnouncementWire[] {
   return rows
     .filter((row) => resolveAnnouncementState(row, now) === "active")
@@ -174,12 +293,41 @@ export function activeAnnouncementsForClone(
         (Date.parse(a.published_at ?? "") || 0),
     )
     .slice(0, MAX_WIRE_ANNOUNCEMENTS)
-    .map(toCloneWire);
+    .map((row) => toCloneWire(row, threadForWorkspace(replies, row.id, clone.id)));
+}
+
+/**
+ * May this workspace reply to this message right now? Only to a message that
+ * asked for replies, that is live, and that reaches it — the same matcher the
+ * list is served with, so a workspace can only answer what it was shown.
+ */
+export function replyRefusal(
+  row: AnnouncementFacts | null,
+  workspace: AudienceClone,
+  now: Date = new Date(),
+): null | "not_found" | "replies_disabled" | "not_live" | "not_addressed" {
+  if (!row) return "not_found";
+  if (!announcementReachesClone(row, workspace)) return "not_addressed";
+  if (row.replies_enabled !== true) return "replies_disabled";
+  if (resolveAnnouncementState(row, now) !== "active") return "not_live";
+  return null;
+}
+
+/** May this workspace acknowledge this message? It must have been servable to it. */
+export function acknowledgeRefusal(
+  row: AnnouncementFacts | null,
+  workspace: AudienceClone,
+  now: Date = new Date(),
+): null | "not_found" | "not_addressed" | "not_live" {
+  if (!row) return "not_found";
+  if (!announcementReachesClone(row, workspace)) return "not_addressed";
+  if (resolveAnnouncementState(row, now) !== "active") return "not_live";
+  return null;
 }
 
 /** Console helper: say who a notice reaches, in words. */
 export function audienceSummary(
-  row: Pick<AnnouncementFacts, "audience_plan_slugs" | "audience_clone_ids">,
+  row: AudienceScopeFacts,
   cloneNamesById: Record<string, string> = {},
 ): string {
   const parts: string[] = [];
@@ -188,11 +336,12 @@ export function audienceSummary(
   }
   if (row.audience_clone_ids) {
     const names = row.audience_clone_ids.map(
-      (id) => cloneNamesById[id] ?? `${id.slice(0, 8)}…`,
+      (id) => cloneNamesById[id] ?? (isPrimeWorkspace(id) ? "the prime" : `${id.slice(0, 8)}…`),
     );
-    parts.push(`clones: ${names.join(", ")}`);
+    parts.push(`workspaces: ${names.join(", ")}`);
   }
-  return parts.length === 0 ? "all clones" : parts.join(" · ");
+  if (parts.length === 0) return "all workspaces";
+  return parts.join(row.audience_match === "any" && parts.length > 1 ? " + " : " · ");
 }
 
 /** One tone per state, in the console's spine vocabulary. */
@@ -223,8 +372,8 @@ export function describeAnnouncementState(
       return `Published, waiting for its start time${row.starts_at ? ` (${row.starts_at})` : ""}.`;
     case "active":
       return row.ends_at
-        ? "Live on every matching clone dashboard until its end time."
-        : "Live on every matching clone dashboard until archived.";
+        ? "Live on every workspace it reaches until its end time."
+        : "Live on every workspace it reaches until archived.";
     case "expired":
       return "Past its end time. It no longer renders anywhere; archive it to put it away.";
     case "archived":
@@ -236,83 +385,99 @@ export function describeAnnouncementState(
  * Workspace messages: the three ways an operator addresses the fleet.
  *
  * The console offers them as three choices, and they are three views of the
- * ONE scope the table already stores (`audience_plan_slugs` /
- * `audience_clone_ids`), so nothing about delivery, reach or the clone's wire
- * changes with them:
+ * ONE scope the table stores (`audience_plan_slugs` / `audience_clone_ids` /
+ * `audience_match`), so delivery and reach run one matcher:
  *
- *  - everyone  — every workspace (both columns null);
- *  - one       — exactly one named workspace (one clone id);
- *  - selected  — chosen workspaces, or every workspace on chosen plans.
+ *  - everyone  — every workspace, the prime included (both lists null);
+ *  - one       — exactly one named workspace (one id; the prime's is allowed);
+ *  - selected  — chosen workspaces, every workspace on chosen plans, or both
+ *                ("everyone on Scale, plus NPC Test" — stored with 'any').
  *
- * Every mode is ONE-WAY. A workspace renders the notice to its own staff and
- * cannot reply to it; Mission Control is never a contact in any workspace's
- * Messaging Hub.
+ * Whether a workspace can reply is the message's own setting
+ * (`replies_enabled`), not part of who it is for.
  * ------------------------------------------------------------------------- */
 
 export type WorkspaceAudienceMode = "everyone" | "one" | "selected";
-export type SelectedBy = "workspaces" | "plans";
 
 export interface WorkspaceAudienceDraft {
   mode: WorkspaceAudienceMode;
-  /** For `selected`: whether the operator picked workspaces or plans. */
-  selectedBy: SelectedBy;
   cloneIds: readonly string[];
   planSlugs: readonly string[];
+  /**
+   * How a stored row combined its lists. Only 'all' with BOTH lists set is
+   * special: that is "these workspaces, if on these plans", which the console
+   * no longer builds — it opens such a row as the workspaces it reaches.
+   */
+  match: AudienceMatch;
 }
 
+const matchOf = (row: AudienceScopeFacts | null): AudienceMatch =>
+  row?.audience_match === "any" ? "any" : "all";
+
 /** Read a stored scope back into the choice the console shows. */
-export function audienceDraftOf(
-  row: Pick<AnnouncementFacts, "audience_plan_slugs" | "audience_clone_ids"> | null,
-): WorkspaceAudienceDraft {
+export function audienceDraftOf(row: AudienceScopeFacts | null): WorkspaceAudienceDraft {
   const cloneIds = row?.audience_clone_ids ?? null;
   const planSlugs = row?.audience_plan_slugs ?? null;
+  const match = matchOf(row);
   if (cloneIds && cloneIds.length > 0) {
     return {
       mode: cloneIds.length === 1 && !planSlugs ? "one" : "selected",
-      selectedBy: "workspaces",
       cloneIds,
       planSlugs: planSlugs ?? [],
+      match,
     };
   }
   if (planSlugs && planSlugs.length > 0) {
-    return { mode: "selected", selectedBy: "plans", cloneIds: [], planSlugs };
+    return { mode: "selected", cloneIds: [], planSlugs, match };
   }
-  return { mode: "everyone", selectedBy: "workspaces", cloneIds: [], planSlugs: [] };
+  return { mode: "everyone", cloneIds: [], planSlugs: [], match: "all" };
 }
+
+/** Is this the old "workspaces AND plans" narrowing the console no longer builds? */
+export function isNarrowingScope(draft: WorkspaceAudienceDraft): boolean {
+  return draft.match === "all" && draft.cloneIds.length > 0 && draft.planSlugs.length > 0;
+}
+
+export type AudienceScope =
+  | {
+      ok: true;
+      audiencePlanSlugs: string[] | null;
+      audienceCloneIds: string[] | null;
+      audienceMatch: AudienceMatch;
+    }
+  | { ok: false; reason: string };
 
 /**
  * The scope to store for a choice, or the reason it cannot be saved yet.
  * A selection that names nobody is refused rather than widened to everyone —
- * an empty list silently meaning "all clones" is the worst reading of it.
+ * an empty list silently meaning "all workspaces" is the worst reading of it.
+ * Choosing plans AND workspaces reaches either (`any`).
  */
-export function audienceScopeOf(
-  draft: WorkspaceAudienceDraft,
-):
-  | { ok: true; audiencePlanSlugs: string[] | null; audienceCloneIds: string[] | null }
-  | { ok: false; reason: string } {
+export function audienceScopeOf(draft: WorkspaceAudienceDraft): AudienceScope {
   const uniq = (xs: readonly string[]) => [...new Set(xs.filter((x) => x.length > 0))];
   if (draft.mode === "everyone") {
-    return { ok: true, audiencePlanSlugs: null, audienceCloneIds: null };
+    return { ok: true, audiencePlanSlugs: null, audienceCloneIds: null, audienceMatch: "all" };
   }
   if (draft.mode === "one") {
     const ids = uniq(draft.cloneIds);
     if (ids.length !== 1) return { ok: false, reason: "Choose the workspace this is for." };
-    return { ok: true, audiencePlanSlugs: null, audienceCloneIds: ids };
-  }
-  if (draft.selectedBy === "plans") {
-    const slugs = uniq(draft.planSlugs);
-    if (slugs.length === 0) return { ok: false, reason: "Choose at least one plan." };
-    return { ok: true, audiencePlanSlugs: slugs, audienceCloneIds: null };
+    return { ok: true, audiencePlanSlugs: null, audienceCloneIds: ids, audienceMatch: "all" };
   }
   const ids = uniq(draft.cloneIds);
-  if (ids.length === 0) return { ok: false, reason: "Choose at least one workspace." };
-  return { ok: true, audiencePlanSlugs: null, audienceCloneIds: ids };
+  const slugs = uniq(draft.planSlugs);
+  if (ids.length === 0 && slugs.length === 0) {
+    return { ok: false, reason: "Choose at least one plan or workspace." };
+  }
+  return {
+    ok: true,
+    audiencePlanSlugs: slugs.length > 0 ? slugs : null,
+    audienceCloneIds: ids.length > 0 ? ids : null,
+    audienceMatch: ids.length > 0 && slugs.length > 0 ? "any" : "all",
+  };
 }
 
 /** Which of the three a stored message is, for the list's filter and badge. */
-export function audienceModeOf(
-  row: Pick<AnnouncementFacts, "audience_plan_slugs" | "audience_clone_ids">,
-): WorkspaceAudienceMode {
+export function audienceModeOf(row: AudienceScopeFacts): WorkspaceAudienceMode {
   return audienceDraftOf(row).mode;
 }
 
@@ -324,11 +489,12 @@ export const AUDIENCE_MODE_LABEL: Record<WorkspaceAudienceMode, string> = {
 
 /** Who a message is addressed to, in a phrase an operator reads at a glance. */
 export function audienceHeadline(
-  row: Pick<AnnouncementFacts, "audience_plan_slugs" | "audience_clone_ids">,
+  row: AudienceScopeFacts,
   cloneNamesById: Record<string, string> = {},
   planNamesBySlug: Record<string, string> = {},
 ): string {
-  const name = (id: string) => cloneNamesById[id] ?? `${id.slice(0, 8)}…`;
+  const name = (id: string) =>
+    cloneNamesById[id] ?? (isPrimeWorkspace(id) ? "the prime" : `${id.slice(0, 8)}…`);
   const draft = audienceDraftOf(row);
   if (draft.mode === "everyone") return "All workspaces";
   if (draft.mode === "one") return `Only ${name(draft.cloneIds[0])}`;
@@ -345,7 +511,7 @@ export function audienceHeadline(
         : `${names.slice(0, 3).join(", ")} and ${names.length - 3} more`,
     );
   }
-  return parts.join(" · ");
+  return parts.join(isNarrowingScope(draft) ? " · only " : " + ");
 }
 
 /** Case- and accent-insensitive match of a search box against a workspace. */
@@ -362,4 +528,107 @@ export function workspaceMatches(
   if (words.length === 0) return true;
   const hay = fold([c.name, c.slug ?? "", c.planSlug ?? ""].join(" "));
   return words.every((w) => hay.includes(w));
+}
+
+/* ------------------------------------------------------------------------- *
+ * When a message goes out.
+ *
+ *  - now      — published on save and live at once (no start time);
+ *  - schedule — published on save and live from its start time, which must
+ *               be in the future (otherwise it is "now" wearing a date);
+ *  - draft    — saved, seen by nobody, published later from the list.
+ *
+ * Times travel as ISO instants. The console converts the operator's local
+ * `datetime-local` input with the browser's own zone and says which zone that
+ * was, so "5:38 pm" is never read in a zone the operator did not mean.
+ * ------------------------------------------------------------------------- */
+
+export type SendTiming = "now" | "schedule" | "draft";
+
+export function sendTimingRefusal(
+  timing: SendTiming,
+  startsAt: string | null,
+  endsAt: string | null,
+  now: Date = new Date(),
+): string | null {
+  const start = startsAt ? Date.parse(startsAt) : null;
+  const end = endsAt ? Date.parse(endsAt) : null;
+  if (start !== null && !Number.isFinite(start)) return "The start time is not a valid date.";
+  if (end !== null && !Number.isFinite(end)) return "The end time is not a valid date.";
+  if (timing === "schedule") {
+    if (start === null) return "Choose when it should go out.";
+    if (start <= now.getTime()) return "A scheduled time must be in the future — use Send now instead.";
+  }
+  if (timing !== "draft" && end !== null && end <= now.getTime()) {
+    return "The end time has already passed.";
+  }
+  const effectiveStart = timing === "now" ? now.getTime() : start;
+  if (end !== null && effectiveStart !== null && end <= effectiveStart) {
+    return "The end time must come after it starts.";
+  }
+  return null;
+}
+
+/** A thread's people, for the console: who wrote last and how many wait. */
+export interface ThreadSummary {
+  workspaceId: string;
+  messages: number;
+  unread: number;
+  lastAt: string;
+  lastFrom: "workspace" | "aurixa";
+}
+
+/** Group a message's replies into one summary per workspace, newest activity first. */
+export function summariseThreads(
+  replies: ReadonlyArray<ReplyFacts & { operator_read_at?: string | null }>,
+): ThreadSummary[] {
+  const byWorkspace = new Map<string, ThreadSummary>();
+  const ordered = [...replies].sort(
+    (a, b) => (Date.parse(a.created_at) || 0) - (Date.parse(b.created_at) || 0),
+  );
+  for (const r of ordered) {
+    const t = byWorkspace.get(r.workspace_id) ?? {
+      workspaceId: r.workspace_id,
+      messages: 0,
+      unread: 0,
+      lastAt: r.created_at,
+      lastFrom: "workspace" as const,
+    };
+    t.messages += 1;
+    if (r.direction === "workspace" && !r.operator_read_at) t.unread += 1;
+    t.lastAt = r.created_at;
+    t.lastFrom = r.direction === "operator" ? "aurixa" : "workspace";
+    byWorkspace.set(r.workspace_id, t);
+  }
+  return [...byWorkspace.values()].sort(
+    (a, b) => (Date.parse(b.lastAt) || 0) - (Date.parse(a.lastAt) || 0),
+  );
+}
+
+/**
+ * An instant as the console shows it: the operator's own zone, named. Built
+ * from explicit fields because `Intl.DateTimeFormat` REFUSES `dateStyle` or
+ * `timeStyle` beside `timeZoneName` ("Invalid option") — a throw inside a
+ * list row takes the whole page down. Unreadable input says "—".
+ */
+export function formatInstant(
+  iso: string | null | undefined,
+  timeZone?: string,
+): string {
+  if (!iso) return "—";
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return "—";
+  try {
+    return new Intl.DateTimeFormat("en-AU", {
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      timeZoneName: "short",
+      ...(timeZone ? { timeZone } : {}),
+    }).format(ms);
+  } catch {
+    return new Date(ms).toISOString();
+  }
 }

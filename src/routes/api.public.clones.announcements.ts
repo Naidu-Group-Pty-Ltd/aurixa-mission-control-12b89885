@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { jsonResponse, resolveCloneApiKey } from "@/server/clone-api-keys.server";
 import {
-  announcementsForClone,
+  announcementsForWorkspace,
   recordAnnouncementDeliveries,
 } from "@/server/announcements.server";
 import { checkRateLimit } from "@/server/token-rate-limit.server";
@@ -19,6 +19,17 @@ import { checkRateLimit } from "@/server/token-rate-limit.server";
  * nothing else. Targeting never travels: a clone is not told which plans a
  * notice was scoped to, which other clones can see it, or that other clones
  * exist. Draft, scheduled, expired and archived rows never leave this server.
+ * Where a message takes replies, the workspace is served its OWN thread and
+ * nobody else's.
+ *
+ * ## The prime is a workspace
+ *
+ * A key with no clone is the prime's. Until 27 Oct 2026 it was answered an
+ * empty list forever, on the reasoning that the prime is the operator's own
+ * house — and so the dashboard the operator's own staff work in, polling 181
+ * times a day, was never shown a single message. It is now served as the
+ * workspace `PRIME_WORKSPACE_ID`, with no plan: it receives what is addressed
+ * to every workspace or to it by name, and nothing scoped to a plan.
  *
  * ## The scope is deliberately wide
  *
@@ -69,24 +80,21 @@ export const Route = createFileRoute("/api/public/clones/announcements")({
           );
         }
 
-        // A key with no clone is a Prime-scoped key. Announcements are the
-        // operator talking to tenant workspaces; the prime is the operator's
-        // own house, so it gets the same definite, empty answer forever.
-        if (!key.clone_id) {
-          return jsonResponse({ ok: true, announcements: [] });
-        }
-
-        const read = await announcementsForClone(key.clone_id);
+        const read = await announcementsForWorkspace(key.clone_id);
         if (!read.ok) {
           return jsonResponse({ ok: false, error: "announcements_read_failed" }, 503);
         }
 
-        // Best-effort, unawaited: a notice nobody's dashboard has fetched
-        // must be distinguishable in the console from one that is working.
-        recordAnnouncementDeliveries(
-          key.clone_id,
-          read.announcements.map((a) => ({ id: a.id, revision: a.revision })),
-        ).catch(() => {});
+        // A notice nobody's dashboard has fetched must be distinguishable in
+        // the console from one that is working. Awaited, because a Worker may
+        // cancel what is still pending once the response is returned; never
+        // allowed to fail the answer, because the stamp is observability.
+        if (read.workspaceId) {
+          await recordAnnouncementDeliveries(
+            read.workspaceId,
+            read.announcements.map((a) => ({ id: a.id, revision: a.revision })),
+          ).catch((err) => console.error("[announcements] delivery stamp threw", err));
+        }
 
         return jsonResponse({ ok: true, announcements: read.announcements });
       },
