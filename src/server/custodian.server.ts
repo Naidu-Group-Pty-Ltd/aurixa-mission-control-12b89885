@@ -7,8 +7,9 @@
  * ## Four rules
  *
  * **The permission is asked before anything is read.** A blockage owned by a
- * person is refused and recorded before the pass spends a single call on it,
- * so a `ci_red` costs nothing and can never be halfway acted on.
+ * person is refused before the pass reads any evidence about it, so a
+ * `ci_red` costs one read of this custodian's own ledger and can never be
+ * halfway acted on.
  *
  * **It never clears its own blockage.** The ledger's next pass observes
  * whether the condition is gone and clears it then. A custodian that closed
@@ -16,9 +17,13 @@
  * like one that did — the auditor's separation of actor from observer, one
  * level down.
  *
- * **Every act is written down, including the ones not taken.** A custodian
- * whose refusals were silent would be indistinguishable from one that was not
- * running.
+ * **Every act is written down, including the ones not taken — once.** A
+ * custodian whose refusals were silent would be indistinguishable from one
+ * that was not running, so each blockage's decision is written the first time
+ * it is taken and again whenever it changes. Writing the same refusal on every
+ * tick is a different silence: 5,300 identical rows a day bury the one act
+ * that mattered (`decideCustodialRecord`). An act that acted is always
+ * written.
  *
  * **It reads back before it writes.** The retarget verifies that the proposal
  * it is about to point at actually exists on the clone's repository, because a
@@ -31,9 +36,11 @@ import {
   ACT_POLICY,
   MAX_ACTS_PER_TICK,
   MAX_ROWS_PER_ACT,
+  decideCustodialRecord,
   decideRetarget,
   mayCustodianAct,
   type CustodialActName,
+  type NewestCustodialRecord,
 } from "./cascade/custodian.pure";
 import type { BlockageClass, BlockageOwner } from "./cascade/blockageTaxonomy.pure";
 import { planRequeue } from "./cascade/requeueDroppedClone.pure";
@@ -55,11 +62,22 @@ export type CustodianOutcome = {
 
 export type CustodianReport = {
   blockages: number;
+  /** Decisions taken this pass, by outcome — whether or not a row was written. */
   performed: number;
   wouldPerform: number;
   refused: number;
   failed: number;
+  /** Rows actually written to `clone_custodial_acts` this pass. */
+  recorded: number;
+  /** Decisions not written because the newest row for the blockage already says them. */
+  unchanged: number;
   dryRun: boolean;
+  /**
+   * The decisions that wrote a row, and those held by the per-tick bound.
+   * A repeat is counted in `unchanged` and not listed: its row is already the
+   * newest for its blockage, and listing 53 of them made this the bulk of a
+   * 26 KB audit row filed on every tick.
+   */
   detail: CustodianOutcome[];
 };
 
@@ -76,8 +94,19 @@ export async function runCustodian(
     wouldPerform: 0,
     refused: 0,
     failed: 0,
+    recorded: 0,
+    unchanged: 0,
     dryRun,
     detail: [],
+  };
+  /** Count a row as written or repeated, and list it only if it was written. */
+  const tally = (written: boolean, outcome: CustodianOutcome) => {
+    if (!written) {
+      report.unchanged += 1;
+      return;
+    }
+    report.recorded += 1;
+    report.detail.push(outcome);
   };
 
   const { data, error } = await supabase
@@ -143,7 +172,7 @@ export async function runCustodian(
 
     if (!verdict.may) {
       const outcome = verdict.reportOnly ? "would_perform" : "refused";
-      await record(supabase, {
+      const written = await record(supabase, {
         cloneId: b.clone_id,
         blockageId: b.id,
         cls: b.class,
@@ -155,7 +184,7 @@ export async function runCustodian(
       });
       if (outcome === "would_perform") report.wouldPerform += 1;
       else report.refused += 1;
-      report.detail.push({
+      tally(written, {
         clone: label,
         cls: b.class as BlockageClass,
         act: actNameFor(b.class as BlockageClass),
@@ -185,7 +214,7 @@ export async function runCustodian(
     const spent = await performedToday(supabase, b.clone_id, verdict.act);
     if (spent >= MAX_PERFORMED_PER_DAY) {
       const why = `Held: '${verdict.act}' has already run ${spent} time(s) for ${label} today.`;
-      await record(supabase, {
+      const written = await record(supabase, {
         cloneId: b.clone_id,
         blockageId: b.id,
         cls: b.class,
@@ -196,7 +225,7 @@ export async function runCustodian(
         dryRun,
       });
       report.refused += 1;
-      report.detail.push({
+      tally(written, {
         clone: label,
         cls: b.class as BlockageClass,
         act: verdict.act,
@@ -247,7 +276,7 @@ export async function runCustodian(
       result = { outcome: "failed", rows: 0, detail: msg(e) };
     }
 
-    await record(supabase, {
+    const written = await record(supabase, {
       cloneId: b.clone_id,
       blockageId: b.id,
       cls: b.class,
@@ -264,7 +293,7 @@ export async function runCustodian(
     else if (result.outcome === "failed") report.failed += 1;
     else report.refused += 1;
 
-    report.detail.push({
+    tally(written, {
       clone: label,
       cls: b.class as BlockageClass,
       act: verdict.act,
@@ -527,6 +556,46 @@ async function performedToday(supabase: Db, cloneId: string, act: string): Promi
   return count ?? 0;
 }
 
+/**
+ * The newest row this custodian wrote for one blockage.
+ *
+ * One indexed read per blockage per tick. Measured 27 Oct 2026 on a blockage
+ * with 3,340 rows: the planner walks `clone_custodial_acts_recent_idx` from
+ * the newest row and stops at this blockage's first, 0.16 ms. A blockage that
+ * has gone quiet is found further back, behind only the rows written since —
+ * which, once repeats stop being written, are few.
+ *
+ * A read that fails says so rather than answering "none": the caller writes
+ * on it, and the reason is `decideCustodialRecord`'s.
+ */
+async function readNewestRecord(supabase: Db, blockageId: string): Promise<NewestCustodialRecord> {
+  const { data, error } = await supabase
+    .from("clone_custodial_acts")
+    .select("act, outcome, rows_affected, detail, dry_run")
+    .eq("blockage_id", blockageId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) return { read: false, why: error.message };
+  if (!data) return { read: true, row: null };
+  return {
+    read: true,
+    row: {
+      act: data.act,
+      outcome: data.outcome as CustodianOutcome["outcome"],
+      rows: data.rows_affected,
+      detail: data.detail,
+      dryRun: data.dry_run,
+    },
+  };
+}
+
+/**
+ * Write one custodial row, unless it repeats the newest one for its blockage.
+ *
+ * Returns whether a row was written, which is what the tick counts: a pass
+ * that wrote nothing is a quiet pass, and files no audit row of its own.
+ */
 async function record(
   supabase: Db,
   row: {
@@ -540,7 +609,23 @@ async function record(
     reversal?: Json;
     dryRun: boolean;
   },
-): Promise<void> {
+): Promise<boolean> {
+  // A row about no blockage has no newest row to repeat, so it is written.
+  const newest: NewestCustodialRecord = row.blockageId
+    ? await readNewestRecord(supabase, row.blockageId)
+    : { read: true, row: null };
+  const decision = decideCustodialRecord({
+    next: {
+      act: row.act,
+      outcome: row.outcome,
+      rows: row.rows,
+      detail: row.detail,
+      dryRun: row.dryRun,
+    },
+    newest,
+  });
+  if (!decision.write) return false;
+
   const { error } = await supabase.from("clone_custodial_acts").insert({
     clone_id: row.cloneId,
     blockage_id: row.blockageId,
@@ -555,4 +640,5 @@ async function record(
   // An act that happened and was not recorded is one nobody can reverse, which
   // is the one thing this table exists to prevent.
   if (error) throw new Error(`Could not record custodial act: ${error.message}`);
+  return true;
 }

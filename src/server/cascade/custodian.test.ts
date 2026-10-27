@@ -3,8 +3,10 @@ import {
   ACT_POLICY,
   MAX_ACTS_PER_TICK,
   MAX_ROWS_PER_ACT,
+  decideCustodialRecord,
   decideRetarget,
   mayCustodianAct,
+  type CustodialRecord,
 } from "./custodian.pure";
 import { BLOCKAGE_POLICY, type BlockageClass } from "./blockageTaxonomy.pure";
 
@@ -230,5 +232,84 @@ describe("decideRetarget", () => {
       currentRepo: CLONE,
     });
     expect(d.retarget && d.prNumber).toBe(44);
+  });
+});
+
+/*
+  A RECORD IS WRITTEN WHEN IT SAYS SOMETHING NEW.
+
+  Measured 27 Oct 2026: over 200,000 rows since 19 Sep, about 5,300 a day,
+  nearly all of them the same refusal of the same blockage written again every
+  fifteen minutes — and one act performed, ever.
+*/
+describe("whether a custodial row is written", () => {
+  /** The refusal the CRM independent's 50 hole blockages were given 96 times a day. */
+  const refusal: CustodialRecord = {
+    act: "none",
+    outcome: "refused",
+    rows: 0,
+    detail: ACT_POLICY.prime_ledger_hole.kind === "never" ? ACT_POLICY.prime_ledger_hole.why : "",
+    dryRun: false,
+  };
+
+  it("does not write the same refusal twice in a row", () => {
+    const d = decideCustodialRecord({ next: refusal, newest: { read: true, row: { ...refusal } } });
+    expect(d.write).toBe(false);
+  });
+
+  it("writes the first record a blockage gets", () => {
+    expect(decideCustodialRecord({ next: refusal, newest: { read: true, row: null } }).write).toBe(
+      true,
+    );
+  });
+
+  it("writes when anything about the decision changed", () => {
+    const changes: Array<Partial<CustodialRecord>> = [
+      { act: "retarget_proposal_urls" },
+      { outcome: "would_perform" },
+      { rows: 3 },
+      { detail: `${refusal.detail} And something new.` },
+      { dryRun: true },
+    ];
+    for (const change of changes) {
+      const d = decideCustodialRecord({
+        next: { ...refusal, ...change },
+        newest: { read: true, row: refusal },
+      });
+      expect(d.write, JSON.stringify(change)).toBe(true);
+    }
+  });
+
+  /*
+    An act that acted changed something, and a failed one may have changed
+    part of it before it threw. Its row is the only record of either and
+    carries the reversal, so it is never skipped as a repeat.
+  */
+  it("always writes an act that acted, even word for word", () => {
+    for (const outcome of ["performed", "failed"] as const) {
+      const acted: CustodialRecord = {
+        act: "retarget_proposal_urls",
+        outcome,
+        rows: 2,
+        detail: "2 of 2 record(s) on NPC repoint",
+        dryRun: false,
+      };
+      const d = decideCustodialRecord({ next: acted, newest: { read: true, row: { ...acted } } });
+      expect(d.write, outcome).toBe(true);
+    }
+  });
+
+  /*
+    A failed read is not "nothing written yet". Skipping on it could leave a
+    blockage with no record at all, indistinguishable from a custodian that
+    never saw it; writing costs one duplicate row.
+  */
+  it("writes when the newest record could not be read", () => {
+    const d = decideCustodialRecord({
+      next: refusal,
+      newest: { read: false, why: "connection reset" },
+    });
+    expect(d.write).toBe(true);
+    expect(d.why).toContain("connection reset");
   });
 });

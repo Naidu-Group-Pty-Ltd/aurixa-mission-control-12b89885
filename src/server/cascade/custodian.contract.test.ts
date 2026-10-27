@@ -231,6 +231,52 @@ describe("it may re-run work; it may never change a verdict", () => {
   it("fails closed on a cap it cannot read", () => {
     expect(custodian).toContain("if (error) return MAX_PERFORMED_PER_DAY");
   });
+
+  /*
+    ONCE, AND AGAIN WHEN IT CHANGES.
+
+    Every decision was inserted on every tick, so a blockage a person owns was
+    refused into the table 96 times a day in the same words: about 5,300 rows
+    a day on 27 Oct 2026, and one act performed in the table's life. The
+    write is now asked first whether it repeats the newest row for its
+    blockage — and the answer is the pure module's, so it is tested there.
+  */
+  it("asks whether a row is new before it inserts one", () => {
+    const rec = custodian.slice(custodian.indexOf("async function record("));
+    const decide = rec.indexOf("decideCustodialRecord(");
+    const insert = rec.search(/from\(\s*["']clone_custodial_acts["']\s*\)\s*\n?\s*\.insert\(/);
+    expect(decide, "record must ask before writing").toBeGreaterThan(-1);
+    expect(insert).toBeGreaterThan(decide);
+    expect(rec).toContain("if (!decision.write) return false;");
+  });
+
+  it("reads the newest row for the blockage, and a failed read is never 'none'", () => {
+    const read = custodian.slice(custodian.indexOf("async function readNewestRecord("));
+    expect(read).toContain('.eq("blockage_id", blockageId)');
+    expect(read).toContain('.order("created_at", { ascending: false })');
+    expect(read).toContain("if (error) return { read: false, why: error.message };");
+  });
+});
+
+describe("a quiet tick is quiet", () => {
+  /*
+    `custodianActed` counted refusals as action, so the hook filed a ~26 KB
+    audit row on every tick to say nothing had changed. It counts rows written.
+  */
+  it("files an audit row for rows the custodian wrote, never for decisions it repeated", () => {
+    const acted = hook.slice(
+      hook.indexOf("function custodianActed("),
+      hook.indexOf("export const Route"),
+    );
+    expect(acted).toContain("return c.recorded > 0;");
+    expect(acted).not.toMatch(/refused|performed|failed/);
+  });
+
+  it("counts a row as recorded only where it was written", () => {
+    expect(custodian).toContain("report.recorded += 1;");
+    expect(custodian).toContain("report.unchanged += 1;");
+    expect((custodian.match(/tally\(written, \{/g) ?? []).length).toBe(3);
+  });
 });
 
 describe("the permission lives in one file, and it is the taxonomy's", () => {

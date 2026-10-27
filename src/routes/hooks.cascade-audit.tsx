@@ -26,9 +26,10 @@ import { beginGithubLane } from "@/server/githubUsageMeter";
 // The custodian then runs on that ledger. It may RE-RUN work — a stale URL, an
 // unseeded policy, a retired delivery — and it may never change a verdict: a
 // red check is the gate working, and no amount of retrying substitutes for
-// somebody changing the code. One act is switched on today, and every act it
-// takes, would take or refuses is written to `clone_custodial_acts` with the
-// means to reverse it.
+// somebody changing the code. One act is switched on today. Every act it takes
+// is written to `clone_custodial_acts` with the means to reverse it, and every
+// act it would take or refuses is written when it differs from the last thing
+// written for that blockage.
 //
 // Nothing here queues a cascade, moves a pointer or raises a notification.
 // The two readings write only their own tables, so a wrong reading costs
@@ -41,12 +42,19 @@ import { beginGithubLane } from "@/server/githubUsageMeter";
 // already uses: pg_cron records what it DELIVERED, never what happened, so the
 // tick's own body is where a misbehaving pass is read from.
 
-/** Did the custodian do or refuse anything worth an audit row? */
-function custodianActed(
-  c: { performed: number; failed: number; refused: number } | { error: string },
-): boolean {
+/**
+ * Did the custodian write anything worth an audit row?
+ *
+ * Rows WRITTEN, never decisions taken. It used to count every refusal, and a
+ * refusal is decided again on every tick for every standing blockage a person
+ * owns: measured 27 Oct 2026, 53 of them each tick, so this filed a ~26 KB
+ * audit row 96 times a day to say nothing had changed. A refusal that repeats
+ * the newest row for its blockage is not written (`decideCustodialRecord`),
+ * so it is not news here either.
+ */
+function custodianActed(c: { recorded: number } | { error: string }): boolean {
   if ("error" in c) return true;
-  return c.performed > 0 || c.failed > 0 || c.refused > 0;
+  return c.recorded > 0;
 }
 
 export const Route = createFileRoute("/hooks/cascade-audit")({
