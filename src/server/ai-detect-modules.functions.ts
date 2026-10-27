@@ -329,7 +329,7 @@ export const approveAndDeploy = createServerFn({ method: "POST" })
     if (jobErr) return { ok: false as const, error: jobErr.message };
 
     if (blast.requiresApproval) {
-      await context.supabase.from("notifications").insert({
+      const { error: noticeErr } = await context.supabase.from("notifications").insert({
         kind: "cascade_awaiting_approval",
         severity: "warning",
         title: "Approval needed · cascade after module approval",
@@ -338,10 +338,15 @@ export const approveAndDeploy = createServerFn({ method: "POST" })
         url: `/cascades/${event.id}`,
         metadata: { mode, clone_count: data.cloneIds.length, module_ids: data.moduleIds },
       });
+      if (noticeErr) {
+        console.error(
+          `[approve-and-deploy] ${event.id} awaits approval but its notice did not land: ${noticeErr.message}`,
+        );
+      }
     }
 
     // Audit
-    await context.supabase.from("audit_log").insert({
+    const { error: auditErr } = await context.supabase.from("audit_log").insert({
       action: "module.approve_and_deploy",
       entity_type: "cascade_event",
       entity_id: event.id,
@@ -353,6 +358,11 @@ export const approveAndDeploy = createServerFn({ method: "POST" })
         requires_approval: blast.requiresApproval,
       },
     });
+    if (auditErr) {
+      console.error(
+        `[approve-and-deploy] ${event.id}: the audit row did not land: ${auditErr.message}`,
+      );
+    }
 
     return {
       ok: true as const,

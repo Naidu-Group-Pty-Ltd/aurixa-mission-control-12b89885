@@ -57,9 +57,14 @@ describe("the write is asserted by its effect", () => {
 describe("the failure is never dropped", () => {
   it("the cascade path keeps the declaration result", () => {
     // It was `await declareDeployer(...)` with the value discarded, so a
-    // fleet-wide permission gap looked exactly like nothing happening.
-    expect(sync).toMatch(/const deployer = await declareDeployer\(input\.cloneId\)/);
+    // fleet-wide permission gap looked exactly like nothing happening. It is
+    // made only where the request queued a run (27 Oct 2026), and where it is
+    // made, its answer is what the request returns.
+    expect(sync).toMatch(
+      /const deployer = runs\.some\(\(r\) => r\.queued\) \? await declareDeployer\(input\.cloneId\) : null;/,
+    );
     expect(sync).toMatch(/return \{ requested: true,[^}]*deployer[^}]*\}/);
+    expect(sync.match(/declareDeployer\(input\.cloneId\)/g)).toHaveLength(1);
   });
 
   it("declareDeployer reports rather than swallowing", () => {
