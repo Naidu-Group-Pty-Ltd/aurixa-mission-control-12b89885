@@ -34,11 +34,103 @@
 /**
  * A regular file or an executable one — the two modes a delivery writes.
  *
- * The vertical engine writes every file `100644`, as it always has. The
- * lateral lane carries the origin's own mode, because a script that crosses
- * without its executable bit is a script that no longer runs.
+ * Both lanes carry the source's own mode, because a script that arrives
+ * without its executable bit is a script that no longer runs. The lateral lane
+ * always did; the vertical engine wrote every file `100644` until
+ * `deliveryModeFor`.
  */
 export type DeliveryMode = "100644" | "100755";
+
+/** The two listings a mode is read from: `path -> blob SHA` and `path -> git mode`. */
+type ListedTree = {
+  entries: ReadonlyMap<string, string>;
+  modes: ReadonlyMap<string, string>;
+};
+
+const isDeliveryMode = (mode: string | undefined): mode is DeliveryMode =>
+  mode === "100644" || mode === "100755";
+
+/**
+ * The mode a vertical delivery writes a file with: the prime's own.
+ *
+ * The engine wrote every file `100644`, which took the executable bit off a
+ * script each time the prime changed it and delivered every new script
+ * without one. Measured 27 Oct 2026: cascades into `npc-crm-independent-6505dc`
+ * took it off `scripts/verify/report-journey/run-format.mjs` (27 Sep) and
+ * `scripts/security/check-cron-caller-names.mjs` (28 Sep), and the three
+ * mirrors each held 16 of the prime's executable scripts as plain files until
+ * a hand sync on 23 Oct put the bits back.
+ *
+ * Where the prime's listing gives no mode a delivery writes — a file the
+ * engine composes at a path the prime does not hold, or a listing that was not
+ * read — the clone's own executable bit is kept rather than taken away, and
+ * anything else is a regular file, as before. A symbolic link is never
+ * delivered at all (`isSymbolicLink`).
+ */
+export function deliveryModeFor(
+  path: string,
+  primeModes: ReadonlyMap<string, string> | null,
+  cloneModes: ReadonlyMap<string, string> | null,
+): DeliveryMode {
+  const prime = primeModes?.get(path);
+  if (isDeliveryMode(prime)) return prime;
+  return cloneModes?.get(path) === "100755" ? "100755" : "100644";
+}
+
+/**
+ * Every written entry at its delivery mode, decided in one place.
+ *
+ * Applied where the delivery is cut into its tree chain, so no stage that
+ * appends an entry can write a mode of its own. A deletion (`sha: null`) is
+ * left as it is: its mode means nothing to the API.
+ */
+export function withDeliveryModes(
+  entries: readonly DeliveryTreeEntry[],
+  primeModes: ReadonlyMap<string, string> | null,
+  cloneModes: ReadonlyMap<string, string> | null,
+): DeliveryTreeEntry[] {
+  return entries.map((entry) =>
+    entry.sha === null
+      ? entry
+      : { ...entry, mode: deliveryModeFor(entry.path, primeModes, cloneModes) },
+  );
+}
+
+/**
+ * Whether the clone's copy of a prime file is not what a delivery would write:
+ * its bytes differ, or its executable bit does.
+ *
+ * Blob SHAs alone cannot see the second. A prime commit that only makes a
+ * script executable changes no blob, so it was never delivered, and a bit a
+ * delivery once took away was never put back. A mode either listing does not
+ * give is not drift: a missing answer is not a difference.
+ */
+export function differsFromPrime(path: string, prime: ListedTree, clone: ListedTree): boolean {
+  if (clone.entries.get(path) !== prime.entries.get(path)) return true;
+  return executableBitDiffers(path, prime.modes, clone.modes);
+}
+
+/** The mode half of `differsFromPrime`: both listings give a delivered mode, and they differ. */
+export function executableBitDiffers(
+  path: string,
+  primeModes: ReadonlyMap<string, string> | null,
+  cloneModes: ReadonlyMap<string, string> | null,
+): boolean {
+  const primeMode = primeModes?.get(path);
+  const cloneMode = cloneModes?.get(path);
+  return isDeliveryMode(primeMode) && isDeliveryMode(cloneMode) && primeMode !== cloneMode;
+}
+
+/**
+ * Whether the prime holds this path as a symbolic link.
+ *
+ * Read as text and written as a blob, a link becomes a file holding its
+ * target's path, and nothing downstream can tell. The fleet held none on
+ * 27 Oct 2026; the engine holds one rather than write that file.
+ */
+export function isSymbolicLink(path: string, primeModes: ReadonlyMap<string, string> | null) {
+  return primeModes?.get(path) === "120000";
+}
 
 export type DeliveryTreeEntry = {
   path: string;

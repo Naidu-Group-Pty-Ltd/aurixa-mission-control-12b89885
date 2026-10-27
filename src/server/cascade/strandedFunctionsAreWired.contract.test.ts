@@ -28,7 +28,7 @@ describe("the widened scope is what a function is stranded FROM", () => {
     const listed = at("globsForModuleScopedClone(installedGlobs),");
     const captured = at("widenedScope = new Set(candidatePaths);");
     const narrowed = at(
-      "candidatePaths = candidatePaths.filter(\n        (path) => cloneTree.entries.get(path) !== primeTree.entries.get(path),",
+      "candidatePaths = candidatePaths.filter((path) =>\n        differsFromPrime(path, primeTree, cloneTree),",
     );
     expect(captured).toBeGreaterThan(listed);
     expect(captured).toBeLessThan(narrowed);

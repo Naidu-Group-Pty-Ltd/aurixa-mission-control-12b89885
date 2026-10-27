@@ -51,8 +51,8 @@
  * `judgeConvergence` alerts on a derivative, and it needs two clocks rather
  * than one, for the reason recorded on `falling_behind` below.
  *
- * Client-safe: pure, and its only imports are the partition, the size ceiling
- * and the pumped paths the engine itself uses — deliberately, because two
+ * Client-safe: pure, and its only imports are the partition, the size ceiling,
+ * the pumped paths and the mode rule the engine itself uses — deliberately, because two
  * implementations of "what the cascade owes" is exactly how the auditor and
  * the actor would come to disagree, and this module's whole job is to be the
  * independent check on the other one.
@@ -60,6 +60,7 @@
 import { partitionCascadePaths, type SyncExclusion } from "./syncExclusions.pure";
 import { CASCADE_STREAM_MAX_FILE_BYTES } from "./blobStreamCarry.pure";
 import { PUMPED_PATHS } from "./pumpedPaths.pure";
+import { executableBitDiffers } from "./treeDelivery.pure";
 
 /**
  * How many SLO windows a clone may go without ever reaching `converged`
@@ -162,6 +163,13 @@ export function measureConvergence(input: {
    * them — never counted as owed.
    */
   crmMode?: string | null;
+  /**
+   * Each side's git mode per path, as `listTreeEntries` returns it. A file
+   * whose blob matches and whose executable bit does not is owed, as the
+   * engine now delivers it (`differsFromPrime`). Absent modes count nothing.
+   */
+  primeModes?: ReadonlyMap<string, string> | null;
+  cloneModes?: ReadonlyMap<string, string> | null;
 }): ConvergenceMeasurement {
   const { prime, clone, exclusions, primeTruncated, cloneTruncated } = input;
 
@@ -180,7 +188,14 @@ export function measureConvergence(input: {
   for (const [path, sha] of prime) {
     if (scope && !scope.has(path)) continue;
     compared += 1;
-    if (clone.get(path) !== sha) differing.push(path);
+    // The same bytes under another executable bit are owed too: the engine
+    // writes the prime's mode, and a script without its bit does not run.
+    if (
+      clone.get(path) !== sha ||
+      executableBitDiffers(path, input.primeModes ?? null, input.cloneModes ?? null)
+    ) {
+      differing.push(path);
+    }
   }
 
   // The engine's own partition, against this clone's own policy. One

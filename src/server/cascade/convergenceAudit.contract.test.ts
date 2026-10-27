@@ -110,6 +110,13 @@ describe("one implementation of what the cascade owes", () => {
     expect(pure.includes("new RegExp")).toBe(false);
   });
 
+  it("asks the engine's own mode rule, with the modes the same listings returned", () => {
+    expect(pure).toContain('import { executableBitDiffers } from "./treeDelivery.pure";');
+    expect(pure).toContain("executableBitDiffers(path, input.primeModes ?? null");
+    expect(audit).toContain("primeModes: primeTree.modes,");
+    expect(audit).toContain("cloneModes: cloneTree.modes,");
+  });
+
   it("is fail-closed on an unreadable exclusion policy", () => {
     expect(audit).toContain("requireExclusions");
   });

@@ -377,6 +377,8 @@ async function auditOneClone(args: {
     cloneTruncated: cloneTree.truncated,
     primeSizes: primeTree.sizes,
     crmMode: clone.crm_mode,
+    primeModes: primeTree.modes,
+    cloneModes: cloneTree.modes,
   });
 
   const reading = judgeConvergence({ now: new Date(), measurement, prior, sloMinutes });

@@ -313,8 +313,9 @@ describe("the wiring", () => {
     expect(at).toBeGreaterThan(-1);
     expect(block).toContain("const chainKey = treeChainKey(cloneCommit.tree.sha, chunks);");
     // F31: the chunks are cut from the canonical order, never as assembled.
+    // And at the prime's modes, decided at the cut (`withDeliveryModes`).
     expect(block).toContain(
-      "const chunks = chunkTreeEntries(canonicalDeliveryOrder(treeEntries));",
+      "const chunks = chunkTreeEntries(\n    canonicalDeliveryOrder(withDeliveryModes(treeEntries, primeModeByPath, cloneModeByPath)),\n  );",
     );
     expect(block).not.toContain("const chunks = chunkTreeEntries(treeEntries);");
     expect(block).toContain("await writeTreeChain({");

@@ -49,6 +49,29 @@ describe("measureConvergence", () => {
     expect(m.kind === "measured" && m.owed).toEqual(["src/ok.ts"]);
   });
 
+  it("owes a file whose bytes match and whose executable bit does not, as the engine delivers it", () => {
+    const m = measureConvergence({
+      prime: tree({ "scripts/run.sh": "S1", "src/a.ts": "aaa" }),
+      clone: tree({ "scripts/run.sh": "S1", "src/a.ts": "aaa" }),
+      exclusions: NONE,
+      primeTruncated: false,
+      cloneTruncated: false,
+      primeModes: tree({ "scripts/run.sh": "100755", "src/a.ts": "100644" }),
+      cloneModes: tree({ "scripts/run.sh": "100644", "src/a.ts": "100644" }),
+    });
+    expect(m.kind === "measured" && m.owed).toEqual(["scripts/run.sh"]);
+    // A mode a listing does not give is not drift.
+    const unread = measureConvergence({
+      prime: tree({ "scripts/run.sh": "S1" }),
+      clone: tree({ "scripts/run.sh": "S1" }),
+      exclusions: NONE,
+      primeTruncated: false,
+      cloneTruncated: false,
+      primeModes: tree({ "scripts/run.sh": "100755" }),
+    });
+    expect(unread.kind === "measured" && unread.owed).toEqual([]);
+  });
+
   it("owes a path whose blob differs, and one the clone does not hold", () => {
     const m = measureConvergence({
       prime: tree({ "src/a.ts": "aaa", "src/new.ts": "nnn" }),

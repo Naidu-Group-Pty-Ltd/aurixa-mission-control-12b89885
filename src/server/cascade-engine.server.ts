@@ -19,7 +19,11 @@ import {
 import {
   canonicalDeliveryOrder,
   chunkTreeEntries,
+  differsFromPrime,
+  executableBitDiffers,
+  isSymbolicLink,
   toGitTreeParam,
+  withDeliveryModes,
   type DeliveryTreeEntry,
 } from "./cascade/treeDelivery.pure";
 import { readInstalledGlobs } from "./cascade/installedGlobs.server";
@@ -2214,8 +2218,8 @@ export async function processClone(args: {
       );
     }
     candidatePaths = [];
-    for (const [path, sha] of primeTree.entries) {
-      if (cloneTree.entries.get(path) !== sha) candidatePaths.push(path);
+    for (const path of primeTree.entries.keys()) {
+      if (differsFromPrime(path, primeTree, cloneTree)) candidatePaths.push(path);
     }
     cloneShaByPath = cloneTree.entries;
     cloneHeadSha = cloneTree.headSha;
@@ -2317,8 +2321,8 @@ export async function processClone(args: {
     // been listed — so the narrowing is skipped and every path is read, as
     // before. The safe direction costs requests; the other loses a file.
     if (!primeTree.truncated && !cloneTree.truncated) {
-      candidatePaths = candidatePaths.filter(
-        (path) => cloneTree.entries.get(path) !== primeTree.entries.get(path),
+      candidatePaths = candidatePaths.filter((path) =>
+        differsFromPrime(path, primeTree, cloneTree),
       );
       cloneShaByPath = cloneTree.entries;
       cloneHeadSha = cloneTree.headSha;
@@ -3402,6 +3406,23 @@ export async function processClone(args: {
    * what a membrane is for.
    */
   const prepareOne = async (path: string): Promise<Prepared | null> => {
+    // A symbolic link read as text and written as a blob becomes a file
+    // holding its target's path. Held before any read, as the lateral lane
+    // holds one.
+    if (isSymbolicLink(path, primeModeByPath)) {
+      return {
+        kind: "held",
+        held: {
+          path,
+          pattern: "(mode: 120000)",
+          reason: "protected",
+          note:
+            "A symbolic link on the prime. This engine writes files, and a link written as one " +
+            "becomes a file holding its target's path, so it is not carried; make it by hand " +
+            "where a clone needs it.",
+        },
+      };
+    }
     // Reused from the previous pass: no read, no create. The tree
     // comparison already established the path differs, and the list
     // established prime's blob is still the one this was made from.
@@ -3493,8 +3514,15 @@ export async function processClone(args: {
       // cascade to `preflight-property-group`, repeated on each of the
       // attempts that followed, which is a third of what spent the App's
       // hourly budget on 2 Sep 2026. The clone's content is still fetched
-      // below, lazily, where the backend-identity hold needs it.
-      if (cloneShaByPath.get(path) === primeFile.sha) return null;
+      // below, lazily, where the backend-identity hold needs it. The same
+      // bytes under another executable bit are still owed: the delivery
+      // writes the prime's mode (`withDeliveryModes`).
+      if (
+        cloneShaByPath.get(path) === primeFile.sha &&
+        !executableBitDiffers(path, primeModeByPath, cloneModeByPath)
+      ) {
+        return null;
+      }
     } else if (!isMirror) {
       cloneFile = await getFileContent(octokit, cloneRef, path);
       cloneFileRead = true;
@@ -6231,7 +6259,11 @@ export async function processClone(args: {
   // chunks are cut from the delivery sorted by path (`canonicalDeliveryOrder`)
   // and two passes that will write the same tree cut the same chain.
   markPhase("tree");
-  const chunks = chunkTreeEntries(canonicalDeliveryOrder(treeEntries));
+  // Every written file at the prime's own mode, decided here so no stage
+  // above can write one of its own (`deliveryModeFor`).
+  const chunks = chunkTreeEntries(
+    canonicalDeliveryOrder(withDeliveryModes(treeEntries, primeModeByPath, cloneModeByPath)),
+  );
   const chainKey = treeChainKey(cloneCommit.tree.sha, chunks);
   const chain = await writeTreeChain({
     chunks,

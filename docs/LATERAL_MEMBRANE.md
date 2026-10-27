@@ -193,8 +193,9 @@ shape, then the membrane's channels, then the whole-delivery rules.
 - **Shape.** Only a regular or executable file crosses, and it carries its own
   mode: a script that crosses without its executable bit is a script that no
   longer runs, and a symbolic link written as `100644` becomes a file holding
-  its target's path. The vertical engine still writes every file `100644`, as
-  it always has. A file past the read ceiling stays where it was written.
+  its target's path. The vertical engine now writes the prime's own mode too,
+  and holds a prime symbolic link rather than write it (`deliveryModeFor`, 27
+  October). A file past the read ceiling stays where it was written.
 - **Channels.** `permeate`, against the membrane INTO the destination.
 - **Workflows.** `judgingWorkflowHold`, exactly as vertically.
 - **A spec crosses with its subject, or not at all.** Vertically a stranded
