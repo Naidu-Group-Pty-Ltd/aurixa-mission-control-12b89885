@@ -51,13 +51,15 @@
  * `judgeConvergence` alerts on a derivative, and it needs two clocks rather
  * than one, for the reason recorded on `falling_behind` below.
  *
- * Client-safe: pure, and its only import is the partition the engine itself
- * uses — deliberately, because two implementations of "what the cascade owes"
- * is exactly how the auditor and the actor would come to disagree, and this
- * module's whole job is to be the independent check on the other one.
+ * Client-safe: pure, and its only imports are the partition, the size ceiling
+ * and the pumped paths the engine itself uses — deliberately, because two
+ * implementations of "what the cascade owes" is exactly how the auditor and
+ * the actor would come to disagree, and this module's whole job is to be the
+ * independent check on the other one.
  */
 import { partitionCascadePaths, type SyncExclusion } from "./syncExclusions.pure";
 import { CASCADE_STREAM_MAX_FILE_BYTES } from "./blobStreamCarry.pure";
+import { PUMPED_PATHS } from "./pumpedPaths.pure";
 
 /**
  * How many SLO windows a clone may go without ever reaching `converged`
@@ -91,6 +93,12 @@ export type ConvergenceMeasurement =
        * reason recorded on the constant below.
        */
       oversizeHeld: number;
+      /**
+       * Differing paths the engine composes for this clone rather than
+       * copying (`PUMPED_PATHS`), sorted. Never part of `owed` — see the rule
+       * in `measureConvergence`.
+       */
+      reconciled: string[];
       /** Paths compared, after scope narrowing. */
       compared: number;
     }
@@ -104,7 +112,11 @@ export type ConvergenceMeasurement =
  * IS "this file differs" — for two API calls total rather than two per file,
  * which is the same reason the mirror cascade compares SHAs and not content.
  *
- * Three things are deliberately NOT divergence:
+ * Four things are deliberately NOT divergence:
+ *
+ * **A path the engine composes for this clone.** See the rule in the body:
+ * a pump's output differs from prime's blob by design, so a blob comparison
+ * can never say whether it is owed.
  *
  * **A held path.** `partitionCascadePaths` puts `protected` and
  * `manual_reconcile` paths in `held`, and this reads `write` only. A held file
@@ -179,7 +191,33 @@ export function measureConvergence(input: {
   });
 
   /*
-    A PATH THE CASCADE WOULD REFUSE IS NOT OWED.
+    A PATH THE ENGINE COMPOSES FOR THIS CLONE IS NOT OWED.
+
+    Seven files describe the repository they sit in — its function set, its
+    backend, its type errors — and the engine writes each clone its own
+    version, reconciled from both sides, instead of prime's bytes
+    (`pumpedPaths.pure.ts`). A blob comparison against prime therefore
+    differs on every clone whose function set differs from prime's, for ever,
+    and it was read as debt: every mirror sat at `falling_behind` from
+    8 Oct to 27 Oct 2026 owing four of these and nothing else, and each
+    reading opened an `unclassified` blockage nothing could explain.
+
+    So they are counted apart, as `reconciled`, and never owed. The list is
+    the engine's own, imported, for the reason the partition is.
+
+    Only where the clone HOLDS a copy: a pump composes from both sides, and a
+    clone with nothing there is sent a file — prime's, or one composed for it
+    — which is a write like any other and is owed.
+
+    What this cannot see: a pumped file that IS behind, where the engine
+    would write something new into it. Knowing that means running the pump,
+    which reads both files' content, and this reads two trees and no blob.
+    Such a change travels with the files it describes — a new function's
+    source, a changed spec — and those are counted here; the pump's own
+    result is the engine's to report, on the pass that writes it.
+  */
+  /*
+    A PATH THE CASCADE WOULD REFUSE IS NOT OWED EITHER.
 
     Found by running this module against the two live trees before it had ever
     run in production, 18 Sep 2026: `owed` was 2, and both were template-library
@@ -209,8 +247,13 @@ export function measureConvergence(input: {
   */
   const sizes = input.primeSizes ?? null;
   const owedWritable: string[] = [];
+  const reconciled: string[] = [];
   let oversizeHeld = 0;
   for (const path of write) {
+    if (PUMPED_PATHS.has(path) && clone.has(path)) {
+      reconciled.push(path);
+      continue;
+    }
     const bytes = sizes?.get(path);
     // An absent size reads as deliverable: reporting a real gap is the safe
     // direction, and inventing a refusal from missing data is not.
@@ -236,8 +279,20 @@ export function measureConvergence(input: {
     deletionCandidates,
     held: held.length,
     oversizeHeld,
+    reconciled: reconciled.sort(),
     compared,
   };
+}
+
+/**
+ * What a reading adds about the paths it did not count, so that "converged"
+ * beside a tree diff showing four differing files explains itself. Empty when
+ * nothing the engine composes differs.
+ */
+function reconciledClause(m: Extract<ConvergenceMeasurement, { kind: "measured" }>): string {
+  const n = m.reconciled.length;
+  if (n === 0) return "";
+  return ` ${n} path(s) the cascade composes for this clone differ from prime's by design and are not owed.`;
 }
 
 /**
@@ -339,7 +394,9 @@ export function judgeConvergence(input: {
   if (measurement.owed.length === 0) {
     return {
       state: "converged",
-      why: `Holds everything the cascade owes it (${measurement.compared} path(s) compared).`,
+      why:
+        `Holds everything the cascade owes it (${measurement.compared} path(s) compared).` +
+        reconciledClause(measurement),
       unchangedSince: null,
       lastConvergedAt: nowIso,
       escalates: false,
@@ -361,7 +418,8 @@ export function judgeConvergence(input: {
         why:
           `${measurement.owed.length} path(s) owed, and this clone has not held everything ` +
           `it is owed since ${lastConvergedAt} — over ${FALLING_BEHIND_WINDOWS} delivery ` +
-          `windows ago. The owed set is moving; it is not reaching zero.`,
+          `windows ago. The owed set is moving; it is not reaching zero.` +
+          reconciledClause(measurement),
         unchangedSince,
         lastConvergedAt,
         escalates: true,
@@ -374,7 +432,8 @@ export function judgeConvergence(input: {
       state: "stalled",
       why:
         `The same ${measurement.owed.length} path(s) have been owed since ${unchangedSince}, ` +
-        `longer than one delivery window (${sloMinutes}m). Nothing is moving.`,
+        `longer than one delivery window (${sloMinutes}m). Nothing is moving.` +
+        reconciledClause(measurement),
       unchangedSince,
       lastConvergedAt,
       escalates: true,
@@ -388,7 +447,8 @@ export function judgeConvergence(input: {
       (changed
         ? " and the set moved this pass"
         : `, unchanged for ${Math.round(unchangedMs / 60_000)}m`) +
-      ` — inside the ${sloMinutes}m delivery window.`,
+      ` — inside the ${sloMinutes}m delivery window.` +
+      reconciledClause(measurement),
     unchangedSince,
     lastConvergedAt,
     escalates: false,

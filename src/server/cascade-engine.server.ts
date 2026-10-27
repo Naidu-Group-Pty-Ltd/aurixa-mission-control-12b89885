@@ -207,6 +207,9 @@ import {
   reconcileEdgeTypecheckBaseline,
 } from "./cascade/edgeTypecheckBaselineReconcile.pure";
 import { API_SURFACE_PATH, reconcileApiSurface } from "./cascade/apiSurfaceReconcile.pure";
+// Shared with the convergence auditor, which must not count a pump's own
+// output as owed (`pumpedPaths.pure.ts`).
+import { PUMPED_PATHS } from "./cascade/pumpedPaths.pure";
 import { generatedArtefactsOwed } from "./cascade/generatedArtefacts.pure";
 import { subjectsImportedBy } from "./cascade/specImportSubjects.pure";
 import {
@@ -2813,15 +2816,6 @@ export async function processClone(args: {
   let variantVerdictsRecorded = 0;
   /** Named prime revision → full SHA, shared by this pass's merges. */
   const variantRevisions = new Map<string, string>();
-  const PUMPED_PATHS = new Set([
-    CONFIG_TOML_PATH,
-    SECURITY_REGISTRY_PATH,
-    SECURITY_INVENTORY_PATH,
-    FUNCTION_COUNT_RATCHET_PATH,
-    API_SURFACE_PATH,
-    DEPLOY_WORKFLOW_PATH,
-    EDGE_TYPECHECK_BASELINE_PATH,
-  ]);
   /** A verdict can be kept only where both blobs and the clone head it read are known. */
   const variantRecordable = (path: string): boolean =>
     resume !== undefined &&

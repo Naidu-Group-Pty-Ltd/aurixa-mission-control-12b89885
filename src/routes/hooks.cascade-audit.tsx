@@ -132,7 +132,10 @@ export const Route = createFileRoute("/hooks/cascade-audit")({
           if (
             report.stalled > 0 ||
             report.fallingBehind > 0 ||
-            report.unknown > 0 ||
+            // A reading that could not be TAKEN is news; a clone the auditor
+            // declines by design (not a mirror) is the same fact every tick,
+            // and its observation row already says so.
+            report.unknown > report.outOfScope ||
             unclassified > 0 ||
             ledgerFailed ||
             custodianActed(custodian)
