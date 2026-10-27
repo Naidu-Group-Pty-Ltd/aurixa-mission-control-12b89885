@@ -5,6 +5,8 @@ import {
   INBOX_KINDS,
   NOTIFICATION_RECORD_KINDS,
   RECORD_KINDS_FILTER,
+  RESTATEMENT_RECORD_KINDS,
+  SUCCESS_RECORD_KINDS,
   isInboxKind,
   type NotificationKind,
 } from "./notificationDisposition";
@@ -12,7 +14,8 @@ import {
 describe("a notification is for something that needs a person", () => {
   /*
     The four largest successes in the channel on 18 Sep 2026. Together with
-    drift_high (which step 3 retires) they were 79% of 2,459 unread rows.
+    drift_high (a record itself since 27 Oct 2026, below) they were 79% of
+    2,459 unread rows.
   */
   it("keeps the measured successes out of the inbox", () => {
     for (const kind of [
@@ -50,9 +53,40 @@ describe("a notification is for something that needs a person", () => {
       "support_ticket_escalated",
       "crm_sla_breach",
       "clone_gate_locked",
+      // Shares its name's prefix with drift_high and none of its reasons:
+      // every one of its five producers names something a person must do.
+      "drift_medium",
+      // Carries "Wrong backend" for a bundle naming only the prime and the
+      // missing billing identity; the unproven `carries_both` is kept out of
+      // it at the source rather than by filing the whole kind away.
+      "deployment_bundle_identity",
     ] as NotificationKind[]) {
       expect(isInboxKind(kind), `${kind} needs a person and must stay in the inbox`).toBe(true);
     }
+  });
+
+  /*
+    The owner's decision (docs/DELIVERY_SYSTEM_PLAN.md, W5), measured
+    27 Oct 2026: 4,649 unread drift_high, none ever read, 77% of the 6,028
+    unread under "Needs attention". Filed as a record it stops being counted
+    at once, with no row stamped, and every row stays in the clone's history.
+  */
+  it("files drift_high as a record", () => {
+    expect(isInboxKind("drift_high")).toBe(false);
+    expect(NOTIFICATION_RECORD_KINDS.has("drift_high")).toBe(true);
+    expect(RECORD_KINDS_FILTER.slice(1, -1).split(",")).toContain("drift_high");
+    expect(INBOX_KINDS).not.toContain("drift_high");
+  });
+
+  /*
+    The plan named drift_medium beside drift_high. The fleet scan never raises
+    it; a cascade conflict nobody could settle, a proposal that cannot be
+    rebuilt and wiring that never reached a held file do, among others. 26
+    unread on 27 Oct 2026, every one something a person must act on.
+  */
+  it("does not file drift_medium with it", () => {
+    expect(isInboxKind("drift_medium")).toBe(true);
+    expect(RECORD_KINDS_FILTER.slice(1, -1).split(",")).not.toContain("drift_medium");
   });
 
   /*
@@ -79,17 +113,39 @@ describe("a notification is for something that needs a person", () => {
   /*
     A guard against a careless future addition. Nothing whose NAME says
     something went wrong, is waiting, or is running out may be filed as a
-    record — whatever anybody's reasoning was at the time.
+    SUCCESS — whatever anybody's reasoning was at the time.
   */
-  it("refuses to file anything that reads like a problem as a record", () => {
+  it("refuses to file anything that reads like a problem as a success", () => {
     /* `(?<!un)lock` on purpose: `clone_gate_unlocked` is the success — the
        payment landed and the workspace opened — while `clone_gate_locked` is
        the one a person is owed. A guard that cannot tell them apart would have
        to be weakened, and a weakened guard stops guarding. */
     const forbidden =
       /(fail|error|blocked|breach|reached|approaching|drift|missed|escalat|declin|flag|pending|alert|await|reject|delet|(?<!un)lock|expir)/i;
-    for (const kind of NOTIFICATION_RECORD_KINDS) {
+    for (const kind of SUCCESS_RECORD_KINDS) {
       expect(forbidden.test(kind), `${kind} reads like something a person is owed`).toBe(false);
+    }
+  });
+
+  /*
+    The guard above covered the whole record until drift_high joined it, and
+    drift_high fails it by name — rightly, for a success. It is not filed as a
+    success. It is filed as a restatement of a reading shown where it is
+    measured, so it sits on its own list and that list is pinned here entry
+    by entry: the guard stays whole for every success, and a second
+    restatement is a deliberate edit of this line, with its measurement,
+    rather than a regex quietly loosened for it.
+  */
+  it("files nothing else as a restatement, and the record is exactly the two lists", () => {
+    expect([...RESTATEMENT_RECORD_KINDS]).toEqual(["drift_high"]);
+    expect(NOTIFICATION_RECORD_KINDS.size).toBe(
+      SUCCESS_RECORD_KINDS.size + RESTATEMENT_RECORD_KINDS.size,
+    );
+    for (const kind of NOTIFICATION_RECORD_KINDS) {
+      expect(
+        SUCCESS_RECORD_KINDS.has(kind) !== RESTATEMENT_RECORD_KINDS.has(kind),
+        `${kind} must be on exactly one list`,
+      ).toBe(true);
     }
   });
 
