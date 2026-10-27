@@ -1275,11 +1275,17 @@ export async function runFleetMigrationSync(
   // this read has to cover the ones this run will not touch as well as the
   // ones it will — which is the whole difference between `excluded: 2` and
   // knowing which two.
+  //
+  // And each clone's CRM line, for the cron sweep after its replay: told the
+  // line, it also takes off the jobs the line does not carry. A read that
+  // failed leaves every line unknown, and an unknown line sweeps the prime's
+  // own jobs alone, as before — less, never more.
   const { data: clones } = await supabase
     .from("clones")
-    .select("id, name")
+    .select("id, name, crm_mode")
     .in("id", [...verdicts.map((v) => v.row.clone_id)]);
   const nameOf = new Map((clones ?? []).map((c) => [c.id, c.name]));
+  const crmModeOf = new Map((clones ?? []).map((c) => [c.id, c.crm_mode]));
 
   const out: FleetMigrationResult = {
     ...EMPTY,
@@ -1625,6 +1631,8 @@ export async function runFleetMigrationSync(
             }
           },
         },
+        // The line the sweep after the replay unschedules for, read above.
+        crmModeOf.get(cloneId) ?? null,
       );
       const successes = results.filter((r) => r.success && !r.skipped);
       /*

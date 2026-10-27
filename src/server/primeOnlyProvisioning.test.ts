@@ -58,7 +58,11 @@ import {
 } from "./handoff-parity.server";
 import { isCloneFunctionPath } from "./prime-backend.server";
 import { shouldSkipFunctionSource, withoutPrimeOnlyFunctions } from "./primeScanCache.pure";
-import { CRON_UNSCHEDULE, recordingManagementApi } from "./managementApiRecorder.test-support";
+import {
+  CRON_UNSCHEDULE,
+  bodyOf,
+  recordingManagementApi,
+} from "./managementApiRecorder.test-support";
 
 const PRIME = "primeprimeprimeprime";
 const CLONE = "cloneclonecloneclone";
@@ -613,7 +617,7 @@ describe("applyPrimeMigrations — what a replay scheduled is swept after it", (
   it("sweeps after a migration that failed — it may have committed what it scheduled", async () => {
     const api = recordingManagementApi({
       cronJobs: dispatcherOnClone,
-      refuse: (q) => q === MIGRATION.sql,
+      refuse: (q) => bodyOf(q) === MIGRATION.sql,
     });
     vi.stubGlobal("fetch", vi.fn(api.fetch));
     const out = await applyPrimeMigrations(CLONE, [MIGRATION]);
@@ -631,6 +635,55 @@ describe("applyPrimeMigrations — what a replay scheduled is swept after it", (
     expect(out.results).toEqual([{ id: MIGRATION.id, name: MIGRATION.name, success: true }]);
     expect(out.latestApplied).toBe(MIGRATION.id);
     expect(out.primeOnlyCronSweep?.failed.map((j) => j.jobid)).toEqual([38]);
+  });
+
+  /*
+    A migration that re-schedules the GoHighLevel sync, replayed onto the
+    independent line. Told the line, the sweep takes the job off in the same
+    pass; not told, it left the job calling a function the line does not have
+    until the half-hourly catch-up swept it (W7).
+  */
+  const ghlSyncOnClone = [{ jobid: 51, jobname: "sync-ghl-pipelines-hourly", command: "select 1" }];
+
+  it("takes off what the clone's CRM line does not carry, when told the line", async () => {
+    const api = recordingManagementApi({ cronJobs: ghlSyncOnClone });
+    vi.stubGlobal("fetch", vi.fn(api.fetch));
+    const out = await applyPrimeMigrations(
+      CLONE,
+      [MIGRATION],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      "independent",
+    );
+    expect(api.sent.filter((q) => CRON_UNSCHEDULE.test(q))).toEqual([
+      "select cron.unschedule(51::bigint);",
+    ]);
+    expect(out.primeOnlyCronSweep?.unscheduled).toEqual([
+      expect.objectContaining({ jobid: 51, crmLine: true }),
+    ]);
+  });
+
+  it.each([
+    ["no line", null],
+    ["the dependent line, which carries it", "dependent"],
+  ])("leaves it for %s", async (_label, crmMode) => {
+    const api = recordingManagementApi({ cronJobs: ghlSyncOnClone });
+    vi.stubGlobal("fetch", vi.fn(api.fetch));
+    const out = await applyPrimeMigrations(
+      CLONE,
+      [MIGRATION],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      crmMode,
+    );
+    expect(api.sent.some((q) => CRON_UNSCHEDULE.test(q))).toBe(false);
+    expect(out.primeOnlyCronSweep?.unscheduled).toEqual([]);
   });
 });
 

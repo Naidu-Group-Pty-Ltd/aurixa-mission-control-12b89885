@@ -10,9 +10,17 @@
  * prime-only sweep makes after it, and records every query, so a test can
  * assert what reached the clone and what its ledger was told.
  *
+ * A body and its ledger record usually travel as ONE query
+ * (`migrationRecordRequest.pure.ts`). `bodies()` gives the body part of each
+ * and `recorded()` reads the record part, so a test asks what the clone was
+ * sent and what its ledger was told without caring how the two were packed;
+ * `sent` keeps every query whole, for a test that does care.
+ *
  * It does not import the test runner: the caller installs `fetch` itself
  * (`vi.stubGlobal("fetch", api.fetch)`), which keeps this an ordinary module.
  */
+
+import { LEDGER_RECORD_SEPARATOR } from "./migrationRecordRequest.pure";
 
 const LEDGER_READ = /select version from supabase_migrations\.schema_migrations\s+union/i;
 const TABLE_COUNT = /from pg_tables/i;
@@ -26,8 +34,17 @@ export const CRON_SWEEP_READ = /select jobid, jobname, command from cron\.job/i;
 /** The write the sweep makes for each prime-only job it found. */
 export const CRON_UNSCHEDULE = /select cron\.unschedule\((\d+)::bigint\)/i;
 
-/** The write `recordReplayedVersion` makes after a version has run. */
+/** The ledger record for a version that ran: alone, or after the body it records. */
 export const LEDGER_RECORD = /insert into supabase_migrations\.schema_migrations/i;
+
+/**
+ * The migration body a query carries: everything before its ledger record
+ * where the two share the query, the whole query otherwise.
+ */
+export function bodyOf(query: string): string {
+  const at = query.indexOf(LEDGER_RECORD_SEPARATOR);
+  return at === -1 ? query : query.slice(0, at);
+}
 
 export type RecordingManagementApi = {
   /** Install as the global `fetch`. */
@@ -36,7 +53,10 @@ export type RecordingManagementApi = {
   sent: string[];
   /** Every migration body the clone was sent, in order: all but bookkeeping. */
   bodies: () => string[];
-  /** Every version the ledger was told, and the name it was told it under. */
+  /**
+   * Every version the ledger was told, and the name it was told it under, by
+   * a query the clone did not refuse: a refused query commits nothing.
+   */
   recorded: () => Array<{ version: string | undefined; name: string | undefined }>;
 };
 
@@ -56,6 +76,8 @@ export function recordingManagementApi(
   } = {},
 ): RecordingManagementApi {
   const sent: string[] = [];
+  /** Queries answered with a refusal, which commit nothing, the record in them included. */
+  const refused = new Set<number>();
   const answer = (body: unknown) =>
     new Response(JSON.stringify(body), {
       status: 200,
@@ -73,7 +95,10 @@ export function recordingManagementApi(
     fetch: async (_url, init) => {
       const { query } = JSON.parse(String(init?.body)) as { query: string };
       sent.push(query);
-      if (opts.refuse?.(query)) return new Response("ERROR: 42P07", { status: 400 });
+      if (opts.refuse?.(query)) {
+        refused.add(sent.length - 1);
+        return new Response("ERROR: 42P07", { status: 400 });
+      }
       if (LEDGER_READ.test(query)) {
         return answer((opts.applied ?? []).map((version) => ({ version })));
       }
@@ -81,9 +106,17 @@ export function recordingManagementApi(
       if (CRON_SWEEP_READ.test(query)) return answer(opts.cronJobs ?? []);
       return answer([]);
     },
-    bodies: () => sent.filter((q) => !bookkeeping(q)),
+    bodies: () =>
+      sent.flatMap((q) =>
+        q.includes(LEDGER_RECORD_SEPARATOR) ? [bodyOf(q)] : bookkeeping(q) ? [] : [q],
+      ),
     recorded: () =>
       sent
+        // A refused query is one transaction that did not commit.
+        .filter((_, i) => !refused.has(i))
+        // The record part alone where a body shares the query: a body can
+        // spell anything. A query with no body is a record, or bookkeeping.
+        .map((q) => (q.includes(LEDGER_RECORD_SEPARATOR) ? q.slice(bodyOf(q).length) : q))
         .filter((q) => LEDGER_RECORD.test(q))
         .map((q) => {
           const m = /values \('(\d{14})', '([^']*)', ARRAY/.exec(q);

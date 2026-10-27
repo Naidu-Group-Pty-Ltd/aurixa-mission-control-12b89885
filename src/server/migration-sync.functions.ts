@@ -1,4 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
+import type { Database } from "@/integrations/supabase/types";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { requireAdmin } from "@/integrations/supabase/role-middleware";
 import { getAppOctokit } from "./github-app.server";
@@ -12,7 +13,7 @@ import {
   countProjectEdgeFunctions,
   readCloneMigrationLedger,
 } from "./backend-provisioning.server";
-import { openScopedPrimeCorpus } from "./fleet-migration.server";
+import { beatWhileClaimHeld, openScopedPrimeCorpus } from "./fleet-migration.server";
 import { describeCoverage, type CoverageComposition } from "./migrationProvenance.pure";
 import {
   readCloneMigrationStanding,
@@ -233,6 +234,16 @@ export const getCloneMigrationStatus = createServerFn({ method: "POST" })
   });
 
 /**
+ * What a press is told when another pass already holds the clone: the fleet
+ * sync, a remediation run, the provisioning worker or another press. Nothing
+ * was sent, and the press is simply early.
+ */
+const SYNC_CLAIM_HELD =
+  "Another pass is applying migrations to this clone right now (the fleet sync, a remediation " +
+  "run, the provisioning worker or another press of this button). Nothing was sent; try again " +
+  "once it has finished.";
+
+/**
  * Apply the prime repo's pending migrations to a specific clone backend.
  */
 export const syncCloneMigrations = createServerFn({ method: "POST" })
@@ -272,63 +283,132 @@ export const syncCloneMigrations = createServerFn({ method: "POST" })
         return { ok: false, error: "Prime not configured — set the prime repo in Settings first" };
       }
 
-      // Update status to migrating
-      // The "I have started" mark. If it does not land, the row still reads
-      // `ready` for the length of the run and a second press claims the same
-      // clone — so a failure here is worth a line even though it does not
-      // stop the sync.
-      const { error: startErr } = await supabase
-        .from("clone_backends")
-        .update({
-          status: "migrating" as const,
-          status_detail: `Syncing migrations from ${source.owner}/${source.repo}...`,
-        })
-        .eq("clone_id", data.cloneId);
-      if (startErr) {
-        console.error("[migration-sync] start mark not recorded", {
+      // The clone's CRM line, for the cron sweep after the replay (see the
+      // replay's `crmMode`). A read that failed is an unknown line, and an
+      // unknown line sweeps the prime's own jobs alone, as before.
+      const { data: lineRow, error: lineErr } = await supabase
+        .from("clones")
+        .select("crm_mode")
+        .eq("id", data.cloneId)
+        .maybeSingle();
+      if (lineErr) {
+        console.warn("[migration-sync] the clone's CRM line could not be read", {
           cloneId: data.cloneId,
-          error: startErr.message,
+          error: lineErr.message,
         });
       }
 
-      try {
-        // The SCOPED corpus — the same one the scheduled fleet sync replays —
-        // and never the raw repo. This button used to pass `corpus.metas`
-        // directly: 962 files, including two rollback scripts and 52
-        // future-dated versions the prime never ran. One click replayed the
-        // repo's January-2025 tail at this tenant's backend — the versions the
-        // earlier incident had stamped were skipped by the ledger, and
-        // `20250124140000`, a version absent from the prime's own ledger,
-        // failed against the introspected schema and marked the backend
-        // `failed`, which took it out of the fleet sync and blocked its
-        // deployment. The rule is #71's: a clone never runs a migration the
-        // prime itself has not run — and it holds for a button exactly as it
-        // holds for a schedule, because the database cannot tell who asked.
-        //
-        // Bodies still arrive on demand inside the replay, for the versions
-        // this clone turns out to be missing; materialising the whole corpus
-        // here is what made this button time out at 60 s without finishing.
-        const scoped = await openScopedPrimeCorpus(supabase, source);
-        if (!scoped.ok) {
-          // The refusal is the whole outcome of this press, so a write that
-          // silently failed would leave the operator with a row that says
-          // nothing happened and a toast that says it was refused.
-          const { error: refusalErr } = await supabase
-            .from("clone_backends")
-            .update({
-              status: "ready" as const,
-              status_detail: `Migration sync refused: ${scoped.error}`,
-              error_message: scoped.error,
-            })
-            .eq("clone_id", data.cloneId);
-          if (refusalErr) {
-            console.error("[migration-sync] refusal not recorded", {
-              cloneId: data.cloneId,
-              error: refusalErr.message,
-            });
-          }
-          return { ok: false, error: scoped.error };
+      // The SCOPED corpus — the same one the scheduled fleet sync replays —
+      // and never the raw repo. This button used to pass `corpus.metas`
+      // directly: 962 files, including two rollback scripts and 52
+      // future-dated versions the prime never ran. One click replayed the
+      // repo's January-2025 tail at this tenant's backend — the versions the
+      // earlier incident had stamped were skipped by the ledger, and
+      // `20250124140000`, a version absent from the prime's own ledger,
+      // failed against the introspected schema and marked the backend
+      // `failed`, which took it out of the fleet sync and blocked its
+      // deployment. The rule is #71's: a clone never runs a migration the
+      // prime itself has not run — and it holds for a button exactly as it
+      // holds for a schedule, because the database cannot tell who asked.
+      //
+      // Bodies still arrive on demand inside the replay, for the versions
+      // this clone turns out to be missing; materialising the whole corpus
+      // here is what made this button time out at 60 s without finishing.
+      const scoped = await openScopedPrimeCorpus(supabase, source);
+      if (!scoped.ok) {
+        // The refusal is the whole outcome of this press, so a write that
+        // silently failed would leave the operator with a row that says
+        // nothing happened and a toast that says it was refused. Written
+        // without a claim, before one is taken: nothing was sent, and the
+        // row's status is not this press's to change.
+        const { error: refusalErr } = await supabase
+          .from("clone_backends")
+          .update({
+            status_detail: `Migration sync refused: ${scoped.error}`,
+            error_message: scoped.error,
+          })
+          .eq("clone_id", data.cloneId);
+        if (refusalErr) {
+          console.error("[migration-sync] refusal not recorded", {
+            cloneId: data.cloneId,
+            error: refusalErr.message,
+          });
         }
+        return { ok: false, error: scoped.error };
+      }
+
+      /*
+        ONE APPLIER AT A TIME, AND THE FLEET LANE'S CLAIM DECIDES WHICH.
+
+        This press marked the row `migrating` and took no claim, so it could
+        run while the fleet sync was already sending migrations into the same
+        schema: nothing it wrote was something that lane checks, and the fleet
+        lane's own claim does not move `status`. Two appliers inside one schema
+        is how a migration is sent twice and fails the second time on an object
+        it created the first, and the failure blocks the clone
+        (`docs/DELIVERY_SYSTEM_PLAN.md` §4.3, W7).
+
+        So it takes the claim the fleet lane and the remediation lane take: the
+        same compare-and-swap on `worker_started_at`, the same heartbeat, and a
+        release fenced on the timestamp it took. Taken once the corpus is open,
+        as the remediation lane takes it, so it is held for the replay and
+        nothing else. On the service role, as the fleet button runs, because
+        the heartbeat is granted to nothing else. The authorisation is
+        `requireAdmin`'s, above.
+
+        The row stays `ready` while it is held. `migrating` is a provisioning
+        status: the fleet lane's stale-claim sweep does not look at it, so a
+        press that died holding the claim would hold it for ever, and the
+        provisioning drain requeues an in-flight status nobody claims, which
+        is a re-provision.
+      */
+      const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+      const claimedAt = new Date().toISOString();
+      const { data: claimed, error: claimErr } = await supabaseAdmin
+        .from("clone_backends")
+        .update({
+          worker_started_at: claimedAt,
+          migration_heartbeat_at: claimedAt,
+          status_detail: `Syncing migrations from ${source.owner}/${source.repo}...`,
+        })
+        .eq("clone_id", data.cloneId)
+        .eq("status", "ready")
+        .is("worker_started_at", null)
+        .select("clone_id");
+      // A claim that ERRORED is not a claim somebody else won.
+      if (claimErr) {
+        return { ok: false, error: `Could not claim this clone for a sync: ${claimErr.message}` };
+      }
+      if (!claimed || claimed.length === 0) {
+        return { ok: false, error: SYNC_CLAIM_HELD };
+      }
+      const heartbeat = beatWhileClaimHeld(supabaseAdmin, data.cloneId, claimedAt);
+      /**
+       * Record this press and let the claim go, in one statement fenced on the
+       * claim, with the beats stopped first so none lands after the release.
+       * A fence that matches nothing means the claim was reclaimed and another
+       * pass now holds the clone: its record is fresher, so nothing is written.
+       */
+      let settled = false;
+      const settle = async (
+        patch: Database["public"]["Tables"]["clone_backends"]["Update"],
+      ): Promise<string | null> => {
+        settled = true;
+        await heartbeat.stop();
+        const { data: released, error: releaseErr } = await supabaseAdmin
+          .from("clone_backends")
+          .update({ ...patch, worker_started_at: null })
+          .eq("clone_id", data.cloneId)
+          .eq("worker_started_at", claimedAt)
+          .select("clone_id");
+        if (releaseErr) return releaseErr.message;
+        if (!released || released.length === 0) {
+          return "the claim was reclaimed before the result could be recorded";
+        }
+        return null;
+      };
+
+      try {
         const { corpus, metas: scopedMetas, runnable } = scoped;
         const sourceSha = scoped.sourceSha;
         const { results, latestApplied } = await applyPrimeMigrations(
@@ -354,13 +434,14 @@ export const syncCloneMigrations = createServerFn({ method: "POST" })
             // callers cannot drift into disagreeing about which body a stream
             // is of.
             bodyIdentity: (m) => corpus.bodyIdentity(m),
-            // And no `onStatementDone`, deliberately: this route claims
-            // nothing and records no place, so it must not start a seed it
-            // cannot finish in one window. The replay HOLDS such a seed
-            // (`heldOversize`, reported below as "left for the chunking
-            // lane") rather than sending a part and reporting the clone level —
-            // and the fleet lane, which does record its place, carries it.
+            // And no `onStatementDone`, deliberately: this route records no
+            // place, so it must not start a seed it cannot finish in one
+            // window. The replay HOLDS such a seed (`heldOversize`, reported
+            // below as "left for the chunking lane") rather than sending a
+            // part and reporting the clone level — and the fleet lane, which
+            // does record its place, carries it.
           },
+          lineRow?.crm_mode ?? null,
         );
 
         const successes = results.filter((r) => r.success && !r.skipped);
@@ -388,53 +469,54 @@ export const syncCloneMigrations = createServerFn({ method: "POST" })
           verdict an operator reads, and a rejected update leaves the row
           saying whatever it said before the button was pressed, with the
           function still reporting success.
+
+          And the release of the claim, in the same statement and behind the
+          same fence, so no other pass can claim the clone between this press
+          applying and this press recording what it applied.
         */
-        const { error: recordErr } = await supabase
-          .from("clone_backends")
-          .update({
-            // NEVER null. `latestApplied` is null whenever the ordered list was
-            // empty — which is the ordinary shape of a press on a clone that is
-            // already level — and writing it erases the version the row holds.
-            // That is the defect the scheduled sync carried until 4 Sep 2026;
-            // one button press would have re-introduced it here.
-            ...(latestApplied ? { migration_version: latestApplied } : {}),
-            source_repo: `${source.owner}/${source.repo}`,
-            source_ref: source.branch,
-            source_sha: sourceSha,
-            migrations_applied: results,
-            status: failures.length > 0 ? ("failed" as const) : ("ready" as const),
-            status_detail:
-              failures.length > 0
-                ? `Migration failed at ${failures[0].name}: ${failures[0].error}`
-                : limited.length > 0
-                  ? // Names no cause: the refusal that produced this on
-                    // npc-test-76b3b3 was a bare 403 against a window with
-                    // 4,300 calls left in it, and "rate limit" sent the reader
-                    // to wait out a window that was never closed. The
-                    // upstream's own words are quoted instead — they cannot go
-                    // in `error_message` or `migration_blocked_reason`, which
-                    // both mean the clone refused something it was sent.
-                    `Synced to ${newVersion} — the prime's copy of ${limited[0].name} could not be ` +
-                    `read, so nothing was sent for it; the clone is unchanged and still in the ` +
-                    `fleet, and the next pass retries from that migration. Upstream said: ` +
-                    `${(limited[0].error ?? "no detail").slice(0, 300)}`
-                  : held.length > 0
-                    ? `Synced to ${newVersion} — ${held[0].name} is too large for this pass to carry ` +
-                      `and is left for the chunking lane; the clone is unchanged and still in the fleet`
-                    : byRule.length > 0
-                      ? `Synced to ${newVersion} — ${byRule[0].heldByRule?.detail ?? byRule[0].error ?? ""} ` +
-                        `The clone is unchanged and still in the fleet.`
-                      : `Migrations up to date (${newVersion})`,
-            error_message: failures.length > 0 ? failures[0].error : null,
-          })
-          .eq("clone_id", data.cloneId);
+        const recordErr = await settle({
+          // NEVER null. `latestApplied` is null whenever the ordered list was
+          // empty — which is the ordinary shape of a press on a clone that is
+          // already level — and writing it erases the version the row holds.
+          // That is the defect the scheduled sync carried until 4 Sep 2026;
+          // one button press would have re-introduced it here.
+          ...(latestApplied ? { migration_version: latestApplied } : {}),
+          source_repo: `${source.owner}/${source.repo}`,
+          source_ref: source.branch,
+          source_sha: sourceSha,
+          migrations_applied: results,
+          status: failures.length > 0 ? ("failed" as const) : ("ready" as const),
+          status_detail:
+            failures.length > 0
+              ? `Migration failed at ${failures[0].name}: ${failures[0].error}`
+              : limited.length > 0
+                ? // Names no cause: the refusal that produced this on
+                  // npc-test-76b3b3 was a bare 403 against a window with
+                  // 4,300 calls left in it, and "rate limit" sent the reader
+                  // to wait out a window that was never closed. The
+                  // upstream's own words are quoted instead — they cannot go
+                  // in `error_message` or `migration_blocked_reason`, which
+                  // both mean the clone refused something it was sent.
+                  `Synced to ${newVersion} — the prime's copy of ${limited[0].name} could not be ` +
+                  `read, so nothing was sent for it; the clone is unchanged and still in the ` +
+                  `fleet, and the next pass retries from that migration. Upstream said: ` +
+                  `${(limited[0].error ?? "no detail").slice(0, 300)}`
+                : held.length > 0
+                  ? `Synced to ${newVersion} — ${held[0].name} is too large for this pass to carry ` +
+                    `and is left for the chunking lane; the clone is unchanged and still in the fleet`
+                  : byRule.length > 0
+                    ? `Synced to ${newVersion} — ${byRule[0].heldByRule?.detail ?? byRule[0].error ?? ""} ` +
+                      `The clone is unchanged and still in the fleet.`
+                    : `Migrations up to date (${newVersion})`,
+          error_message: failures.length > 0 ? failures[0].error : null,
+        });
         if (recordErr) {
           // Not thrown: the migrations really were applied, and claiming
           // otherwise would be a worse lie than a stale status line. Said
           // once, where somebody will see it.
           console.error("[migration-sync] result not recorded", {
             cloneId: data.cloneId,
-            error: recordErr.message,
+            error: recordErr,
           });
         }
 
@@ -472,15 +554,27 @@ export const syncCloneMigrations = createServerFn({ method: "POST" })
         };
       } catch (e) {
         const msg = e instanceof Error ? e.message : "Migration sync failed";
-        await supabase
-          .from("clone_backends")
-          .update({
-            status: "ready" as const,
-            status_detail: `Migration error: ${msg}`,
-            error_message: msg,
-          })
-          .eq("clone_id", data.cloneId);
+        // Once only: a throw after the result was recorded must not write
+        // over that record, and its fence would miss the released claim.
+        const errorNotRecorded = settled
+          ? null
+          : await settle({
+              status_detail: `Migration error: ${msg}`,
+              error_message: msg,
+            }).catch((err: unknown) => (err instanceof Error ? err.message : String(err)));
+        if (errorNotRecorded) {
+          // The fleet lane's stale-claim sweep frees an unreleased claim five
+          // minutes after its beats stop, which `settle` stopped first.
+          console.error("[migration-sync] error not recorded", {
+            cloneId: data.cloneId,
+            error: errorNotRecorded,
+          });
+        }
         return { ok: false, error: msg };
+      } finally {
+        // Already stopped on every path that settled; this is the one that
+        // threw before it could, and stopping twice costs nothing.
+        await heartbeat.stop();
       }
     },
   );

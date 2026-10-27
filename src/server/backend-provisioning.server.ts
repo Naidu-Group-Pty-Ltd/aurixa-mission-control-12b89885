@@ -31,6 +31,7 @@ import {
   resolveMigrationFrontier,
   type MigrationFrontier,
 } from "./migrationFrontier.pure";
+import { bodyWithLedgerRecord } from "./migrationRecordRequest.pure";
 import {
   joinSharedVersionSql,
   missingMembers,
@@ -3062,15 +3063,13 @@ export async function rescueScopedOrphans<T extends { id: string; name: string }
  * joined by ` + `, which is the form `cloneMigrationStanding` reads part by
  * part. One writer for both, so the two cannot come to record a version
  * differently.
+ *
+ * These are the statements. They travel in the request that applies the
+ * version wherever its body allows (`applyAndRecord`), and alone otherwise
+ * (`recordReplayedVersion`).
  */
-async function recordReplayedVersion(
-  projectRef: string,
-  version: string,
-  name: string,
-): Promise<void> {
-  await runSqlOnProject(
-    projectRef,
-    `insert into supabase_migrations.schema_migrations (version, name, statements)
+function ledgerRecordSql(version: string, name: string): string {
+  return `insert into supabase_migrations.schema_migrations (version, name, statements)
        values (${sqlLiteral(version)}, ${sqlLiteral(name)}, ARRAY[]::text[])
        on conflict (version) do nothing;
      insert into aurixa.schema_migrations (version, name)
@@ -3081,8 +3080,45 @@ async function recordReplayedVersion(
        on conflict (version) do update
          set provenance = 'applied',
              recorded_at = now(),
-             note = excluded.note;`,
-  );
+             note = excluded.note;`;
+}
+
+/** The record alone: a chunked seed's, after its last statement, and a body's that cannot share a request. */
+async function recordReplayedVersion(
+  projectRef: string,
+  version: string,
+  name: string,
+): Promise<void> {
+  await runSqlOnProject(projectRef, ledgerRecordSql(version, name));
+}
+
+/**
+ * Apply a version's body and record it, in ONE request wherever the body can
+ * share one — so no pass can end with the version applied and unrecorded.
+ * `migrationRecordRequest.pure.ts` says what one request buys for each kind
+ * of body, and which bodies must keep two.
+ *
+ * Throws what the request threw. A body the clone refuses is never recorded,
+ * in either form.
+ */
+async function applyAndRecord(
+  projectRef: string,
+  body: string,
+  version: string,
+  name: string,
+): Promise<void> {
+  const request = bodyWithLedgerRecord(body, ledgerRecordSql(version, name));
+  if (request.together) {
+    await runSqlOnProject(projectRef, request.sql);
+    return;
+  }
+  console.info("[migrations] a body and its record go in two requests", {
+    projectRef,
+    version,
+    why: request.why,
+  });
+  await runSqlOnProject(projectRef, body);
+  await recordReplayedVersion(projectRef, version, name);
 }
 
 /**
@@ -3161,6 +3197,16 @@ export async function applyPrimeMigrations(
    * as before.
    */
   oversize?: OversizeApplyOptions,
+  /**
+   * The clone's recorded CRM line (`clones.crm_mode`), for the sweep after
+   * the replay. Given, that sweep also unschedules the jobs the line does not
+   * carry: four of the prime's migrations re-schedule the GoHighLevel jobs,
+   * and on the independent line they called functions it does not have until
+   * the half-hourly catch-up next swept them (`primeOnlyFunctionSweep.server.ts`).
+   * Absent or unread: the prime's own jobs alone, exactly as before, which
+   * sweeps less and never more.
+   */
+  crmMode?: string | null,
 ): Promise<{
   results: PrimeMigrationResult[];
   latestApplied: string | null;
@@ -3319,7 +3365,21 @@ export async function applyPrimeMigrations(
   let attempted = 0;
   let slowestMs = 0;
   let stoppedEarly = false;
-  let chunkCursorDiscarded = false;
+  /*
+    A CURSOR INTO A VERSION THE CLONE ALREADY RECORDS IS DISCARDED.
+
+    A seed's version is recorded only after its last statement, so a cursor
+    naming a recorded version is a position in work that is finished — by this
+    lane or by another one, which keeps no cursor of this lane's to clear. The
+    loop below skips the version as applied, so it never reaches the seed and
+    never says the cursor is done with, and the row kept it: NPC Test's cursor
+    still named `20270130090000`, recorded on 22 Oct, and on 27 Oct the drain
+    served it every five minutes for nothing — 237 of 239 passes in 24 hours
+    found the clone current, at about 1,900 GitHub calls a day
+    (`docs/DELIVERY_SYSTEM_PLAN.md` §4.3, W7). Said here, where the ledger is
+    in hand, through the flag the fleet lane already clears its cursor on.
+  */
+  let chunkCursorDiscarded = Boolean(oversize?.cursor && applied.has(oversize.cursor.migrationId));
   let chunksApplied = 0;
   // Whether any migration body was SENT this pass, failed or not — a file that
   // fails part-way may already have committed what it scheduled. Not
@@ -3499,8 +3559,9 @@ export async function applyPrimeMigrations(
       }
       try {
         sentToClone = true;
-        await runSqlOnProject(projectRef, sql);
-        await recordReplayedVersion(projectRef, unit.version, recordedName);
+        // The version's record rides in the same request as its files, so no
+        // pass can end with the version applied and unrecorded.
+        await applyAndRecord(projectRef, sql, unit.version, recordedName);
         for (const f of unit.members) {
           results.push({ id: f.id, name: f.name, success: true, ...together });
         }
@@ -3654,9 +3715,17 @@ export async function applyPrimeMigrations(
           break;
         }
         sentToClone = true;
-        await runSqlOnProject(projectRef, sql);
+        // Applied and recorded in one request: a pass ended between two
+        // requests left a change applied and unrecorded, and the next pass
+        // sent the whole file again into the objects it had already created.
+        await applyAndRecord(projectRef, sql, m.id, recordedName);
+      } else {
+        // A chunked seed's last statement has gone. Its record is a request
+        // of its own, and safe as one: a pass ended before it resumes at the
+        // cursor and records the seed once nothing is left to send, and a
+        // statement sent twice is a no-op under the seed's own ON CONFLICT.
+        await recordReplayedVersion(projectRef, m.id, recordedName);
       }
-      await recordReplayedVersion(projectRef, m.id, recordedName);
       results.push({ id: m.id, name: m.name, success: true });
       latestApplied = m.id;
       slowestMs = Math.max(slowestMs, Date.now() - startedAt);
@@ -3693,10 +3762,11 @@ export async function applyPrimeMigrations(
   // reached the clone — a pass that sent nothing scheduled nothing — and not
   // when the budget stopped the pass, because the pass that continues it will
   // sweep. See `sweepPrimeOnlyCronJobs`, which never throws and never acts on
-  // the prime.
+  // the prime. Told the clone's line, so what the line does not carry goes
+  // with them in the same pass rather than at the next catch-up.
   const primeOnlyCronSweep =
     (sentToClone || chunksApplied > 0) && !stoppedEarly
-      ? await sweepPrimeOnlyCronJobs(projectRef)
+      ? await sweepPrimeOnlyCronJobs(projectRef, { crmMode: crmMode ?? null })
       : null;
   if (primeOnlyCronSweep && primeOnlyCronSweep.unscheduled.length > 0) {
     console.info("[migrations] unscheduled the prime's own jobs from a clone", {
