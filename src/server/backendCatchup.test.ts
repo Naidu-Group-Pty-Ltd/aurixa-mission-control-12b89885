@@ -81,8 +81,10 @@ describe("the hook", () => {
   });
 
   it("files a breadcrumb only when the sweep did something or could not", () => {
+    // The rule itself, `no_backend_work` included, is asserted by behaviour in
+    // backendCatchupBreadcrumb.test.ts.
     const r = route();
-    expect(r).toMatch(/if \(report\.planned \|\| report\.refused \|\| report\.outcomes\.some/);
+    expect(r).toContain("if (catchupIsNoteworthy(report)) {");
   });
 });
 

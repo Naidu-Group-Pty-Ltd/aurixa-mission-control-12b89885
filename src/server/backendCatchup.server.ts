@@ -91,6 +91,26 @@ export type BackendCatchupResult = {
 };
 
 /**
+ * Whether a sweep is worth a breadcrumb in the audit log: it planned
+ * something, or something was refused.
+ *
+ * `no_backend_work` reaches a clone's outcome as its `refused`, and it is not
+ * a refusal in that sense: it is the answer for a clone that owes nothing,
+ * the healthy state twice an hour. Counted as one, it filed a row on every
+ * sweep of a fleet that owed nothing (48 on 27 Oct 2026), which the header's
+ * "writes nothing at all" says it must not.
+ */
+export function catchupIsNoteworthy(
+  report: Pick<BackendCatchupResult, "planned" | "refused" | "outcomes">,
+): boolean {
+  return (
+    report.planned > 0 ||
+    report.refused !== null ||
+    report.outcomes.some((o) => o.refused !== null && o.refused !== "no_backend_work")
+  );
+}
+
+/**
  * Read the prime's current HEAD.
  *
  * The same read the cascade engine makes, for the same reason: the diff is

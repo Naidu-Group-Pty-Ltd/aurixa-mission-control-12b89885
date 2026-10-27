@@ -83,13 +83,14 @@ export const Route = createFileRoute("/hooks/backend-catchup")({
               { headers: { "Content-Type": "application/json" } },
             );
           }
-          const { runBackendCatchup } = await import("@/server/backendCatchup.server");
+          const { runBackendCatchup, catchupIsNoteworthy } =
+            await import("@/server/backendCatchup.server");
           const report = await runBackendCatchup("backend catch-up sweep");
 
           // Only a breadcrumb when something was planned or refused. A sweep
           // over a fleet that owes nothing is the healthy steady state and
           // should not fill the audit log twice an hour.
-          if (report.planned || report.refused || report.outcomes.some((o) => o.refused)) {
+          if (catchupIsNoteworthy(report)) {
             await writeAuditLog({
               action: "backend_catchup_cron",
               entityType: "cron",
