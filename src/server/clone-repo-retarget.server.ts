@@ -48,9 +48,21 @@
  * rather than emptied: a config that exists says somebody decided what it
  * should contain, and the decision here is that this repository has no say in
  * its own dependencies.
+ *
+ * ## A parent's own files (27 Oct 2026)
+ *
+ * A clone created from a PARENT clone copies the parent's tree, not the
+ * prime's, and the parent keeps files for itself alone. NPC Client Dashboard's
+ * `vcr-prune.yml` prunes and can redeploy the dashboard's own Vercel project,
+ * by its id, with a token only the dashboard's repository holds; its two
+ * children received it by cascade and ran it every Sunday, failing for want of
+ * that token — protection by absent credential again — until it was deleted by
+ * hand. `PARENT_DEPLOYMENT_OWN_FILES` names such files, and step 5b deletes
+ * them from a repository whose clone records a parent.
  */
 
 import { getAppOctokit } from "./github-app.server";
+import { PARENT_DEPLOYMENT_OWN_FILES } from "./cascade/syncExclusions.pure";
 
 export const CONFIG_TOML_PATH = "supabase/config.toml";
 export const LINKED_PROJECT_PATH = "supabase/.temp/linked-project.json";
@@ -409,6 +421,16 @@ export async function retargetCloneRepo(
    * not a partial success.
    */
   cloneAnonKey?: string,
+  opts: {
+    /**
+     * The clone records a parent (`clones.parent_clone_id`): its repository
+     * was copied from, and is cascaded from, another deployment's rather than
+     * the prime's, so it may hold that deployment's own files (step 5b). False
+     * for a parent itself, which is what keeps step 5b off the one repository
+     * where those files belong.
+     */
+    fromParentClone?: boolean;
+  } = {},
 ): Promise<RetargetResult> {
   const octokit = getAppOctokit();
   const actions: RetargetAction[] = [];
@@ -637,6 +659,45 @@ export async function retargetCloneRepo(
       status: "failed",
       detail: e instanceof Error ? e.message : String(e),
     });
+  }
+
+  // 5b. The parent deployment's own files, on a clone copied from a parent.
+  //
+  //     One commit per file, like every other step here: this module writes
+  //     through the contents API, which commits each call, so there is no
+  //     single tree to fold a deletion into. Absent is the ordinary case on
+  //     every run after the first — once deleted, the exclusion keeps it out —
+  //     and never fails the retarget.
+  if (opts.fromParentClone) {
+    for (const path of PARENT_DEPLOYMENT_OWN_FILES) {
+      try {
+        const f = await readFile(path);
+        if (!f) {
+          actions.push({ target: path, status: "absent" });
+          continue;
+        }
+        await octokit.repos.deleteFile({
+          owner: ref.owner,
+          repo: ref.repo,
+          path,
+          ...(branch ? { branch } : {}),
+          message:
+            `chore(aurixa): drop ${path}, the parent deployment's own file\n\n` +
+            "This repository was copied from a parent clone's, and the parent keeps this " +
+            "file for itself: it acts on the parent's own hosting, with a credential only the " +
+            "parent holds. Mission Control holds the path as protected here, so the parent's " +
+            "cascades do not bring it back.",
+          sha: f.sha,
+        });
+        actions.push({ target: path, status: "deleted" });
+      } catch (e) {
+        actions.push({
+          target: path,
+          status: "failed",
+          detail: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
   }
 
   // 6. The shipped Supabase pair — the artefact that reaches a customer.

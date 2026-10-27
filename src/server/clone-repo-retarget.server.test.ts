@@ -1,7 +1,9 @@
 import { readFileSync } from "node:fs";
-import { describe, it, expect } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 import { REPOSITORY_INVARIANTS } from "./cascade/repositoryInvariants.pure";
+import { PARENT_DEPLOYMENT_OWN_FILES } from "./cascade/syncExclusions.pure";
 import {
+  retargetCloneRepo,
   DEPENDABOT_CONFIG_PATH,
   GITLEAKS_CONFIG_PATH,
   SHIPPED_BACKEND_PAIR_PATHS,
@@ -612,5 +614,118 @@ describe("the isolation spec a clone copied from a parent inherits", () => {
     expect(step).toContain("rewriteOwnProjectRefConst(f.text, cloneProjectRef)");
     // It reads both paths through the one helper, so neither can drift.
     expect(step).toContain("findIsolationSpec(readFile)");
+  });
+});
+
+/**
+ * Step 5b, run against the App client rather than read off the source: the
+ * deletion is the behaviour, and only a call can show which repository it
+ * reaches and what it does when the file is not there.
+ */
+const github = vi.hoisted(() => ({
+  repos: {
+    getContent: vi.fn(),
+    deleteFile: vi.fn(),
+    createOrUpdateFileContents: vi.fn(),
+  },
+  request: vi.fn(),
+}));
+vi.mock("./github-app.server", () => ({ getAppOctokit: () => github }));
+
+describe("a parent deployment's own files, on a clone copied from a parent", () => {
+  const VCR_PRUNE = ".github/workflows/vcr-prune.yml";
+  const REPO = { owner: "Naidu-Group-Pty-Ltd", repo: "npc-child", branch: "main" };
+  const notFound = () => Promise.reject(Object.assign(new Error("Not Found"), { status: 404 }));
+
+  /** A repository holding exactly the given paths. */
+  const holding = (paths: Record<string, string>) =>
+    github.repos.getContent.mockImplementation(({ path }: { path: string }) =>
+      path in paths
+        ? Promise.resolve({
+            data: { type: "file", sha: paths[path], content: Buffer.from("x").toString("base64") },
+          })
+        : notFound(),
+    );
+  const read = () => github.repos.getContent.mock.calls.map(([args]) => args.path as string);
+  const deleted = () => github.repos.deleteFile.mock.calls.map(([args]) => args.path as string);
+
+  beforeEach(() => {
+    for (const fn of [
+      github.repos.getContent,
+      github.repos.deleteFile,
+      github.repos.createOrUpdateFileContents,
+      github.request,
+    ]) {
+      fn.mockReset();
+    }
+    github.request.mockResolvedValue({ data: {} });
+    github.repos.deleteFile.mockResolvedValue({ data: {} });
+  });
+
+  it("deletes each one the copy carries, on the clone's branch, by the blob it read", async () => {
+    holding({ [VCR_PRUNE]: "sha-vcr" });
+    const result = await retargetCloneRepo(REPO, CLONE, "anon", { fromParentClone: true });
+
+    expect(result.actions).toContainEqual({ target: VCR_PRUNE, status: "deleted" });
+    const call = github.repos.deleteFile.mock.calls.find(([a]) => a.path === VCR_PRUNE)?.[0];
+    expect(call).toMatchObject({
+      owner: "Naidu-Group-Pty-Ltd",
+      repo: "npc-child",
+      branch: "main",
+      sha: "sha-vcr",
+    });
+    expect(call.message).toMatch(/^chore\(aurixa\): drop \.github\/workflows\/vcr-prune\.yml/);
+  });
+
+  it("reports a file that is not there as absent, which does not fail the retarget", async () => {
+    holding({});
+    const result = await retargetCloneRepo(REPO, CLONE, "anon", { fromParentClone: true });
+    expect(result.actions).toContainEqual({ target: VCR_PRUNE, status: "absent" });
+    expect(deleted()).not.toContain(VCR_PRUNE);
+    expect(result.actions.find((a) => a.target === VCR_PRUNE)?.status).not.toBe("failed");
+  });
+
+  it("never looks for them on a clone with no parent — a parent's own copy is its to keep", async () => {
+    holding({ [VCR_PRUNE]: "sha-vcr" });
+    const result = await retargetCloneRepo(REPO, CLONE, "anon");
+    expect(read()).not.toContain(VCR_PRUNE);
+    expect(deleted()).not.toContain(VCR_PRUNE);
+    expect(result.actions.some((a) => a.target === VCR_PRUNE)).toBe(false);
+  });
+
+  it("names a failed read as failed, and carries on with every later step", async () => {
+    github.repos.getContent.mockImplementation(({ path }: { path: string }) =>
+      path === VCR_PRUNE
+        ? Promise.reject(Object.assign(new Error("Server Error"), { status: 502 }))
+        : notFound(),
+    );
+    const result = await retargetCloneRepo(REPO, CLONE, "anon", { fromParentClone: true });
+    expect(result.actions).toContainEqual({
+      target: VCR_PRUNE,
+      status: "failed",
+      detail: "Server Error",
+    });
+    // Step 6 still ran: the shipped pair was looked for after it.
+    expect(read().indexOf(SHIPPED_BACKEND_PAIR_PATHS[0])).toBeGreaterThan(
+      read().indexOf(VCR_PRUNE),
+    );
+  });
+
+  it("reads the list beside the exclusions and spells no path of its own", () => {
+    const src = readFileSync("src/server/clone-repo-retarget.server.ts", "utf8");
+    const step = src.slice(src.indexOf("// 5b."), src.indexOf("// 6. The shipped Supabase pair"));
+    expect(step).toContain("for (const path of PARENT_DEPLOYMENT_OWN_FILES)");
+    expect(step).toContain("octokit.repos.deleteFile(");
+    for (const path of PARENT_DEPLOYMENT_OWN_FILES) expect(step).not.toContain(`"${path}"`);
+  });
+
+  it("is asked for by provisioning wherever the clone records a parent", () => {
+    const caller = readFileSync("src/lib/backend-provisioning.functions.ts", "utf8");
+    expect(caller).toContain(
+      '.select("github_owner, github_repo, default_branch, parent_clone_id")',
+    );
+    expect(caller).toMatch(
+      /retargetCloneRepo\([\s\S]{0,1600}\{ fromParentClone: Boolean\(cloneRow\.parent_clone_id\) \}/,
+    );
   });
 });
