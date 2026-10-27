@@ -15,7 +15,9 @@
  * every clone, and it settles: a project holding none of them costs one read.
  *
  * It runs before the catch-up's GitHub budget check, and is not gated by it,
- * because it reads nothing from GitHub. A pass the budget skips still sweeps.
+ * because taking the prime-only functions off reads nothing from GitHub. A
+ * pass the budget skips still sweeps them. Only the retired half below reads
+ * the prime's repository, and it asks the budget itself.
  *
  * ## The rules
  *
@@ -38,15 +40,32 @@
  * 29 Sep 2026, all four were live on the independent line head. A clone
  * recording no line has nothing swept for it but the prime's own functions,
  * exactly as before.
+ *
+ * ## What the prime has retired
+ *
+ * The same pass takes off what the prime has RETIRED: the functions its own
+ * decommission workflows list, which those workflows deleted from the prime's
+ * project and which no clone could delete from its own
+ * (`retiredFunctions.pure.ts`). Measured 27 Oct 2026, the dependent clones ran
+ * twenty-eight each and the CRM line one, nineteen of them answering without
+ * a JWT. The register is read once a pass from the prime's repository. That
+ * half yields to the GitHub budget on its own, and a pass that cannot read it
+ * deletes nothing retired anywhere while still taking the prime-only functions
+ * off. What still stands is read only when a clone runs a retired function:
+ * the prime's own project once a pass, and that clone's own tree. A clean
+ * fleet therefore costs no read of either.
  */
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import {
+  readProjectEdgeFunctionSlugs,
   sweepPrimeOnlyCronJobs,
   sweepPrimeOnlyFunctions,
   type PrimeOnlyCronSweep,
   type PrimeOnlyFunctionSweep,
+  type RetiredFunctionSweepInput,
 } from "@/server/backend-provisioning.server";
+import { openRetiredFunctionRegister } from "@/server/retiredFunctions.server";
 
 export type FleetFunctionSweepOutcome = {
   cloneId: string;
@@ -73,6 +92,22 @@ export type FleetFunctionSweepResult = {
   outcomes: FleetFunctionSweepOutcome[];
   /** Fleet-level refusal: nothing was swept at all. */
   refused: string | null;
+  /**
+   * The prime's retired functions as this pass read them. Absent when the
+   * pass stopped before reading them.
+   */
+  retired?: {
+    /** `owner/repo@sha` they were read at, or null when they were not read. */
+    readAt: string | null;
+    /** How many names the prime's decommission workflows retire. */
+    names: number;
+    /** Decommission workflows whose list could not be read, each with why. */
+    unreadable: Array<{ path: string; why: string }>;
+    /** Why nothing retired was read: a failure, never an empty register. */
+    refused: string | null;
+    /** The budget's reason, when it deferred the read to the next pass. */
+    postponed: string | null;
+  };
 };
 
 export async function sweepPrimeOnlyFunctionsFromFleet(): Promise<FleetFunctionSweepResult> {
@@ -121,8 +156,42 @@ export async function sweepPrimeOnlyFunctionsFromFleet(): Promise<FleetFunctionS
     if (b.clone_id && ref) refByClone.set(b.clone_id, ref);
   }
 
+  // Once a pass, and never fatal: a register this pass does not have is
+  // reported, and the prime-only functions below are swept without it.
+  const opening = await openRetiredFunctionRegister();
+  result.retired = opening.ok
+    ? {
+        readAt: opening.register.readAt,
+        names: opening.register.retiredBy.size,
+        unreadable: [...opening.register.unreadable],
+        refused: null,
+        postponed: null,
+      }
+    : {
+        readAt: null,
+        names: 0,
+        unreadable: [],
+        refused: opening.postponed ? null : opening.why,
+        postponed: opening.postponed ? opening.why : null,
+      };
+
+  // What the prime's own project runs: read once, and only when the first
+  // clone running a retired function asks.
+  let primeLive: Promise<ReadonlySet<string> | null> | null = null;
+  const primeRuns = () =>
+    (primeLive ??= readProjectEdgeFunctionSlugs(primeRef).then((slugs) =>
+      slugs ? new Set(slugs) : null,
+    ));
+
   for (const clone of clones ?? []) {
-    const row = clone as { id: string; name?: string | null; crm_mode?: string | null };
+    const row = clone as {
+      id: string;
+      name?: string | null;
+      crm_mode?: string | null;
+      github_owner?: string | null;
+      github_repo?: string | null;
+      default_branch?: string | null;
+    };
     result.considered += 1;
     const ref = refByClone.get(row.id);
     if (!ref) {
@@ -135,7 +204,38 @@ export async function sweepPrimeOnlyFunctionsFromFleet(): Promise<FleetFunctionS
       continue;
     }
     const crmMode = row.crm_mode ?? null;
-    const sweep = await sweepPrimeOnlyFunctions(ref, { primeRef, crmMode });
+    let retired: RetiredFunctionSweepInput | undefined;
+    if (opening.ok) {
+      const { register, cloneCarries } = opening;
+      const owner = (row.github_owner ?? "").trim();
+      const repo = (row.github_repo ?? "").trim();
+      retired = {
+        register,
+        guards: async () => {
+          const prime = await primeRuns();
+          if (!prime) {
+            return {
+              refused:
+                "the prime's own project could not be listed, so whether its decommission has run cannot be told",
+            };
+          }
+          if (!owner || !repo) {
+            return { refused: "the clone records no repository to read its own tree from" };
+          }
+          const own = await cloneCarries({ owner, repo, branch: row.default_branch || "main" });
+          return "refused" in own
+            ? {
+                refused: `the clone's own tree could not be read, so its source cannot be ruled out: ${own.refused}`,
+              }
+            : { primeRuns: prime, cloneCarries: own.carries };
+        },
+      };
+    }
+    const sweep = await sweepPrimeOnlyFunctions(ref, {
+      primeRef,
+      crmMode,
+      ...(retired ? { retired } : {}),
+    });
     result.deleted += sweep.deleted.length;
     result.failed += sweep.failed.length;
     result.deferred += sweep.deferred.length;
@@ -170,5 +270,10 @@ export function fleetFunctionSweepIsNoteworthy(result: FleetFunctionSweepResult)
   ) {
     return true;
   }
-  return result.outcomes.some((o) => o.sweep?.skipped || o.cronSweep?.skipped);
+  // A register that could not be read is a fault somebody may have to fix. A
+  // read the budget put off is not: the next pass makes it.
+  if (result.retired?.refused || (result.retired?.unreadable.length ?? 0) > 0) return true;
+  return result.outcomes.some(
+    (o) => o.sweep?.skipped || o.cronSweep?.skipped || (o.sweep?.kept?.length ?? 0) > 0,
+  );
 }

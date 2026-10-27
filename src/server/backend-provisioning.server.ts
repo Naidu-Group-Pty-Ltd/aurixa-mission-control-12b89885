@@ -53,6 +53,13 @@ import {
   primeOnlyFunctionsIn,
 } from "./primeOnlyFeatures.pure";
 import { crmLineCronJobsIn, crmLineCronReason, crmLineFunctionsIn } from "./crmLineFeatures.pure";
+import {
+  retiredCandidatesIn,
+  retiredFunctionsToDelete,
+  type DeployedFunction,
+  type RetiredFunctionGuards,
+  type RetiredFunctionRegister,
+} from "./retiredFunctions.pure";
 import { deployedVerifyJwt } from "./anonymousFunctionSlugs.pure";
 import {
   compressedUploadRequest,
@@ -2173,6 +2180,27 @@ export type PrimeOnlyFunctionSweep = {
   deferred: string[];
   /** Why nothing was deleted although the sweep ran; null otherwise. */
   skipped: string | null;
+  /**
+   * Retired functions the project runs and the sweep left on purpose, each
+   * with why: a tree still carries the source, or the clone's own tree could
+   * not be read. Absent when there were none.
+   */
+  kept?: Array<{ slug: string; why: string }>;
+};
+
+/**
+ * The prime's retired functions, for a sweep to take off a clone as well
+ * (`retiredFunctions.pure.ts`).
+ */
+export type RetiredFunctionSweepInput = {
+  register: RetiredFunctionRegister;
+  /**
+   * What still stands for this clone: the functions the prime's own project
+   * runs, and the directories the clone's own tree carries. Asked only when
+   * the project runs a retired function, so a clean project costs no read. A
+   * refusal keeps every retired function on the clone, named.
+   */
+  guards: () => Promise<RetiredFunctionGuards | { refused: string }>;
 };
 
 /**
@@ -2212,6 +2240,12 @@ export const PRIME_ONLY_FUNCTION_DELETES_PER_PASS = 10;
  * A function is code, not data: its source stays in the prime's tree, so a
  * deletion loses nothing a redeploy could not put back. That is the difference
  * from the feature's BUCKET, which this platform never deletes.
+ *
+ * Given the prime's RETIRED functions, it takes those off too, last and under
+ * the same cap (`retiredFunctions.pure.ts`). One goes only once its source has
+ * left the prime's tree and the clone's, and the prime's own decommission
+ * workflow has deleted it from the prime's project. Otherwise it is `kept`,
+ * with the reason, never deleted. The ones that answer without a JWT go first.
  */
 export async function sweepPrimeOnlyFunctions(
   targetRef: string,
@@ -2224,6 +2258,11 @@ export async function sweepPrimeOnlyFunctions(
      * the same rules and the same cap. Absent: prime-only functions alone.
      */
     crmMode?: string | null;
+    /**
+     * The prime's retired functions, as this pass read them. Absent: nothing
+     * retired is deleted, exactly as before.
+     */
+    retired?: RetiredFunctionSweepInput;
   } = {},
 ): Promise<PrimeOnlyFunctionSweep> {
   const sweep: PrimeOnlyFunctionSweep = { deleted: [], failed: [], deferred: [], skipped: null };
@@ -2232,7 +2271,7 @@ export async function sweepPrimeOnlyFunctions(
     sweep.skipped = "no project was named";
     return sweep;
   }
-  let slugs: string[];
+  let deployed: DeployedFunction[];
   try {
     const res = await fetch(`${MGMT_API}/projects/${ref}/functions`, { headers: headers() });
     if (!res.ok) {
@@ -2244,22 +2283,52 @@ export async function sweepPrimeOnlyFunctions(
       sweep.skipped = "the deployed functions could not be read: the answer was not a list";
       return sweep;
     }
-    slugs = raw
-      .map((r) => {
+    deployed = raw
+      .map((r): DeployedFunction => {
         const o = (r ?? {}) as Record<string, unknown>;
-        return typeof o.slug === "string" ? o.slug : typeof o.name === "string" ? o.name : "";
+        const slug = typeof o.slug === "string" ? o.slug : typeof o.name === "string" ? o.name : "";
+        return typeof o.verify_jwt === "boolean" ? { slug, verifyJwt: o.verify_jwt } : { slug };
       })
-      .filter((slug) => slug.length > 0);
+      .filter((fn) => fn.slug.length > 0);
   } catch (err) {
     sweep.skipped = `the deployed functions could not be read: ${err instanceof Error ? err.message : String(err)}`;
     return sweep;
   }
+  const slugs = deployed.map((fn) => fn.slug);
   const primeOnlyFound = primeOnlyFunctionsIn(slugs);
   const primeOnlySlugs = new Set(primeOnlyFound.map((f) => f.slug));
   const found = [
     ...primeOnlyFound,
     ...crmLineFunctionsIn(slugs, opts.crmMode).filter((f) => !primeOnlySlugs.has(f.slug)),
   ];
+  if (opts.retired) {
+    const taken = new Set(found.map((f) => f.slug));
+    const candidates = retiredCandidatesIn(deployed, opts.retired.register).filter(
+      (fn) => !taken.has(fn.slug),
+    );
+    if (candidates.length > 0) {
+      let guards: RetiredFunctionGuards | { refused: string };
+      try {
+        guards = await opts.retired.guards();
+      } catch (err) {
+        guards = {
+          refused: `what still stands for it could not be read: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+      if ("refused" in guards) {
+        // Unread is not empty: a guard this pass could not read might be the
+        // one that keeps the function, so nothing retired is taken off.
+        const why = guards.refused;
+        sweep.kept = candidates
+          .map((fn) => ({ slug: fn.slug, why }))
+          .sort((a, b) => a.slug.localeCompare(b.slug));
+      } else {
+        const decided = retiredFunctionsToDelete(candidates, opts.retired.register, guards);
+        found.push(...decided.found);
+        if (decided.kept.length > 0) sweep.kept = decided.kept;
+      }
+    }
+  }
   if (found.length === 0) return sweep;
 
   let primeRef = (opts.primeRef ?? "").trim();

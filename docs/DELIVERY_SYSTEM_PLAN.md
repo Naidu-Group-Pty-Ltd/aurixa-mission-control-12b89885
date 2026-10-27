@@ -24,12 +24,14 @@ what became of it.
 | W1, W2                                      | #367        | See #367.                                                                                                                                                                                                   |
 | W6, W5 (the three notices)                  | #369        | The four rows stranded under `0a3c9817` since 18 Oct were settled at 10:29 on 27 Oct, the first tick under W6.                                                                                              |
 | W3, W4, W5 (auditor, custodian, holes), L11 | #370        | At the 11:22 audit tick on 27 Oct the three mirrors read `converged` with nothing owed (`falling_behind` with 4 owed since 8 Oct), with both SHAs recorded, and the custodian wrote no row on a quiet tick. |
-| W7                                          | #371        | Pending its publish: NPC Test's stale cursor cleared on its next pass, and the drain idle after it.                                                                                                         |
+| W7                                          | #371        | NPC Test's `chunk_cursor` read null at 12:28 on 27 Oct (`20270130090000` at 12:10). The drain stopped claiming it after 12:20; its next heartbeat was the 12:30 fleet sync, which visits every clone.       |
 | W8, and W7's prime half                     | prime #3392 | `edge-function-bundles` is in the prime's register, rule 119 is in its rules, and the apply preflight refuses both rollback scripts, `reapply` included (read at `d72032e`).                                |
 | L8                                          | prime #3393 | The delivery summary is on every prime pull request's `security` job page.                                                                                                                                  |
+| D4 (the owner's decision)                   | #372        | Pending its publish: over three passes, no clone's function list holds a retired name, and the sweep's audit rows name each deletion.                                                                       |
 
 Still open: the rest of P1 (L1–L7, L9, L10), P2, and the owner's decisions in
-§10. D4, D3 and D8 are the ones that stand between this fleet and a launch.
+§10. D3 and D8 are the ones that stand between this fleet and a launch, with
+D4 until #372's publish is read back.
 
 ---
 

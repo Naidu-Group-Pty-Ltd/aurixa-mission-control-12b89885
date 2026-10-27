@@ -1730,6 +1730,26 @@ export async function fetchDeclaredEdgeFunctionSlugs(
 }
 
 /**
+ * Every path under `supabase/` on a branch, unfiltered, and the commit read.
+ *
+ * Unfiltered, unlike `fetchDeclaredEdgeFunctionSlugs`: a caller asking whether
+ * a tree still carries a function's source must see the prime-only files and a
+ * directory with no entrypoint too, because either is still source. Null when
+ * the walk fails, and null is never an empty tree.
+ */
+export async function fetchSupabaseTreePaths(
+  octokit: Octokit,
+  ref: RepoRef,
+): Promise<{ paths: string[]; commitSha: string } | null> {
+  try {
+    const { blobs, commitSha } = await listSupabaseBlobs(octokit, ref);
+    return { paths: blobs.map((b) => b.path), commitSha };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The prime's generated record of every object its migrations have created and
  * dropped — `supabase/migration-object-index.json`, kept current by the
  * prime's own CI (`npm run migrations:index:check`).
