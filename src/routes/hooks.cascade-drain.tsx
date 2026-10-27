@@ -1042,6 +1042,13 @@ async function drainOne(
 
   try {
     const res = await executeCascade(supabaseAdmin, claimed.id, { budget, fence: claimed.fence });
+    // A refusal before the pass wrote anything leaves this claim the drain's
+    // to release, and the catch below is where a claim is released: back to
+    // pending and claimable, or failed at the attempt ceiling with its rows.
+    // Stamping it finished instead left the event pending under a claim no
+    // pass or reclaim rule could take again, and head redelivery counted it
+    // as a live delivery for ever.
+    if (!res.ok && res.untouched) throw new Error(res.error);
     if (
       res.ok &&
       (res.status === "deferred" || res.status === "resuming" || res.status === "unarmed")

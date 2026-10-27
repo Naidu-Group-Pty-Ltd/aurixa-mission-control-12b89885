@@ -69,7 +69,19 @@ export type CascadeRunResult =
        */
       status: "unarmed";
     }
-  | { ok: false; error: string };
+  | {
+      ok: false;
+      error: string;
+      /**
+       * The pass refused before it wrote anything to the event: its first
+       * reads failed, or a gate held it. A claim the caller took is still the
+       * caller's to release. Stamped finished instead, the event sat `pending`
+       * under a claim no pass and no reclaim rule could ever take again, and
+       * head redelivery counted it as a live delivery for ever (audit of
+       * 27 Oct 2026).
+       */
+      untouched?: true;
+    };
 
 /**
  * One sentence for whoever pressed the button.

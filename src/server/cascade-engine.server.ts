@@ -548,9 +548,18 @@ export async function executeCascade(
       .eq("status", "queued"),
   ]);
 
+  // Every refusal before the event is first written is `untouched`: nothing
+  // was recorded, so a claim the caller holds is still its own to release.
   const event = eventRes.data;
-  if (eventRes.error || !event) {
-    return { ok: false, error: "Cascade event not found" };
+  if (eventRes.error) {
+    return {
+      ok: false,
+      error: `Could not read the cascade event: ${eventRes.error.message}`,
+      untouched: true,
+    };
+  }
+  if (!event) {
+    return { ok: false, error: "Cascade event not found", untouched: true };
   }
   if (event.status === "completed" || event.status === "failed") {
     return { ok: false, error: `Already ${event.status}` };
@@ -559,11 +568,24 @@ export async function executeCascade(
   // and not yet recorded. Engine will re-run via approveCascade.
   const gate = await isBlockedByApproval(supabase, cascadeEventId);
   if (gate.blocked) {
-    return { ok: false, error: gate.reason ?? "Awaiting approval" };
+    return { ok: false, error: gate.reason ?? "Awaiting approval", untouched: true };
+  }
+  // A failed read is not an unconfigured prime: the first is a moment, the
+  // second a setup step, and only the second sends someone to Settings.
+  if (primeRes.error) {
+    return {
+      ok: false,
+      error: `Could not read prime_config: ${primeRes.error.message}`,
+      untouched: true,
+    };
   }
   const prime = primeRes.data;
   if (!prime) {
-    return { ok: false, error: "Prime not configured — set it up in Settings first" };
+    return {
+      ok: false,
+      error: "Prime not configured — set it up in Settings first",
+      untouched: true,
+    };
   }
 
   // Every write that moves the EVENT goes through this. With a fence it
