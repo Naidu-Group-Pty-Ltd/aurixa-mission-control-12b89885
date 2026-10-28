@@ -334,6 +334,8 @@ async function runProvisioning(
     cloudflareEnabled: false,
     notes: `Provisioned automatically from signed agreement ${agreement.id} (${agreement.client_name}).`,
     moduleIds,
+    // The agreement's plan. `provisionCloneCore` also puts it on the tenant
+    // the clone meters under, which is the plan its balance reports (D16).
     planSlug: agreement.plan_slug,
     addonSlugs: agreement.addon_slugs ?? [],
     // Written in the clone's own INSERT, so the reconcile inside
