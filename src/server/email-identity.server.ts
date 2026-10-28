@@ -1073,6 +1073,14 @@ export type EmailAuditReport = {
   keysComplete: boolean | null;
   /** Healthy identities whose two secrets the clone's own project listed. */
   confirmedOnClone: number;
+  /**
+   * Healthy identities whose clone project could not be listed, and those
+   * whose project did not list a secret. Counted as well as described because
+   * the drain records a pass only on a count: the first leaves a ledger that
+   * may be stale, the second a gap an operator has to close.
+   */
+  cloneUnread: number;
+  absentOnClone: number;
   detail: Array<{ cloneId: string; outcome: string; note?: string }>;
 };
 
@@ -1118,6 +1126,8 @@ export async function auditEmailIdentities(
     domainsComplete: null,
     keysComplete: null,
     confirmedOnClone: 0,
+    cloneUnread: 0,
+    absentOnClone: 0,
     detail: [],
   };
   if (!isResendConfigured()) return report;
@@ -1184,12 +1194,14 @@ export async function auditEmailIdentities(
       if (!needsWork) {
         const onClone = await confirmIdentityOnClone(supabase, identity);
         if (!onClone.checked) {
+          report.cloneUnread += 1;
           report.detail.push({
             cloneId: identity.clone_id,
             outcome: "clone_unread",
             note: onClone.note,
           });
         } else if (onClone.absent.length > 0) {
+          report.absentOnClone += 1;
           report.detail.push({
             cloneId: identity.clone_id,
             outcome: "absent_on_clone",
