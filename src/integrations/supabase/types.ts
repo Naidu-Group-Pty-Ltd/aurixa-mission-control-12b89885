@@ -1248,6 +1248,8 @@ export type Database = {
           signed_record_sha256: string | null
           status: string
           template_id: string | null
+          trial_days: number | null
+          trial_offer_code: string | null
           updated_at: string
           void_reason: string | null
         }
@@ -1310,6 +1312,8 @@ export type Database = {
           signed_record_sha256?: string | null
           status?: string
           template_id?: string | null
+          trial_days?: number | null
+          trial_offer_code?: string | null
           updated_at?: string
           void_reason?: string | null
         }
@@ -1372,6 +1376,8 @@ export type Database = {
           signed_record_sha256?: string | null
           status?: string
           template_id?: string | null
+          trial_days?: number | null
+          trial_offer_code?: string | null
           updated_at?: string
           void_reason?: string | null
         }
@@ -13782,6 +13788,48 @@ export type Database = {
         }
         Relationships: []
       }
+      trial_offers: {
+        Row: {
+          active: boolean
+          code: string
+          created_at: string
+          created_by: string | null
+          expires_at: string | null
+          id: string
+          label: string
+          notes: string | null
+          trial_days: number
+          updated_at: string
+          updated_by: string | null
+        }
+        Insert: {
+          active?: boolean
+          code: string
+          created_at?: string
+          created_by?: string | null
+          expires_at?: string | null
+          id?: string
+          label: string
+          notes?: string | null
+          trial_days: number
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Update: {
+          active?: boolean
+          code?: string
+          created_at?: string
+          created_by?: string | null
+          expires_at?: string | null
+          id?: string
+          label?: string
+          notes?: string | null
+          trial_days?: number
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Relationships: []
+      }
       user_invites: {
         Row: {
           accepted_at: string | null
@@ -15749,6 +15797,146 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      website_briefing_uploads: {
+        Row: {
+          briefing_id: string
+          completed_at: string | null
+          created_at: string
+          created_by: string | null
+          expires_at: string
+          id: string
+          paths: string[]
+          token_sha256: string
+          version: string
+        }
+        Insert: {
+          briefing_id: string
+          completed_at?: string | null
+          created_at?: string
+          created_by?: string | null
+          expires_at: string
+          id?: string
+          paths: string[]
+          token_sha256: string
+          version: string
+        }
+        Update: {
+          briefing_id?: string
+          completed_at?: string | null
+          created_at?: string
+          created_by?: string | null
+          expires_at?: string
+          id?: string
+          paths?: string[]
+          token_sha256?: string
+          version?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "website_briefing_uploads_briefing_id_fkey"
+            columns: ["briefing_id"]
+            isOneToOne: false
+            referencedRelation: "website_briefings"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      website_briefings: {
+        Row: {
+          artwork: string
+          artwork_position: string | null
+          chapters: Json
+          created_at: string
+          created_by: string | null
+          disclaimer: string | null
+          duration_seconds: number | null
+          explore_label: string
+          explore_to: string
+          id: string
+          kicker: string
+          media_captions: string | null
+          media_card: string | null
+          media_hls: string | null
+          media_mp4: string | null
+          media_poster: string | null
+          media_version: string | null
+          orientation: string
+          published_on: string | null
+          series: string
+          slug: string
+          sort_order: number
+          status: string
+          summary: string
+          takeaways: string[]
+          title: string
+          transcript: string[]
+          updated_at: string
+          updated_by: string | null
+        }
+        Insert: {
+          artwork?: string
+          artwork_position?: string | null
+          chapters?: Json
+          created_at?: string
+          created_by?: string | null
+          disclaimer?: string | null
+          duration_seconds?: number | null
+          explore_label?: string
+          explore_to?: string
+          id?: string
+          kicker?: string
+          media_captions?: string | null
+          media_card?: string | null
+          media_hls?: string | null
+          media_mp4?: string | null
+          media_poster?: string | null
+          media_version?: string | null
+          orientation?: string
+          published_on?: string | null
+          series?: string
+          slug: string
+          sort_order?: number
+          status?: string
+          summary?: string
+          takeaways?: string[]
+          title: string
+          transcript?: string[]
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Update: {
+          artwork?: string
+          artwork_position?: string | null
+          chapters?: Json
+          created_at?: string
+          created_by?: string | null
+          disclaimer?: string | null
+          duration_seconds?: number | null
+          explore_label?: string
+          explore_to?: string
+          id?: string
+          kicker?: string
+          media_captions?: string | null
+          media_card?: string | null
+          media_hls?: string | null
+          media_mp4?: string | null
+          media_poster?: string | null
+          media_version?: string | null
+          orientation?: string
+          published_on?: string | null
+          series?: string
+          slug?: string
+          sort_order?: number
+          status?: string
+          summary?: string
+          takeaways?: string[]
+          title?: string
+          transcript?: string[]
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Relationships: []
       }
     }
     Views: {

@@ -1237,4 +1237,32 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "column", table: "clone_announcement_deliveries", column: "withdrawn_at" },
     ],
   },
+  {
+    migration: "20261028160000_fourteen_day_free_trial.sql",
+    version: "20261028160000",
+    assertions: [
+      { kind: "column", table: "prime_config", column: "clone_gate_default_hours" },
+      { kind: "column", table: "client_agreements", column: "trial_days" },
+      { kind: "column", table: "client_agreements", column: "trial_offer_code" },
+    ],
+  },
+  {
+    migration: "20261028160100_trial_offers.sql",
+    version: "20261028160100",
+    assertions: [
+      { kind: "table", table: "trial_offers" },
+      { kind: "column", table: "trial_offers", column: "trial_days" },
+      { kind: "column", table: "trial_offers", column: "code" },
+    ],
+  },
+  {
+    migration: "20261028160200_website_briefings.sql",
+    version: "20261028160200",
+    assertions: [
+      { kind: "table", table: "website_briefings" },
+      { kind: "table", table: "website_briefing_uploads" },
+      { kind: "column", table: "website_briefings", column: "media_hls" },
+      { kind: "rows", table: "website_briefings", atLeast: 3 },
+    ],
+  },
 ];

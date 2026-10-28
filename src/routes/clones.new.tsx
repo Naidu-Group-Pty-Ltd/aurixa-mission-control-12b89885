@@ -8,7 +8,10 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Checkbox } from "@/components/ui/checkbox";
 import { Textarea } from "@/components/ui/textarea";
 import { useModules, usePrimeConfig } from "@/lib/queries";
-import { normaliseGraceHours } from "@/lib/clonePaymentGate.pure";
+import { useQuery } from "@tanstack/react-query";
+import { DEFAULT_CHOICE, resolveTrialChoice, type TrialChoice } from "@/lib/trialOffers.pure";
+import { TrialLengthPicker } from "@/components/trial-length-picker";
+import { getTrialSettings } from "@/server/trial-offers.functions";
 import { TierModulePicker, type TierSelection } from "@/components/tier-module-picker";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
@@ -129,16 +132,24 @@ function NewClone() {
     addonSlugs: [],
   });
   const [notes, setNotes] = useState("");
-  // Activation window for this clone's payment gate. Blank means "use the
-  // platform default"; the field only appears for a paid tier, because a gate
-  // is only ever armed on one.
-  const [gateHours, setGateHours] = useState("");
-  // Parsed once and used by both the submit guard and the field's own message.
-  // Blank means "platform default" here rather than "no deadline": the window
-  // is the point of the field, and a clone armed with no deadline is a
-  // deliberate act made on the Payment Gates page, not a blank box.
-  const gateWindow =
-    gateHours.trim() === "" ? ({ ok: true, hours: null } as const) : normaliseGraceHours(gateHours);
+  // The free trial this clone's payment gate is armed with. The field only
+  // appears for a paid tier, because a gate is only ever armed on one. The
+  // platform default is a choice of its own rather than a blank box, and "no
+  // deadline" is not offered here at all: a clone armed with no deadline is a
+  // deliberate act made on the Payment Gates page.
+  const [trialChoice, setTrialChoice] = useState<TrialChoice>(DEFAULT_CHOICE);
+  const trialSettingsFn = useServerFn(getTrialSettings);
+  const trialSettings = useQuery({
+    queryKey: ["trial-settings"],
+    queryFn: () => trialSettingsFn(),
+    staleTime: 60_000,
+  });
+  // Resolved once and used by both the submit guard and the field's own
+  // message, through the same function the summary under the field uses.
+  const trial = resolveTrialChoice(trialChoice, {
+    offers: trialSettings.data?.offers ?? [],
+    defaultHours: trialSettings.data?.defaults.hours ?? null,
+  });
   const [billingUserId, setBillingUserId] = useState("");
   const [billingStripeCustomerId, setBillingStripeCustomerId] = useState("");
   const [busy, setBusy] = useState(false);
@@ -349,8 +360,8 @@ function NewClone() {
       }
     }
 
-    if (tierSelection.planSlug && !gateWindow.ok) {
-      toast.error("Activation window must be a whole number of hours between 1 and 8760.");
+    if (tierSelection.planSlug && !trial.ok) {
+      toast.error(`Free trial: ${trial.error}`);
       return;
     }
 
@@ -378,7 +389,8 @@ function NewClone() {
           moduleIds: Array.from(picked),
           planSlug: tierSelection.planSlug,
           addonSlugs: tierSelection.addonSlugs,
-          gateGraceHours: gateWindow.ok ? (gateWindow.hours ?? undefined) : undefined,
+          gateGraceHours: trial.ok ? trial.hours : undefined,
+          gateTrialOfferCode: trial.ok ? trial.offerCode : null,
           isolatedTenant,
           billingUserId: billingUserId.trim() || null,
           billingStripeCustomerId: billingStripeCustomerId.trim() || null,
@@ -850,42 +862,35 @@ function NewClone() {
         onSelectionChange={setTierSelection}
       />
 
-      {/* The activation window. Shown only once a paid tier is chosen: a gate
-          is armed on a paid plan and nothing else, so offering the field on a
+      {/* The free trial. Shown only once a paid tier is chosen: a gate is
+          armed on a paid plan and nothing else, so offering the field on a
           clone with no tier would suggest a control that does nothing. */}
       {tierSelection.planSlug && (
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
-              <ShieldCheck className="h-4 w-4 text-primary" /> Activation window
+              <ShieldCheck className="h-4 w-4 text-primary" /> Free trial
             </CardTitle>
             <CardDescription>
-              This clone boots with a payment gate: it works normally until the window closes, and
-              is then locked behind a "complete your activation payment" screen until Stripe
-              captures the {tierSelection.planSlug} subscription. Leave blank to use the platform
-              default set on the Payment Gates page.
+              This clone boots on its free trial: it works normally until the trial ends, and is
+              then locked behind a "complete your activation payment" screen until Stripe captures
+              the {tierSelection.planSlug} subscription. Pick the platform default, another length,
+              or a trial offer.
             </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-2">
-            <Label htmlFor="gate-hours">Hours before it locks</Label>
-            <Input
-              id="gate-hours"
-              inputMode="numeric"
-              value={gateHours}
-              onChange={(e) => setGateHours(e.target.value)}
-              placeholder="72 (platform default)"
-              className="max-w-[12rem]"
+          <CardContent>
+            <TrialLengthPicker
+              id="trial-length"
+              value={trialChoice}
+              onChange={setTrialChoice}
+              defaultHours={trialSettings.data?.defaults.hours ?? null}
+              offers={trialSettings.data?.offers ?? []}
+              offersError={
+                trialSettings.error
+                  ? (trialSettings.error as Error).message
+                  : (trialSettings.data?.offersError ?? null)
+              }
             />
-            {gateWindow.ok ? (
-              <p className="text-xs text-muted-foreground">
-                The gate can be extended, lifted or locked at any time from Billing → Payment Gates.
-              </p>
-            ) : (
-              <p className="text-xs text-destructive">
-                Enter a whole number of hours between 1 and 8760, or leave it blank for the platform
-                default.
-              </p>
-            )}
           </CardContent>
         </Card>
       )}

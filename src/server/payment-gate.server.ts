@@ -18,6 +18,7 @@ import { notifyOperators, writeAuditLog } from "@/server/audit.server";
 import { TIERS, tierHeadlineCents } from "@/lib/pricing/aurixa-catalog";
 import {
   computeLocksAt,
+  describeWindowHours,
   formatRemaining,
   GATE_DEFAULT_HOURS,
   gateEligibility,
@@ -274,6 +275,10 @@ export async function armGate(input: {
   /** Operator-chosen window for this clone. Undefined = platform default;
    *  null = deliberately no deadline. */
   graceHours?: number | null;
+  /** The trial offer `graceHours` was taken from, if any. Recorded on the
+   *  `armed` event and the audit log only — the gate keeps its hours and
+   *  never reads an offer, so an offer changed later moves no deadline. */
+  trialOfferCode?: string | null;
   actorId?: string | null;
 }): Promise<ArmResult> {
   try {
@@ -343,7 +348,9 @@ export async function armGate(input: {
       cloneId: input.cloneId,
       kind: "armed",
       statusAfter: resolveGateState(factsOf(row), armedAt).status,
-      reason: `Armed on ${eligible.planSlug} for ${hours === null ? "no deadline" : `${hours}h`}`,
+      reason: `Armed on ${eligible.planSlug} for ${hours === null ? "no deadline" : `${hours}h`}${
+        input.trialOfferCode ? ` (trial offer ${input.trialOfferCode})` : ""
+      }`,
       actor: "system",
       actorId: input.actorId ?? null,
       metadata: {
@@ -351,6 +358,7 @@ export async function armGate(input: {
         amount_due_cents: eligible.amountDueCents,
         grace_hours: hours,
         locks_at: locksAt,
+        trial_offer_code: input.trialOfferCode ?? null,
       },
     });
 
@@ -359,7 +367,12 @@ export async function armGate(input: {
       entityType: "clone_payment_gate",
       entityId: input.cloneId,
       actorUserId: input.actorId ?? null,
-      metadata: { plan_slug: eligible.planSlug, grace_hours: hours, locks_at: locksAt },
+      metadata: {
+        plan_slug: eligible.planSlug,
+        grace_hours: hours,
+        locks_at: locksAt,
+        trial_offer_code: input.trialOfferCode ?? null,
+      },
     });
 
     await notifyOperators({
@@ -369,7 +382,9 @@ export async function armGate(input: {
       body:
         hours === null
           ? `On ${eligible.planSlug} with no deadline — it will not lock on its own.`
-          : `On ${eligible.planSlug}. Locks in ${hours}h unless the activation payment lands.`,
+          : `On ${eligible.planSlug}, with a ${describeWindowHours(hours)} free trial${
+              input.trialOfferCode ? ` (${input.trialOfferCode})` : ""
+            }. Locks when it ends unless the activation payment lands.`,
       cloneId: input.cloneId,
       url: "/billing/gates",
       metadata: { plan_slug: eligible.planSlug, grace_hours: hours, locks_at: locksAt },

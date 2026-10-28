@@ -455,6 +455,20 @@ export const configureAgreementProvisioning = createServerFn({ method: "POST" })
         adminEmail: z.string().email().max(200).optional(),
         region: z.string().min(1).max(50).optional(),
         armed: z.boolean(),
+        // The free trial the workspace is armed with. Omitted leaves the
+        // agreement's trial as it is; null days is the platform default.
+        trial: z
+          .object({
+            days: z.number().int().min(1).max(365).nullable(),
+            offerCode: z
+              .string()
+              .regex(/^[A-Z0-9][A-Z0-9-]{1,31}$/)
+              .nullable(),
+          })
+          .refine((t) => t.offerCode === null || t.days !== null, {
+            message: "A trial offer always carries its days.",
+          })
+          .optional(),
       })
       .parse(input),
   )
@@ -556,7 +570,35 @@ export const configureAgreementProvisioning = createServerFn({ method: "POST" })
       })
       .eq("id", data.id);
     if (updateError) throw updateError;
+
+    // Written apart from the selection above, so the selection saves even
+    // before the trial columns exist (see `agreement-trial.server.ts`).
+    if (data.trial) {
+      const { writeAgreementTrial } = await import("@/server/agreement-trial.server");
+      const trial = await writeAgreementTrial(context.supabase, data.id, {
+        trialDays: data.trial.days,
+        trialOfferCode: data.trial.offerCode,
+      });
+      if (!trial.ok) {
+        throw new Error(
+          trial.error === "schema_pending"
+            ? "The selection is saved, but a custom free trial cannot be stored until the migration that adds it has applied. Until then this agreement provisions the platform default."
+            : `The selection is saved, but the free trial was not: ${trial.error}`,
+        );
+      }
+    }
     return { ok: true };
+  });
+
+/** The free trial an agreement will provision, for its provisioning dialog. */
+export const getAgreementTrial = createServerFn({ method: "POST" })
+  .middleware([requireOperator])
+  .inputValidator((input) => z.object({ id: uuid }).parse(input))
+  .handler(async ({ data, context }) => {
+    const { readAgreementTrial } = await import("@/server/agreement-trial.server");
+    const trial = await readAgreementTrial(context.supabase, data.id);
+    if (!trial.ok) throw new Error(trial.error);
+    return trial;
   });
 
 /**

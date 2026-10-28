@@ -59,6 +59,7 @@ import {
   Users,
   Waves,
   PhoneCall,
+  Clapperboard,
 } from "lucide-react";
 
 export type NavItem = {
@@ -373,6 +374,13 @@ export const NAV_SECTIONS: NavSection[] = [
         keywords:
           "ads advertising meta facebook instagram youtube google ads tiktok campaigns spend leads attribution utm roi brief digest",
       },
+      {
+        to: "/website/videos",
+        label: "Website videos",
+        icon: Clapperboard,
+        keywords:
+          "briefing room watch website videos explainer marketing publish upload hls reels transcript chapters",
+      },
       { to: "/handoffs", label: "Handoffs", icon: ArrowRightLeft, keywords: "client transfer" },
       { to: "/partner-portal", label: "Partner Portal", icon: Handshake, keywords: "resellers" },
     ],
@@ -407,7 +415,7 @@ export const NAV_SECTIONS: NavSection[] = [
         label: "Payment Gates",
         icon: GateIcon,
         keywords:
-          "activation gate lock unlock clone access grace period trial countdown 72 hours paid unpaid stripe",
+          "activation gate lock unlock clone access grace period free trial 14 days countdown extend trial paid unpaid stripe",
       },
     ],
   },

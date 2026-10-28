@@ -34,6 +34,11 @@ import {
 } from "@/server/payment-gate.server";
 import { notifyOperators } from "@/server/audit.server";
 import {
+  checkoutPaysActivation,
+  invoicePaysActivation,
+  subscriptionPaysActivation,
+} from "@/lib/clonePaymentGate.pure";
+import {
   isBuilderPortalSession,
   isBuilderPortalSubscription,
 } from "@/lib/agreements/builderPortalPayment.pure";
@@ -280,8 +285,13 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
   // i.e. exactly where the platform has already concluded the money landed.
   // Two call sites (one per fulfilment branch) is how one of them comes to
   // settle on a payment status the other rejects.
+  //
+  // `isPaidSession` also passes a session that paid nothing, which is right
+  // for fulfilment and wrong for the gate: a Stripe trial completes that way,
+  // and stamping it paid would end the free trial's clock for good. A fully
+  // discounted order still opens it (`checkoutPaysActivation`).
   const gateMode = (session.metadata ?? {}).mode ?? "";
-  if (GATE_OPENING_MODES.has(gateMode)) {
+  if (GATE_OPENING_MODES.has(gateMode) && checkoutPaysActivation(session)) {
     await openGateForPayment({
       cloneId: (session.metadata ?? {}).clone_id || null,
       source: "stripe_checkout",
@@ -503,7 +513,11 @@ async function handleSubscriptionUpdated(sub: Stripe.Subscription) {
   // `checkout.session.completed`, and its clone would stay locked with money
   // in the bank. `settleGatePayment` is idempotent, so a subscription that
   // already settled from its session updates nothing here.
-  if (status === "active") {
+  //
+  // Live means Stripe's own `active`, not the mapped `status` above, which
+  // folds `trialing` in so the entitlement reads as usable. A subscription on
+  // Stripe's trial has paid nothing; it settles when it goes active.
+  if (subscriptionPaysActivation(sub.status)) {
     await openGateForPayment({
       cloneId: await cloneIdForStripe({
         metadataCloneId: cloneId,
@@ -613,6 +627,10 @@ async function handleInvoicePaid(invoice: Stripe.Invoice) {
   // Stripe mints on its own cycle carries no session and, for a subscription
   // created outside our Checkout, may carry no clone metadata either — which
   // is why `cloneIdForStripe` also resolves through the subscription id.
+  //
+  // Only an invoice that collected money. Stripe marks a trial's $0 first
+  // invoice `paid` the moment the trial starts.
+  if (!invoicePaysActivation(invoice)) return;
   await openGateForPayment({
     cloneId: await cloneIdForStripe({
       metadataCloneId: (invoice.metadata ?? {}).clone_id ?? null,

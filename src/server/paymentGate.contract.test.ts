@@ -118,6 +118,27 @@ describe("enforcement", () => {
     expect(text).toMatch(/gateLockedBody\(gate\),\s*402/);
   });
 
+  // The two brokered calls a lapsed trial must not keep making on Aurixa's
+  // account: Didit verifications are billed per call, and federated model
+  // inference is billed to Aurixa's organisation. Each answers with the same
+  // body, so the clone reads them as one refusal.
+  const vendorSpend = [
+    "src/routes/api.public.verification.$operation.ts",
+    "src/routes/api.public.anthropic.identity.ts",
+  ];
+
+  it.each(vendorSpend)("%s refuses a lapsed trial with 402 before spending", (file) => {
+    const text = readFileSync(file, "utf8");
+    expect(text).toMatch(/const gate = await assertGateOpen\(key\.clone_id\)/);
+    expect(text).toMatch(/JSON\.stringify\(gateLockedBody\(gate\)\)[\s\S]{0,40}status: 402/);
+  });
+
+  it("usage reporting stays open, so spend already incurred is still accounted for", () => {
+    expect(readFileSync("src/routes/api.public.usage.report.ts", "utf8")).not.toMatch(
+      /assertGateOpen/,
+    );
+  });
+
   it("release and commit stay open on a locked workspace", () => {
     // A locked workspace must still be able to unwind an in-flight signup and
     // finish work it already reserved; blocking those strands rows nobody can
@@ -166,6 +187,19 @@ describe("Stripe settles the gate on every route money can arrive by", () => {
     expect(webhook).toMatch(/source: "stripe_checkout"/);
     expect(webhook).toMatch(/source: "stripe_subscription"/);
     expect(webhook).toMatch(/source: "stripe_invoice"/);
+  });
+
+  it("a Stripe trial never settles the gate, on any of the three routes", () => {
+    // A trial stamped paid is a free trial that never ends: `paid_at` outranks
+    // the deadline and nothing clears it. Each route asks the pure rule.
+    expect(webhook).toMatch(
+      /GATE_OPENING_MODES\.has\(gateMode\) && checkoutPaysActivation\(session\)/,
+    );
+    expect(webhook).toMatch(/if \(subscriptionPaysActivation\(sub\.status\)\) \{/);
+    expect(webhook).toMatch(/if \(!invoicePaysActivation\(invoice\)\) return;/);
+    // And the subscription route reads Stripe's word, not the mapped status
+    // that folds `trialing` into "active" for the entitlement.
+    expect(webhook).not.toMatch(/if \(status === "active"\) \{\s*await openGateForPayment/);
   });
 
   it("a credit top-up does not activate a workspace", () => {
