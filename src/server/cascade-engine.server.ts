@@ -2017,11 +2017,14 @@ export async function processClone(args: {
    * How the CRM line shapes this delivery's partition. The line's own copies
    * are held only where the bytes come from the prime: a child of the line
    * head reads the head and must receive them, and a conversion exists to
-   * deliver the other line's copy of exactly these files.
+   * deliver the other line's copy of exactly these files. Where the bytes
+   * come from another clone instead (a parent, or a conversion's target head),
+   * that deployment's own trees are held (`PARENT_DEPLOYMENT_OWN_TREES`).
    */
   const lineOpts = {
     crmMode: clone.crm_mode,
     fromAnotherLine: !conversion && args.provenance === undefined,
+    fromAnotherDeployment: args.provenance !== undefined,
   };
 
   // ── The boundary this delivery crosses ───────────────────────────────────

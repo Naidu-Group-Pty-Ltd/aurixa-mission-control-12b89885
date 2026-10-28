@@ -218,6 +218,14 @@ export function partitionCascadePaths(
      * line, whatever this line's register says.
      */
     originCrmMode?: string | null;
+    /**
+     * True when this delivery's bytes come from another clone's repository (a
+     * parent, or a conversion's target head) rather than the prime's. A write
+     * into that deployment's own trees (`PARENT_DEPLOYMENT_OWN_TREES`) is then
+     * held. A deletion is not: the prime carries none of them, so no deletion
+     * from its history reaches one.
+     */
+    fromAnotherDeployment?: boolean;
   } = {},
 ): CascadePartition {
   const holdPrimeOnly = (opts.purpose ?? "write") === "write";
@@ -259,6 +267,17 @@ export function partitionCascadePaths(
         pattern: `(prime-only: ${primeOnly.key})`,
         reason: "protected",
         note: primeOnly.reason,
+      });
+      continue;
+    }
+    const parentOwn =
+      holdPrimeOnly && opts.fromAnotherDeployment === true ? parentDeploymentOwnTree(path) : null;
+    if (parentOwn) {
+      held.push({
+        path,
+        pattern: `(another deployment's own: ${parentOwn})`,
+        reason: "protected",
+        note: PARENT_DEPLOYMENT_OWN_TREE_NOTE,
       });
       continue;
     }
@@ -685,6 +704,40 @@ export const DEFAULT_MIRROR_EXCLUSIONS: readonly SyncExclusion[] = [
  * to `DEFAULT_MIRROR_EXCLUSIONS`, which `syncExclusions.test.ts` enforces.
  */
 export const PARENT_DEPLOYMENT_OWN_FILES: readonly string[] = [".github/workflows/vcr-prune.yml"];
+
+/**
+ * Trees a deployment keeps for itself, which no clone receives from another
+ * clone's repository.
+ *
+ * `voice-agents/` is a deployment's voice stack: its Vapi assistants, the
+ * numbers they answer and the Make webhooks they call. What it holds is that
+ * deployment's identity on Vapi and Make, not code another deployment can run,
+ * and the CRM's copy (148 files on 28 Oct 2026) carries the ten live webhook
+ * URLs D14 is about (`docs/DELIVERY_SYSTEM_PLAN.md` §10). The lateral lane
+ * already keeps it on its own side (`isLineOwnPath`). A clone created from a
+ * parent clone is a whole-tree copy of the parent's repository, though, and
+ * every cascade it receives afterwards reads the parent's tree, so a line
+ * head's voice stack would otherwise arrive in each child's first commit and
+ * on every pass after it.
+ *
+ * The retarget removes each tree from a repository copied from a parent, in
+ * one commit (`clone-repo-retarget.server.ts`, step 5c), and the partition
+ * holds a write into one from another deployment's bytes
+ * (`fromAnotherDeployment`). The prime carries none of them, so a cascade from
+ * the prime is unaffected, and a stack the prime one day carries for every
+ * deployment reaches every clone, as any shared file does.
+ */
+export const PARENT_DEPLOYMENT_OWN_TREES: readonly string[] = ["voice-agents/"];
+
+/** The parent deployment's own tree `path` sits in, or null. */
+export function parentDeploymentOwnTree(path: string): string | null {
+  return PARENT_DEPLOYMENT_OWN_TREES.find((root) => path.startsWith(root)) ?? null;
+}
+
+const PARENT_DEPLOYMENT_OWN_TREE_NOTE =
+  "Another deployment's own tree: its voice stack names that deployment's Vapi numbers and " +
+  "Make webhooks. This delivery reads another clone's repository, so nothing in the tree " +
+  "travels to this one.";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The content rule: a clone's backend identity is not a file the cascade owns,

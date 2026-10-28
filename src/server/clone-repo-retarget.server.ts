@@ -59,10 +59,23 @@
  * that token — protection by absent credential again — until it was deleted by
  * hand. `PARENT_DEPLOYMENT_OWN_FILES` names such files, and step 5b deletes
  * them from a repository whose clone records a parent.
+ *
+ * ## And a parent's own trees (28 Oct 2026)
+ *
+ * The same holds for a whole directory. A line head's `voice-agents/` is its
+ * voice stack, and the CRM's names its Vapi numbers and its ten live Make
+ * webhooks (D14 of `docs/DELIVERY_SYSTEM_PLAN.md`). `PARENT_DEPLOYMENT_OWN_TREES`
+ * names such trees, and step 5c removes each in one commit, because one
+ * contents-API commit per file would put a hundred commits on a new
+ * repository. The cascade holds a write into one from the parent's bytes
+ * afterwards (`partitionCascadePaths`, `fromAnotherDeployment`).
  */
 
 import { getAppOctokit } from "./github-app.server";
-import { PARENT_DEPLOYMENT_OWN_FILES } from "./cascade/syncExclusions.pure";
+import {
+  PARENT_DEPLOYMENT_OWN_FILES,
+  PARENT_DEPLOYMENT_OWN_TREES,
+} from "./cascade/syncExclusions.pure";
 
 export const CONFIG_TOML_PATH = "supabase/config.toml";
 export const LINKED_PROJECT_PATH = "supabase/.temp/linked-project.json";
@@ -470,6 +483,49 @@ export async function retargetCloneRepo(
     }
   };
 
+  /** Remove every file under `root` in one commit; how many, or 0 when there is none. */
+  const removeTree = async (root: string): Promise<number> => {
+    const name = root.replace(/\/+$/, "");
+    const repo = { owner: ref.owner, repo: ref.repo };
+    const head = branch || (await octokit.repos.get(repo)).data.default_branch;
+    const { data: headRef } = await octokit.git.getRef({ ...repo, ref: `heads/${head}` });
+    const parent = headRef.object.sha;
+    const { data: commit } = await octokit.git.getCommit({ ...repo, commit_sha: parent });
+    const { data: top } = await octokit.git.getTree({ ...repo, tree_sha: commit.tree.sha });
+    const dir = top.tree.find((e) => e.path === name && e.type === "tree");
+    if (!dir?.sha) return 0;
+    const { data: sub } = await octokit.git.getTree({
+      ...repo,
+      tree_sha: dir.sha,
+      recursive: "true",
+    });
+    if (sub.truncated) throw new Error(`GitHub truncated the listing of ${root}`);
+    const files = sub.tree.filter((e) => e.type === "blob" && e.path && e.mode);
+    if (files.length === 0) return 0;
+    const { data: tree } = await octokit.git.createTree({
+      ...repo,
+      base_tree: commit.tree.sha,
+      tree: files.map((e) => ({
+        path: `${name}/${e.path}`,
+        mode: e.mode as "100644" | "100755" | "120000",
+        type: "blob" as const,
+        sha: null,
+      })),
+    });
+    const { data: next } = await octokit.git.createCommit({
+      ...repo,
+      message:
+        `chore(aurixa): drop ${root}, the parent deployment's own tree\n\n` +
+        "This repository was copied from a parent clone's, and the parent keeps this " +
+        "tree for itself: its voice stack names the parent's Vapi numbers and Make " +
+        "webhooks. Mission Control's cascades do not deliver it from the parent again.",
+      tree: tree.sha,
+      parents: [parent],
+    });
+    await octokit.git.updateRef({ ...repo, ref: `heads/${head}`, sha: next.sha });
+    return files.length;
+  };
+
   const writeFile = async (path: string, text: string, sha: string, message: string) => {
     await octokit.repos.createOrUpdateFileContents({
       owner: ref.owner,
@@ -710,6 +766,32 @@ export async function retargetCloneRepo(
       } catch (e) {
         actions.push({
           target: path,
+          status: "failed",
+          detail: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+  }
+
+  // 5c. The parent deployment's own trees, on a clone copied from a parent.
+  //
+  //     Through the git data API, so every file under a tree goes in one
+  //     commit on the clone's branch. The ref moves only forward from the
+  //     commit the listing read: a branch that moved in between refuses the
+  //     update, which is reported and never forced. A listing GitHub cut short
+  //     is a failure, not a smaller tree, because what it left out would stay.
+  if (opts.fromParentClone) {
+    for (const root of PARENT_DEPLOYMENT_OWN_TREES) {
+      try {
+        const removed = await removeTree(root);
+        actions.push(
+          removed === 0
+            ? { target: root, status: "absent" }
+            : { target: root, status: "deleted", detail: `${removed} file(s)` },
+        );
+      } catch (e) {
+        actions.push({
+          target: root,
           status: "failed",
           detail: e instanceof Error ? e.message : String(e),
         });
