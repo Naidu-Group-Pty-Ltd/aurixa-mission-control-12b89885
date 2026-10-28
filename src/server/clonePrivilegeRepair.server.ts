@@ -1,6 +1,7 @@
 /**
  * Give every existing clone the prime's function EXECUTE grants and view
- * options.
+ * options, and report the table privileges its browser roles hold that the
+ * prime's do not.
  *
  * ## Why a sweep, and not only the provisioner
  *
@@ -23,6 +24,22 @@
  * nothing else can be planned (see `routinePrivileges.pure.ts`). No row is
  * read or written.
  *
+ * ## Table privileges: compared, reported, never taken back
+ *
+ * On 28 Oct 2026 every clone gave `anon` SELECT, INSERT, UPDATE and DELETE on
+ * 24 tables whose policies are `TO public USING (true)`, because a clone is
+ * built with Supabase's default privileges and the grants stage adds what a
+ * clone lacks without ever revoking what it holds. So each pass also compares
+ * the table-level privileges of `anon` and `authenticated` on every `public`
+ * relation both sides hold against the prime's live ACL
+ * (`tablePrivileges.pure.ts`), and says what differs: in its result, in its
+ * audit row, and in a notice for a person when a clone's surplus changes.
+ *
+ * It revokes nothing. The owner decided on 28 Oct 2026 to have it report for a
+ * week and to review the reports before anything is enforced, and
+ * `ENFORCE_TABLE_GRANTS` is off with nothing behind it. The table stage only
+ * reads: the comparison returns counts and names, never a statement.
+ *
  * ## Budget
  *
  * The first pass on a clone is a few hundred statements; every later one is
@@ -30,11 +47,32 @@
  * the budget stops loses nothing and the next one carries only what is still
  * different. The starting clone rotates with the clock so one large clone
  * cannot starve the others.
+ *
+ * Reading costs six Management API calls a clone (three on each side) plus one
+ * per 200 functions only the clone holds. The table comparison adds one
+ * statement on each side, and no more: the prime's is read once a pass and
+ * shared by every clone, and each clone's runs beside that clone's function
+ * reads, so it adds a call and not a round trip of waiting. Four clones go from
+ * 24 calls a pass to 29. Each table read answers about 610 rows, 75 to 100 KB
+ * (measured 28 Oct 2026). A notice costs one read of Mission Control's own
+ * `notifications` a pass, and an insert only when a clone's surplus changes.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
+import { notifyOperators } from "./audit.server";
 import { resolveCloneSecretTarget, CloneSecretTargetError } from "./cloneAllowedOrigins.server";
 import { BudgetPause, pastDeadline } from "./provisioningBudget";
+import {
+  TABLE_GRANT_NOTICE_SOURCE,
+  compareTableGrants,
+  decideTableGrantNotice,
+  describeTableGrantNotice,
+  summariseTableGrants,
+  tableGrantMode,
+  type RelationAclReading,
+  type TableGrantMode,
+  type TableGrantSummary,
+} from "./tablePrivileges.pure";
 
 type Db = SupabaseClient<Database>;
 
@@ -55,6 +93,48 @@ export type ClonePrivilegeOutcome = {
   sample?: string[];
 };
 
+/**
+ * One clone's table privileges against the prime's. Every clone a pass reaches
+ * has one, so a clone that could not be compared says why and is never read as
+ * a clone with nothing to report.
+ */
+export type CloneTableGrantReport =
+  | ({ cloneId: string; cloneName: string; projectRef: string; read: "ok" } & TableGrantSummary)
+  | {
+      cloneId: string;
+      cloneName: string;
+      projectRef: string;
+      read: "unreadable";
+      /** Which catalogue could not be read. */
+      side: "prime" | "clone";
+      error: string;
+    }
+  | {
+      cloneId: string;
+      cloneName: string;
+      projectRef: string;
+      /** Both sides were read and the comparison itself threw. */
+      read: "failed";
+      error: string;
+    }
+  | { cloneId: string; read: "not_read"; why: string };
+
+export type TableGrantSweep = {
+  /** `report_only`: nothing is revoked (the owner, 28 Oct 2026). */
+  mode: TableGrantMode;
+  clones: CloneTableGrantReport[];
+  /** Clones the budget stopped the pass before. This pass says nothing about them. */
+  notReached: string[];
+  notices: {
+    raised: number;
+    /** Notices the database refused, logged by `notifyOperators`. */
+    failed: number;
+    /** What the last notices could be read as. A ledger that was not read raises nothing. */
+    ledger: "read" | "unreadable" | "dry_run" | "nothing_read";
+    error?: string;
+  };
+};
+
 export type ClonePrivilegeReconcileResult = {
   dryRun: boolean;
   considered: number;
@@ -64,6 +144,8 @@ export type ClonePrivilegeReconcileResult = {
   /** The clone the budget stopped in, if any. The next pass resumes it. */
   pausedAt: string | null;
   refused: Array<{ cloneId: string; reason: string; error: string }>;
+  /** Table privileges, compared and reported. Report-only. */
+  tables: TableGrantSweep;
 };
 
 const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
@@ -73,6 +155,17 @@ export function rotate<T>(items: readonly T[], offset: number): T[] {
   if (items.length === 0) return [];
   const k = ((offset % items.length) + items.length) % items.length;
   return [...items.slice(k), ...items.slice(0, k)];
+}
+
+type Settled<T> = { ok: true; value: T } | { ok: false; error: string };
+
+function settle<T>(run: () => Promise<T>): Promise<Settled<T>> {
+  return Promise.resolve()
+    .then(run)
+    .then(
+      (value): Settled<T> => ({ ok: true, value }),
+      (e: unknown): Settled<T> => ({ ok: false, error: msg(e).slice(0, 300) }),
+    );
 }
 
 export async function reconcileClonePrivileges(
@@ -101,6 +194,12 @@ export async function reconcileClonePrivileges(
     changed: [],
     pausedAt: null,
     refused: [],
+    tables: {
+      mode: tableGrantMode(),
+      clones: [],
+      notReached: [],
+      notices: { raised: 0, failed: 0, ledger: "nothing_read" },
+    },
   };
   if (candidates.length === 0) return out;
 
@@ -109,12 +208,20 @@ export async function reconcileClonePrivileges(
   // authority to converge towards, and guessing one is how the wrong database
   // was once copied.
   const primeRef = await resolvePrimeBackendRef(supabase);
-  const { convergeClonePrivileges } = await import("./schema-introspection.server");
+  const { convergeClonePrivileges, readRelationAcls } =
+    await import("./schema-introspection.server");
+
+  // The prime's side of the table comparison: one statement, read when the
+  // first clone needs it and shared by every clone in the pass.
+  let primeTables: Promise<Settled<RelationAclReading>> | undefined;
+  const readPrimeTables = () => (primeTables ??= settle(() => readRelationAcls(primeRef)));
 
   const minute = Math.floor((opts.now ?? Date.now()) / 60_000);
-  for (const cloneId of rotate(candidates, minute)) {
+  const order = rotate(candidates, minute);
+  for (const [i, cloneId] of order.entries()) {
     if (pastDeadline(opts.deadlineAt)) {
       out.pausedAt = cloneId;
+      out.tables.notReached = order.slice(i);
       break;
     }
     let target: Awaited<ReturnType<typeof resolveCloneSecretTarget>>;
@@ -126,9 +233,21 @@ export async function reconcileClonePrivileges(
         reason: e instanceof CloneSecretTargetError ? e.reason : "target_unresolved",
         error: msg(e),
       });
+      out.tables.clones.push({
+        cloneId,
+        read: "not_read",
+        why: "the clone's project could not be resolved, so nothing was compared",
+      });
       continue;
     }
 
+    // Started beside the function reads rather than after them.
+    const cloneRef = target.projectRef;
+    const tables = surveyCloneTableGrants(target, readPrimeTables(), () =>
+      readRelationAcls(cloneRef),
+    );
+
+    let paused = false;
     try {
       const r = await convergeClonePrivileges(target.projectRef, {
         primeRef,
@@ -163,10 +282,169 @@ export async function reconcileClonePrivileges(
     } catch (e) {
       if (e instanceof BudgetPause) {
         out.pausedAt = cloneId;
-        break;
+        paused = true;
+      } else {
+        out.refused.push({ cloneId, reason: "converge_failed", error: msg(e) });
       }
-      out.refused.push({ cloneId, reason: "converge_failed", error: msg(e) });
+    }
+
+    // A read only, so it is kept even when the function pass on the same
+    // clone was stopped or refused: the two are independent questions.
+    out.tables.clones.push(await tables);
+    if (paused) {
+      out.tables.notReached = order.slice(i + 1);
+      break;
     }
   }
+
+  out.tables.notices = await announceTableGrantChanges(supabase, out.tables.clones, dryRun);
   return out;
+}
+
+/**
+ * One clone's table privileges against the prime's. Reads only, and never
+ * rejects: a side that could not be read is reported by name.
+ */
+async function surveyCloneTableGrants(
+  target: { cloneId: string; cloneName: string; projectRef: string },
+  prime: Promise<Settled<RelationAclReading>>,
+  readClone: () => Promise<RelationAclReading>,
+): Promise<CloneTableGrantReport> {
+  const [p, c] = await Promise.all([prime, settle(readClone)]);
+  const base = {
+    cloneId: target.cloneId,
+    cloneName: target.cloneName,
+    projectRef: target.projectRef,
+  };
+  const unreadable = (side: "prime" | "clone", error: string): CloneTableGrantReport => ({
+    ...base,
+    read: "unreadable",
+    side,
+    error,
+  });
+  if (!p.ok) return unreadable("prime", p.error);
+  if (!c.ok) return unreadable("clone", c.error);
+  // No project in this fleet holds fewer than 600 relations in `public`, and
+  // `toRows` reads a body it does not recognise as no rows at all. A side that
+  // answered none was not read, and a comparison against nothing would report
+  // a clean clone and clear a finding announced before.
+  if (p.value.relations.length === 0) {
+    return unreadable("prime", "the catalogue answered no relation in public");
+  }
+  if (c.value.relations.length === 0) {
+    return unreadable("clone", "the catalogue answered no relation in public");
+  }
+  // A comparison that throws is a fault in this code, and it is said as one
+  // for this clone rather than failing the pass: the function work on every
+  // clone is still reported.
+  try {
+    const comparison = compareTableGrants({
+      prime: p.value.relations,
+      clone: c.value.relations,
+      maintainOnBoth: p.value.maintain && c.value.maintain,
+    });
+    return { ...base, read: "ok", ...summariseTableGrants(comparison) };
+  } catch (e) {
+    return { ...base, read: "failed", error: msg(e).slice(0, 300) };
+  }
+}
+
+/**
+ * Tell a person when a clone's table surplus CHANGES: when one first appears,
+ * when it grows or shrinks, and when it clears. Never once a half hour for the
+ * same thing (`decideTableGrantNotice`).
+ *
+ * The last notice raised for each clone is the ledger, keyed on what was
+ * DELIVERED rather than on what was observed, so a notice the database
+ * refused is raised again on the next pass instead of being recorded as told.
+ */
+async function announceTableGrantChanges(
+  supabase: Db,
+  reports: readonly CloneTableGrantReport[],
+  dryRun: boolean,
+): Promise<TableGrantSweep["notices"]> {
+  const read = reports.filter(
+    (r): r is Extract<CloneTableGrantReport, { read: "ok" }> => r.read === "ok",
+  );
+  if (read.length === 0) return { raised: 0, failed: 0, ledger: "nothing_read" };
+  // A dry run is somebody looking. It answers them, and tells nobody else.
+  if (dryRun) return { raised: 0, failed: 0, ledger: "dry_run" };
+
+  const { data, error } = await supabase
+    .from("notifications")
+    .select("clone_id, metadata")
+    .eq("kind", "drift_medium")
+    .eq("metadata->>source", TABLE_GRANT_NOTICE_SOURCE)
+    .in(
+      "clone_id",
+      read.map((r) => r.cloneId),
+    )
+    .order("created_at", { ascending: false })
+    .limit(500);
+  // A ledger that could not be read is not one that says "never told": read
+  // that way, every standing surplus would be announced again on every
+  // database hiccup.
+  if (error) return { raised: 0, failed: 0, ledger: "unreadable", error: error.message };
+
+  const last = new Map<string, string | null>();
+  for (const row of data ?? []) {
+    const id = (row as { clone_id: string | null }).clone_id;
+    if (!id || last.has(id)) continue;
+    const fp = ((row as { metadata: unknown }).metadata as { fingerprint?: unknown } | null)
+      ?.fingerprint;
+    // A notice with no fingerprint cannot vouch for anything, so it reads as
+    // none: the worst that does is one notice too many.
+    last.set(id, typeof fp === "string" ? fp : null);
+  }
+
+  let raised = 0;
+  let failed = 0;
+  for (const r of read) {
+    const decision = decideTableGrantNotice({ previous: last.get(r.cloneId) ?? null, current: r });
+    if (!decision.notify) continue;
+    const notice = describeTableGrantNotice(r.cloneName, r, decision.kind);
+    const landed = await notifyOperators({
+      kind: "drift_medium",
+      severity: notice.severity,
+      title: notice.title,
+      body: notice.body,
+      cloneId: r.cloneId,
+      url: `/clones/${r.cloneId}`,
+      metadata: {
+        source: TABLE_GRANT_NOTICE_SOURCE,
+        fingerprint: decision.fingerprint,
+        mode: tableGrantMode(),
+        surplus: r.surplus,
+        relations: r.relations,
+        columnSurplus: r.columnSurplus,
+      },
+    });
+    if (landed) raised += 1;
+    else failed += 1;
+  }
+  return { raised, failed, ledger: "read" };
+}
+
+/**
+ * Whether a pass deserves a line in the audit log.
+ *
+ * Function EXECUTE and view options settle, and once they have, a pass writes
+ * nothing and has nothing to say. The table comparison is different for now:
+ * it is report-only for a week, and its report is what the owner reviews, so a
+ * scheduled pass in which any clone holds a table surplus, or could not be
+ * compared, or whose notices changed, files its row. Once every clone matches
+ * the prime the sweep is quiet again. A dry run answers its caller instead.
+ */
+export function privilegeSweepIsNoteworthy(report: ClonePrivilegeReconcileResult): boolean {
+  const wrote = report.changed.some((c) => c.applied > 0 || c.failed > 0);
+  if (wrote || report.refused.length > 0) return true;
+  if (report.dryRun) return false;
+  if (report.pausedAt) return true;
+  const t = report.tables;
+  return (
+    t.clones.some((c) => c.read !== "ok" || c.surplus > 0 || c.columnSurplus > 0) ||
+    t.notices.raised > 0 ||
+    t.notices.failed > 0 ||
+    t.notices.ledger === "unreadable"
+  );
 }
