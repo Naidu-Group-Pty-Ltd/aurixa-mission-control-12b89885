@@ -1,14 +1,9 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { jsonResponse, resolveCloneApiKey } from "@/server/clone-api-keys.server";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
-import {
-  factsOf,
-  readGate,
-  recordGateCheck,
-  resolvePlanPricing,
-} from "@/server/payment-gate.server";
+import { factsOf, gateQuote, readGate, recordGateCheck } from "@/server/payment-gate.server";
 import { resolveGateState } from "@/lib/clonePaymentGate.pure";
-import { storefrontPricingBase } from "@/server/billing-handoffs.server";
+import { gatePricingUrl } from "@/server/gateCheckout.server";
 import { checkRateLimit } from "@/server/token-rate-limit.server";
 
 /**
@@ -117,16 +112,17 @@ export const Route = createFileRoute("/api/public/clones/gate")({
           .eq("id", key.clone_id)
           .maybeSingle();
 
-        const pricing = await resolvePlanPricing(read.row.plan_slug);
+        // Today's price for the plan the gate was armed for, never the figure
+        // stamped at arming: the checkout holds Stripe's row to this same
+        // quote, so what the lock screen shows is what the button charges.
+        const quote = await gateQuote(read.row);
 
         // The fallback CTA. `POST /gate/checkout` is the one-click route; this
         // is where a customer lands if minting a session fails, and it carries
         // the clone's stable billing uid so the pricing page's purchase
         // buttons are live and correctly attributed rather than browse-only.
-        const uid = clone?.billing_user_id ?? null;
-        const pricingUrl = uid
-          ? `${storefrontPricingBase()}?uid=${encodeURIComponent(uid)}`
-          : storefrontPricingBase();
+        // The checkout's refusals carry the same URL (`gatePricingUrl`).
+        const pricingUrl = gatePricingUrl(clone?.billing_user_id);
 
         return jsonResponse({
           ok: true,
@@ -142,9 +138,9 @@ export const Route = createFileRoute("/api/public/clones/gate")({
           grace_hours: read.row.grace_hours,
           plan: {
             slug: read.row.plan_slug,
-            name: read.row.plan_name ?? pricing.planName,
-            amount_due_cents: read.row.amount_due_cents ?? pricing.amountDueCents,
-            currency: read.row.currency ?? pricing.currency,
+            name: quote.planName,
+            amount_due_cents: quote.amountDueCents,
+            currency: quote.currency,
           },
           clone: { id: key.clone_id, name: clone?.name ?? null, slug: clone?.slug ?? null },
           checkout: {

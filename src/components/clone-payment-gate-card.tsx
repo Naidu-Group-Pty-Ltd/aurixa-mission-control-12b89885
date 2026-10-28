@@ -97,7 +97,16 @@ export function ClonePaymentGateCard({
           <div className="flex justify-between gap-3">
             <dt>Activation fee</dt>
             <dd className="text-foreground">
-              {money(data.gate.amount_due_cents, data.gate.currency ?? "AUD")}
+              {/* Today's price, the one the lock screen shows and the
+                  checkout charges. The figure stamped at arming is kept as a
+                  note when the catalogue has moved since. */}
+              {money(data.quote?.amountDueCents, data.quote?.currency ?? "AUD")}
+              {data.gate.amount_due_cents !== null &&
+                data.gate.amount_due_cents !== data.quote?.amountDueCents && (
+                  <span className="ml-1.5 text-muted-foreground">
+                    (armed at {money(data.gate.amount_due_cents, data.gate.currency ?? "AUD")})
+                  </span>
+                )}
             </dd>
           </div>
           <div className="flex justify-between gap-3">

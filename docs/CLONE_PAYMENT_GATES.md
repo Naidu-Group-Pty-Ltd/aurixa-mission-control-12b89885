@@ -114,10 +114,11 @@ the deliberate act it leaves to a person.
 
 ## The CTA charges what it quoted, and refuses if it cannot prove that
 
-`POST /api/public/clones/gate/checkout` resolves the plan, the price and the
-tenant from the gate row Mission Control already wrote, so the button charges
-exactly what the clone was armed for and the browser is never told a price it
-could edit. It refuses on a gate that is already paid — a CTA is the one place
+`POST /api/public/clones/gate/checkout` resolves the plan and the tenant from
+the gate row Mission Control already wrote, and the price from the catalogue as
+it stands (`gateQuote`, below: today's price for the plan the clone was armed
+for), so the button charges exactly what the lock screen showed and the browser
+is never told a price it could edit. It refuses on a gate that is already paid — a CTA is the one place
 that is easy to click twice — and on a gate an operator has LOCKED, for the
 reason the resolution order above gives: the override outranks `paid_at` and
 settling never clears it, so that checkout would take the money and leave the
@@ -378,6 +379,54 @@ separately. Until it has applied, the act answers `schema_pending` (PostgREST's
 `PGRST204`, or `42703` from Postgres) having written nothing, and every row
 reads as never extended through `trialExtensionsOf`.
 
+## The price is today's, and every way out names the workspace (28 Oct 2026)
+
+The owner signed in to NPC Test, found it locked as it should be, and pressed
+the pay button. It failed, and the screen quoted $699 for a plan that costs
+$999. Behind it, measured that day:
+
+| Gate | Plan | Stamped at arming | Today's price |
+| ---- | ---- | ----------------- | ------------- |
+| NPC Test | Launch | $699 | $999 |
+| Preflight Property Group | Scale | $2,210 | $2,699 |
+| NPC Client Dashboard | Scale | $2,210 | $2,699 |
+| NPC CRM Independent | Scale | $2,210 | $2,699 |
+
+All four were armed on 16 and 19 Sep, and the catalogue's rows were repriced on
+27 Sep (`seat_plans.updated_at`). Nothing re-stamps `amount_due_cents`, so the
+verdict showed the September figure, and the checkout held Stripe's $999 row to
+that $699 quote and refused it as `price_mismatch`. The price assertion did
+what it exists to do. It was being handed the wrong quote.
+
+The owner ruled the same day that a gate charges its plan's current price.
+`gateQuote` in `payment-gate.server.ts` is now the one reading of the price, and
+it has three readers: the verdict the lock screen renders, the 402 body the
+guard returns, and the quote the checkout holds Stripe's row to. Three readers
+of one function cannot disagree, and that is what the assertion needs. The plan
+is still the one the gate was armed for, which is what the column's comment
+means by "what the customer was asked to pay", and the stamp stays on the row
+as the record of what was quoted at arming. The console shows today's figure
+too, with the stamp beside it when the two differ. A plan nothing can price is
+refused (`plan_not_purchasable`, `no_quote`) rather than charged at a price
+nobody was shown.
+
+The same click showed the second defect. The lock screen offers a refusal's
+pricing URL in place of the verdict's, and every refusal carried the bare
+pricing page, so the only way out the customer was given opened a storefront
+that could not say which workspace it was selling to and that withheld its Buy
+buttons. Every refusal except `operator_locked` now carries `gatePricingUrl`,
+the pricing page scoped to the workspace's `billing_user_id` (the form the
+top-up CTA falls back to), and the verdict carries the same URL from the same
+function. The storefront resolves the id to the workspace's name, and a
+purchase made there is credited to that workspace, which settles the gate. A
+workspace with no billing id still gets the browse-only page, never another
+tenant's.
+
+`gateCheckout.server.test.ts` runs the mint against the rows as they were
+measured: the stale gate mints at $999, a row that disagrees with today's quote
+is still refused, and each refusal names the workspace. Eight of its ten tests
+fail on the code they replaced.
+
 ## Files
 
 | File | What it is |
@@ -385,11 +434,12 @@ reads as never extended through `trialExtensionsOf`.
 | `supabase/migrations/20260831000000_clone_payment_gates.sql` | The tables, the defaults, and why there is no `status` column |
 | `supabase/migrations/20260930100000_clone_gate_trial_extensions.sql` | The `trial_extended` event and the latest extension's four columns |
 | `src/lib/clonePaymentGate.pure.ts` | The state machine. The only thing that decides open or locked — and `planTrialExtension`, the only thing that decides an extension |
-| `src/server/payment-gate.server.ts` | Arm, override, window, extend, settle, and `assertGateOpen` |
+| `src/server/payment-gate.server.ts` | Arm, override, window, extend, settle, `assertGateOpen`, and `gateQuote`, the one reading of what a gate costs |
 | `src/server/payment-gate.server.test.ts` | The extension act against an in-memory table: what it writes, what it refuses, and the gate it will not write onto |
 | `src/server/payment-gate.functions.ts` | The operator RPCs |
 | `src/routes/api.public.clones.gate.ts` | What a clone asks about itself |
-| `src/server/gateCheckout.server.ts` | The one mint. Both the clone's CTA and the operator's link |
+| `src/server/gateCheckout.server.ts` | The one mint. Both the clone's CTA and the operator's link, and `gatePricingUrl`, the way out every refusal offers |
+| `src/server/gateCheckout.server.test.ts` | The mint against the rows measured on 28 Oct 2026: today's price, the assertion still standing, and a way out that names the workspace |
 | `src/routes/api.public.clones.gate.checkout.ts` | The CTA's destination. A thin mapping onto the mint |
 | `src/components/clone-gate-actions.tsx` | The operator's acts, Extend trial and Payment link among them |
 | `src/routes/billing.gates.tsx` | The console |
