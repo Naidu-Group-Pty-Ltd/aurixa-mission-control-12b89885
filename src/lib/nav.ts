@@ -59,6 +59,7 @@ import {
   Users,
   Waves,
   PhoneCall,
+  Clapperboard,
 } from "lucide-react";
 
 export type NavItem = {
@@ -372,6 +373,13 @@ export const NAV_SECTIONS: NavSection[] = [
         shortcut: "u",
         keywords:
           "ads advertising meta facebook instagram youtube google ads tiktok campaigns spend leads attribution utm roi brief digest",
+      },
+      {
+        to: "/website/videos",
+        label: "Website videos",
+        icon: Clapperboard,
+        keywords:
+          "briefing room watch website videos explainer marketing publish upload hls reels transcript chapters",
       },
       { to: "/handoffs", label: "Handoffs", icon: ArrowRightLeft, keywords: "client transfer" },
       { to: "/partner-portal", label: "Partner Portal", icon: Handshake, keywords: "resellers" },

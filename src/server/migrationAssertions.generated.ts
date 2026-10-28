@@ -1255,4 +1255,14 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "column", table: "trial_offers", column: "code" },
     ],
   },
+  {
+    migration: "20261028160200_website_briefings.sql",
+    version: "20261028160200",
+    assertions: [
+      { kind: "table", table: "website_briefings" },
+      { kind: "table", table: "website_briefing_uploads" },
+      { kind: "column", table: "website_briefings", column: "media_hls" },
+      { kind: "rows", table: "website_briefings", atLeast: 3 },
+    ],
+  },
 ];
