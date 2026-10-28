@@ -33,7 +33,8 @@ what became of it.
 Still open: the rest of P1 (L1–L7, L9, L10), P2, and the owner's decisions in
 §10. The owner answered D9 and D13–D19 on 27 Oct, and that work is under way
 (§10, "The owner's answers"). D3 and D8 are the ones that stand between this
-fleet and a launch.
+fleet and a launch. §14 records the clones' open tables, found and closed on
+28 Oct.
 
 ---
 
@@ -720,7 +721,7 @@ without loss.
 | D15 | The independent CRM line is parented on the CRM, which is module-scoped, so a new independent clone would start with the CRM's 497 missing prime files and never receive them                                                        | Refuse a parent that is not a mirror in `judgeCrmParent` (`parent_not_mirror`), and keep the line closed to new clones until D7.                                                                                                                                                                                                                                                                                                                   |
 | D16 | NPC Test, Preflight and the CRM meter on plan `free` while Mission Control records `launch`/`scale`, and neither provisioning door sets the plan a clone gates on                                                                    | Confirm the commercial position, set the three tenants' plans, and have `provisionCloneCore` create or adopt the metering tenant on the agreement's plan.                                                                                                                                                                                                                                                                                          |
 | D17 | Solicitor Portal is sold at $299 a month with a live Stripe price and gated by nothing, so every plan already has it                                                                                                                 | Gate it on the add-on in the prime's capability registry, or withdraw it from sale (`directSale` or `comingSoon`, the Stripe price deactivated).                                                                                                                                                                                                                                                                                                   |
-| D18 | Contract exclusions never reach a clone, and the core reconcile installs an excluded module before the exclusion is written                                                                                                          | Before the first agreement that excludes a module (none does today): send exclusions in the balance response and subtract them in the prime's snapshot, pass them to `provisionCloneCore`, and store slugs, not ids.                                                                                                                                                                                                                               |
+| D18 | Contract exclusions never reach a clone, and the core reconcile installs an excluded module before the exclusion is written                                                                                                          | Shipped: the prime refuses an excluded capability above its tier, add-ons and exemption, and keeps the last list stated (prime #3398; `20270203090000` reached all four clones at 06:00 on 28 Oct). Mission Control states the exclusions as price-list slugs on each balance call that reads the clone's row, stores them as slugs (`20261027140000`), and `provisionCloneCore` writes them before the first reconcile (#381).                    |
 | D19 | The module catalogue was last detected on 31 Jul (61 of 430 functions belong to no module), and all 134 library entries are `pending`, so no pin can be used                                                                         | Decide whether pins stay; if they do, approve entries at publish and record a commit per entry. After D7, stop using module globs as a delivery scope and keep modules as entitlement vocabulary generated from the prime (§9.3).                                                                                                                                                                                                                  |
 
 ### The owner's answers (27 Oct 2026, evening)
@@ -921,3 +922,41 @@ read-back, then what the first read showed.
   and the two `scripts/clone-backend/*.py`.
   - **Not read yet.** A child's cascade runs inside a prime cascade, and none
     has run since the publish.
+
+## 14. The clones' open tables (28 Oct 2026)
+
+Classifying the D9 holes meant reading each clone's table privileges. That read
+found that a request carrying nothing but a clone's publishable key could read
+tables the prime keeps private.
+
+- **What was open.** On all four clones, `anon` held SELECT, INSERT, UPDATE and
+  DELETE on 24 tables whose policies are written `TO public USING (true)`, so
+  privileges were the only gate.
+  - A count-only request read `client_address_history` (5 rows on
+    npc-client-dashboard, 33 on the CRM), `client_income_sources` (5),
+    `finance_agent_contacts` (1) and the 3.5M-row `api_usage_log`.
+  - Every reference cache a report reads could be written.
+- **Why only the clones.** The prime took these privileges back in July
+  (`20260721140000` onward, F-07), and those versions are holes on every clone
+  (D9). A clone is built from the prime's catalogue with Supabase's default
+  privileges. Provisioning adds the grants a clone lacks but never takes one
+  back.
+- **What was done.** With the owner's approval, the privileges were taken back
+  by hand on the four clones between 05:02 and 05:06 UTC, to the prime's state:
+  - the browser roles get nothing on the private tables, except that signed-in
+    users keep `finance_agent_contacts`, which a settings page reads;
+  - nobody but the service role writes a reference cache.
+
+  All 24 tables read back as intended, and the same count-only request now
+  answers 401.
+
+- **What else was checked.** No clone has a storage policy, so storage fails
+  closed. The `net` schema is not served (`PGRST106`), `anon` cannot enter
+  `aml`, and no role table has a write policy.
+- **What makes it permanent.** Prime #3399 (`20270204090000`) states the same
+  revokes, and the fleet lane applies it. It is a no-op on the prime and on the
+  four clones.
+- **What it does not cover.** A clone built later is stamped past that version
+  and would start with these tables open. The owner chose to extend the
+  half-hourly privilege sweep (`/hooks/clone-privilege-reconcile`) to table
+  grants: report-only for a week, then enforced.
