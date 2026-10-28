@@ -1194,4 +1194,15 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20261028090000",
     assertions: [{ kind: "cron", jobname: "airtable-waitlist-sync" }],
   },
+  {
+    migration: "20261028130000_detection_runs_can_be_purged.sql",
+    version: "20261028130000",
+    assertions: [
+      {
+        kind: "none",
+        reason:
+          "changes what two foreign keys do when their run is deleted; no table, column, function, cron job or row is created, and pg_constraint is not observable through PostgREST",
+      },
+    ],
+  },
 ];
