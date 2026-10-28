@@ -20,7 +20,9 @@
 import {
   BASELINE_ASSERTION_NAME,
   composeCoverage,
-  provenanceFromCanonicalName,
+  EXTERNAL_APPLY_NOTE,
+  MIGRATION_PROVENANCE_VALUES,
+  provenanceFromCanonicalRow,
   provenanceFromLedgerName,
   type CoverageComposition,
   type MigrationProvenance,
@@ -77,9 +79,13 @@ export async function recordKnownProvenance(projectRef: string): Promise<Provena
       runSqlOnProject(projectRef, `select version, name from aurixa.schema_migrations`).then(
         toRows,
       ),
+      // Whether the row carries a body is read here, as a boolean, rather than
+      // the body itself: it is the writer's mark (no Mission Control writer
+      // stores one), and a clone's bodies are megabytes this has no use for.
       runSqlOnProject(
         projectRef,
-        `select version, name from supabase_migrations.schema_migrations`,
+        `select version, name, cardinality(coalesce(statements, '{}'::text[])) > 0 as has_body
+         from supabase_migrations.schema_migrations`,
       ).then(toRows),
     ]);
   } catch (e) {
@@ -104,12 +110,20 @@ export async function recordKnownProvenance(projectRef: string): Promise<Provena
     const p = provenanceFromLedgerName(name, version);
     if (p) decided.set(version, { provenance: p, note: name, from: "legacy" });
   }
+  const legacyVersions = new Set(legacy.map((r) => str(r.version)));
   for (const row of canonical) {
     const version = str(row.version);
     if (decided.has(version)) continue;
     const name = str(row.name);
-    const p = provenanceFromCanonicalName(name);
-    if (p) decided.set(version, { provenance: p, note: name, from: "canonical" });
+    const p = provenanceFromCanonicalRow({
+      name,
+      hasBody: row.has_body === true || row.has_body === "t",
+      hasLegacyRow: legacyVersions.has(version),
+    });
+    if (p) {
+      const note = p === "external" ? `${EXTERNAL_APPLY_NOTE}: ${name || version}` : name;
+      decided.set(version, { provenance: p, note, from: "canonical" });
+    }
   }
 
   const considered = new Set([
@@ -228,7 +242,9 @@ export async function readCloneCoverage(
     );
     rows = toRows(raw)
       .map((r) => ({ version: str(r.version), provenance: str(r.provenance) }))
-      .filter((r): r is ProvenanceRow => r.provenance === "applied" || r.provenance === "asserted");
+      .filter((r): r is ProvenanceRow =>
+        (MIGRATION_PROVENANCE_VALUES as readonly string[]).includes(r.provenance),
+      );
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     // The one error that is a state rather than a fault.
