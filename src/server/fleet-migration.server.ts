@@ -80,6 +80,7 @@ import {
 } from "./fleetMigrationEligibility.pure";
 import { blockOvertakenBySequence } from "./blockSequence.pure";
 import { notifyOperators, writeAuditLog } from "./audit.server";
+import { recordKnownProvenance } from "./migrationProvenance.server";
 import { chunkCursorFor } from "./chunkCursorStore.pure";
 import { ClaimLostError } from "./provisioningBudget";
 import {
@@ -422,6 +423,18 @@ export type FleetMigrationResult = {
    * it again, and the count of what was sent is the only other place it shows.
    */
   seedSkeletons?: SeedSkeletonReport;
+  /**
+   * What the sweep recorded about who wrote each clone's ledger rows
+   * (`recordKnownProvenance`), one entry per clone it reached.
+   *
+   * A clone the budget left out has no entry, and `provenanceStoppedAtBudget`
+   * says so, so a clone that was never read is never reported as one with
+   * nothing to record. Empty on a drain tick, which never records it.
+   */
+  provenance: Array<
+    { cloneName: string; recorded: number; upgraded: number } | { cloneName: string; error: string }
+  >;
+  provenanceStoppedAtBudget: boolean;
   /** Set when the run could not start at all. */
   error?: string;
 };
@@ -440,6 +453,8 @@ const EMPTY: FleetMigrationResult = {
   heldByRule: [],
   withheld: 0,
   withheldBreakdown: { neverApplied: 0, skewSuspected: 0, bodyUnread: 0 },
+  provenance: [],
+  provenanceStoppedAtBudget: false,
 };
 
 /**
@@ -1293,6 +1308,7 @@ export async function runFleetMigrationSync(
     heldOversize: [],
     rateLimited: [],
     heldByRule: [],
+    provenance: [],
     excluded: excludedCount,
     rehabilitated,
     skipped: skipped.map((v) => ({
@@ -2353,6 +2369,47 @@ export async function runFleetMigrationSync(
     }
   }
 
+  /*
+    WHO WROTE EACH LEDGER ROW, RECORDED WHERE A PASS ALREADY VISITS.
+
+    `recordKnownProvenance` annotates a clone's ledgers with how each version
+    came to be there: the lane's own run, a known assertion, or another applier
+    (`external`). Its only caller was the remediation lane's
+    `executeSqlMigration`, and the backend catch-up sweep has retired every
+    `sql_migration` run since that lane took over: none was created after
+    23 Sep 2026. So nothing recorded provenance after that. Measured 28 Oct
+    2026, the CRM's table held the 146 `applied` rows this lane wrote and 15
+    `asserted` rows from 19 Sep, and none for the 5 versions its own workflow
+    applied. The mirrors' last non-`applied` row was written on 12 Sep.
+
+    After the loop, so it never spends time a replay needed. A clone is reached
+    only while the pass keeps the reserve it keeps for a claim, and one the
+    budget leaves out is reached on a later sweep. Never on a drain tick, which
+    exists to finish a seed. The backfill writes an annotation that no replay
+    reads, so it is never allowed to fail the pass.
+  */
+  if (mode === "sweep") {
+    for (const row of backends) {
+      const ref = row.supabase_project_ref;
+      if (!ref) continue;
+      if (Date.now() + CLAIM_RESERVE_MS >= deadlineAt) {
+        out.provenanceStoppedAtBudget = true;
+        break;
+      }
+      const cloneName = nameOf.get(row.clone_id) ?? row.clone_id;
+      try {
+        const r = await recordKnownProvenance(ref);
+        out.provenance.push(
+          r.ok
+            ? { cloneName, recorded: r.recorded, upgraded: r.upgraded }
+            : { cloneName, error: r.error },
+        );
+      } catch (e) {
+        out.provenance.push({ cloneName, error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+  }
+
   await writeAuditLog({
     action: "fleet.migrations_synced",
     entityType: "fleet",
@@ -2418,6 +2475,14 @@ export async function runFleetMigrationSync(
       seed_skeletons_stale: out.seedSkeletons?.stale ?? [],
       seed_skeletons_unmatched: out.seedSkeletons?.unmatched ?? [],
       seed_skeletons_refused: out.seedSkeletons?.refused ?? [],
+      // Who wrote each clone's ledger rows, for each clone the sweep reached.
+      // A clone the budget left out has no entry, and the flag says so.
+      provenance: out.provenance.map((p) =>
+        "error" in p
+          ? `${p.cloneName}: failed: ${p.error}`
+          : `${p.cloneName}: recorded ${p.recorded}, upgraded ${p.upgraded}`,
+      ),
+      provenance_stopped_at_budget: out.provenanceStoppedAtBudget,
       ...(out.seedSkeletons?.why ? { seed_skeletons_unreadable_why: out.seedSkeletons.why } : {}),
     },
   });
