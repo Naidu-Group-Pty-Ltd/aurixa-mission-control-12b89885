@@ -116,7 +116,7 @@ function row(over: Partial<AgreementListRow> = {}): AgreementListRow {
     docusign_signed_at: null,
     docusign_status: null,
     docusign_voided_at: null,
-    excluded_module_ids: [],
+    excluded_module_slugs: [],
     issued_at: null,
     lead_id: null,
     metadata: {},

@@ -39,7 +39,7 @@ export type ProvisionFromAgreementResult =
 
 const AGREEMENT_SELECT =
   "id, status, client_name, client_email, client_org, provision_on_signature, provision_status, " +
-  "plan_slug, module_ids, addon_slugs, excluded_module_ids, admin_email, provision_region, created_by, " +
+  "plan_slug, module_ids, addon_slugs, excluded_module_slugs, admin_email, provision_region, created_by, " +
   "document_kind, signed_record_path";
 
 /**
@@ -306,10 +306,23 @@ async function runProvisioning(
   if (primeErr) throw new Error(`Could not read prime config: ${primeErr.message}`);
   if (!prime?.github_owner) throw new Error("Prime not configured — set it up in Settings first");
 
-  const moduleIds = effectiveModuleIds(
-    agreement.module_ids ?? [],
-    agreement.excluded_module_ids ?? [],
-  );
+  // The contract's exclusions are price-list slugs and the picks are library
+  // module ids, so they meet through the library the reconcile resolves with.
+  // Read only when there is something to translate, and fatal when it cannot
+  // be read: translated against nothing, an exclusion withholds nothing.
+  const excludedSlugs = agreement.excluded_module_slugs ?? [];
+  let moduleIds = agreement.module_ids ?? [];
+  if (excludedSlugs.length > 0) {
+    const { readPricingLibrary } = await import("./entitlement-modules.server");
+    const library = await readPricingLibrary(supabaseAdmin);
+    if (!library.ok) {
+      throw new Error(`Could not translate the contract's exclusions: ${library.error}`);
+    }
+    moduleIds = effectiveModuleIds(moduleIds, excludedSlugs, {
+      modules: [...library.catalogue].map(([slug, id]) => ({ id, slug })),
+      overrides: library.overrides,
+    });
+  }
 
   const { provisionCloneCore } = await import("./clone-provisioning.server");
   const created = await provisionCloneCore(supabaseAdmin, userId, {
@@ -323,6 +336,9 @@ async function runProvisioning(
     moduleIds,
     planSlug: agreement.plan_slug,
     addonSlugs: agreement.addon_slugs ?? [],
+    // Written in the clone's own INSERT, so the reconcile inside
+    // `provisionCloneCore` already honours them.
+    contractExcludedSlugs: excludedSlugs,
     // The signature is precisely the moment the tenant becomes real — a
     // dedicated backend is the point of the agreement.
     isolatedTenant: true,
@@ -330,33 +346,26 @@ async function runProvisioning(
   });
   if (!created.ok) throw new Error(created.error);
 
-  // ── Contractual exclusions, then the initial entitlement reconcile ──
+  // ── The initial entitlement reconcile ──
   // The reconcile is what turns "modules installed" into "features on":
   // it stamps entitled_plan_slug / entitled_module_slugs / entitlement_keys
   // from the tier + purchased add-ons (through the curated pricing→module
   // mapping), and installs any tier-entitled module the operator did not
-  // hand-pick. The exclusions land FIRST so the resolution honours them —
-  // and they persist on the clone, so a later plan change can never
-  // re-install what this agreement bargained away. Fatal on failure on
-  // purpose: a clone with modules but no entitlements renders every gated
-  // feature off, which is exactly the "installed but unfunctional" state
-  // this pipeline exists to prevent. The operator's retry re-enters here
-  // idempotently.
-  if ((agreement.excluded_module_ids ?? []).length > 0) {
-    const { data: excludedRows, error: exErr } = await supabaseAdmin
-      .from("modules")
-      .select("slug")
-      .in("id", agreement.excluded_module_ids);
-    if (exErr) throw new Error(`Could not resolve excluded module slugs: ${exErr.message}`);
-    const { error: writeErr } = await supabaseAdmin
-      .from("clones")
-      .update({
-        contract_excluded_module_slugs: (excludedRows ?? []).map((r) => r.slug).sort(),
-      })
-      .eq("id", created.cloneId);
-    if (writeErr) throw new Error(`Could not record contractual exclusions: ${writeErr.message}`);
-  }
-
+  // hand-pick. The contract's exclusions are already on the clone:
+  // `provisionCloneCore` wrote them in the clone's INSERT, so the reconcile
+  // inside it honoured them, and on a retry it wrote the agreement's current
+  // ones onto the existing row before returning. This reconcile reads the same
+  // row. They persist there, so a later plan change can never re-install what
+  // this agreement bargained away, and the balance response carries them to
+  // the clone. They used to be written HERE, after `provisionCloneCore`
+  // returned, when its reconcile had already installed the excluded modules
+  // and this one could only record them as revoked.
+  //
+  // Fatal on failure on purpose, where the reconcile inside
+  // `provisionCloneCore` only warns: a clone with modules but no entitlements
+  // renders every gated feature off, which is exactly the "installed but
+  // unfunctional" state this pipeline exists to prevent. The operator's retry
+  // re-enters here idempotently.
   const { reconcileCloneEntitlements } = await import("./entitlement-modules.server");
   const recon = await reconcileCloneEntitlements({
     supabase: supabaseAdmin,

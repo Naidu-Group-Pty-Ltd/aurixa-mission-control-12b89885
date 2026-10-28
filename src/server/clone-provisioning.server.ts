@@ -13,6 +13,7 @@ import { armGate } from "./payment-gate.server";
 import type { Database } from "@/integrations/supabase/types";
 import type { ProvisionCloneInput, ProvisionCloneResult } from "./clone-provisioning.functions";
 import { crmChildFields, describeCrmPlacement, type CrmParent } from "./crmLineage.pure";
+import { sortedUniqueSlugs } from "@/lib/pricing/contract-exclusions";
 
 /**
  * The whole clone-creation pipeline as a plain function, so it has exactly
@@ -60,6 +61,10 @@ export async function provisionCloneCore(
         It stays `idempotent: true`: the caller asked for a clone and is
         getting the same clone, which is what that word answers.
       */
+      // A failed agreement attempt can be re-configured before its retry, and
+      // the reconcile that follows reads the row. The wizard sends none.
+      const excluded = await recordContractExclusions(supabase, existing.id, data);
+      if (!excluded.ok) return excluded;
       await startRequestedSideEffects(supabase, userId, existing, data);
       return {
         ok: true,
@@ -290,6 +295,11 @@ export async function provisionCloneCore(
       isolated_tenant: data.isolatedTenant === true,
       idempotency_key: data.idempotencyKey ?? null,
       entitled_plan_slug: data.planSlug ?? null,
+      // The contract's exclusions, price-list slugs, in the same insert as the
+      // row, so the reconcile below honours them. The agreement path used to
+      // write them after this function returned, when that reconcile had
+      // already installed what the contract excluded (D18).
+      contract_excluded_module_slugs: sortedUniqueSlugs(data.contractExcludedSlugs ?? []),
       // The CRM line, written in the same insert as the row so no reader can
       // see a clone with a parent and no mode, or a mode and no parent. A
       // clone provisioned with no choice records no mode: NULL is "nobody
@@ -461,6 +471,9 @@ export async function provisionCloneCore(
   // route that skipped it. The agreement path (`agreement-provisioning.server`)
   // has always reconciled at creation; this is the same call, from the other
   // door.
+  //
+  // It honours the contract's exclusions, because the insert above wrote them
+  // onto the row it reads.
   //
   // Non-fatal on purpose, and loudly recorded. A clone with a repository, a
   // backend and an unreconciled entitlement set is a clone an operator can
@@ -789,6 +802,38 @@ async function warnOnClone(
     // The row IS the telling. Losing it leaves the gap and no trace of it.
     console.error(`[provisionCloneCore] could not warn about ${stage}: ${error.message}`);
   }
+}
+
+/**
+ * Bring an existing clone's contract exclusions in line with this request.
+ *
+ * Only the idempotent retry needs it, because a first submit writes them in
+ * the clone's own INSERT. A signed agreement whose provisioning failed can have
+ * its selection changed before an operator retries it, and the retry finds the
+ * clone the first attempt created. The agreement path reconciles next, against
+ * whatever this row says.
+ *
+ * A request that names none (the wizard's) changes nothing. A failed write is
+ * returned rather than logged: the reconcile would otherwise honour the old
+ * exclusions and report success.
+ */
+async function recordContractExclusions(
+  supabase: SupabaseClient<Database>,
+  cloneId: string,
+  data: ProvisionCloneInput,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (data.contractExcludedSlugs === undefined) return { ok: true };
+  const { error } = await supabase
+    .from("clones")
+    .update({ contract_excluded_module_slugs: sortedUniqueSlugs(data.contractExcludedSlugs) })
+    .eq("id", cloneId);
+  if (error) {
+    return {
+      ok: false,
+      error: `Could not record the contract's exclusions on clone ${cloneId}: ${error.message}`,
+    };
+  }
+  return { ok: true };
 }
 
 /**

@@ -105,6 +105,11 @@ export function getBalance(tenantRef: string, displayName?: string) {
       lifetime_granted: number;
       lifetime_spent: number;
     };
+    // Price-list slugs. See §4a.
+    entitlements: {
+      addons: string[];
+      excluded?: string[];
+    };
   }>(`/api/public/tokens/balance?${q.toString()}`, { method: "GET" });
 }
 ```
@@ -174,6 +179,27 @@ if (balance.available < lowThreshold) {
   });
 }
 ```
+
+### 4a. Entitlements
+
+A clone gates its features on this response and on nothing else Mission
+Control holds. `entitlements` is in price-list slugs (`MODULES[].slug` in
+Mission Control's `src/lib/pricing/aurixa-catalog.ts`):
+
+```
+entitlements: { addons: string[], excluded?: string[] }
+```
+
+- `addons` — the add-ons the clone holds, plus `aml-ctf` on a known tier unless
+  a without-AML SKU is recorded. It never contains an excluded slug.
+- `excluded` — what the clone's signed agreement took out of its tier, sorted
+  and de-duplicated. It is present, possibly `[]`, whenever Mission Control
+  read the clone's row, and `[]` for a platform-level key, which has no clone.
+  It is absent only when that read failed. Keep the exclusions last received
+  then: absent means "not known", never "none".
+
+Subtract `excluded` from what the plan and the add-ons grant. A failed read
+never fails the balance call.
 
 ## 5. Out of scope for the prime repo
 

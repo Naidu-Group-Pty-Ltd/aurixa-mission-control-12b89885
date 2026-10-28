@@ -18,7 +18,7 @@ const agreement = (over: Partial<AgreementProvisionFacts> = {}): AgreementProvis
   plan_slug: "growth",
   module_ids: ["m1", "m2", "m3"],
   addon_slugs: [],
-  excluded_module_ids: [],
+  excluded_module_slugs: [],
   admin_email: null,
   client_email: "client@tenant.com.au",
   client_name: "Jordan Client",
@@ -141,16 +141,66 @@ describe("decideProvisionOnSignature", () => {
 });
 
 describe("effectiveModuleIds", () => {
-  it("subtracts the named exclusions, preserving order", () => {
-    expect(effectiveModuleIds(["m1", "m2", "m3"], ["m2"])).toEqual(["m1", "m3"]);
+  // Library modules as the catalogue holds them: an id and a detected slug.
+  const library = {
+    modules: [
+      { id: "id-client", slug: "client" },
+      { id: "id-aml", slug: "aml" },
+      { id: "id-commercial", slug: "commercial" },
+      { id: "id-industrial", slug: "industrial" },
+      { id: "id-market-updates", slug: "market-updates" },
+      { id: "id-listings", slug: "listings" },
+      { id: "id-deal-pipeline", slug: "deal-pipeline" },
+    ],
+  };
+  const all = library.modules.map((m) => m.id);
+
+  it("drops the picked library module an excluded price-list slug maps to", () => {
+    // The selection is library ids and the exclusion is a price-list slug:
+    // `aml-ctf` is what the price list calls the library's `aml`.
+    expect(effectiveModuleIds(all, ["aml-ctf"], library)).toEqual(
+      all.filter((id) => id !== "id-aml"),
+    );
   });
 
-  it("an exclusion outside the selection is inert", () => {
-    expect(effectiveModuleIds(["m1"], ["m9"])).toEqual(["m1"]);
+  it("drops every module one priced line is built from, preserving order", () => {
+    expect(
+      effectiveModuleIds(
+        ["id-commercial", "id-client", "id-industrial"],
+        ["commercial-industrial"],
+        library,
+      ),
+    ).toEqual(["id-client"]);
+  });
+
+  it("translates through the operator's override first", () => {
+    const r = effectiveModuleIds(all, ["market-updates"], {
+      ...library,
+      overrides: { "module:market-updates": ["listings"] },
+    });
+    expect(r).toContain("id-market-updates");
+    expect(r).not.toContain("id-listings");
+  });
+
+  it("drops nothing for an entitlement-only item: nothing installs for it", () => {
+    expect(effectiveModuleIds(all, ["client-ai"], library)).toEqual(all);
+  });
+
+  it("an exclusion that maps to nothing picked is inert", () => {
+    expect(effectiveModuleIds(["id-client"], ["finance-portal"], library)).toEqual(["id-client"]);
+  });
+
+  it("drops nothing for a slug the price list does not know, even a library one", () => {
+    // `aml` read as a price-list slug names nothing.
+    expect(effectiveModuleIds(all, ["aml"], library)).toEqual(all);
+  });
+
+  it("keeps a picked id the catalogue does not hold", () => {
+    expect(effectiveModuleIds(["id-gone", "id-aml"], ["aml-ctf"], library)).toEqual(["id-gone"]);
   });
 
   it("empty exclusions change nothing", () => {
-    expect(effectiveModuleIds(["m1", "m2"], [])).toEqual(["m1", "m2"]);
+    expect(effectiveModuleIds(["m1", "m2"], [], { modules: [] })).toEqual(["m1", "m2"]);
   });
 });
 

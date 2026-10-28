@@ -1208,6 +1208,7 @@ export type Database = {
           docusign_status: string | null
           docusign_voided_at: string | null
           excluded_module_ids: string[]
+          excluded_module_slugs: string[]
           grant_access_on_signature: boolean
           id: string
           issued_at: string | null
@@ -1269,6 +1270,7 @@ export type Database = {
           docusign_status?: string | null
           docusign_voided_at?: string | null
           excluded_module_ids?: string[]
+          excluded_module_slugs?: string[]
           grant_access_on_signature?: boolean
           id?: string
           issued_at?: string | null
@@ -1330,6 +1332,7 @@ export type Database = {
           docusign_status?: string | null
           docusign_voided_at?: string | null
           excluded_module_ids?: string[]
+          excluded_module_slugs?: string[]
           grant_access_on_signature?: boolean
           id?: string
           issued_at?: string | null

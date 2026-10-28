@@ -1003,7 +1003,8 @@ client, so what was reviewed is what is signed.
 
 The agreement now carries the COMMERCIAL SELECTION — tier plan
 (`billing_plans`), modules in (`modules`), add-ons (`addon_modules`), and the
-modules the negotiation explicitly took OUT — and, when **armed**, the moment
+price-list modules the negotiation explicitly took OUT
+(`excluded_module_slugs`) — and, when **armed**, the moment
 DocuSign reports the envelope signed, Mission Control provisions the clone
 from exactly those parameters. Same pipeline as the operator wizard
 (`provisionCloneCore` → repo, clone row, entitlements, module install,
@@ -1016,6 +1017,22 @@ selection (plan, modules, add-ons, exclusions, clone admin email, the arm
 switch); a signed row offers **Provision now** (also the retry after a
 failure, and the manual path for an agreement that was never armed); a
 provisioned row links to the clone.
+
+**An exclusion is a price-list module** (`aml-ctf`, `finance-portal`,
+`market-updates`), the vocabulary the agreement is negotiated in and the prime
+gates on. Until D18 it was a library module id, which named code rather than
+what was sold.
+
+- The dialog offers the modules the selected tier includes, plus AML/CTF,
+  which every tier's headline price carries. A saved exclusion outside that set
+  stays listed, checked, so it can be removed.
+- The save refuses a slug the price list does not know, and one the same
+  selection buys as an add-on. An exclusion of a module the plan does not
+  include is accepted and changes nothing.
+- The clone carries the exclusions from its first INSERT, every reconcile
+  subtracts them, and the balance response tells the clone
+  (`entitlements.excluded`). See
+  [Contractual exclusions](./MODULES_TO_CLONES.md#contractual-exclusions).
 
 ### How the signature arrives — two paths, one handler
 

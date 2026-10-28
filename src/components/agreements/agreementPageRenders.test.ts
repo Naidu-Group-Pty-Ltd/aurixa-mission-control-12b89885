@@ -150,6 +150,7 @@ function row(over: Partial<AgreementRow> = {}): AgreementRow {
     docusign_status: null,
     docusign_voided_at: null,
     excluded_module_ids: [],
+    excluded_module_slugs: [],
     grant_access_on_signature: false,
     issued_at: null,
     issued_snapshot: null,

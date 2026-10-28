@@ -76,15 +76,32 @@ export function classifyChange(
   return "lateral";
 }
 
-/** Live technical module slugs, keyed by slug → id for install writes. */
-async function loadCatalogue(supabase: Supabase): Promise<Map<string, string>> {
-  const { data } = await supabase.from("modules").select("id, slug").neq("status", "archived");
-  return new Map(((data ?? []) as Array<{ id: string; slug: string }>).map((m) => [m.slug, m.id]));
+/** The live catalogue, slug → id, and the read's error when it failed. */
+async function readCatalogue(
+  supabase: Supabase,
+): Promise<{ catalogue: Map<string, string>; error: string | null }> {
+  const { data, error } = await supabase
+    .from("modules")
+    .select("id, slug")
+    .neq("status", "archived");
+  return {
+    catalogue: new Map(
+      ((data ?? []) as Array<{ id: string; slug: string }>).map((m) => [m.slug, m.id]),
+    ),
+    error: error?.message ?? null,
+  };
 }
 
-/** Operator overrides, as `${kind}:${slug}` → technical slugs. */
-async function loadOverrides(supabase: Supabase): Promise<Record<string, string[]>> {
-  const { data } = await supabase
+/** Live technical module slugs, keyed by slug → id for install writes. */
+async function loadCatalogue(supabase: Supabase): Promise<Map<string, string>> {
+  return (await readCatalogue(supabase)).catalogue;
+}
+
+/** The operator overrides, and the read's error when it failed. */
+async function readOverrides(
+  supabase: Supabase,
+): Promise<{ overrides: Record<string, string[]>; error: string | null }> {
+  const { data, error } = await supabase
     .from("pricing_module_map")
     .select("source_kind, source_slug, source_name, module_slugs, mapping_kind, is_override")
     .eq("is_override", true);
@@ -103,7 +120,41 @@ async function loadOverrides(supabase: Supabase): Promise<Record<string, string[
         : `module:${row.source_slug}`;
     out[key] = row.module_slugs ?? [];
   }
-  return out;
+  return { overrides: out, error: error?.message ?? null };
+}
+
+/** Operator overrides, as `${kind}:${slug}` → technical slugs. */
+async function loadOverrides(supabase: Supabase): Promise<Record<string, string[]>> {
+  return (await readOverrides(supabase)).overrides;
+}
+
+/**
+ * The library a contract exclusion is translated against: the live catalogue
+ * and the operator's overrides, through the same two reads the reconcile
+ * resolves with.
+ *
+ * A failed read is an error here, never an empty library. Translated against
+ * nothing, an exclusion withholds nothing, and the clone would be given exactly
+ * what its contract excluded without a word.
+ */
+export async function readPricingLibrary(
+  supabase: Supabase,
+): Promise<
+  | { ok: true; catalogue: Map<string, string>; overrides: Record<string, string[]> }
+  | { ok: false; error: string }
+> {
+  const [catalogue, overrides] = await Promise.all([
+    readCatalogue(supabase),
+    readOverrides(supabase),
+  ]);
+  if (catalogue.error)
+    return { ok: false, error: `module catalogue unreadable: ${catalogue.error}` };
+  if (overrides.error)
+    return { ok: false, error: `pricing overrides unreadable: ${overrides.error}` };
+  if (catalogue.catalogue.size === 0) {
+    return { ok: false, error: "module catalogue is empty — run detection first" };
+  }
+  return { ok: true, catalogue: catalogue.catalogue, overrides: overrides.overrides };
 }
 
 function slugifyName(name: string): string {
@@ -225,16 +276,25 @@ export async function reconcileCloneEntitlements(args: {
 
   // Contractual exclusions hold across every reconcile — initial, plan
   // changes, manual — or the first upgrade quietly re-installs what the
-  // signed agreement excluded.
+  // signed agreement excluded. They are price-list slugs, translated into
+  // library modules through the same catalogue and overrides as the plan.
+  const knownModules = new Set(catalogue.keys());
   const resolution = applyContractExclusions(
     resolveEntitledModules({
       planSlug,
       purchasedAddons: addons,
-      knownModules: new Set(catalogue.keys()),
+      knownModules,
       overrides,
     }),
     (clone.contract_excluded_module_slugs as string[] | null) ?? [],
+    { knownModules, overrides },
   );
+  if (resolution.unknownExclusions.length > 0) {
+    console.warn(
+      `[reconcileCloneEntitlements] clone ${cloneId} records exclusion(s) the price list ` +
+        `does not know: ${resolution.unknownExclusions.join(", ")}. Nothing was subtracted for them.`,
+    );
+  }
 
   const { data: installedRows } = await supabase
     .from("clone_modules")
@@ -330,6 +390,9 @@ export async function reconcileCloneEntitlements(args: {
       installed: diff.toInstall,
       revoked: diff.toRevoke,
       unmapped_count: resolution.unmapped.length,
+      contract_excluded: resolution.contractExcluded,
+      contract_exclusions_unknown: resolution.unknownExclusions,
+      contract_exclusions_shared: resolution.sharedModulesKept,
     },
   });
 

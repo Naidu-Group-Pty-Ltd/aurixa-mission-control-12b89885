@@ -3,7 +3,37 @@ import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { ensureTenant, jsonResponse, resolveCloneApiKey } from "@/server/clone-api-keys.server";
 import { checkRateLimit } from "@/server/token-rate-limit.server";
 import { EXPIRY_WARNING_DAYS, TOKEN_EXPIRY_DAYS } from "@/server/token-lots.server";
-import { AML_MODULE_SLUG, TIER_INCLUDES_AML, tierBySlug } from "@/lib/pricing/aurixa-catalog";
+import { balanceEntitlements } from "@/server/balanceEntitlements.pure";
+
+/**
+ * The clone's contract exclusions, or `null` when they could not be read.
+ *
+ * A row that is not there is a failed read as well. The key's foreign key
+ * cascades on delete, so a key naming a clone always has a row, and "the read
+ * found nothing" can only mean the read did not say.
+ */
+async function readContractExclusions(cloneId: string): Promise<string[] | null> {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("clones")
+      .select("contract_excluded_module_slugs")
+      .eq("id", cloneId)
+      .maybeSingle();
+    if (error) {
+      console.warn("[tokens/balance] contract exclusions unavailable", error.message);
+      return null;
+    }
+    const slugs = data?.contract_excluded_module_slugs;
+    if (!Array.isArray(slugs)) {
+      console.warn("[tokens/balance] contract exclusions unavailable: no readable row", cloneId);
+      return null;
+    }
+    return slugs;
+  } catch (err) {
+    console.warn("[tokens/balance] contract exclusions unavailable", err);
+    return null;
+  }
+}
 
 export const Route = createFileRoute("/api/public/tokens/balance")({
   server: {
@@ -117,37 +147,36 @@ export const Route = createFileRoute("/api/public/tokens/balance")({
           }
         }
 
+        // The contract's exclusions (D18), price-list slugs read off the
+        // clone. Clones gate on this response alone, so this is the only way
+        // an exclusion reaches one. Best-effort like the reads above: a failed
+        // read never fails the balance. It leaves `excluded` out, and the
+        // clone keeps the exclusions it last knew. A platform-level key has
+        // no clone, so no agreement and nothing excluded.
+        const contractExcluded = addonCloneId ? await readContractExclusions(addonCloneId) : [];
+
         // AML/CTF is entitled by the purchased SKU, never by tier membership.
         // Every tier's headline SKU — the one Stripe charges — includes the
         // module (TIER_INCLUDES_AML), so a tenant on a known tier is entitled
-        // unless a without-AML SKU is recorded. Stating it HERE makes this
-        // response the authoritative answer; clones no longer have to assume.
-        // A future without-AML SKU sets tenants.metadata.aml_excluded and
-        // this stops adding the slug.
-        try {
-          const planSlug = (ten.data as { billing_plans?: { slug?: string | null } | null } | null)
-            ?.billing_plans?.slug;
-          const amlExcluded = Boolean(
-            (ten.data as { metadata?: Record<string, unknown> | null } | null)?.metadata
-              ?.aml_excluded,
-          );
-          if (
-            TIER_INCLUDES_AML &&
-            !amlExcluded &&
-            planSlug &&
-            tierBySlug(planSlug) &&
-            !addonSlugs.includes(AML_MODULE_SLUG)
-          ) {
-            addonSlugs = [...addonSlugs, AML_MODULE_SLUG].sort();
-          }
-        } catch (err) {
-          console.warn("[tokens/balance] AML entitlement derivation failed", err);
-        }
+        // unless a without-AML SKU is recorded or the contract excludes it.
+        // Stating it HERE makes this response the authoritative answer;
+        // clones no longer have to assume. A future without-AML SKU sets
+        // tenants.metadata.aml_excluded and this stops adding the slug.
+        const tenantRow = ten.data as {
+          billing_plans?: { slug?: string | null } | null;
+          metadata?: Record<string, unknown> | null;
+        } | null;
+        const entitlements = balanceEntitlements({
+          addonSlugs,
+          planSlug: tenantRow?.billing_plans?.slug ?? null,
+          amlExcluded: Boolean(tenantRow?.metadata?.aml_excluded),
+          contractExcluded,
+        });
 
         return jsonResponse({
           ok: true,
           tenant: ten.data,
-          entitlements: { addons: addonSlugs },
+          entitlements,
           balance: bal.data ?? {
             available: 0,
             reserved: 0,

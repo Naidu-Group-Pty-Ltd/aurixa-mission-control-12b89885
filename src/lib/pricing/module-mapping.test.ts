@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
   applyContractExclusions,
+  libraryModulesExcludedBy,
+  libraryModulesOf,
   slugify,
   suggestModules,
   mapPricedModule,
@@ -375,30 +377,178 @@ describe("buildFullMapping", () => {
   });
 });
 
+describe("libraryModulesOf", () => {
+  it("is the translation the resolution installs by, for every priced module", () => {
+    // Bought on a plan with no tier baseline, a priced module adds exactly its
+    // library modules to the shell. An exclusion must withhold exactly those,
+    // so the two translations are compared rather than restated.
+    const shell = resolveEntitledModules({ planSlug: "no-such-plan", knownModules: KNOWN });
+    for (const pm of MODULES) {
+      const bought = resolveEntitledModules({
+        planSlug: "no-such-plan",
+        purchasedAddons: [pm.slug],
+        knownModules: KNOWN,
+      });
+      const added = bought.moduleSlugs.filter((s) => !shell.moduleSlugs.includes(s));
+      expect(libraryModulesOf(pm, KNOWN), pm.slug).toEqual(added);
+    }
+  });
+
+  it("takes the operator's override first, and only modules the catalogue holds", () => {
+    const overrides = { "module:market-updates": ["listings", "not-detected"] };
+    expect(libraryModulesOf(priced("market-updates"), KNOWN, overrides)).toEqual(["listings"]);
+  });
+
+  it("maps an entitlement-only item and an external one to nothing", () => {
+    expect(libraryModulesOf(priced("client-ai"), KNOWN)).toEqual([]);
+    expect(libraryModulesOf(priced("builder-developer-portal"), KNOWN)).toEqual([]);
+  });
+});
+
+describe("libraryModulesExcludedBy", () => {
+  it("unions what each excluded price-list slug maps to, and ignores an unknown one", () => {
+    expect(libraryModulesExcludedBy(["commercial-industrial", "aml-ctf", "nope"], KNOWN)).toEqual([
+      "aml",
+      "commercial",
+      "industrial",
+    ]);
+  });
+});
+
 describe("applyContractExclusions", () => {
-  const base = {
-    planSlug: "growth",
-    moduleSlugs: ["platform-core", "market-updates", "call-logs"],
-    entitlementKeys: ["k1"],
-    includedModules: ["market-updates"],
-    addonModules: [],
-    unmapped: [],
-  };
+  const library = { knownModules: KNOWN };
+  const scale = resolveEntitledModules({ planSlug: "scale", knownModules: KNOWN });
+  const launch = resolveEntitledModules({ planSlug: "launch", knownModules: KNOWN });
 
-  it("subtracts excluded modules and names what it removed", () => {
-    const r = applyContractExclusions(base, ["market-updates"]);
-    expect(r.moduleSlugs).toEqual(["platform-core", "call-logs"]);
+  it("takes price-list slugs: an excluded tier module leaves every list it was on", () => {
+    expect(scale.includedModules).toContain("market-updates");
+    expect(scale.moduleSlugs).toContain("market-updates");
+    const r = applyContractExclusions(scale, ["market-updates"], library);
+    expect(r.includedModules).not.toContain("market-updates");
+    expect(r.moduleSlugs).not.toContain("market-updates");
     expect(r.contractExcluded).toEqual(["market-updates"]);
+    // Nothing else moves.
+    expect(r.moduleSlugs).toEqual(scale.moduleSlugs.filter((s) => s !== "market-updates"));
+    expect(r.entitlementKeys).toEqual(scale.entitlementKeys);
   });
 
-  it("an exclusion outside the resolution is inert", () => {
-    const r = applyContractExclusions(base, ["not-in-plan"]);
-    expect(r.moduleSlugs).toEqual(base.moduleSlugs);
+  it("translates a price-list slug into the library modules it maps to", () => {
+    // The library slug was the old vocabulary. The price list calls `aml`
+    // `aml-ctf`, and sells Commercial / Industrial as one line built as two.
+    const r = applyContractExclusions(scale, ["aml-ctf", "commercial-industrial"], library);
+    expect(r.moduleSlugs).not.toContain("aml");
+    expect(r.moduleSlugs).not.toContain("commercial");
+    expect(r.moduleSlugs).not.toContain("industrial");
+    expect(r.includedModules).not.toContain("commercial-industrial");
+  });
+
+  it("removes AML even though the tier's own baseline maps to it as well", () => {
+    // `aml` reaches every tier through the "AML/CTF Compliance" baseline, not
+    // through the priced line. A tier baseline keeps nothing an exclusion names.
+    expect(launch.moduleSlugs).toContain("aml");
+    const r = applyContractExclusions(launch, ["aml-ctf"], library);
+    expect(r.moduleSlugs).not.toContain("aml");
+    expect(r.contractExcluded).toEqual(["aml-ctf"]);
+  });
+
+  it("removes an entitlement-only item's key, which is its only gate", () => {
+    expect(scale.entitlementKeys).toContain("clients.ai");
+    const r = applyContractExclusions(scale, ["client-ai"], library);
+    expect(r.entitlementKeys).not.toContain("clients.ai");
+    expect(r.includedModules).not.toContain("client-ai");
+    // Nothing installs for it, so nothing else leaves.
+    expect(r.moduleSlugs).toEqual(scale.moduleSlugs);
+  });
+
+  it("leaves the keys of a module that installs alone: its module gate wins", () => {
+    const r = applyContractExclusions(scale, ["finance-portal"], library);
+    expect(r.moduleSlugs).not.toContain("finance-portal");
+    expect(r.entitlementKeys).toEqual(scale.entitlementKeys);
+  });
+
+  it("keeps a library module another priced module in effect maps to, and says so", () => {
+    // Two priced lines that share a library module, through overrides. Both
+    // are included at Scale; the contract excludes one.
+    const overrides = {
+      "module:market-updates": ["listings"],
+      "module:opportunity-marketplace": ["listings"],
+    };
+    const resolved = resolveEntitledModules({ planSlug: "scale", knownModules: KNOWN, overrides });
+    const r = applyContractExclusions(resolved, ["market-updates"], {
+      knownModules: KNOWN,
+      overrides,
+    });
+    expect(r.moduleSlugs).toContain("listings");
+    expect(r.includedModules).not.toContain("market-updates");
+    expect(r.sharedModulesKept).toEqual([
+      {
+        moduleSlug: "listings",
+        excludedBy: ["market-updates"],
+        keptFor: ["opportunity-marketplace"],
+      },
+    ]);
+  });
+
+  it("keeps a shared module only for a priced module this resolution still has", () => {
+    // Model Hub is not bought and not in Launch, so it keeps nothing.
+    const overrides = {
+      "module:client-forms": ["model-hub"],
+      "module:model-hub": ["model-hub"],
+    };
+    const resolved = resolveEntitledModules({ planSlug: "launch", knownModules: KNOWN, overrides });
+    expect(resolved.moduleSlugs).toContain("model-hub");
+    const r = applyContractExclusions(resolved, ["client-forms"], {
+      knownModules: KNOWN,
+      overrides,
+    });
+    expect(r.moduleSlugs).not.toContain("model-hub");
+    expect(r.sharedModulesKept).toEqual([]);
+  });
+
+  it("translates through the operator's override first", () => {
+    // Nothing else at Scale maps to `email`, so only the override put it there.
+    const overrides = { "module:market-updates": ["email"] };
+    const resolved = resolveEntitledModules({ planSlug: "scale", knownModules: KNOWN, overrides });
+    expect(resolved.moduleSlugs).toContain("email");
+    const r = applyContractExclusions(resolved, ["market-updates"], {
+      knownModules: KNOWN,
+      overrides,
+    });
+    expect(r.moduleSlugs).not.toContain("email");
+    expect(r.sharedModulesKept).toEqual([]);
+  });
+
+  it("an exclusion wins over an add-on bought on top of the tier", () => {
+    const resolved = resolveEntitledModules({
+      planSlug: "launch",
+      purchasedAddons: ["call-logs"],
+      knownModules: KNOWN,
+    });
+    const r = applyContractExclusions(resolved, ["call-logs"], library);
+    expect(r.addonModules).not.toContain("call-logs");
+    expect(r.moduleSlugs).not.toContain("call-logs");
+  });
+
+  it("an exclusion of a module the plan does not include changes nothing, and holds", () => {
+    const r = applyContractExclusions(launch, ["finance-portal"], library);
+    expect(r.moduleSlugs).toEqual(launch.moduleSlugs);
+    expect(r.includedModules).toEqual(launch.includedModules);
+    expect(r.addonModules).toEqual(launch.addonModules);
+    expect(r.entitlementKeys).toEqual(launch.entitlementKeys);
+    // Still in effect: it is what stops a later upgrade handing it back.
+    expect(r.contractExcluded).toEqual(["finance-portal"]);
+  });
+
+  it("reports a slug the price list does not know, and subtracts nothing for it", () => {
+    // `aml` is a LIBRARY slug. Read as a price-list slug it names nothing.
+    const r = applyContractExclusions(launch, ["aml", "not-a-module"], library);
+    expect(r.unknownExclusions).toEqual(["aml", "not-a-module"]);
     expect(r.contractExcluded).toEqual([]);
+    expect(r.moduleSlugs).toEqual(launch.moduleSlugs);
   });
 
-  it("leaves entitlement keys alone — the module gate wins anyway", () => {
-    const r = applyContractExclusions(base, ["market-updates"]);
-    expect(r.entitlementKeys).toEqual(["k1"]);
+  it("reports the exclusions in effect sorted and de-duplicated", () => {
+    const r = applyContractExclusions(scale, ["marketing", "aml-ctf", "marketing"], library);
+    expect(r.contractExcluded).toEqual(["aml-ctf", "marketing"]);
   });
 });

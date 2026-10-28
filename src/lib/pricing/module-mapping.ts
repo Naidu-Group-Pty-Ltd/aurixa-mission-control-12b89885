@@ -31,7 +31,8 @@
  * Pure and dependency-free so the whole table can be asserted in tests.
  */
 
-import { MODULES, TIERS, type PricedModule } from "./aurixa-catalog";
+import { MODULES, TIERS, moduleBySlug, type PricedModule } from "./aurixa-catalog";
+import { sortedUniqueSlugs, unknownExclusionSlugs } from "./contract-exclusions";
 import { SUB_MODULE_MATRIX, tierEnablesSubModule } from "./sub-module-matrix";
 import { TIER_FEATURES } from "./tier-features";
 
@@ -513,27 +514,148 @@ export function diffModules(installed: readonly string[], entitled: readonly str
 // ─── Contractual exclusions ──────────────────────────────────────────
 
 /**
- * Subtract the modules a signed agreement contractually excluded.
+ * The library modules one priced module puts on a clone: the operator's
+ * override (`module:<slug>`) when there is one, else the derived mapping.
+ *
+ * It is the translation `resolveEntitledModules` installs by, so an exclusion
+ * withholds exactly what buying the module would have installed. Empty for an
+ * entitlement-only item, for one another deployment serves, and for one
+ * nothing maps.
+ */
+export function libraryModulesOf(
+  pm: PricedModule,
+  knownModules: ReadonlySet<string>,
+  overrides: Readonly<Record<string, readonly string[]>> = {},
+): string[] {
+  const override = overrides[`module:${pm.slug}`];
+  if (override) return sortedUniqueSlugs(override.filter((s) => knownModules.has(s)));
+  return sortedUniqueSlugs(mapPricedModule(pm, knownModules).moduleSlugs);
+}
+
+/**
+ * Every library module the excluded price-list slugs map to, through
+ * `libraryModulesOf`. A slug the price list does not know maps to nothing.
+ *
+ * Provisioning drops these from the modules picked for a new clone
+ * (`effectiveModuleIds`). Whether one of them stays because another priced
+ * module needs it is the reconcile's decision (`applyContractExclusions`), and
+ * the reconcile reinstalls what it keeps.
+ */
+export function libraryModulesExcludedBy(
+  excludedSlugs: readonly string[],
+  knownModules: ReadonlySet<string>,
+  overrides: Readonly<Record<string, readonly string[]>> = {},
+): string[] {
+  const out = new Set<string>();
+  for (const slug of new Set(excludedSlugs)) {
+    const pm = moduleBySlug(slug);
+    if (!pm) continue;
+    for (const s of libraryModulesOf(pm, knownModules, overrides)) out.add(s);
+  }
+  return [...out].sort();
+}
+
+export type ContractExclusionOutcome = {
+  /** The price-list slugs in effect: every recorded exclusion the price list knows, sorted. */
+  contractExcluded: string[];
+  /**
+   * Recorded exclusions the price list does not know. Reported, never dropped
+   * silently, and never subtracted: nothing says what they would remove.
+   */
+  unknownExclusions: string[];
+  /**
+   * Library modules an excluded priced module maps to that stay, because a
+   * priced module this resolution still includes or sells maps to them too.
+   */
+  sharedModulesKept: Array<{ moduleSlug: string; excludedBy: string[]; keptFor: string[] }>;
+};
+
+/**
+ * Subtract what a signed agreement contractually excluded.
  *
  * Applied to every resolution — initial provisioning, upgrades, downgrades,
  * manual reconciles — because the failure mode this prevents is the quiet
  * one: a plan change re-resolving the tier's full set and re-installing
- * exactly what the client bargained away. An exclusion naming a module the
- * plan does not include anyway is inert (it documents the negotiation).
+ * exactly what the client bargained away.
  *
- * Entitlement KEYS are left alone on purpose: a key gates a sub-feature
- * inside a module, and the module gate itself already wins — an excluded
- * module's tabs cannot render whatever its keys say.
+ * An exclusion is a price-list slug (`contract-exclusions.ts`). For each one
+ * the price list knows:
+ *
+ *  - it leaves `includedModules` and `addonModules`;
+ *  - the library modules it maps to (`libraryModulesOf`) leave `moduleSlugs`,
+ *    except one that a priced module still in effect also maps to. That one
+ *    stays and is reported in `sharedModulesKept`. A tier's baseline features
+ *    keep nothing: the AML/CTF baseline maps to `aml` as well, and excluding
+ *    `aml-ctf` has to remove it;
+ *  - its `ENTITLEMENT_ONLY_MODULES` key leaves `entitlementKeys`. For an
+ *    entitlement-only item such as `client-ai` that key is the only gate there
+ *    is, since nothing installs for it. The keys of a module that installs are
+ *    left alone, because the module gate already wins: an excluded module's
+ *    tabs cannot render whatever its keys say.
+ *
+ * An exclusion of a priced module the plan does not include changes nothing
+ * and stays in `contractExcluded`: it documents the negotiation, and it holds
+ * if the plan later changes to one that includes the module.
  */
 export function applyContractExclusions(
   resolution: EntitlementResolution,
   excludedSlugs: readonly string[],
-): EntitlementResolution & { contractExcluded: string[] } {
-  const excluded = new Set(excludedSlugs);
-  const contractExcluded = resolution.moduleSlugs.filter((s) => excluded.has(s)).sort();
+  library: {
+    /** Live detected module slugs, as `resolveEntitledModules` was given them. */
+    knownModules: ReadonlySet<string>;
+    /** Operator overrides, as `resolveEntitledModules` was given them. */
+    overrides?: Readonly<Record<string, readonly string[]>>;
+  },
+): EntitlementResolution & ContractExclusionOutcome {
+  const { knownModules, overrides = {} } = library;
+  const unknownExclusions = unknownExclusionSlugs(excludedSlugs);
+  const contractExcluded = sortedUniqueSlugs(excludedSlugs.filter((s) => moduleBySlug(s)));
+  const excluded = new Set(contractExcluded);
+
+  const includedModules = resolution.includedModules.filter((s) => !excluded.has(s));
+  const addonModules = resolution.addonModules.filter((s) => !excluded.has(s));
+
+  // Library module → the priced modules mapping to it, on each side.
+  const mappedBy = (slugs: readonly string[]): Map<string, string[]> => {
+    const out = new Map<string, string[]>();
+    for (const slug of slugs) {
+      const pm = moduleBySlug(slug);
+      if (!pm) continue;
+      for (const lib of libraryModulesOf(pm, knownModules, overrides)) {
+        out.set(lib, [...(out.get(lib) ?? []), slug]);
+      }
+    }
+    return out;
+  };
+  const withheld = mappedBy(contractExcluded);
+  const stillNeeded = mappedBy([...includedModules, ...addonModules]);
+
+  const sharedModulesKept: ContractExclusionOutcome["sharedModulesKept"] = [];
+  const moduleSlugs = resolution.moduleSlugs.filter((lib) => {
+    const excludedBy = withheld.get(lib);
+    if (!excludedBy) return true;
+    const keptFor = stillNeeded.get(lib);
+    if (!keptFor) return false;
+    sharedModulesKept.push({
+      moduleSlug: lib,
+      excludedBy: sortedUniqueSlugs(excludedBy),
+      keptFor: sortedUniqueSlugs(keptFor),
+    });
+    return true;
+  });
+
+  const withheldKeys = new Set(
+    contractExcluded.map((s) => ENTITLEMENT_ONLY_MODULES[s]).filter((k): k is string => !!k),
+  );
+
   return {
     ...resolution,
-    moduleSlugs: resolution.moduleSlugs.filter((s) => !excluded.has(s)),
+    moduleSlugs,
+    entitlementKeys: resolution.entitlementKeys.filter((k) => !withheldKeys.has(k)),
+    includedModules,
+    addonModules,
     contractExcluded,
+    unknownExclusions,
+    sharedModulesKept,
   };
 }
