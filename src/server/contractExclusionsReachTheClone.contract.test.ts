@@ -114,6 +114,13 @@ describe("the balance response", () => {
     expect(balance).toMatch(/\n\s*entitlements,\n/);
     expect(balance).not.toMatch(/entitlements: \{/);
   });
+
+  it("hands the helper the tenant's billing exemption, from the tenant it read (D17)", () => {
+    const select = balance.slice(balance.indexOf('.from("tenants")'));
+    expect(select.slice(0, 400)).toMatch(/billing_exempt/);
+    const call = balance.slice(balance.indexOf("balanceEntitlements({"));
+    expect(call.slice(0, 400)).toMatch(/billingExempt: tenantRow\?\.billing_exempt === true,/);
+  });
 });
 
 describe("the superseded column", () => {

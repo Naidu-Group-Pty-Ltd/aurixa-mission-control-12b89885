@@ -192,6 +192,11 @@ entitlements: { addons: string[], excluded?: string[] }
 
 - `addons` — the add-ons the clone holds, plus `aml-ctf` on a known tier unless
   a without-AML SKU is recorded. It never contains an excluded slug.
+  - For a billing-exempt tenant (`tenant.billing_exempt`, only the prime's), it
+    is every slug on the price list, less the exclusions. Cache it as you cache
+    any other answer: the cached list is what lets an exempt workspace keep its
+    add-on-only modules through an outage. Never cache the exemption itself,
+    which also waives metering.
 - `excluded` — what the clone's signed agreement took out of its tier, sorted
   and de-duplicated. It is present, possibly `[]`, whenever Mission Control
   read the clone's row, and `[]` for a platform-level key, which has no clone.

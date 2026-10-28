@@ -162,7 +162,12 @@ export const Route = createFileRoute("/api/public/tokens/balance")({
         // Stating it HERE makes this response the authoritative answer;
         // clones no longer have to assume. A future without-AML SKU sets
         // tenants.metadata.aml_excluded and this stops adding the slug.
+        //
+        // A billing-exempt tenant holds every module on the price list (D17),
+        // so the prime's last-known-good cache keeps what its exemption grants
+        // through an outage of this endpoint.
         const tenantRow = ten.data as {
+          billing_exempt?: boolean | null;
           billing_plans?: { slug?: string | null } | null;
           metadata?: Record<string, unknown> | null;
         } | null;
@@ -171,6 +176,7 @@ export const Route = createFileRoute("/api/public/tokens/balance")({
           planSlug: tenantRow?.billing_plans?.slug ?? null,
           amlExcluded: Boolean(tenantRow?.metadata?.aml_excluded),
           contractExcluded,
+          billingExempt: tenantRow?.billing_exempt === true,
         });
 
         return jsonResponse({
