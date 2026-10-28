@@ -56,6 +56,10 @@ import {
   mapResendDomainStatus,
   mayAlignSenderAddress,
   missingKeyPatch,
+  identityLedgerFromListing,
+  IDENTITY_SECRET_NAMES,
+  CLONE_RESEND_SECRET,
+  CLONE_RESEND_FROM_SECRET,
   decideEmailIdentitySweep,
   expectedDnsProbes,
   planDnsInstallation,
@@ -71,7 +75,7 @@ import { resolveCloneSecretTarget, CloneSecretTargetError } from "./cloneAllowed
 
 type Db = SupabaseClient<Database>;
 
-export const CLONE_RESEND_SECRET = "RESEND_API_KEY";
+export { CLONE_RESEND_SECRET } from "./cloneEmailIdentity.pure";
 
 /**
  * The address the clone may send from, written beside the key.
@@ -88,7 +92,7 @@ export const CLONE_RESEND_SECRET = "RESEND_API_KEY";
  * key makes it the only address that can work; the tenant's own contact
  * address remains the tenant's, and remains what appears in body copy.
  */
-export const CLONE_RESEND_FROM_SECRET = "RESEND_FROM_EMAIL";
+export { CLONE_RESEND_FROM_SECRET } from "./cloneEmailIdentity.pure";
 
 const RESEND_REGIONS = new Set(["us-east-1", "eu-west-1", "sa-east-1", "ap-northeast-1"]);
 
@@ -1067,6 +1071,8 @@ export type EmailAuditReport = {
   /** Whether Resend's listings were read to the end; an incomplete one proves no absence. */
   domainsComplete: boolean | null;
   keysComplete: boolean | null;
+  /** Healthy identities whose two secrets the clone's own project listed. */
+  confirmedOnClone: number;
   detail: Array<{ cloneId: string; outcome: string; note?: string }>;
 };
 
@@ -1111,6 +1117,7 @@ export async function auditEmailIdentities(
     failed: 0,
     domainsComplete: null,
     keysComplete: null,
+    confirmedOnClone: 0,
     detail: [],
   };
   if (!isResendConfigured()) return report;
@@ -1171,6 +1178,27 @@ export async function auditEmailIdentities(
         });
       }
       const needsWork = verdict.kind !== "healthy";
+      // Healthy on Resend's side: now ask the clone. Resend holding the key
+      // says nothing about whether the clone's project does, and the ledger
+      // the secrets page shows is only as true as this read makes it.
+      if (!needsWork) {
+        const onClone = await confirmIdentityOnClone(supabase, identity);
+        if (!onClone.checked) {
+          report.detail.push({
+            cloneId: identity.clone_id,
+            outcome: "clone_unread",
+            note: onClone.note,
+          });
+        } else if (onClone.absent.length > 0) {
+          report.detail.push({
+            cloneId: identity.clone_id,
+            outcome: "absent_on_clone",
+            note: onClone.absent.join(","),
+          });
+        } else {
+          report.confirmedOnClone += 1;
+        }
+      }
       // A healthy identity is only re-asserted where this platform owns its
       // DNS; one handed to an operator has nothing here to correct.
       if (!needsWork && identity.dns_installed_via !== "cloudflare") {
@@ -1206,6 +1234,62 @@ export async function auditEmailIdentities(
     }
   }
   return report;
+}
+
+/**
+ * Make the ledger say what the clone's project holds of the identity's two
+ * secrets, read from the project's own listing (`identityLedgerFromListing`
+ * decides; see it for the seven weeks the two disagreed).
+ *
+ * Never throws, and never reads an unreadable project as an empty one: a
+ * refused target, a failed listing or a failed ledger read leaves the ledger
+ * as it was and says why. It only reports an absence. Rotating the key is an
+ * operator's act, because it writes both secrets, and any secret write bumps
+ * every one of the clone's function versions (`secretWriteDiff.pure.ts`).
+ */
+async function confirmIdentityOnClone(
+  supabase: Db,
+  identity: Pick<EmailIdentityRow, "clone_id" | "key_written_at" | "from_address_written_at">,
+): Promise<{ checked: true; absent: string[] } | { checked: false; note: string }> {
+  try {
+    const target = await resolveCloneSecretTarget(supabase, identity.clone_id);
+    // Imported where it is used, as `setCloneSecretValues` is above: the
+    // module reaches backend-provisioning, which this one must not load first.
+    const { readHeldSecretNames } = await import("./cloneProhibitedSecrets.server");
+    const listing = await readHeldSecretNames(target.projectRef);
+    if (!listing.ok) return { checked: false, note: listing.error };
+
+    const { data, error } = await supabase
+      .from("clone_backend_secrets")
+      .select("name, status, last_error")
+      .eq("clone_id", identity.clone_id)
+      .in("name", [...IDENTITY_SECRET_NAMES]);
+    if (error) return { checked: false, note: `ledger read failed: ${error.message}` };
+
+    const plan = identityLedgerFromListing({
+      identity,
+      listed: new Set(listing.names),
+      ledger: new Map(
+        (data ?? []).map((r) => [r.name, { status: r.status, last_error: r.last_error }]),
+      ),
+    });
+    for (const w of plan.writes) {
+      const { error: writeError } = await supabase.from("clone_backend_secrets").upsert(
+        {
+          clone_id: identity.clone_id,
+          name: w.name,
+          status: w.status,
+          last_set_at: w.last_set_at,
+          last_error: w.last_error,
+        },
+        { onConflict: "clone_id,name" },
+      );
+      if (writeError) return { checked: false, note: `ledger write failed: ${writeError.message}` };
+    }
+    return { checked: true, absent: plan.absent };
+  } catch (e) {
+    return { checked: false, note: msg(e) };
+  }
 }
 
 /**
@@ -1296,15 +1380,17 @@ async function mintAndWriteKey(
     default_from_address: fromAddress,
     last_error: null,
   });
+  // Both rows: the two were written in one request, and stamping only the key
+  // left every clone's RESEND_FROM_EMAIL row reading `missing` beside it.
   const { error: trackErr } = await supabase.from("clone_backend_secrets").upsert(
-    {
+    [CLONE_RESEND_SECRET, CLONE_RESEND_FROM_SECRET].map((name) => ({
       clone_id: cloneId,
-      name: CLONE_RESEND_SECRET,
+      name,
       status: "set",
       last_set_at: now,
       last_error: null,
       set_by: actorUserId,
-    },
+    })),
     { onConflict: "clone_id,name" },
   );
   if (trackErr) console.error("[email-identity] secret ledger upsert failed:", trackErr.message);

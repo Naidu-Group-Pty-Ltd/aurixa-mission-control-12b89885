@@ -8,6 +8,8 @@ import {
   keyOwed,
   mapResendDomainStatus,
   missingKeyPatch,
+  identityLedgerFromListing,
+  IDENTITY_SECRET_ABSENT_NOTE,
   planDnsRecordSync,
   vanishedDomainPatch,
   EMAIL_AUDIT_EVERY_MS,
@@ -1164,5 +1166,94 @@ describe("isEmailAuditPass", () => {
 
   it("never fires on an unusable clock", () => {
     expect(isEmailAuditPass(Number.NaN)).toBe(false);
+  });
+});
+
+describe("identityLedgerFromListing", () => {
+  // Preflight's identity and ledger as Mission Control held them on 28 Oct 2026.
+  const identity = {
+    key_written_at: "2026-09-03T16:00:29.894Z",
+    from_address_written_at: "2026-09-03T16:00:29.894Z",
+  };
+  const stale = new Map([
+    ["RESEND_API_KEY", { status: "missing", last_error: "" }],
+    ["RESEND_FROM_EMAIL", { status: "missing", last_error: "" }],
+  ]);
+
+  it("says set, at the identity's write, for both names the project lists", () => {
+    const plan = identityLedgerFromListing({
+      identity,
+      listed: new Set(["RESEND_API_KEY", "RESEND_FROM_EMAIL", "SUPABASE_URL"]),
+      ledger: stale,
+    });
+    expect(plan.absent).toEqual([]);
+    expect(plan.writes).toEqual([
+      {
+        name: "RESEND_API_KEY",
+        status: "set",
+        last_set_at: identity.key_written_at,
+        last_error: null,
+      },
+      {
+        name: "RESEND_FROM_EMAIL",
+        status: "set",
+        last_set_at: identity.from_address_written_at,
+        last_error: null,
+      },
+    ]);
+  });
+
+  it("writes nothing over a ledger that already reads true", () => {
+    const plan = identityLedgerFromListing({
+      identity,
+      listed: new Set(["RESEND_API_KEY", "RESEND_FROM_EMAIL"]),
+      ledger: new Map([
+        ["RESEND_API_KEY", { status: "set", last_error: null }],
+        ["RESEND_FROM_EMAIL", { status: "set", last_error: null }],
+      ]),
+    });
+    expect(plan).toEqual({ writes: [], absent: [] });
+  });
+
+  it("says missing, with the remedy, for a name the project does not list", () => {
+    const plan = identityLedgerFromListing({
+      identity,
+      listed: new Set(["RESEND_FROM_EMAIL"]),
+      ledger: new Map([["RESEND_FROM_EMAIL", { status: "set", last_error: null }]]),
+    });
+    expect(plan.absent).toEqual(["RESEND_API_KEY"]);
+    expect(plan.writes).toEqual([
+      {
+        name: "RESEND_API_KEY",
+        status: "missing",
+        last_set_at: null,
+        last_error: IDENTITY_SECRET_ABSENT_NOTE,
+      },
+    ]);
+  });
+
+  it("reports an absence every pass, and writes it once", () => {
+    const plan = identityLedgerFromListing({
+      identity,
+      listed: new Set(),
+      ledger: new Map([
+        ["RESEND_API_KEY", { status: "missing", last_error: IDENTITY_SECRET_ABSENT_NOTE }],
+        ["RESEND_FROM_EMAIL", { status: "missing", last_error: IDENTITY_SECRET_ABSENT_NOTE }],
+      ]),
+    });
+    expect(plan.absent).toEqual(["RESEND_API_KEY", "RESEND_FROM_EMAIL"]);
+    expect(plan.writes).toEqual([]);
+  });
+
+  it("writes a row the ledger never had", () => {
+    const plan = identityLedgerFromListing({
+      identity,
+      listed: new Set(["RESEND_API_KEY", "RESEND_FROM_EMAIL"]),
+      ledger: new Map(),
+    });
+    expect(plan.writes.map((w) => [w.name, w.status])).toEqual([
+      ["RESEND_API_KEY", "set"],
+      ["RESEND_FROM_EMAIL", "set"],
+    ]);
   });
 });
