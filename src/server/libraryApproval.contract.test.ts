@@ -221,4 +221,19 @@ describe("the migration the refusals name", () => {
     );
     expect(sql).not.toMatch(/NOT NULL|DEFAULT|\bUPDATE\b|\bINSERT\b|\bDELETE\b/i);
   });
+
+  it("holds every writer to the rule: an approved entry records a commit, and a run a commit or nothing", () => {
+    // Row-level security lets an operator write both tables directly, so the
+    // rule is the database's as well as this code's. A CHECK whose expression
+    // is NULL passes, so the entry's must not be able to come out NULL.
+    const sql = readFileSync(file, "utf8").replace(/--[^\n]*/g, "");
+    expect(sql).toMatch(
+      /ADD CONSTRAINT module_library_approved_at_a_commit\s+CHECK \(approval_status <> 'approved' OR coalesce\(source_commit_sha ~ '\^\[0-9a-f\]\{40\}\$', false\)\);/,
+    );
+    expect(sql).toMatch(
+      /ADD CONSTRAINT module_detection_runs_commit_sha_is_a_commit\s+CHECK \(commit_sha IS NULL OR commit_sha ~ '\^\[0-9a-f\]\{40\}\$'\);/,
+    );
+    // Re-runnable: each is added only where it is absent.
+    expect(sql.match(/IF NOT EXISTS \(\s*SELECT 1 FROM pg_constraint/g)?.length).toBe(2);
+  });
 });

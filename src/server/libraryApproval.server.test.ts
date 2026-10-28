@@ -345,6 +345,19 @@ describe("approving an entry already published", () => {
     });
   });
 
+  it("is refused by the database itself when a writer steps around this code", async () => {
+    // Row-level security lets an operator write module_library directly, so
+    // 20261028120000 makes the rule the database's too.
+    seed({ module_library: [entry("legacy", null)] });
+    const { error } = await db
+      .from("module_library")
+      .update({ approval_status: "approved", approved_by: OPERATOR })
+      .eq("id", "legacy");
+    expect(error).toMatchObject({ code: "23514" });
+    expect(error.message).toContain("module_library_approved_at_a_commit");
+    expect(library()[0].approval_status).toBe("pending");
+  });
+
   it("still lets an entry without a commit be rejected", async () => {
     seed({ module_library: [entry("legacy", null)] });
     const answer = await decideLibraryEntry(client(), {

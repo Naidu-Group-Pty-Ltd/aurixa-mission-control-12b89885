@@ -296,6 +296,37 @@ function violation(table: Table, row: Row): PgError | null {
       hint: null,
     };
   }
+  // 20261028120000: an approved entry records a commit, and a run records a
+  // commit or nothing. Postgres passes a CHECK whose expression is NULL, which
+  // is why the entry's is written with coalesce there.
+  const isCommit = (v: unknown) => typeof v === "string" && /^[0-9a-f]{40}$/.test(v);
+  if (
+    table === "module_library" &&
+    row.approval_status === "approved" &&
+    !isCommit(row.source_commit_sha)
+  ) {
+    return {
+      message:
+        'new row for relation "module_library" violates check constraint "module_library_approved_at_a_commit"',
+      code: "23514",
+      details: null,
+      hint: null,
+    };
+  }
+  if (
+    table === "module_detection_runs" &&
+    row.commit_sha !== null &&
+    row.commit_sha !== undefined &&
+    !isCommit(row.commit_sha)
+  ) {
+    return {
+      message:
+        'new row for relation "module_detection_runs" violates check constraint "module_detection_runs_commit_sha_is_a_commit"',
+      code: "23514",
+      details: null,
+      hint: null,
+    };
+  }
   if (
     table === "notifications" &&
     !(Constants.public.Enums.notification_kind as readonly string[]).includes(String(row.kind))

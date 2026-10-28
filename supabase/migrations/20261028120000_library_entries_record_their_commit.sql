@@ -45,3 +45,39 @@ COMMENT ON COLUMN public.module_detection_runs.commit_sha IS
 
 COMMENT ON COLUMN public.module_library.source_commit_sha IS
   'The prime commit this entry was approved at: the commit_sha of the detection run that detected its module, copied when an admin published it, which approves it. NULL on entries published before 20261028120000; such an entry cannot be approved or pinned.';
+
+-- The rule holds for every writer, not only for Mission Control's code.
+-- Row-level security lets any operator write these two tables directly, so a
+-- rule kept only in libraryApproval.server.ts is one a request to the API can
+-- step around: an entry approved with no commit, or a run recording a value
+-- that is not one. A CHECK whose expression is NULL passes, so the entry's is
+-- written with coalesce: an approved entry with no commit is refused, not
+-- admitted.
+--
+-- Both hold for every existing row (measured before this migration: no entry
+-- is approved, and no run can record a commit before the column exists), so
+-- each is validated as it is added. Re-running finds each by name and adds
+-- nothing.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'module_library_approved_at_a_commit'
+      AND conrelid = 'public.module_library'::regclass
+  ) THEN
+    ALTER TABLE public.module_library
+      ADD CONSTRAINT module_library_approved_at_a_commit
+      CHECK (approval_status <> 'approved' OR coalesce(source_commit_sha ~ '^[0-9a-f]{40}$', false));
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'module_detection_runs_commit_sha_is_a_commit'
+      AND conrelid = 'public.module_detection_runs'::regclass
+  ) THEN
+    ALTER TABLE public.module_detection_runs
+      ADD CONSTRAINT module_detection_runs_commit_sha_is_a_commit
+      CHECK (commit_sha IS NULL OR commit_sha ~ '^[0-9a-f]{40}$');
+  END IF;
+END
+$$;
