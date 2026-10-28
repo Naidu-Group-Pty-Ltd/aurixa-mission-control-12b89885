@@ -467,8 +467,8 @@ export type ApplicantEmailEvidence =
  * an HTTP module inside the scenario itself. So a row existing at all means
  * the scenario ran, which means the Airtable record exists, which means the
  * mirror has something to link and will stamp this row on its next pass.
- * An unlinked row is a row waiting for the next hourly sync, never a row
- * waiting for ever, and `maxAgeMs` is 72 hours against that one hour.
+ * An unlinked row is a row waiting for the next sync, never a row waiting
+ * for ever, and `maxAgeMs` is 72 hours against the six between syncs.
  *
  * Which also says what the backstop is actually FOR. Not "the scenario never
  * ran" — that population cannot reach this table. It is "the scenario ran,
