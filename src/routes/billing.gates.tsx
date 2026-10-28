@@ -311,7 +311,7 @@ function GateRow({ row, onDone }: { row: GateListRow; onDone: () => void }) {
             {gate && (
               <>
                 <span aria-hidden>·</span>
-                <span>{money(gate.amount_due_cents, gate.currency ?? "AUD")}</span>
+                <span>{money(row.quote?.amountDueCents, row.quote?.currency ?? "AUD")}</span>
                 <span aria-hidden>·</span>
                 <span>
                   {gate.locks_at

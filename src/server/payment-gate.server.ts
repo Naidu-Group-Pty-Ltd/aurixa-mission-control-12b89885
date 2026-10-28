@@ -97,8 +97,9 @@ export async function resolvePlanPricing(planSlug: string | null | undefined): P
       // alternative". The raw field is the BASE — $2,015 where Scale bills
       // $2,210, $504 where Launch bills $699.
       //
-      // This figure is not decoration. It is stamped onto the gate at arming
-      // and is later handed to `seatPlanForTier` as the quoted price, which
+      // This figure is not decoration. It is what a gate quotes (`gateQuote`
+      // below reads it each time a gate is shown), and the activation
+      // checkout hands it to `seatPlanForTier` as the quoted price, which
       // refuses any catalogue row whose `price_cents` disagrees — deliberately,
       // because that guard is what stops a customer being charged something
       // other than what they were shown. Quoting the base therefore did not
@@ -125,6 +126,47 @@ export async function resolvePlanPricing(planSlug: string | null | undefined): P
     planName: data.name ?? null,
     amountDueCents: typeof data.price_cents === "number" ? data.price_cents : null,
     currency: (data.currency ?? "AUD").toUpperCase(),
+  };
+}
+
+export type GateQuote = {
+  planName: string | null;
+  amountDueCents: number | null;
+  currency: string;
+};
+
+/**
+ * What a gate asks for today: its plan's price as the catalogue states it now.
+ *
+ * ## Not the figure stamped at arming
+ *
+ * `amount_due_cents` is what the plan cost on the day the gate was armed, and
+ * nothing re-stamps it. The catalogue's rows were repriced on 27 Sep 2026
+ * (`seat_plans.updated_at`: Launch $699 → $999, Scale $2,210 → $2,699), and
+ * all four gates on the fleet had been armed before then, so all four went on
+ * quoting the old figure. On NPC Test on 28 Oct 2026 the lock screen read "Pay
+ * A$699.00 and unlock"; the checkout held Stripe's $999 row to that $699
+ * quote, refused it as `price_mismatch`, and the pay button failed. The owner
+ * ruled the same day that a gate charges its plan's current price.
+ *
+ * So the PLAN stays the one the gate was armed for, which is what the column's
+ * comment means by "what the customer was asked to pay", and the PRICE is read
+ * from the one place that owns it whenever a gate is shown: by the verdict the
+ * lock screen renders, by the 402 the guard returns, and by the checkout as the
+ * quote it holds Stripe's row to. Three readers of one function cannot
+ * disagree, and the price assertion depends on exactly that: the figure the
+ * customer was shown is the figure the row must cost. The stamp stays on the
+ * row as the record of what was quoted at arming.
+ *
+ * A plan nothing can price answers null, unknown rather than zero, and the
+ * lock screen then shows no amount instead of a stale one.
+ */
+export async function gateQuote(row: Pick<GateRow, "plan_slug" | "plan_name">): Promise<GateQuote> {
+  const pricing = await resolvePlanPricing(row.plan_slug);
+  return {
+    planName: pricing.planName ?? row.plan_name ?? null,
+    amountDueCents: pricing.amountDueCents,
+    currency: pricing.currency,
   };
 }
 
@@ -971,13 +1013,15 @@ export async function assertGateOpen(cloneId: string | null): Promise<GateGuard>
   const state = resolveGateState(factsOf(read.row));
   if (!state.locked) return { open: true };
 
+  // The price the lock screen shows, not the one stamped at arming.
+  const quote = await gateQuote(read.row);
   return {
     open: false,
     reason: state.reason,
     locksAt: state.locksAt,
     planSlug: read.row.plan_slug,
-    amountDueCents: read.row.amount_due_cents,
-    currency: read.row.currency ?? "AUD",
+    amountDueCents: quote.amountDueCents,
+    currency: quote.currency,
   };
 }
 

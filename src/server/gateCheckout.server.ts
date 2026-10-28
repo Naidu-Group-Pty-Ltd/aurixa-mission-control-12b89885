@@ -41,16 +41,18 @@
  * Every refusal except `operator_locked` carries a pricing URL, so a customer
  * always has somewhere to pay. That one does not, on purpose: a link to buy
  * would invite a second subscription that opens nothing, and the remedy is a
- * person.
+ * person. The URL names the workspace (`gatePricingUrl`), so the pricing page
+ * says who the purchase is for.
  */
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { startCheckoutCore } from "@/server/checkout.server";
 import { resolveCloneBillingTenant } from "@/server/billing-tenant.server";
 import { normalizeBillingContact } from "@/server/billing-contact.server";
-import { factsOf, logGateEvent, readGate } from "@/server/payment-gate.server";
+import { factsOf, gateQuote, logGateEvent, readGate } from "@/server/payment-gate.server";
 import { resolveGateState } from "@/lib/clonePaymentGate.pure";
 import { storefrontPricingBase } from "@/server/billing-handoffs.server";
 import { seatPlanForTier } from "@/lib/pricing/seatPlanForTier.pure";
+import { topupLinkFor } from "@/lib/storefront";
 
 /** Who asked. Reaches the gate event and the purchase attribution, so a
  *  customer-started activation can be told from one an operator sent. */
@@ -162,6 +164,25 @@ function activationUrl(base: string, outcome: "success" | "cancelled"): string {
   return outcome === "success" ? `${out}&session_id={CHECKOUT_SESSION_ID}` : out;
 }
 
+/**
+ * Where a customer of this workspace can always pay: the Aurixa Systems
+ * pricing page, scoped to the workspace by its billing id.
+ *
+ * Until 28 Oct 2026 every refusal below carried the bare pricing page, and the
+ * lock screen shows a refusal's URL in place of the verdict's. So the one link
+ * a customer was offered after the pay button failed opened a page that could
+ * not say which workspace it was selling to, and withheld its Buy buttons. The
+ * scoped form is the one the top-up CTA falls back to (`topupLinkFor`): the
+ * storefront resolves the id to the workspace's name and a purchase made there
+ * is credited to it, which opens the gate. A workspace with no billing id gets
+ * the browse-only page, never another tenant's.
+ *
+ * The verdict route hands out the same URL, so the two cannot disagree.
+ */
+export function gatePricingUrl(billingUserId: string | null | undefined): string {
+  return topupLinkFor(storefrontPricingBase(), billingUserId?.trim() || null);
+}
+
 export async function mintGateActivationCheckout(input: {
   cloneId: string;
   /** Where Stripe returns the buyer. Falls back to the clone's own deploy URL,
@@ -174,15 +195,25 @@ export async function mintGateActivationCheckout(input: {
 }): Promise<GateCheckoutResult> {
   const pricingBase = storefrontPricingBase();
 
-  const read = await readGate(input.cloneId);
+  // The clone first, so every refusal can name the workspace it is for.
+  const [read, { data: clone }] = await Promise.all([
+    readGate(input.cloneId),
+    supabaseAdmin
+      .from("clones")
+      .select("id, name, slug, billing_user_id, deploy_url")
+      .eq("id", input.cloneId)
+      .maybeSingle(),
+  ]);
+  const pricingUrl = gatePricingUrl(clone?.billing_user_id);
+
   if (!read.ok) {
-    return { ok: false, error: "gate_read_failed", status: 503, pricingUrl: pricingBase };
+    return { ok: false, error: "gate_read_failed", status: 503, pricingUrl };
   }
   if (!read.row) {
-    return { ok: false, error: "not_gated", status: 404, pricingUrl: pricingBase };
+    return { ok: false, error: "not_gated", status: 404, pricingUrl };
   }
   if (read.row.paid_at) {
-    return { ok: false, error: "already_paid", status: 409, pricingUrl: pricingBase };
+    return { ok: false, error: "already_paid", status: 409, pricingUrl };
   }
 
   // See the header. Deliberately the only refusal with no pricing URL.
@@ -192,27 +223,42 @@ export async function mintGateActivationCheckout(input: {
   }
 
   if (!read.row.plan_slug) {
-    return { ok: false, error: "no_plan_on_gate", status: 409, pricingUrl: pricingBase };
+    return { ok: false, error: "no_plan_on_gate", status: 409, pricingUrl };
+  }
+
+  // What the lock screen showed: the plan's price today, never the figure
+  // stamped at arming (`gateQuote`). Nothing quoted is nothing to hold the row
+  // to, so it refuses rather than charge a price nobody was shown.
+  const quote = await gateQuote(read.row);
+  if (quote.amountDueCents === null) {
+    return {
+      ok: false,
+      error: "plan_not_purchasable",
+      status: 409,
+      detail: "no_quote",
+      pricingUrl,
+    };
   }
 
   const { data: planRows, error: planError } = await supabaseAdmin
     .from("seat_plans")
     .select("id, slug, name, is_active, stripe_price_id, price_cents");
   if (planError) {
-    return { ok: false, error: "plan_lookup_failed", status: 503, pricingUrl: pricingBase };
+    return { ok: false, error: "plan_lookup_failed", status: 503, pricingUrl };
   }
 
   const match = seatPlanForTier(
     read.row.plan_slug,
     (planRows ?? []).filter((r) => r.is_active),
-    read.row.amount_due_cents,
+    quote.amountDueCents,
   );
   if (!match.ok) {
     console.error("[gate] no purchasable plan row for this gate", {
       clone_id: input.cloneId,
       plan_slug: read.row.plan_slug,
       reason: match.reason,
-      quoted_cents: read.row.amount_due_cents,
+      quoted_cents: quote.amountDueCents,
+      armed_cents: read.row.amount_due_cents,
       row_cents: match.reason === "price_mismatch" ? match.rowCents : undefined,
     });
     return {
@@ -220,7 +266,7 @@ export async function mintGateActivationCheckout(input: {
       error: "plan_not_purchasable",
       status: 409,
       detail: match.reason,
-      pricingUrl: pricingBase,
+      pricingUrl,
     };
   }
   const plan = match.row;
@@ -231,15 +277,9 @@ export async function mintGateActivationCheckout(input: {
       error: "plan_not_purchasable",
       status: 409,
       detail: "no_stripe_price",
-      pricingUrl: pricingBase,
+      pricingUrl,
     };
   }
-
-  const { data: clone } = await supabaseAdmin
-    .from("clones")
-    .select("id, name, slug, billing_user_id, deploy_url")
-    .eq("id", input.cloneId)
-    .maybeSingle();
 
   const tenant = await resolveCloneBillingTenant(input.cloneId, {
     billingUserId: clone?.billing_user_id ?? null,
@@ -247,7 +287,7 @@ export async function mintGateActivationCheckout(input: {
     fallbackDisplayName: clone?.name ?? null,
   });
   if (!tenant.ok) {
-    return { ok: false, error: tenant.error, status: 500, pricingUrl: pricingBase };
+    return { ok: false, error: tenant.error, status: 500, pricingUrl };
   }
 
   // Success returns the buyer to their own workspace where possible: the gate
@@ -285,7 +325,7 @@ export async function mintGateActivationCheckout(input: {
         ok: false,
         error: "error" in result && typeof result.error === "string" ? result.error : "checkout_failed",
         status: 400,
-        pricingUrl: pricingBase,
+        pricingUrl,
       };
     }
 
@@ -311,6 +351,6 @@ export async function mintGateActivationCheckout(input: {
     return { ok: true, url: result.url, sessionId: result.sessionId ?? null };
   } catch (err) {
     console.error("[gate] activation checkout failed", err);
-    return { ok: false, error: "checkout_failed", status: 500, pricingUrl: pricingBase };
+    return { ok: false, error: "checkout_failed", status: 500, pricingUrl };
   }
 }

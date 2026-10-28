@@ -205,6 +205,50 @@ describe("the gate quotes what Stripe will charge", () => {
   });
 });
 
+describe("a gate quotes its plan's price today, never the figure stamped at arming", () => {
+  // Every gate on the fleet was armed before the catalogue's 27 Sep 2026
+  // repricing, and quoting the stamp made the checkout refuse Stripe's row as
+  // `price_mismatch` and the pay button fail (NPC Test, 28 Oct 2026).
+  // `gateQuote` is the one reading of the price; these pin its three readers.
+  const checkout = readFileSync("src/server/gateCheckout.server.ts", "utf8");
+  const verdict = readFileSync("src/routes/api.public.clones.gate.ts", "utf8");
+  const gateServer = readFileSync("src/server/payment-gate.server.ts", "utf8");
+
+  it("the checkout holds Stripe's row to the quote", () => {
+    const call = /seatPlanForTier\(([\s\S]*?)\);/.exec(checkout)?.[1] ?? "";
+    expect(call).toMatch(/quote\.amountDueCents/);
+    expect(call).not.toMatch(/amount_due_cents/);
+    expect(checkout).toMatch(/await gateQuote\(read\.row\)/);
+  });
+
+  it("the lock screen's verdict shows the quote", () => {
+    expect(verdict).toMatch(/await gateQuote\(read\.row\)/);
+    expect(verdict).toMatch(/amount_due_cents: quote\.amountDueCents/);
+    expect(verdict).not.toMatch(/read\.row\.amount_due_cents/);
+  });
+
+  it("the guard's 402 states the quote", () => {
+    const guard = /export async function assertGateOpen[\s\S]*?\n}\n/.exec(gateServer)?.[0] ?? "";
+    expect(guard).toMatch(/await gateQuote\(read\.row\)/);
+    expect(guard).not.toMatch(/read\.row\.amount_due_cents/);
+  });
+});
+
+describe("every pricing URL the gate hands out names the workspace", () => {
+  const checkout = readFileSync("src/server/gateCheckout.server.ts", "utf8");
+  const verdict = readFileSync("src/routes/api.public.clones.gate.ts", "utf8");
+
+  it("the checkout's refusals and the verdict use one composer", () => {
+    // The lock screen shows a refusal's URL in place of the verdict's, so a
+    // bare refusal URL was the only way out a customer was offered after the
+    // pay button failed, and it could not say which workspace it was for.
+    expect(checkout).not.toMatch(/pricingUrl: pricingBase/);
+    expect(checkout).toMatch(/const pricingUrl = gatePricingUrl\(clone\?\.billing_user_id\)/);
+    expect(verdict).toMatch(/gatePricingUrl\(clone\?\.billing_user_id\)/);
+    expect(verdict).not.toMatch(/\?uid=/);
+  });
+});
+
 describe("the event vocabulary is the column's", () => {
   it("GATE_EVENT_KINDS is exactly the latest CHECK declared on clone_payment_gate_events.kind", async () => {
     // `logGateEvent` swallows a refused insert on purpose, so a kind the

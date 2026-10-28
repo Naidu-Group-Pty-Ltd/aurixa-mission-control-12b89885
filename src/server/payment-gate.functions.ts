@@ -13,6 +13,7 @@ import {
   defaultGateSettings,
   extendGateTrial,
   factsOf,
+  gateQuote,
   readGate,
   resolvePlanPricing,
   setGateOverride,
@@ -38,6 +39,9 @@ import { writeAuditLog } from "./audit.server";
 export type GateListRow = {
   gate: GateRow | null;
   state: GateState;
+  /** What the gate asks for today (`gateQuote`), the figure its lock screen
+   *  shows. Null with no gate. */
+  quote: { amountDueCents: number | null; currency: string } | null;
   clone: {
     id: string;
     name: string;
@@ -112,6 +116,16 @@ export const listCloneGates = createServerFn({ method: "GET" })
       }),
     );
 
+    // Each gate's quote through the function its lock screen reads, so the
+    // console shows the figure the customer is asked for.
+    const quotes = new Map<string, GateListRow["quote"]>();
+    await Promise.all(
+      [...byClone.values()].map(async (g) => {
+        const q = await gateQuote(g);
+        quotes.set(g.clone_id, { amountDueCents: q.amountDueCents, currency: q.currency });
+      }),
+    );
+
     const rows: GateListRow[] = (clonesQ.data ?? []).map((clone) => {
       const gate = byClone.get(clone.id) ?? null;
       const eligible = gateEligibility({
@@ -121,6 +135,7 @@ export const listCloneGates = createServerFn({ method: "GET" })
       return {
         gate,
         state: resolveGateState(factsOf(gate), now),
+        quote: gate ? (quotes.get(clone.id) ?? null) : null,
         clone,
         ungatedPaidPlan: gate === null && eligible.eligible,
       };
@@ -162,6 +177,8 @@ export type GateDetail = {
     amountDueCents: number | null;
     currency: string;
   };
+  /** As on `GateListRow`. */
+  quote: GateListRow["quote"];
   eligible: boolean;
 };
 
@@ -194,11 +211,14 @@ export const getCloneGate = createServerFn({ method: "GET" })
           .limit(100)
       : { data: [], error: null };
 
+    const quote = read.row ? await gateQuote(read.row) : null;
+
     return {
       gate: read.row,
       state: resolveGateState(factsOf(read.row)),
       events: (events.data ?? []) as GateDetail["events"],
       pricing,
+      quote: quote ? { amountDueCents: quote.amountDueCents, currency: quote.currency } : null,
       eligible: gateEligibility({
         planSlug: pricing.planSlug,
         amountDueCents: pricing.amountDueCents,
