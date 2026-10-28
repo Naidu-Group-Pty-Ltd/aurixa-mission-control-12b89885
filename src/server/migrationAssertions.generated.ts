@@ -1202,4 +1202,15 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "column", table: "module_library", column: "source_commit_sha" },
     ],
   },
+  {
+    migration: "20261028130000_detection_runs_can_be_purged.sql",
+    version: "20261028130000",
+    assertions: [
+      {
+        kind: "none",
+        reason:
+          "changes what two foreign keys do when their run is deleted; no table, column, function, cron job or row is created, and pg_constraint is not observable through PostgREST",
+      },
+    ],
+  },
 ];
