@@ -1194,4 +1194,12 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20261028090000",
     assertions: [{ kind: "cron", jobname: "airtable-waitlist-sync" }],
   },
+  {
+    migration: "20261028120000_library_entries_record_their_commit.sql",
+    version: "20261028120000",
+    assertions: [
+      { kind: "column", table: "module_detection_runs", column: "commit_sha" },
+      { kind: "column", table: "module_library", column: "source_commit_sha" },
+    ],
+  },
 ];

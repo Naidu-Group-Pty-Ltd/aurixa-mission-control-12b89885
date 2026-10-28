@@ -23,14 +23,20 @@
  * Library pins: when a clone pins a specific library version for a module
  * slug, that module's live globs are swapped for the pinned entry's
  * `file_paths` — which is how a fork stays on v3 of "checkout" while the prime
- * is on v5.
+ * is on v5. The files themselves are still read from the prime's head, so the
+ * summary names the commit the entry was approved at (D19): a reader of a
+ * delivery can then see which detection a pinned module's scope came from.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
+import { pinLabel } from "../libraryApproval.pure";
 
 export type InstalledGlobs = {
   globs: string[];
-  /** `pins: checkout@v3, …` where a pin was honoured, else null. */
+  /**
+   * `pins: checkout@v3 (prime@abc1234), …` where a pin was honoured, else null.
+   * Each pin names the commit its entry was approved at, or says none is recorded.
+   */
   pinSummary: string | null;
   /** Set when a read this answer depends on failed; `globs` is then partial. */
   failed: string | null;
@@ -60,21 +66,23 @@ export async function readInstalledGlobs(
     library_entry_id: string;
   }>;
 
-  const pinMap = new Map<string, { version: number; files: string[] }>();
+  const pinMap = new Map<string, { version: number; files: string[]; commitSha: string | null }>();
   if (pinRows.length > 0) {
     const entryIds = pinRows.map((p) => p.library_entry_id);
     const { data: entries, error: entriesErr } = await supabase
       .from("module_library")
-      .select("id, file_paths")
+      .select("id, file_paths, source_commit_sha")
       .in("id", entryIds);
     if (entriesErr) failures.push(`module_library: ${entriesErr.message}`);
-    const fileMap = new Map<string, string[]>();
-    for (const e of (entries ?? []) as Array<{ id: string; file_paths: string[] | null }>) {
-      fileMap.set(e.id, e.file_paths ?? []);
+    const entryMap = new Map<string, { files: string[]; commitSha: string | null }>();
+    for (const e of entries ?? []) {
+      entryMap.set(e.id, { files: e.file_paths ?? [], commitSha: e.source_commit_sha });
     }
     for (const p of pinRows) {
-      const files = fileMap.get(p.library_entry_id) ?? [];
-      if (files.length > 0) pinMap.set(p.slug, { version: p.version, files });
+      const entry = entryMap.get(p.library_entry_id);
+      if (entry && entry.files.length > 0) {
+        pinMap.set(p.slug, { version: p.version, files: entry.files, commitSha: entry.commitSha });
+      }
     }
   }
 
@@ -87,7 +95,7 @@ export async function readInstalledGlobs(
     const slug = cm.modules?.slug ?? null;
     if (slug && pinMap.has(slug)) {
       const pin = pinMap.get(slug)!;
-      honored.push(`${slug}@v${pin.version}`);
+      honored.push(pinLabel({ slug, version: pin.version, commitSha: pin.commitSha }));
       return pin.files;
     }
     return cm.modules?.file_globs ?? [];

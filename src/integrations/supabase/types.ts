@@ -10274,6 +10274,7 @@ export type Database = {
         Row: {
           backend_module_count: number
           backend_summary: Json
+          commit_sha: string | null
           completed_at: string | null
           created_at: string
           database_object_count: number
@@ -10304,6 +10305,7 @@ export type Database = {
         Insert: {
           backend_module_count?: number
           backend_summary?: Json
+          commit_sha?: string | null
           completed_at?: string | null
           created_at?: string
           database_object_count?: number
@@ -10334,6 +10336,7 @@ export type Database = {
         Update: {
           backend_module_count?: number
           backend_summary?: Json
+          commit_sha?: string | null
           completed_at?: string | null
           created_at?: string
           database_object_count?: number
@@ -10488,6 +10491,7 @@ export type Database = {
           replacement_slug: string | null
           route_path: string | null
           slug: string
+          source_commit_sha: string | null
           source_detection_run_id: string | null
           source_module_id: string | null
           tags: string[]
@@ -10515,6 +10519,7 @@ export type Database = {
           replacement_slug?: string | null
           route_path?: string | null
           slug: string
+          source_commit_sha?: string | null
           source_detection_run_id?: string | null
           source_module_id?: string | null
           tags?: string[]
@@ -10542,6 +10547,7 @@ export type Database = {
           replacement_slug?: string | null
           route_path?: string | null
           slug?: string
+          source_commit_sha?: string | null
           source_detection_run_id?: string | null
           source_module_id?: string | null
           tags?: string[]

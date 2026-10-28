@@ -3,7 +3,10 @@
  *
  * Rebuilds the module catalogue from scratch: wipe `modules` and
  * `module_library`, re-run detection against the prime, approve what comes
- * back, and publish every module as v1 of a fresh library.
+ * back, and publish every module as v1 of a fresh library. Publishing approves
+ * each entry at the commit the new run read (`libraryApproval.server.ts`,
+ * D19), so a reset that publishes is an admin's to run, and it asks before it
+ * wipes anything rather than after.
  *
  * The reason this is not a couple of DELETE statements is blast radius.
  * `clone_modules.module_id` is `ON DELETE CASCADE`, so dropping the modules
@@ -25,6 +28,11 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import { runDetection, DEFAULT_CONFIG, type DetectionRunConfig } from "./module-detection.server";
+import {
+  probeCommitColumns,
+  publishModulesToLibrary,
+  requireLibraryAdmin,
+} from "./libraryApproval.server";
 
 type Supabase = SupabaseClient<Database>;
 
@@ -163,6 +171,34 @@ export async function resetAndReingestLibrary(args: {
     return report;
   }
 
+  // Publishing approves each entry, and only an admin may. Asked before the
+  // wipe: a reset refused at its publish step would leave an empty library.
+  if (options.publishToLibrary !== false) {
+    const admin = await requireLibraryAdmin(
+      supabase,
+      userId,
+      "publish library entries, which approves them",
+    );
+    if (!admin.ok) {
+      if (!dryRun) {
+        report.error = `${admin.error}. Nothing was wiped.`;
+        return report;
+      }
+      report.warnings.push(`A real run would be refused: ${admin.error}.`);
+    }
+  }
+
+  // The new detection run records the commit it read, and fails without
+  // somewhere to record it: asked now, while nothing has been wiped.
+  const columns = await probeCommitColumns(supabase);
+  if (!columns.ok) {
+    if (!dryRun) {
+      report.error = `The commit columns cannot be read, so nothing was wiped: ${columns.error}`;
+      return report;
+    }
+    report.warnings.push(`A real run would be refused: ${columns.error}.`);
+  }
+
   // ── 1. Snapshot current state ──
   const [modulesRes, libraryRes, installs, pins] = await Promise.all([
     supabase.from("modules").select("id, slug, status"),
@@ -295,6 +331,7 @@ export async function resetAndReingestLibrary(args: {
         `${published.errors.length} module(s) failed to publish: ${published.errors.slice(0, 5).join("; ")}`,
       );
     }
+    report.warnings.push(...published.warnings);
   }
 
   // ── 6. Restore clone installs by slug ──
@@ -422,65 +459,24 @@ export async function resetAndReingestLibrary(args: {
 }
 
 /**
- * Publish every approved module as a fresh v1. Called after a wipe, so there
- * is no prior version to supersede — versions restart at 1 by design, which is
- * what makes the new library readable rather than carrying old numbering.
+ * Publish every approved module, through the one publication path. Called
+ * after a wipe, so there is no prior version to supersede and each entry is v1:
+ * versions restart by design, which is what makes the new library readable
+ * rather than carrying old numbering. Each entry is approved at the commit the
+ * detection run read, and a module whose run recorded none is refused by name.
  */
 export async function publishAllToLibrary(
   supabase: Supabase,
   userId: string,
-): Promise<{ count: number; errors: string[] }> {
-  const { data: modules, error } = await supabase
-    .from("modules")
-    .select("*")
-    .eq("status", "approved");
-  if (error) return { count: 0, errors: [error.message] };
-
-  const errors: string[] = [];
-  let count = 0;
-
-  for (const m of modules ?? []) {
-    const frontendPaths = ((m.resolved_files as string[]) ?? []).length
-      ? (m.resolved_files as string[])
-      : ((m.file_globs as string[]) ?? []);
-    // Backend globs must travel with the entry: a pinned clone has its globs
-    // replaced by file_paths, so publishing frontend-only would strip the
-    // module's edge functions and migrations on every pinned clone.
-    const filePaths = [
-      ...new Set([...frontendPaths, ...(((m.backend_file_globs as string[]) ?? []) as string[])]),
-    ];
-
-    const { error: insErr } = await supabase.from("module_library").insert({
-      name: m.name,
-      slug: m.slug,
-      description: m.description,
-      route_path: (m.routes as string[])?.[0] ?? null,
-      entry_file: m.route_entry_file ?? m.slug,
-      file_paths: filePaths,
-      file_count: filePaths.length,
-      version: 1,
-      source_detection_run_id: m.detection_run_id,
-      source_module_id: m.id,
-      published_by: userId,
-      is_latest: true,
-      tags: [m.layer as string].filter(Boolean),
-      metadata: {
-        cohesion_score: m.cohesion_score,
-        coupling_score: m.coupling_score,
-        ai_confidence: m.ai_confidence,
-        ai_reasoning: m.ai_reasoning,
-        layer: m.layer,
-        edge_functions: m.edge_functions ?? [],
-        database_tables: m.database_tables ?? [],
-        required_secrets: m.required_secrets ?? [],
-        required_migrations: m.required_migrations ?? [],
-        storage_buckets: m.storage_buckets ?? [],
-        cron_jobs: m.cron_jobs ?? [],
-      },
-    });
-    if (insErr) errors.push(`${m.slug}: ${insErr.message}`);
-    else count++;
-  }
-
-  return { count, errors };
+): Promise<{ count: number; errors: string[]; warnings: string[] }> {
+  const answer = await publishModulesToLibrary(supabase, {
+    userId,
+    moduleIds: "approved",
+    tagsFor: (m) => [m.layer].filter(Boolean),
+  });
+  // One line per module that was not published; a refusal of the whole
+  // publication (the role, a read) has no module to name, so it is its own line.
+  const errors = answer.refused.map((r) => r.reason);
+  if (!answer.ok && answer.error && errors.length === 0) errors.push(answer.error);
+  return { count: answer.published, errors, warnings: answer.warnings };
 }

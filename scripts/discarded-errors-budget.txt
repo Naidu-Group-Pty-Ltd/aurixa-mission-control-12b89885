@@ -42,7 +42,7 @@ src/routes/hooks.vercel.tsx 1
 src/routes/hooks.warm-health.tsx 1
 src/routes/notifications.tsx 1
 src/server/addon-purchases.server.ts 2
-src/server/ai-detect-modules.functions.ts 9
+src/server/ai-detect-modules.functions.ts 7
 src/server/ai-features.functions.ts 1
 src/server/ai-gateway.server.ts 1
 src/server/api-usage-settlement.server.ts 5
@@ -72,7 +72,7 @@ src/server/entitlement-modules.server.ts 6
 src/server/fit-analysis.server.ts 4
 src/server/fleet-drift.functions.ts 2
 src/server/handoff-observability.server.ts 2
-src/server/library-admin.functions.ts 2
+src/server/library-admin.functions.ts 1
 src/server/library-reingest.server.ts 10
 src/server/migration-sync.functions.ts 0
 src/server/module-detection.server.ts 11

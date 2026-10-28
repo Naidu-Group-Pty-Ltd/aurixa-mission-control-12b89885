@@ -1,85 +1,63 @@
-// Server-only pin validation helper used by the cascade engine.
-// Mirrors the validateClonePins server function but takes a SupabaseClient
-// directly so it can be invoked from background flows (webhooks, cron).
+// Pin validation, for the cascade engine's pre-flight and the pages alike.
+//
+// The `validateClonePins` server function used to restate this check, and the
+// two copies had already drifted in what they read. It now calls this one,
+// with the same SupabaseClient-taking signature the engine's background flows
+// (webhooks, cron) need. The judgement itself is `judgeClonePins` in
+// `libraryApproval.pure.ts`.
+//
+// What a pin is checked for: its entry still exists, is approved, records the
+// commit it was approved at (D19), and has files. And what each pin rests on:
+// the commit its entry records, reported per pin.
+//
+// A failed read of the entries is reported as the failure it is. It used to
+// leave the entry map empty, so every pin read "Library entry was deleted".
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
+import {
+  describeDbError,
+  judgeClonePins,
+  type ClonePin,
+  type PinCommit,
+  type PinIssue,
+  type PinnedEntry,
+} from "./libraryApproval.pure";
 
-export type PinIssue = {
-  cloneId: string;
-  slug: string;
-  version: number;
-  severity: "error" | "warning";
-  reason: string;
-};
+export type { PinCommit, PinIssue } from "./libraryApproval.pure";
 
 export async function validateClonePinsServer(
   supabase: SupabaseClient<Database>,
   cloneIds: string[],
-): Promise<{ ok: boolean; issues: PinIssue[]; checked: number; error?: string }> {
-  if (cloneIds.length === 0) return { ok: true, issues: [], checked: 0 };
+): Promise<{
+  ok: boolean;
+  issues: PinIssue[];
+  /** Every pin checked, with the commit its entry records (null: none recorded, or unread). */
+  pins: PinCommit[];
+  checked: number;
+  error?: string;
+}> {
+  if (cloneIds.length === 0) return { ok: true, issues: [], pins: [], checked: 0 };
 
   const { data: pins, error } = await supabase
     .from("clone_library_pins")
-    .select("id, clone_id, slug, version, library_entry_id")
+    .select("clone_id, slug, version, library_entry_id")
     .in("clone_id", cloneIds);
-  if (error) return { ok: false, issues: [], checked: 0, error: error.message };
+  if (error) return { ok: false, issues: [], pins: [], checked: 0, error: error.message };
 
-  const pinRows = (pins ?? []) as Array<{
-    id: string;
-    clone_id: string;
-    slug: string;
-    version: number;
-    library_entry_id: string;
-  }>;
-  if (pinRows.length === 0) return { ok: true, issues: [], checked: 0 };
+  const pinRows: ClonePin[] = pins ?? [];
+  if (pinRows.length === 0) return { ok: true, issues: [], pins: [], checked: 0 };
 
   const entryIds = Array.from(new Set(pinRows.map((p) => p.library_entry_id)));
-  const { data: entries } = await supabase
+  const { data: entries, error: entriesError } = await supabase
     .from("module_library")
-    .select("id, approval_status, file_paths")
+    .select("id, approval_status, file_paths, source_commit_sha")
     .in("id", entryIds);
 
-  const entryMap = new Map<string, { approval_status: string; file_paths: string[] | null }>();
-  for (const e of (entries ?? []) as Array<{
-    id: string;
-    approval_status: string;
-    file_paths: string[] | null;
-  }>) {
-    entryMap.set(e.id, { approval_status: e.approval_status, file_paths: e.file_paths });
-  }
-
-  const issues: PinIssue[] = [];
-  for (const p of pinRows) {
-    const e = entryMap.get(p.library_entry_id);
-    if (!e) {
-      issues.push({
-        cloneId: p.clone_id,
-        slug: p.slug,
-        version: p.version,
-        severity: "error",
-        reason: "Library entry was deleted",
-      });
-      continue;
-    }
-    if (e.approval_status !== "approved") {
-      issues.push({
-        cloneId: p.clone_id,
-        slug: p.slug,
-        version: p.version,
-        severity: "error",
-        reason: `Entry is now ${e.approval_status}`,
-      });
-    }
-    if ((e.file_paths ?? []).length === 0) {
-      issues.push({
-        cloneId: p.clone_id,
-        slug: p.slug,
-        version: p.version,
-        severity: "error",
-        reason: "Pinned entry has no file paths",
-      });
-    }
-  }
-
-  return { ok: true, issues, checked: pinRows.length };
+  const judged = judgeClonePins(
+    pinRows,
+    entriesError
+      ? { unread: describeDbError(entriesError) }
+      : new Map<string, PinnedEntry>((entries ?? []).map((e) => [e.id, e])),
+  );
+  return { ok: true, ...judged, checked: pinRows.length };
 }

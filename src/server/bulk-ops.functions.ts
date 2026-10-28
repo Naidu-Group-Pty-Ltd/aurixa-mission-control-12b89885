@@ -7,6 +7,7 @@ import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { Constants } from "@/integrations/supabase/types";
 import { NOTIFICATION_KIND_FILTER_VALUES } from "@/lib/notificationKinds.pure";
 import { bulkMarkByIds, bulkMarkMatching } from "./notificationBulkRead.server";
+import { decideLibraryEntries } from "./libraryApproval.server";
 
 const idArray = z.array(z.string().uuid()).min(1).max(200);
 
@@ -149,29 +150,16 @@ export const bulkSetLibraryApproval = createServerFn({ method: "POST" })
         })
         .parse(d),
   )
-  .handler(async ({ data, context }) => {
-    const { supabase, userId } = context;
-    const isAdmin = await supabase.rpc("has_role", { _user_id: userId, _role: "admin" });
-    const isSuper = await supabase.rpc("has_role", { _user_id: userId, _role: "super_admin" });
-    if (!isAdmin.data && !isSuper.data) {
-      return { ok: false as const, error: "Admin role required" };
-    }
-    const update = {
-      approval_status: data.status,
-      approved_by: data.status === "approved" ? userId : null,
-      approved_at: data.status === "approved" ? new Date().toISOString() : null,
-      rejection_reason: data.status === "rejected" ? (data.reason ?? null) : null,
-    };
-    const { error } = await supabase.from("module_library").update(update).in("id", data.ids);
-    if (error) return { ok: false as const, error: error.message };
-    await supabase.from("audit_log").insert({
-      action: `library.bulk_${data.status}`,
-      entity_type: "module_library",
-      actor_user_id: userId,
-      metadata: { count: data.ids.length, ids: data.ids, reason: data.reason },
-    });
-    return { ok: true as const, count: data.ids.length };
-  });
+  // Admin only, and approving needs the commit each entry records: an entry is
+  // approved at a commit (`libraryApproval.server.ts`, D19).
+  .handler(async ({ data, context }) =>
+    decideLibraryEntries(context.supabase, {
+      userId: context.userId,
+      ids: data.ids,
+      status: data.status,
+      reason: data.reason,
+    }),
+  );
 
 export const bulkDeprecateLibrary = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])

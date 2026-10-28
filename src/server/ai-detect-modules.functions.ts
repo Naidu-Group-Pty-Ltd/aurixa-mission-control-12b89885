@@ -9,6 +9,7 @@ import {
   type DetectionStrategy,
   type DetectionRunConfig,
 } from "./module-detection.server";
+import { publishModulesToLibrary, readModuleLibrary } from "./libraryApproval.server";
 
 // Enhanced multi-pass AI module detection
 export const detectModules = createServerFn({ method: "POST" })
@@ -589,7 +590,12 @@ export const getBackendCoverage = createServerFn({ method: "POST" })
 
 // ─── Module Library ─────────────────────────────────────────────────
 
-// Publish approved modules to the library
+/**
+ * Publish modules to the library, which approves each entry, by an admin, at
+ * the prime commit its module's files were detected at
+ * (`libraryApproval.server.ts`; docs/DELIVERY_SYSTEM_PLAN.md, D19). A module
+ * whose detection run recorded no commit is refused by name.
+ */
 export const publishToLibrary = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((data: { moduleIds: string[]; tags?: string[] }) => {
@@ -597,104 +603,27 @@ export const publishToLibrary = createServerFn({ method: "POST" })
       throw new Error("moduleIds required");
     return data;
   })
-  .handler(async ({ data, context }) => {
-    // Fetch the modules
-    const { data: modules, error: fetchErr } = await context.supabase
-      .from("modules")
-      .select("*")
-      .in("id", data.moduleIds);
-    if (fetchErr || !modules)
-      return { ok: false as const, error: fetchErr?.message ?? "Failed to fetch modules" };
+  .handler(async ({ data, context }) =>
+    publishModulesToLibrary(context.supabase, {
+      userId: context.userId,
+      moduleIds: data.moduleIds,
+      tagsFor: () => data.tags ?? [],
+    }),
+  );
 
-    let published = 0;
-    for (const m of modules) {
-      // Mark previous versions as not latest
-      await context.supabase
-        .from("module_library")
-        .update({ is_latest: false })
-        .eq("slug", m.slug)
-        .eq("is_latest", true);
-
-      // Get next version
-      const { data: prevVersions } = await context.supabase
-        .from("module_library")
-        .select("version")
-        .eq("slug", m.slug)
-        .order("version", { ascending: false })
-        .limit(1);
-      const nextVersion = ((prevVersions?.[0]?.version as number) ?? 0) + 1;
-
-      // A clone that pins a library version has its globs *replaced* by this
-      // entry's file_paths at cascade time. Publishing frontend paths alone
-      // would silently strip the module's edge functions and migrations from
-      // every pinned clone, so the backend globs must travel with the entry.
-      const frontendPaths = ((m.resolved_files as string[]) ?? []).length
-        ? (m.resolved_files as string[])
-        : ((m.file_globs as string[]) ?? []);
-      const backendGlobs = (m.backend_file_globs as string[]) ?? [];
-      const filePaths = [...new Set([...frontendPaths, ...backendGlobs])];
-
-      const { error: insertErr } = await context.supabase.from("module_library").insert({
-        name: m.name,
-        slug: m.slug,
-        description: m.description,
-        route_path: (m.routes as string[])?.[0] ?? null,
-        entry_file: m.route_entry_file ?? m.slug,
-        file_paths: filePaths,
-        file_count: filePaths.length,
-        version: nextVersion,
-        source_detection_run_id: m.detection_run_id,
-        source_module_id: m.id,
-        published_by: context.userId,
-        is_latest: true,
-        tags: data.tags ?? [],
-        metadata: {
-          cohesion_score: m.cohesion_score,
-          coupling_score: m.coupling_score,
-          ai_confidence: m.ai_confidence,
-          ai_reasoning: m.ai_reasoning,
-          shared_by_modules: m.shared_by_modules,
-          // Pinned installs need the same backend contract as a live install.
-          layer: m.layer,
-          edge_functions: m.edge_functions ?? [],
-          database_tables: m.database_tables ?? [],
-          required_secrets: m.required_secrets ?? [],
-          required_migrations: m.required_migrations ?? [],
-          storage_buckets: m.storage_buckets ?? [],
-          cron_jobs: m.cron_jobs ?? [],
-        },
-      });
-      if (!insertErr) published++;
-    }
-
-    await context.supabase.from("audit_log").insert({
-      action: "module.publish_to_library",
-      entity_type: "module_library",
-      actor_user_id: context.userId,
-      metadata: { module_ids: data.moduleIds, published, tags: data.tags },
-    });
-
-    return { ok: true as const, published };
-  });
-
-// Get library entries
+/**
+ * Library entries, every one of them (paged, never cut at a row count), with
+ * the names of the admins who approved them.
+ */
 export const getModuleLibrary = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((data?: { latestOnly?: boolean; slug?: string }) => data ?? {})
-  .handler(async ({ data, context }) => {
-    let query = context.supabase
-      .from("module_library")
-      .select("*")
-      .order("name", { ascending: true })
-      .order("version", { ascending: false });
-
-    if (data.latestOnly !== false) query = query.eq("is_latest", true);
-    if (data.slug) query = query.eq("slug", data.slug);
-
-    const { data: entries, error } = await query.limit(200);
-    if (error) return { ok: false as const, error: error.message, entries: [] };
-    return { ok: true as const, entries: entries ?? [] };
-  });
+  .handler(async ({ data, context }) =>
+    readModuleLibrary(context.supabase, {
+      latestOnly: data.latestOnly !== false,
+      slug: data.slug,
+    }),
+  );
 
 // Remove library entry
 export const removeFromLibrary = createServerFn({ method: "POST" })
