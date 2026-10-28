@@ -108,7 +108,7 @@ export const Route = createFileRoute("/api/public/clones/announcements")({
           ).catch((err) => console.error("[announcements] delivery stamp threw", err));
           // And a recalled message this answer no longer holds is withdrawn
           // here: the console's "withdrawn from N of M" is read from this.
-          await recordAnnouncementWithdrawals(read.workspaceId).catch((err) =>
+          await recordAnnouncementWithdrawals(read.workspaceId, read.announcements).catch((err) =>
             console.error("[announcements] withdrawal stamp threw", err),
           );
         }

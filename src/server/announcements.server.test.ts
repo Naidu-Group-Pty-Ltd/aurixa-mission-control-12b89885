@@ -20,6 +20,8 @@ const h = vi.hoisted(() => ({
   /** What reached a workspace's Realtime: the URL posted to, and the body. */
   broadcasts: [] as Array<{ url: string; body: { messages: Array<Record<string, unknown>> } }>,
   refusing: new Set<string>(),
+  /** An update the database refuses this once, as a write lost to a timeout would be. */
+  refuseUpdate: null as null | ((table: string, values: Row) => boolean),
 }));
 
 /** The unique indexes of 20261027120100_workspace_message_replies.sql. */
@@ -68,6 +70,10 @@ vi.mock("@/integrations/supabase/client.server", () => {
         return { data: made.map((r) => ({ ...r })), error: null };
       }
       let rows = rowsOf().filter((r) => filters.every((f) => f(r)));
+      if (op === "update" && h.refuseUpdate?.(table, values as Row)) {
+        h.refuseUpdate = null;
+        return { data: null, error: { message: "canceling statement due to statement timeout" } };
+      }
       if (op === "update") {
         // The CHECKs the migrations declare, refused as Postgres refuses them.
         for (const r of rows) {
@@ -244,6 +250,7 @@ beforeEach(() => {
   h.seq = 0;
   h.broadcasts = [];
   h.refusing = new Set();
+  h.refuseUpdate = null;
 });
 
 describe("the prime is served", () => {
@@ -699,6 +706,33 @@ describe("recall", () => {
     expect((await publishAnnouncement({ id: "ann-1", actorId: "operator-1" })).ok).toBe(true);
     expect(h.tables.clone_announcements[0].recalled_at).toBeNull();
   });
+
+  it("a send again that fails changes nothing, and its retry sends the correction", async () => {
+    h.tables.clone_announcements = [message()];
+    await recallAnnouncement({ id: "ann-1", actorId: "operator-1" });
+    const again = {
+      ...draftInput,
+      id: "ann-1",
+      title: "Going Live - 1 November 2026",
+      clientRequestId: "6f1d9c2e-1b7a-4c55-8e0b-5a3e9d7c2f10",
+    };
+    h.refuseUpdate = (table, values) => table === "clone_announcements" && !!values.published_at;
+    expect((await sendAnnouncement(again)).ok).toBe(false);
+    expect(h.tables.clone_announcements[0]).toMatchObject({
+      title: message().title,
+      published_at: null,
+      recalled_at: expect.any(String),
+    });
+
+    // The same act, tried again: sent, not reported already sent.
+    const retry = await sendAnnouncement(again);
+    expect(retry.ok && retry.repeated).toBeFalsy();
+    expect(h.tables.clone_announcements[0]).toMatchObject({
+      title: "Going Live - 1 November 2026",
+      published_at: expect.any(String),
+      recalled_at: null,
+    });
+  });
 });
 
 describe("a recall is confirmed by the workspaces themselves", () => {
@@ -718,21 +752,31 @@ describe("a recall is confirmed by the workspaces themselves", () => {
     h.tables.clone_announcement_deliveries = [stamp(CLONE)];
     await recallAnnouncement({ id: "ann-1", actorId: "operator-1" });
 
-    await recordAnnouncementWithdrawals(CLONE);
-    await recordAnnouncementWithdrawals(OTHER);
+    await recordAnnouncementWithdrawals(CLONE, []);
+    await recordAnnouncementWithdrawals(OTHER, []);
     expect(h.tables.clone_announcement_deliveries).toEqual([
       expect.objectContaining({ clone_id: CLONE, withdrawn_at: expect.any(String) }),
     ]);
+  });
+
+  it("an answer read before the recall landed, still holding it, withdraws nothing", async () => {
+    h.tables.clone_announcements = [message()];
+    h.tables.clone_announcement_deliveries = [stamp(CLONE)];
+    await recallAnnouncement({ id: "ann-1", actorId: "operator-1" });
+    await recordAnnouncementWithdrawals(CLONE, [{ id: "ann-1" }]);
+    expect(h.tables.clone_announcement_deliveries[0].withdrawn_at).toBeNull();
+    await recordAnnouncementWithdrawals(CLONE, []);
+    expect(h.tables.clone_announcement_deliveries[0].withdrawn_at).toEqual(expect.any(String));
   });
 
   it("is stamped once, at the first fetch after the recall", async () => {
     h.tables.clone_announcements = [message()];
     h.tables.clone_announcement_deliveries = [stamp(CLONE)];
     await recallAnnouncement({ id: "ann-1", actorId: "operator-1" });
-    await recordAnnouncementWithdrawals(CLONE);
+    await recordAnnouncementWithdrawals(CLONE, []);
     const first = h.tables.clone_announcement_deliveries[0].withdrawn_at;
     await new Promise((r) => setTimeout(r, 5));
-    await recordAnnouncementWithdrawals(CLONE);
+    await recordAnnouncementWithdrawals(CLONE, []);
     expect(h.tables.clone_announcement_deliveries[0].withdrawn_at).toBe(first);
   });
 
@@ -742,7 +786,7 @@ describe("a recall is confirmed by the workspaces themselves", () => {
       stamp(CLONE, { withdrawn_at: new Date(Date.now() - 3_000_000).toISOString() }),
     ];
     await recallAnnouncement({ id: "ann-1", actorId: "operator-1" });
-    await recordAnnouncementWithdrawals(CLONE);
+    await recordAnnouncementWithdrawals(CLONE, []);
     const w = Date.parse(h.tables.clone_announcement_deliveries[0].withdrawn_at as string);
     expect(w).toBeGreaterThanOrEqual(
       Date.parse(h.tables.clone_announcements[0].recalled_at as string),
@@ -760,12 +804,12 @@ describe("a recall is confirmed by the workspaces themselves", () => {
   it("with no recent recall it reads one small list and writes nothing", async () => {
     h.tables.clone_announcements = [message()];
     h.tables.clone_announcement_deliveries = [stamp(CLONE)];
-    await recordAnnouncementWithdrawals(CLONE);
+    await recordAnnouncementWithdrawals(CLONE, []);
     expect(h.tables.clone_announcement_deliveries[0].withdrawn_at).toBeNull();
   });
 
   it("never fails a workspace's answer when it cannot read", async () => {
     h.failing.add("clone_announcements:select");
-    await expect(recordAnnouncementWithdrawals(CLONE)).resolves.toBeUndefined();
+    await expect(recordAnnouncementWithdrawals(CLONE, [])).resolves.toBeUndefined();
   });
 });

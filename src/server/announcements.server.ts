@@ -229,16 +229,21 @@ export async function recordAnnouncementDeliveries(
 
 /**
  * Stamp that a workspace's dashboards no longer hold a recalled message: the
- * first fetch after the recall answered without it. Only a workspace that had
- * fetched it has anything to withdraw, so only an existing delivery stamp is
- * marked, and one already marked for THIS recall is left alone.
+ * first fetch after the recall whose answer (`served`) leaves it out. Only a
+ * workspace that had fetched it has anything to withdraw, so only an existing
+ * delivery stamp is marked, and one already marked for THIS recall is left
+ * alone.
  *
  * Asks only about the recalls of the last day (a dashboard opened hours later
  * still confirms), so the common answer, "no recent recall", costs one small
  * read. Best-effort and awaited, like the delivery stamp: it is
  * observability, and it never fails the answer.
  */
-export async function recordAnnouncementWithdrawals(workspaceId: string): Promise<void> {
+export async function recordAnnouncementWithdrawals(
+  workspaceId: string,
+  /** What this answer serves: a message still in it is not withdrawn, whatever its row now says. */
+  served: ReadonlyArray<Pick<CloneAnnouncementWire, "id">>,
+): Promise<void> {
   const since = new Date(Date.now() - RECALL_CONFIRM_WINDOW_MS).toISOString();
   const recalled = await supabaseAdmin
     .from("clone_announcements")
@@ -249,8 +254,14 @@ export async function recordAnnouncementWithdrawals(workspaceId: string): Promis
     console.error("[announcements] recall read failed", recalled.error.message);
     return;
   }
+  // A recall that lands between this answer's read and this stamp would find
+  // the message recalled while the answer still holds it. Only a message the
+  // answer demonstrably leaves out is withdrawn.
+  const inAnswer = new Set(served.map((a) => a.id));
   const recalledAt = new Map(
-    (recalled.data ?? []).map((r) => [r.id as string, r.recalled_at as string]),
+    (recalled.data ?? [])
+      .filter((r) => !inAnswer.has(r.id as string))
+      .map((r) => [r.id as string, r.recalled_at as string]),
   );
   if (recalledAt.size === 0) return;
 
@@ -760,9 +771,38 @@ export async function sendAnnouncement(
     if (current.data.published_at && !current.data.archived_at) {
       return { ok: false, error: "already_published" };
     }
-    const saved = await updateAnnouncement({ ...input, id: draftId });
-    if (!saved.ok) return saved;
-    return publishAnnouncement({ id: draftId, actorId: input.actorId });
+    // Saved and published in ONE write, so this act's id never sits on a row
+    // that is still unpublished: a send that fails changes nothing and can be
+    // tried again with the same id, and one that succeeded is found sent — or,
+    // recalled since, left alone (the guard above). Two writes left a
+    // corrected, recalled message saved under the retry's id but never sent,
+    // and the retry then reported it already sent.
+    const { data, error } = await supabaseAdmin
+      .from("clone_announcements")
+      .update(
+        asRow<TablesUpdate<"clone_announcements">>({
+          ...draftToColumns(input),
+          ...(input.clientRequestId ? { client_request_id: input.clientRequestId } : {}),
+          published_at: new Date().toISOString(),
+          archived_at: null,
+          recalled_at: null,
+        }),
+      )
+      .eq("id", draftId)
+      .select("*")
+      .single();
+    if (error) return { ok: false, error: error.message };
+    const row = data as AnnouncementRow;
+    await writeAuditLog({
+      action: "clone_announcement.updated",
+      entityType: "clone_announcement",
+      entityId: row.id,
+      actorUserId: input.actorId,
+      metadata: { title: row.title, audience: audienceSummary(factsOf(row)) },
+    });
+    await recordPublished(row, input.actorId);
+    const signal = await signalMessageChange([row]);
+    return { ok: true, row, signal };
   }
 
   const now = new Date().toISOString();
