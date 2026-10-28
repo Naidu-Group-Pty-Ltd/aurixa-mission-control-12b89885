@@ -92,6 +92,27 @@ describe("the email identity drain starts as well as advances", () => {
     expect(guarded, "the audit runs inside its own try").toContain("try {");
   });
 
+  it("records a pass whose clone could not be read, or did not list a secret", () => {
+    // Both are described in the report's detail, and the drain records a pass
+    // only on a count, so a quiet pass that found either left no record.
+    const acted = EMAIL_DRAIN.slice(
+      EMAIL_DRAIN.indexOf("const auditActed"),
+      EMAIL_DRAIN.indexOf("// Only write a breadcrumb"),
+    );
+    expect(acted).toContain("audit.cloneUnread > 0");
+    expect(acted).toContain("audit.absentOnClone > 0");
+    const fn = EMAIL_SERVER.slice(
+      EMAIL_SERVER.indexOf("export async function auditEmailIdentities"),
+    );
+    const body = fn.slice(0, fn.indexOf("\n}\n"));
+    expect(body).toMatch(
+      /report\.cloneUnread \+= 1;\s*report\.detail\.push\(\{\s*cloneId: identity\.clone_id,\s*outcome: "clone_unread"/,
+    );
+    expect(body).toMatch(
+      /report\.absentOnClone \+= 1;\s*report\.detail\.push\(\{\s*cloneId: identity\.clone_id,\s*outcome: "absent_on_clone"/,
+    );
+  });
+
   it("never writes a CNAME for Resend behind Cloudflare's proxy", () => {
     // The client proxies a CNAME by default; the fallback return path Resend
     // added in August 2026 cannot verify behind it.

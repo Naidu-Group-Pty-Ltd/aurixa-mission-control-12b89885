@@ -149,6 +149,14 @@ describe("the public gate endpoint", () => {
     expect(text).toMatch(/pricing_url/);
     expect(text).toMatch(/start_path/);
   });
+
+  it("waits for the read stamp, which was lost when it was left running", () => {
+    // Unawaited, the stamp was lost: NPC Test's verdict reads after 16:09 and
+    // Preflight's at 17:45 left no trace (28 Oct 2026), so the console said a
+    // lock screen that was in use had never been read.
+    expect(text).toMatch(/await recordGateCheck\(key\.clone_id, state\.locked\)\.catch\(/);
+    expect(text).not.toMatch(/^\s*recordGateCheck\(/m);
+  });
 });
 
 describe("Stripe settles the gate on every route money can arrive by", () => {

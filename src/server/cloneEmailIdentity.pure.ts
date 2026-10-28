@@ -1008,6 +1008,83 @@ export function keyOwed(row: Pick<EmailIdentityRow, "resend_key_id" | "key_writt
   return !row.resend_key_id || !row.key_written_at;
 }
 
+/** The clone's domain-scoped key. */
+export const CLONE_RESEND_SECRET = "RESEND_API_KEY";
+/** The address that key may send from (see `email-identity.server.ts`). */
+export const CLONE_RESEND_FROM_SECRET = "RESEND_FROM_EMAIL";
+/** The two secrets an identity writes, in one call, as one credential. */
+export const IDENTITY_SECRET_NAMES = [CLONE_RESEND_SECRET, CLONE_RESEND_FROM_SECRET] as const;
+
+/** What the ledger says about a name that the clone's own listing lacks. */
+export const IDENTITY_SECRET_ABSENT_NOTE =
+  "Not on the clone's project when the hourly email audit listed it. Rotate the key from the clone's email identity.";
+
+export type IdentityLedgerWrite = {
+  name: (typeof IDENTITY_SECRET_NAMES)[number];
+  status: "set" | "missing";
+  last_set_at: string | null;
+  last_error: string | null;
+};
+
+/**
+ * What `clone_backend_secrets` should say about a finished identity's two
+ * secrets, from the clone project's own listing of its secret names.
+ *
+ * ## Why the listing, and not the identity's record
+ *
+ * The identity records that its write call succeeded, and the ledger is what
+ * the clone's secrets page shows. They disagreed for two clones for seven
+ * weeks: Preflight's key was written on 3 Sep and the dashboard's on 30 Aug,
+ * then a provisioning pass rewrote both rows `missing` (5 Sep and 4 Sep),
+ * before provisioning read the identity's writes as settled. Every operator
+ * since was told those clones could not send, and the delivery plan's D3 said
+ * to set Resend for them. Preflight sent a recovery code from its own domain on
+ * 28 Oct 2026. Setting a prime or vendor key there would have replaced a
+ * working key with one Resend refuses for that sender.
+ *
+ * So the audit asks the project. A listed name is `set`, at the time the
+ * identity wrote it. An unlisted one is `missing`, with the remedy, and is
+ * returned in `absent` for the audit to report. Nothing here mints or rotates:
+ * a key missing from a clone is an operator's to rotate, because a rotation
+ * writes both secrets, and any secret write bumps every one of the clone's
+ * function versions.
+ *
+ * Only a change is written, so a pass over a clone that already reads true
+ * writes nothing.
+ */
+export function identityLedgerFromListing(input: {
+  identity: Pick<EmailIdentityRow, "key_written_at" | "from_address_written_at">;
+  /** The project's secret names, from a listing that SUCCEEDED. */
+  listed: ReadonlySet<string>;
+  ledger: ReadonlyMap<string, { status: string | null; last_error: string | null }>;
+}): { writes: IdentityLedgerWrite[]; absent: IdentityLedgerWrite["name"][] } {
+  const writtenAt: Record<IdentityLedgerWrite["name"], string | null> = {
+    RESEND_API_KEY: input.identity.key_written_at,
+    RESEND_FROM_EMAIL: input.identity.from_address_written_at,
+  };
+  const writes: IdentityLedgerWrite[] = [];
+  const absent: IdentityLedgerWrite["name"][] = [];
+  for (const name of IDENTITY_SECRET_NAMES) {
+    const row = input.ledger.get(name);
+    if (input.listed.has(name)) {
+      if (row?.status !== "set") {
+        writes.push({ name, status: "set", last_set_at: writtenAt[name], last_error: null });
+      }
+      continue;
+    }
+    absent.push(name);
+    if (row?.status !== "missing" || row.last_error !== IDENTITY_SECRET_ABSENT_NOTE) {
+      writes.push({
+        name,
+        status: "missing",
+        last_set_at: null,
+        last_error: IDENTITY_SECRET_ABSENT_NOTE,
+      });
+    }
+  }
+  return { writes, absent };
+}
+
 // ─── Ledger vocabulary ───────────────────────────────────────────────
 
 /**

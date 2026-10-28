@@ -78,8 +78,17 @@ export const Route = createFileRoute("/hooks/email-identity-drain")({
             console.error("[hooks/email-identity-drain] audit:", audit.error);
           }
           const report = { ...swept, started, audit };
+          // A clone that could not be read, or did not list a secret, is
+          // recorded too: without it a quiet pass left a stale ledger row with
+          // no explanation anywhere.
           const auditActed =
-            "error" in audit ? true : audit.ran && (audit.repaired > 0 || audit.failed > 0);
+            "error" in audit
+              ? true
+              : audit.ran &&
+                (audit.repaired > 0 ||
+                  audit.failed > 0 ||
+                  audit.cloneUnread > 0 ||
+                  audit.absentOnClone > 0);
 
           // Only write a breadcrumb when the run did something or refused for
           // a reason worth reading. A drain that files an identical row every
