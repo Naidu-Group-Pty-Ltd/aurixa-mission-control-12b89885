@@ -23,32 +23,87 @@
  *   4. reports precisely what could not be restored, rather than dropping it
  *
  * `dryRun` performs step 1 and reports the plan without deleting anything.
+ *
+ * Step 1's snapshot is written to the audit log before step 2 deletes
+ * anything, and a reset after one that never finished restores that one's
+ * snapshot too (`libraryReset.pure.ts`). Neither starts beside a detection
+ * run that is still running (`findRunningDetection`).
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
-import { runDetection, DEFAULT_CONFIG, type DetectionRunConfig } from "./module-detection.server";
+import {
+  runDetection,
+  findRunningDetection,
+  runningRefusal,
+  DEFAULT_CONFIG,
+  RUNNING_RUN_WINDOW_MS,
+  type DetectionRunConfig,
+} from "./module-detection.server";
 import {
   probeCommitColumns,
   publishModulesToLibrary,
   requireLibraryAdmin,
 } from "./libraryApproval.server";
+import {
+  RESET_AUDIT_ACTION,
+  RESET_COMPLETE_AUDIT_ACTION,
+  installCount,
+  mergeResetSnapshots,
+  snapshotForAudit,
+  snapshotOfResetRow,
+  type CloneInstallSnapshot,
+  type PinSnapshot,
+  type ResetSnapshot,
+} from "./libraryReset.pure";
+import { describeDbError } from "./libraryApproval.pure";
 
 type Supabase = SupabaseClient<Database>;
 
 /** Typing this out is the point: it is hard to trigger by accident. */
 export const RESET_CONFIRMATION = "RESET LIBRARY";
 
-export type CloneInstallSnapshot = {
-  cloneId: string;
-  slugs: string[];
-};
+/**
+ * The last reset's snapshot, when that reset never recorded its completion:
+ * it died somewhere between its wipe and its restore, and the installs it
+ * recorded are on no clone now.
+ *
+ * A failed read is an error, never "nothing unfinished": a reset that went on
+ * would restore only what the dead one left.
+ */
+export async function readUnfinishedReset(
+  supabase: Supabase,
+): Promise<
+  | { ok: true; unfinished: { at: string; snapshot: ResetSnapshot } | null }
+  | { ok: false; error: string }
+> {
+  const { data: last, error } = await supabase
+    .from("audit_log")
+    .select("id, created_at, metadata")
+    .eq("action", RESET_AUDIT_ACTION)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) return { ok: false, error: `the last reset is unreadable: ${describeDbError(error)}` };
+  if (!last) return { ok: true, unfinished: null };
 
-export type PinSnapshot = {
-  cloneId: string;
-  slug: string;
-  version: number;
-};
+  const { data: done, error: doneErr } = await supabase
+    .from("audit_log")
+    .select("id")
+    .eq("action", RESET_COMPLETE_AUDIT_ACTION)
+    .gt("created_at", last.created_at)
+    .limit(1);
+  if (doneErr) {
+    return {
+      ok: false,
+      error: `the last reset's completion is unreadable: ${describeDbError(doneErr)}`,
+    };
+  }
+  if ((done ?? []).length > 0) return { ok: true, unfinished: null };
+
+  const snapshot = snapshotOfResetRow(last.metadata);
+  return { ok: true, unfinished: snapshot ? { at: last.created_at, snapshot } : null };
+}
 
 export type ReingestReport = {
   ok: boolean;
@@ -110,32 +165,73 @@ function emptyReport(dryRun: boolean): ReingestReport {
   };
 }
 
+/** Rows per page of a snapshot read: PostgREST answers at most 1,000 rows a request. */
+const SNAPSHOT_PAGE = 1000;
+
+/**
+ * Every row of `table`, page by page, or the read's error. A snapshot that
+ * stopped at the first page would restore a thousand installs and lose the
+ * rest, and a failed read is never an empty table: the wipe that followed it
+ * would take every install with it.
+ */
+async function readAllRows<T>(
+  supabase: Supabase,
+  table: "clone_modules" | "clone_library_pins",
+  columns: string,
+): Promise<{ ok: true; rows: T[] } | { ok: false; error: string }> {
+  const rows: T[] = [];
+  for (let from = 0; ; from += SNAPSHOT_PAGE) {
+    const { data, error } = await supabase
+      .from(table)
+      .select(columns)
+      .order("id", { ascending: true })
+      .range(from, from + SNAPSHOT_PAGE - 1);
+    if (error) return { ok: false, error: `${table}: ${describeDbError(error)}` };
+    const page = (data ?? []) as T[];
+    rows.push(...page);
+    if (page.length < SNAPSHOT_PAGE) return { ok: true, rows };
+  }
+}
+
 /** Read every clone's installed module slugs, so they survive the wipe. */
-export async function snapshotCloneInstalls(supabase: Supabase): Promise<CloneInstallSnapshot[]> {
-  const { data } = await supabase.from("clone_modules").select("clone_id, modules(slug)");
+export async function snapshotCloneInstalls(
+  supabase: Supabase,
+): Promise<{ ok: true; installs: CloneInstallSnapshot[] } | { ok: false; error: string }> {
+  const read = await readAllRows<{ clone_id: string; modules: { slug: string } | null }>(
+    supabase,
+    "clone_modules",
+    "clone_id, modules(slug)",
+  );
+  if (!read.ok) return read;
   const byClone = new Map<string, string[]>();
-  for (const row of (data ?? []) as Array<{
-    clone_id: string;
-    modules: { slug: string } | null;
-  }>) {
+  for (const row of read.rows) {
     if (!row.modules?.slug) continue;
     const list = byClone.get(row.clone_id) ?? [];
     list.push(row.modules.slug);
     byClone.set(row.clone_id, list);
   }
-  return [...byClone.entries()].map(([cloneId, slugs]) => ({
-    cloneId,
-    slugs: [...new Set(slugs)].sort(),
-  }));
+  return {
+    ok: true,
+    installs: [...byClone.entries()].map(([cloneId, slugs]) => ({
+      cloneId,
+      slugs: [...new Set(slugs)].sort(),
+    })),
+  };
 }
 
-export async function snapshotPins(supabase: Supabase): Promise<PinSnapshot[]> {
-  const { data } = await supabase.from("clone_library_pins").select("clone_id, slug, version");
-  return ((data ?? []) as Array<{ clone_id: string; slug: string; version: number }>).map((p) => ({
-    cloneId: p.clone_id,
-    slug: p.slug,
-    version: p.version,
-  }));
+export async function snapshotPins(
+  supabase: Supabase,
+): Promise<{ ok: true; pins: PinSnapshot[] } | { ok: false; error: string }> {
+  const read = await readAllRows<{ clone_id: string; slug: string; version: number }>(
+    supabase,
+    "clone_library_pins",
+    "clone_id, slug, version",
+  );
+  if (!read.ok) return read;
+  return {
+    ok: true,
+    pins: read.rows.map((p) => ({ cloneId: p.clone_id, slug: p.slug, version: p.version })),
+  };
 }
 
 export type ReingestOptions = {
@@ -199,19 +295,82 @@ export async function resetAndReingestLibrary(args: {
     report.warnings.push(`A real run would be refused: ${columns.error}.`);
   }
 
+  // Two runs at once write the same modules, and a reset beside a detection
+  // that is still running wipes what it is writing. On 31 Jul 2026 three runs
+  // overlapped, two of them started while the reset's own was reading.
+  const running = await findRunningDetection(supabase);
+  const runningWhy = !running.ok
+    ? `${running.error}, so it is not known whether a detection is running.`
+    : running.running
+      ? runningRefusal(running.running, "a reset")
+      : null;
+  if (runningWhy) {
+    if (!dryRun) {
+      report.error = `${runningWhy} Nothing was wiped.`;
+      return report;
+    }
+    report.warnings.push(`A real run would be refused: ${runningWhy}`);
+  }
+
   // ── 1. Snapshot current state ──
-  const [modulesRes, libraryRes, installs, pins] = await Promise.all([
+  const [modulesRes, libraryRes, installsRead, pinsRead, unfinishedRead] = await Promise.all([
     supabase.from("modules").select("id, slug, status"),
     supabase.from("module_library").select("id, slug"),
     snapshotCloneInstalls(supabase),
     snapshotPins(supabase),
+    readUnfinishedReset(supabase),
   ]);
+  const unreadable = [
+    modulesRes.error ? `modules: ${describeDbError(modulesRes.error)}` : null,
+    libraryRes.error ? `module_library: ${describeDbError(libraryRes.error)}` : null,
+    installsRead.ok ? null : installsRead.error,
+    pinsRead.ok ? null : pinsRead.error,
+    unfinishedRead.ok ? null : unfinishedRead.error,
+  ].filter((why): why is string => why !== null);
+  if (!installsRead.ok || !pinsRead.ok || !unfinishedRead.ok || unreadable.length > 0) {
+    report.error =
+      `What the reset would remove and restore could not be read (${unreadable.join("; ")}). ` +
+      `Nothing was wiped.`;
+    return report;
+  }
+
+  // A reset that died after its wipe left its installs on no clone, and its
+  // record is the only place they still are.
+  const current: ResetSnapshot = { installs: installsRead.installs, pins: pinsRead.pins };
+  const unfinished = unfinishedRead.unfinished;
+
+  // A reset with no completion recorded may not be dead: it records its
+  // snapshot before its detection run exists, and approves, publishes and
+  // restores after that run says `completed`. Inside the window it is taken
+  // to be running, and a second reset now would wipe what it is restoring.
+  const unfinishedAt = unfinished ? Date.parse(unfinished.at) : NaN;
+  if (unfinished && Date.now() - unfinishedAt < RUNNING_RUN_WINDOW_MS) {
+    const retryAt = new Date(unfinishedAt + RUNNING_RUN_WINDOW_MS).toISOString();
+    const why =
+      `The reset of ${unfinished.at} has not recorded its completion and may still be running. ` +
+      `If it died, reset again after ${retryAt}, and that reset restores what it recorded.`;
+    if (!dryRun) {
+      report.error = `${why} Nothing was wiped.`;
+      return report;
+    }
+    report.warnings.push(`A real run would be refused: ${why}`);
+  }
+
+  const snapshot = unfinished ? mergeResetSnapshots(current, unfinished.snapshot) : current;
+  const { installs, pins } = snapshot;
+  if (unfinished) {
+    report.warnings.push(
+      `The reset of ${unfinished.at} never finished. The ${installCount(unfinished.snapshot)} ` +
+        `install(s) and ${unfinished.snapshot.pins.length} pin(s) it recorded before its wipe are ` +
+        `restored with this one's.`,
+    );
+  }
 
   const existingModules = modulesRes.data ?? [];
   report.before = {
     modules: existingModules.length,
     libraryEntries: (libraryRes.data ?? []).length,
-    cloneInstalls: installs.reduce((n, c) => n + c.slugs.length, 0),
+    cloneInstalls: installCount(snapshot),
     clonesWithModules: installs.length,
     libraryPins: pins.length,
   };
@@ -237,7 +396,30 @@ export async function resetAndReingestLibrary(args: {
     return report;
   }
 
-  // ── 2. Wipe ──
+  // ── 2. Record, then wipe ──
+  // The snapshot is written before anything is deleted. The wipe takes
+  // `clone_modules` with the modules, so an invocation that died after it
+  // would otherwise take the only record of what to restore with it.
+  const { error: recordErr } = await supabase.from("audit_log").insert({
+    action: RESET_AUDIT_ACTION,
+    entity_type: "module_library",
+    actor_user_id: userId,
+    metadata: {
+      modules_removed: report.before.modules,
+      library_entries_removed: report.before.libraryEntries,
+      clone_installs_snapshotted: report.before.cloneInstalls,
+      pins_snapshotted: report.before.libraryPins,
+      ...(unfinished ? { restores_unfinished_reset_of: unfinished.at } : {}),
+      snapshot: snapshotForAudit(snapshot),
+    },
+  });
+  if (recordErr) {
+    report.error =
+      `The snapshot of what to restore could not be recorded (${describeDbError(recordErr)}), ` +
+      `so nothing was wiped.`;
+    return report;
+  }
+
   // Order matters: soft-referencing rows first, then the tables that cascade.
   await supabase.from("clone_library_pins").delete().not("id", "is", null);
   await supabase.from("module_library").delete().not("id", "is", null);
@@ -264,18 +446,6 @@ export async function resetAndReingestLibrary(args: {
     return report;
   }
 
-  await supabase.from("audit_log").insert({
-    action: "module_library.reset",
-    entity_type: "module_library",
-    actor_user_id: userId,
-    metadata: {
-      modules_removed: report.before.modules,
-      library_entries_removed: report.before.libraryEntries,
-      clone_installs_snapshotted: report.before.cloneInstalls,
-      pins_snapshotted: report.before.libraryPins,
-    },
-  });
-
   // ── 3. Re-detect ──
   const config: DetectionRunConfig = { ...DEFAULT_CONFIG, ...options.config, deltaMode: false };
   const detection = await runDetection({ supabase, userId, config });
@@ -284,8 +454,8 @@ export async function resetAndReingestLibrary(args: {
   if (!detection.ok) {
     report.error = `Detection failed after wipe: ${detection.error ?? "unknown"}`;
     report.warnings.push(
-      "The catalogue is now empty. Fix the detection error and re-run — clone installs " +
-        "were snapshotted but cannot be restored until modules exist again.",
+      "The catalogue is now empty. The clone installs were recorded before the wipe, and the " +
+        "next reset restores them with its own: fix the detection error and reset again.",
     );
     return report;
   }
@@ -436,7 +606,7 @@ export async function resetAndReingestLibrary(args: {
   }
 
   await supabase.from("audit_log").insert({
-    action: "module_library.reingest_complete",
+    action: RESET_COMPLETE_AUDIT_ACTION,
     entity_type: "module_library",
     entity_id: detection.runId,
     actor_user_id: userId,
