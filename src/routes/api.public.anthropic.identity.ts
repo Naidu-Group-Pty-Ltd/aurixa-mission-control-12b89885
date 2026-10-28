@@ -33,6 +33,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { resolveCloneApiKey } from "@/server/clone-api-keys.server";
 import { checkRateLimit } from "@/server/token-rate-limit.server";
+import { assertGateOpen, gateLockedBody } from "@/server/payment-gate.server";
 import {
   FEDERATION_ORG_ENV,
   federationSubject,
@@ -94,6 +95,24 @@ export const Route = createFileRoute("/api/public/anthropic/identity")({
             "This is a prime-scoped key. The prime reaches Anthropic with the key it already holds.",
             403,
           );
+        }
+
+        /*
+         * The activation gate. Inference federated through this identity is
+         * billed to Aurixa's own organisation, so a workspace whose free trial
+         * lapsed unpaid gets no new token. The one it holds expires in minutes,
+         * and a 402 in the shape every guarded endpoint uses tells the clone
+         * why rather than reading as a federation fault.
+         */
+        const gate = await assertGateOpen(key.clone_id);
+        if (!gate.open) {
+          return new Response(JSON.stringify(gateLockedBody(gate)), {
+            status: 402,
+            headers: {
+              "content-type": "application/json",
+              "x-mission-control-refusal": "workspace_locked",
+            },
+          });
         }
 
         const identity = await supabaseAdmin

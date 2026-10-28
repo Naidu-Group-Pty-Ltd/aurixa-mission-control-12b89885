@@ -12,6 +12,7 @@
 // application reference (`AX-XXXXXXXXXX`) issued at Stage 1. That reference is
 // the only key shared with the Airtable operations record, so it is parsed and
 // stored first-class rather than left buried in the raw metadata blob.
+import { normaliseOfferCode } from "@/lib/trialOffers.pure";
 import crypto from "crypto";
 
 export const LEAD_MAX_FIELD_LENGTH = 300;
@@ -339,6 +340,20 @@ export function parseStageUpdate(
 }
 
 /** Routes a payload to the right parser based on its declared submission type. */
+/**
+ * The trial offer a Stage 1 application was made under, when the visitor
+ * arrived on a `?trial=CODE` link. The website asked Mission Control about
+ * the code before showing it, so this only normalises it: a code the offers
+ * table does not know is still worth keeping on the lead, as what the visitor
+ * was shown. Anything that is not a code shape is dropped.
+ */
+export function trialOfferCodeFrom(payload: Record<string, unknown>): string | null {
+  const raw = payload.trialOfferCode ?? payload.trial_offer_code;
+  if (typeof raw !== "string") return null;
+  const code = normaliseOfferCode(raw);
+  return code.ok ? code.code : null;
+}
+
 export function parseSubmission(
   payload: Record<string, unknown>,
 ): ParsedSubmission | { error: string } {

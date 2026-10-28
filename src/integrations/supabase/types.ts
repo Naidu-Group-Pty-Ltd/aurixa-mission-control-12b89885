@@ -1248,6 +1248,8 @@ export type Database = {
           signed_record_sha256: string | null
           status: string
           template_id: string | null
+          trial_days: number | null
+          trial_offer_code: string | null
           updated_at: string
           void_reason: string | null
         }
@@ -1310,6 +1312,8 @@ export type Database = {
           signed_record_sha256?: string | null
           status?: string
           template_id?: string | null
+          trial_days?: number | null
+          trial_offer_code?: string | null
           updated_at?: string
           void_reason?: string | null
         }
@@ -1372,6 +1376,8 @@ export type Database = {
           signed_record_sha256?: string | null
           status?: string
           template_id?: string | null
+          trial_days?: number | null
+          trial_offer_code?: string | null
           updated_at?: string
           void_reason?: string | null
         }
@@ -13779,6 +13785,48 @@ export type Database = {
           stripe_price_id?: string | null
           tokens?: number
           updated_at?: string
+        }
+        Relationships: []
+      }
+      trial_offers: {
+        Row: {
+          active: boolean
+          code: string
+          created_at: string
+          created_by: string | null
+          expires_at: string | null
+          id: string
+          label: string
+          notes: string | null
+          trial_days: number
+          updated_at: string
+          updated_by: string | null
+        }
+        Insert: {
+          active?: boolean
+          code: string
+          created_at?: string
+          created_by?: string | null
+          expires_at?: string | null
+          id?: string
+          label: string
+          notes?: string | null
+          trial_days: number
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Update: {
+          active?: boolean
+          code?: string
+          created_at?: string
+          created_by?: string | null
+          expires_at?: string | null
+          id?: string
+          label?: string
+          notes?: string | null
+          trial_days?: number
+          updated_at?: string
+          updated_by?: string | null
         }
         Relationships: []
       }

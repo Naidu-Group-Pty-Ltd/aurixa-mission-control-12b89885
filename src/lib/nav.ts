@@ -407,7 +407,7 @@ export const NAV_SECTIONS: NavSection[] = [
         label: "Payment Gates",
         icon: GateIcon,
         keywords:
-          "activation gate lock unlock clone access grace period trial countdown 72 hours paid unpaid stripe",
+          "activation gate lock unlock clone access grace period free trial 14 days countdown extend trial paid unpaid stripe",
       },
     ],
   },

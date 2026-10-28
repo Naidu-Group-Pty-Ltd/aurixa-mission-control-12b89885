@@ -17,6 +17,7 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { CloneGateActions } from "@/components/clone-gate-actions";
+import { TrialOffersPanel } from "@/components/trial-offers-panel";
 import {
   armCloneGate,
   listCloneGates,
@@ -25,11 +26,15 @@ import {
 } from "@/server/payment-gate.functions";
 import {
   GATE_DEFAULT_HOURS,
+  TRIAL_MAX_DAYS,
+  TRIAL_MIN_DAYS,
   describeGateReason,
+  describeWindowHours,
   formatRemaining,
   gateTone,
   isOnExtendedTrial,
-  normaliseGraceHours,
+  normaliseTrialDays,
+  trialDaysOf,
   trialExtensionsOf,
 } from "@/lib/clonePaymentGate.pure";
 import { cn } from "@/lib/utils";
@@ -146,7 +151,7 @@ function PaymentGatesPage() {
       <PageHeader
         eyebrow="activation"
         title="Payment Gates"
-        description="A clone provisioned onto a paid plan boots on a clock and locks when it runs out, until Stripe captures its activation payment. The prime and every clone created before this feature are not gated and never will be."
+        description="A clone provisioned onto a paid plan starts on its free trial — fourteen days unless set otherwise — and locks when the trial runs out, until Stripe captures its activation payment. The prime and every clone created before this feature are not gated and never will be."
         actions={<RefreshButton onRefresh={refresh} loading={query.isFetching} />}
       />
 
@@ -183,6 +188,8 @@ function PaymentGatesPage() {
         enabled={query.data?.defaults.enabled ?? true}
         onSaved={refresh}
       />
+
+      <TrialOffersPanel />
 
       <div className="flex flex-wrap items-center gap-2">
         <div className="glass flex flex-wrap overflow-hidden">
@@ -415,10 +422,14 @@ function DefaultsPanel({
   onSaved: () => void;
 }) {
   const save = useServerFn(setGateDefaults);
-  const [value, setValue] = useState(String(hours));
+  // The default is set in whole days, because that is how a free trial is
+  // offered. A default somebody set in hours before this read days (36, say)
+  // is shown as it is and left blank in the box rather than rounded into a
+  // length nobody chose.
+  const currentDays = trialDaysOf(hours);
+  const [value, setValue] = useState(currentDays === null ? "" : String(currentDays));
   const [busy, setBusy] = useState(false);
-  const parsed = normaliseGraceHours(value);
-  const valid = parsed.ok && parsed.hours !== null;
+  const parsed = normaliseTrialDays(value);
 
   async function commit(patch: { hours?: number; enabled?: boolean }) {
     setBusy(true);
@@ -441,33 +452,42 @@ function DefaultsPanel({
       <div className="flex flex-col gap-5 md:flex-row md:items-start md:justify-between">
         <div className="min-w-0 space-y-1">
           <p className="label-mono">platform default</p>
-          <h2 className="font-display text-lg">New paid clones get {hours} hours</h2>
+          <h2 className="font-display text-lg">
+            New paid clones get a {describeWindowHours(hours)} free trial
+          </h2>
           <p className="max-w-prose text-sm text-muted-foreground">
-            The window every newly provisioned paid clone is armed with. Changing it affects the
-            next clone, never one that already exists — an armed gate keeps the window its customer
-            was told about.
+            The free trial every newly provisioned paid clone is armed with, unless the wizard or
+            its agreement sets another length. Changing it affects the next clone, never one that
+            already exists — an armed gate keeps the trial its customer was told about. To give an
+            existing customer more time, use Extend trial on its row.
           </p>
         </div>
 
         <div className="flex flex-wrap items-end gap-4">
           <div className="space-y-2">
-            <Label htmlFor="default-hours">Hours</Label>
+            <Label htmlFor="default-days">Trial length (days)</Label>
             <div className="flex gap-2">
               <Input
-                id="default-hours"
+                id="default-days"
                 inputMode="numeric"
                 value={value}
                 onChange={(e) => setValue(e.target.value)}
+                placeholder={currentDays === null ? describeWindowHours(hours) : undefined}
                 className="w-28"
               />
               <Button
                 variant="outline"
-                disabled={busy || !valid || Number(value) === hours}
-                onClick={() => commit({ hours: Number(value) })}
+                disabled={busy || !parsed.ok || parsed.hours === hours}
+                onClick={() => parsed.ok && commit({ hours: parsed.hours })}
               >
                 Save
               </Button>
             </div>
+            {!parsed.ok && value.trim() !== "" && (
+              <p className="text-xs text-destructive">
+                Whole days, {TRIAL_MIN_DAYS} to {TRIAL_MAX_DAYS}.
+              </p>
+            )}
           </div>
 
           <div className="space-y-2">

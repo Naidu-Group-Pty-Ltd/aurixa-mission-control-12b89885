@@ -1,4 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
+import { normaliseOfferCode } from "@/lib/trialOffers.pure";
 import { requireAdmin } from "@/integrations/supabase/role-middleware";
 import type { Database } from "@/integrations/supabase/types";
 import { isCrmMode, type CrmMode } from "@/lib/crmMode.pure";
@@ -53,11 +54,14 @@ export type ProvisionCloneInput = {
   // is used. Either way it goes through `allocateSubdomain`, so a reserved or
   // taken name is suffixed rather than rejected or silently duplicated.
   subdomain?: string | null;
-  // Activation window for this clone's payment gate, in hours. Undefined uses
-  // the platform default (prime_config.clone_gate_default_hours, 72); null
-  // arms a gate with no deadline. Only ever consulted for a clone on a PAID
-  // plan — `armGate` decides that, not the caller.
+  // The free trial for this clone's payment gate, in hours. Undefined uses
+  // the platform default (prime_config.clone_gate_default_hours, fourteen
+  // days); null arms a gate with no deadline. Only ever consulted for a clone
+  // on a PAID plan — `armGate` decides that, not the caller.
   gateGraceHours?: number | null;
+  // The trial offer the hours above came from, when they did. Provenance for
+  // the gate's history; the hours are what is armed.
+  gateTrialOfferCode?: string | null;
   /**
    * Provision this clone's own Supabase backend as part of creation.
    *
@@ -153,6 +157,11 @@ export const provisionClone = createServerFn({ method: "POST" })
     // reported as a success.
     if (input.crmMode != null && !isCrmMode(input.crmMode)) {
       throw new Error("crmMode must be 'dependent' or 'independent'");
+    }
+    // A trial offer's code is provenance on the gate's history. One that is
+    // not a code is refused rather than recorded as if it were.
+    if (input.gateTrialOfferCode != null && !normaliseOfferCode(input.gateTrialOfferCode).ok) {
+      throw new Error("gateTrialOfferCode is not a trial offer code");
     }
     // The wizard offers no exclusions, but this input is the pipeline's, so a
     // list sent here is held to the agreement's rule rather than written as sent.

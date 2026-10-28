@@ -213,6 +213,7 @@ import { Route as ApiPublicStorefrontPlanChangeRouteImport } from './routes/api.
 import { Route as ApiPublicStorefrontSessionRouteImport } from './routes/api.public.storefront.session'
 import { Route as ApiPublicStorefrontSetupRouteImport } from './routes/api.public.storefront.setup'
 import { Route as ApiPublicStorefrontStrategicReviewRouteImport } from './routes/api.public.storefront.strategic-review'
+import { Route as ApiPublicStorefrontTrialOfferRouteImport } from './routes/api.public.storefront.trial-offer'
 import { Route as ApiPublicStorefrontWalletRouteImport } from './routes/api.public.storefront.wallet'
 import { Route as ApiPublicStripeWebhookRouteImport } from './routes/api.public.stripe.webhook'
 import { Route as ApiPublicSupportAssistantActivityRouteImport } from './routes/api.public.support.assistant-activity'
@@ -1312,6 +1313,12 @@ const ApiPublicStorefrontStrategicReviewRoute =
     path: '/api/public/storefront/strategic-review',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicStorefrontTrialOfferRoute =
+  ApiPublicStorefrontTrialOfferRouteImport.update({
+    id: '/api/public/storefront/trial-offer',
+    path: '/api/public/storefront/trial-offer',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicStorefrontWalletRoute =
   ApiPublicStorefrontWalletRouteImport.update({
     id: '/api/public/storefront/wallet',
@@ -1670,6 +1677,7 @@ export interface FileRoutesByFullPath {
   '/api/public/storefront/session': typeof ApiPublicStorefrontSessionRoute
   '/api/public/storefront/setup': typeof ApiPublicStorefrontSetupRoute
   '/api/public/storefront/strategic-review': typeof ApiPublicStorefrontStrategicReviewRoute
+  '/api/public/storefront/trial-offer': typeof ApiPublicStorefrontTrialOfferRoute
   '/api/public/storefront/wallet': typeof ApiPublicStorefrontWalletRoute
   '/api/public/stripe/webhook': typeof ApiPublicStripeWebhookRouteWithChildren
   '/api/public/support/assistant-activity': typeof ApiPublicSupportAssistantActivityRoute
@@ -1901,6 +1909,7 @@ export interface FileRoutesByTo {
   '/api/public/storefront/session': typeof ApiPublicStorefrontSessionRoute
   '/api/public/storefront/setup': typeof ApiPublicStorefrontSetupRoute
   '/api/public/storefront/strategic-review': typeof ApiPublicStorefrontStrategicReviewRoute
+  '/api/public/storefront/trial-offer': typeof ApiPublicStorefrontTrialOfferRoute
   '/api/public/storefront/wallet': typeof ApiPublicStorefrontWalletRoute
   '/api/public/stripe/webhook': typeof ApiPublicStripeWebhookRouteWithChildren
   '/api/public/support/assistant-activity': typeof ApiPublicSupportAssistantActivityRoute
@@ -2135,6 +2144,7 @@ export interface FileRoutesById {
   '/api/public/storefront/session': typeof ApiPublicStorefrontSessionRoute
   '/api/public/storefront/setup': typeof ApiPublicStorefrontSetupRoute
   '/api/public/storefront/strategic-review': typeof ApiPublicStorefrontStrategicReviewRoute
+  '/api/public/storefront/trial-offer': typeof ApiPublicStorefrontTrialOfferRoute
   '/api/public/storefront/wallet': typeof ApiPublicStorefrontWalletRoute
   '/api/public/stripe/webhook': typeof ApiPublicStripeWebhookRouteWithChildren
   '/api/public/support/assistant-activity': typeof ApiPublicSupportAssistantActivityRoute
@@ -2370,6 +2380,7 @@ export interface FileRouteTypes {
     | '/api/public/storefront/session'
     | '/api/public/storefront/setup'
     | '/api/public/storefront/strategic-review'
+    | '/api/public/storefront/trial-offer'
     | '/api/public/storefront/wallet'
     | '/api/public/stripe/webhook'
     | '/api/public/support/assistant-activity'
@@ -2601,6 +2612,7 @@ export interface FileRouteTypes {
     | '/api/public/storefront/session'
     | '/api/public/storefront/setup'
     | '/api/public/storefront/strategic-review'
+    | '/api/public/storefront/trial-offer'
     | '/api/public/storefront/wallet'
     | '/api/public/stripe/webhook'
     | '/api/public/support/assistant-activity'
@@ -2834,6 +2846,7 @@ export interface FileRouteTypes {
     | '/api/public/storefront/session'
     | '/api/public/storefront/setup'
     | '/api/public/storefront/strategic-review'
+    | '/api/public/storefront/trial-offer'
     | '/api/public/storefront/wallet'
     | '/api/public/stripe/webhook'
     | '/api/public/support/assistant-activity'
@@ -3040,6 +3053,7 @@ export interface RootRouteChildren {
   ApiPublicStorefrontSessionRoute: typeof ApiPublicStorefrontSessionRoute
   ApiPublicStorefrontSetupRoute: typeof ApiPublicStorefrontSetupRoute
   ApiPublicStorefrontStrategicReviewRoute: typeof ApiPublicStorefrontStrategicReviewRoute
+  ApiPublicStorefrontTrialOfferRoute: typeof ApiPublicStorefrontTrialOfferRoute
   ApiPublicStorefrontWalletRoute: typeof ApiPublicStorefrontWalletRoute
   ApiPublicStripeWebhookRoute: typeof ApiPublicStripeWebhookRouteWithChildren
   ApiPublicSupportAssistantActivityRoute: typeof ApiPublicSupportAssistantActivityRoute
@@ -4495,6 +4509,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicStorefrontStrategicReviewRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/storefront/trial-offer': {
+      id: '/api/public/storefront/trial-offer'
+      path: '/api/public/storefront/trial-offer'
+      fullPath: '/api/public/storefront/trial-offer'
+      preLoaderRoute: typeof ApiPublicStorefrontTrialOfferRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/storefront/wallet': {
       id: '/api/public/storefront/wallet'
       path: '/api/public/storefront/wallet'
@@ -5025,6 +5046,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicStorefrontSetupRoute: ApiPublicStorefrontSetupRoute,
   ApiPublicStorefrontStrategicReviewRoute:
     ApiPublicStorefrontStrategicReviewRoute,
+  ApiPublicStorefrontTrialOfferRoute: ApiPublicStorefrontTrialOfferRoute,
   ApiPublicStorefrontWalletRoute: ApiPublicStorefrontWalletRoute,
   ApiPublicStripeWebhookRoute: ApiPublicStripeWebhookRouteWithChildren,
   ApiPublicSupportAssistantActivityRoute:

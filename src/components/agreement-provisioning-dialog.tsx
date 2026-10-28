@@ -15,12 +15,21 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { TierModulePicker, type TierSelection } from "@/components/tier-module-picker";
+import { TrialLengthPicker } from "@/components/trial-length-picker";
 import {
   configureAgreementProvisioning,
+  getAgreementTrial,
   getProvisioningCatalog,
   type AgreementListRow,
 } from "@/lib/agreements.functions";
 import { exclusionChoices } from "@/lib/pricing/contract-exclusions";
+import { getTrialSettings } from "@/server/trial-offers.functions";
+import {
+  DEFAULT_CHOICE,
+  choiceFromStored,
+  resolveTrialChoice,
+  type TrialChoice,
+} from "@/lib/trialOffers.pure";
 
 /** The columns the dialog reads — the list's row and the offer page's row both carry them. */
 export type ProvisioningAgreement = Pick<
@@ -90,6 +99,37 @@ export function AgreementProvisioningDialog({
   const [armed, setArmed] = useState(true);
   const [saving, setSaving] = useState(false);
 
+  // The free trial the workspace will be armed with. Read apart from the row
+  // (the agreements list does not carry it), and only sent back once it has
+  // been read — saving the other settings must never quietly reset a 30-day
+  // trial to the default because the read had not come back yet.
+  const trialSettingsQ = useQuery({
+    queryKey: ["trial-settings"],
+    queryFn: async () => getTrialSettings(),
+    enabled: open,
+    staleTime: 60_000,
+  });
+  const trialQ = useQuery({
+    queryKey: ["agreement-trial", agreement?.id],
+    queryFn: async () => getAgreementTrial({ data: { id: agreement!.id } }),
+    enabled: open && Boolean(agreement?.id),
+  });
+  const [trialChoice, setTrialChoice] = useState<TrialChoice>(DEFAULT_CHOICE);
+  const trialLoaded = Boolean(trialQ.data) && Boolean(trialSettingsQ.data);
+  useEffect(() => {
+    if (!trialQ.data || !trialSettingsQ.data) return;
+    setTrialChoice(
+      choiceFromStored(
+        { trial_days: trialQ.data.trialDays, trial_offer_code: trialQ.data.trialOfferCode },
+        trialSettingsQ.data.offers,
+      ),
+    );
+  }, [trialQ.data, trialSettingsQ.data]);
+  const trial = resolveTrialChoice(trialChoice, {
+    offers: trialSettingsQ.data?.offers ?? [],
+    defaultHours: trialSettingsQ.data?.defaults.hours ?? null,
+  });
+
   useEffect(() => {
     if (!agreement) return;
     setSelection({
@@ -138,6 +178,10 @@ export function AgreementProvisioningDialog({
       toast.error("Pick a tier plan — provisioning without one has nothing to entitle.");
       return;
     }
+    if (trialLoaded && !trial.ok) {
+      toast.error(`Free trial: ${trial.error}`);
+      return;
+    }
     setSaving(true);
     try {
       const moduleIds = [...picked].filter((id) => byId.has(id));
@@ -150,6 +194,13 @@ export function AgreementProvisioningDialog({
           excludedModuleSlugs: excludedSlugs,
           adminEmail: adminEmail.trim() || undefined,
           armed,
+          trial:
+            trialLoaded && trial.ok
+              ? {
+                  days: trialChoice.kind === "default" ? null : trial.days,
+                  offerCode: trial.offerCode,
+                }
+              : undefined,
         },
       });
       if (res?.ok) {
@@ -214,6 +265,32 @@ export function AgreementProvisioningDialog({
               Seed administrator of the new workspace. They set their password via the platform's
               own reset flow.
             </p>
+          </div>
+
+          <div className="space-y-2">
+            {trialLoaded ? (
+              <TrialLengthPicker
+                id="prov-trial"
+                value={trialChoice}
+                onChange={setTrialChoice}
+                defaultHours={trialSettingsQ.data?.defaults.hours ?? null}
+                offers={trialSettingsQ.data?.offers ?? []}
+                offersError={trialSettingsQ.data?.offersError ?? null}
+                disabled={locked}
+              />
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                {trialQ.error || trialSettingsQ.error
+                  ? "The free trial could not be read; saving leaves it as it is."
+                  : "Reading the free trial…"}
+              </p>
+            )}
+            {trialQ.data?.schemaPending && (
+              <p className="text-xs text-warning">
+                Free trials on agreements need a migration that has not applied yet. Until it does,
+                this agreement provisions the platform default.
+              </p>
+            )}
           </div>
 
           <div className="space-y-2">

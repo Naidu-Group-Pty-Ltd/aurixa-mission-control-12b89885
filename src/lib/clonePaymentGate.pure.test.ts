@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  checkoutPaysActivation,
   computeLocksAt,
   describeTrialExtensionRefusal,
+  describeWindowHours,
   formatRemaining,
   GATE_DEFAULT_HOURS,
   GATE_EVENT_KINDS,
@@ -11,6 +13,13 @@ import {
   gateFactsOf,
   gateTone,
   describeGateReason,
+  HOURS_PER_DAY,
+  invoicePaysActivation,
+  normaliseTrialDays,
+  subscriptionPaysActivation,
+  TRIAL_LENGTH_PRESET_DAYS,
+  TRIAL_MAX_DAYS,
+  trialDaysOf,
   isOnExtendedTrial,
   normaliseExtensionHours,
   normaliseGraceHours,
@@ -136,11 +145,70 @@ describe("resolveGateState", () => {
   });
 });
 
+describe("the free trial default", () => {
+  it("is fourteen days", () => {
+    expect(GATE_DEFAULT_HOURS).toBe(14 * 24);
+    expect(trialDaysOf(GATE_DEFAULT_HOURS)).toBe(14);
+  });
+  it("is offered as a preset, so the default is always one click away", () => {
+    expect(TRIAL_LENGTH_PRESET_DAYS).toContain(14);
+  });
+  it("fits inside the gate's own limits", () => {
+    expect(GATE_DEFAULT_HOURS).toBeLessThanOrEqual(GATE_MAX_HOURS);
+    expect(TRIAL_MAX_DAYS * HOURS_PER_DAY).toBe(GATE_MAX_HOURS);
+    for (const days of TRIAL_LENGTH_PRESET_DAYS) expect(days).toBeLessThanOrEqual(TRIAL_MAX_DAYS);
+  });
+});
+
+describe("normaliseTrialDays", () => {
+  it("turns whole days into the hours a gate stores", () => {
+    expect(normaliseTrialDays(14)).toEqual({ ok: true, days: 14, hours: 336 });
+    expect(normaliseTrialDays(" 30 ")).toEqual({ ok: true, days: 30, hours: 720 });
+  });
+  it("refuses a blank rather than defaulting it", () => {
+    expect(normaliseTrialDays("")).toEqual({ ok: false, error: "required" });
+    expect(normaliseTrialDays(null)).toEqual({ ok: false, error: "required" });
+  });
+  it("refuses fractions, words and lengths outside a day to a year", () => {
+    expect(normaliseTrialDays("1.5")).toEqual({ ok: false, error: "not_whole_days" });
+    expect(normaliseTrialDays("two weeks")).toEqual({ ok: false, error: "not_a_number" });
+    expect(normaliseTrialDays(0)).toEqual({ ok: false, error: "below_minimum" });
+    expect(normaliseTrialDays(366)).toEqual({ ok: false, error: "above_maximum" });
+    expect(normaliseTrialDays(365)).toEqual({ ok: true, days: 365, hours: GATE_MAX_HOURS });
+  });
+});
+
+describe("describeWindowHours", () => {
+  it("reads whole days as days", () => {
+    expect(describeWindowHours(336)).toBe("14 days");
+    expect(describeWindowHours(24)).toBe("1 day");
+  });
+  it("keeps the hours of a window that was set in hours", () => {
+    expect(describeWindowHours(72)).toBe("3 days");
+    expect(describeWindowHours(36)).toBe("1 day 12 hours");
+    expect(describeWindowHours(5)).toBe("5 hours");
+    expect(describeWindowHours(1)).toBe("1 hour");
+  });
+  it("says what a null window means", () => {
+    expect(describeWindowHours(null)).toBe("no deadline");
+  });
+});
+
+describe("trialDaysOf", () => {
+  it("is null for a window that is not whole days, rather than a rounded length", () => {
+    expect(trialDaysOf(36)).toBeNull();
+    expect(trialDaysOf(null)).toBeNull();
+    expect(trialDaysOf(0)).toBeNull();
+    expect(trialDaysOf(720)).toBe(30);
+  });
+});
+
 describe("computeLocksAt", () => {
   it("adds the window to the arm time", () => {
     expect(computeLocksAt("2026-09-01T00:00:00.000Z", GATE_DEFAULT_HOURS)).toBe(
-      "2026-09-04T00:00:00.000Z",
+      "2026-09-15T00:00:00.000Z",
     );
+    expect(computeLocksAt("2026-09-01T00:00:00.000Z", 72)).toBe("2026-09-04T00:00:00.000Z");
   });
   it("null hours means no deadline", () => {
     expect(computeLocksAt(NOW, null)).toBeNull();
@@ -597,5 +665,46 @@ describe("isOnExtendedTrial", () => {
     );
     expect(isOnExtendedTrial({ gate: {}, state: { paid: false } })).toBe(false);
     expect(isOnExtendedTrial({ gate: null, state: { paid: false } })).toBe(false);
+  });
+});
+
+describe("what pays the activation, and what a trial looks like instead", () => {
+  it("a paid Checkout pays it", () => {
+    expect(checkoutPaysActivation({ payment_status: "paid", amount_total: 99900 })).toBe(true);
+  });
+  it("a fully discounted Checkout still opens the gate, as an admin's waiver", () => {
+    expect(
+      checkoutPaysActivation({
+        payment_status: "no_payment_required",
+        amount_total: 0,
+        total_details: { amount_discount: 99900 },
+      }),
+    ).toBe(true);
+  });
+  it("a Checkout that paid nothing and was discounted nothing is a trial", () => {
+    expect(
+      checkoutPaysActivation({
+        payment_status: "no_payment_required",
+        amount_total: 0,
+        total_details: { amount_discount: 0 },
+      }),
+    ).toBe(false);
+    expect(checkoutPaysActivation({ payment_status: "no_payment_required", amount_total: 0 })).toBe(
+      false,
+    );
+  });
+  it("a delayed payment that has not cleared pays nothing", () => {
+    expect(checkoutPaysActivation({ payment_status: "unpaid", amount_total: 99900 })).toBe(false);
+  });
+  it("only an active subscription pays it — trialing has charged nothing", () => {
+    expect(subscriptionPaysActivation("active")).toBe(true);
+    expect(subscriptionPaysActivation("trialing")).toBe(false);
+    expect(subscriptionPaysActivation("past_due")).toBe(false);
+    expect(subscriptionPaysActivation(null)).toBe(false);
+  });
+  it("only an invoice that collected money pays it", () => {
+    expect(invoicePaysActivation({ amount_paid: 99900 })).toBe(true);
+    expect(invoicePaysActivation({ amount_paid: 0 })).toBe(false);
+    expect(invoicePaysActivation({})).toBe(false);
   });
 });
