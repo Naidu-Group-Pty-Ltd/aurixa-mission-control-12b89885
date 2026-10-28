@@ -8,6 +8,7 @@
  * the exclusions it last knew. `addons` never carries an excluded slug.
  */
 import { describe, expect, it } from "vitest";
+import { MODULES, isModulePurchasable } from "@/lib/pricing/aurixa-catalog";
 import { balanceEntitlements } from "./balanceEntitlements.pure";
 
 const base = {
@@ -15,7 +16,10 @@ const base = {
   planSlug: "growth",
   amlExcluded: false,
   contractExcluded: [] as string[] | null,
+  billingExempt: false,
 };
+
+const priceList = MODULES.map((m) => m.slug).sort();
 
 describe("excluded", () => {
   it("is present, sorted and de-duplicated, when the clone's row was read", () => {
@@ -92,5 +96,62 @@ describe("addons", () => {
       addonSlugs: ["integrations", "aml-ctf", "call-logs", "integrations"],
     });
     expect(r.addons).toEqual(["aml-ctf", "call-logs", "integrations"]);
+  });
+});
+
+describe("a billing-exempt tenant (D17)", () => {
+  // Only the prime's tenant is exempt (measured 28 Oct 2026: `scale`, no
+  // clone). Its gate passes an exempt workspace on a live answer, and its
+  // last-known-good cache keeps only the plan and these add-ons.
+  const exempt = { ...base, planSlug: "scale", billingExempt: true };
+
+  it("holds every module on the price list", () => {
+    expect(balanceEntitlements(exempt).addons).toEqual(priceList);
+  });
+
+  it("including the add-on-only modules a tier never includes", () => {
+    const { addons } = balanceEntitlements(exempt);
+    for (const slug of ["solicitor-portal", "intelligence-hub", "integrations", "aurixa-agent"]) {
+      expect(addons).toContain(slug);
+    }
+  });
+
+  it("and the ones no checkout sells, which the prime's gate still checks", () => {
+    // `lenders` is coming soon and the Builder / Developer Portal is a direct
+    // sale. The exemption is not a purchase, so neither flag narrows it.
+    const unsold = MODULES.filter((m) => !isModulePurchasable(m.slug)).map((m) => m.slug);
+    expect(unsold.length).toBeGreaterThan(0);
+    const { addons } = balanceEntitlements(exempt);
+    for (const slug of unsold) expect(addons).toContain(slug);
+  });
+
+  it("still loses what its agreement excludes, and says so", () => {
+    const r = balanceEntitlements({
+      ...exempt,
+      contractExcluded: ["solicitor-portal", "aml-ctf"],
+    });
+    expect(r.addons).toEqual(priceList.filter((s) => s !== "solicitor-portal" && s !== "aml-ctf"));
+    expect(r.excluded).toEqual(["aml-ctf", "solicitor-portal"]);
+  });
+
+  it("keeps the whole list when the exclusions could not be read", () => {
+    // The prime subtracts the exclusions it last knew.
+    const r = balanceEntitlements({ ...exempt, contractExcluded: null });
+    expect(r.addons).toEqual(priceList);
+    expect("excluded" in r).toBe(false);
+  });
+
+  it("is not narrowed by a without-AML SKU, which records a purchase", () => {
+    const r = balanceEntitlements({ ...exempt, amlExcluded: true });
+    expect(r.addons).toContain("aml-ctf");
+  });
+
+  it("does not depend on the plan", () => {
+    expect(balanceEntitlements({ ...exempt, planSlug: null }).addons).toEqual(priceList);
+  });
+
+  it("leaves a tenant that is not exempt with what it bought", () => {
+    const r = balanceEntitlements({ ...base, planSlug: "scale", addonSlugs: ["call-logs"] });
+    expect(r.addons).toEqual(["aml-ctf", "call-logs"]);
   });
 });

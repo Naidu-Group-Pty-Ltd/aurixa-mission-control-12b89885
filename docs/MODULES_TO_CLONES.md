@@ -204,6 +204,9 @@ entitlements: { addons: string[], excluded?: string[] }
   failed, and the clone then keeps the exclusions it last knew.
 - `addons` never contains an excluded slug, and the AML derivation never adds
   `aml-ctf` when the contract excludes it.
+- A billing-exempt tenant's `addons` is the whole price list, less its
+  exclusions (D17), so the prime's last-known-good cache keeps what its
+  exemption grants on a live answer.
 
 A failed read never fails the balance call. The derivation is
 `balanceEntitlements.pure.ts`.
