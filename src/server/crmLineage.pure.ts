@@ -11,7 +11,7 @@
  * ## Refused by name, never substituted
  *
  * Every failure here refuses the whole provision BEFORE a repository exists,
- * and the refusal says which of five different things is wrong, because each
+ * and the refusal says which of six different things is wrong, because each
  * sends an operator somewhere different:
  *
  *  - the configuration could not be READ (a transient fault: retry),
@@ -19,7 +19,9 @@
  *  - the recorded parent no longer exists (Settings),
  *  - the recorded parent runs the OTHER CRM, or nobody has said which (fix the
  *    parent's `crm_mode`, or point the line at the right clone),
- *  - the parent has no repository or branch to copy (the parent's own page).
+ *  - the parent has no repository or branch to copy (the parent's own page),
+ *  - the parent is module-scoped, so its tree is the prime's only inside its
+ *    modules (make it a mirror).
  *
  * Falling back to the prime in any of those cases would create a clone whose
  * tree does not match the line the operator chose — a CRM-independent choice
@@ -61,7 +63,8 @@ export interface CrmParentRow {
   /** The PRIME commit the parent's branch carries. */
   last_synced_sha: string | null;
   crm_mode: string | null;
-  sync_scope?: string | null;
+  /** `mirror` or `modules`. Only a mirror can head a line. */
+  sync_scope: string | null;
   parent_clone_id?: string | null;
 }
 
@@ -80,8 +83,14 @@ export type CrmParentJudgement =
   | { ok: true; parent: CrmParent }
   | {
       ok: false;
-      /** Which of the five refusals this is — the page and the tests key on it. */
-      kind: "unreadable" | "unset" | "missing" | "wrong_mode" | "no_repository";
+      /** Which of the six refusals this is — the page and the tests key on it. */
+      kind:
+        | "unreadable"
+        | "unset"
+        | "missing"
+        | "wrong_mode"
+        | "no_repository"
+        | "parent_not_mirror";
       reason: string;
     };
 
@@ -154,6 +163,28 @@ export function judgeCrmParent(input: JudgeCrmParentInput): CrmParentJudgement {
       reason:
         `${parentName} has no repository${owner && repo ? " branch" : ""} recorded, so there is ` +
         `nothing to create the new clone from. Wire up its repository on its own page first.`,
+    };
+  }
+
+  // A line's clones are created from its head's tree and receive every cascade
+  // through it, so the head has to hold the prime's whole tree. A module-scoped
+  // head is the prime's only inside the globs of the modules it installed:
+  // measured on 27 Oct 2026, the CRM read `in_sync` while missing 495 of the
+  // prime's files, and a clone created from it would have started without all
+  // of them and never received one (D15 of docs/DELIVERY_SYSTEM_PLAN.md).
+  if (parent.sync_scope !== "mirror") {
+    const scope =
+      parent.sync_scope === "modules"
+        ? "module-scoped"
+        : `recorded with the scope "${parent.sync_scope ?? "none"}"`;
+    return {
+      ok: false,
+      kind: "parent_not_mirror",
+      reason:
+        `${parentName} heads the ${line} line but is ${scope}: cascades keep its tree current ` +
+        `only inside the modules it installed, so a clone created from it would start without ` +
+        `the prime's other files and never receive them. Make ${parentName} a mirror, then ` +
+        `provision again.`,
     };
   }
 

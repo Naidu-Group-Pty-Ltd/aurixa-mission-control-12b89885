@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { CRM_MODE_COPY } from "@/lib/crmMode.pure";
 import type { CrmParent, CrmParentJudgement } from "./crmLineage.pure";
+import { judgeCrmParent } from "./crmLineage.pure";
 import type { DeletionPlan } from "./cascade/deletionPropagation.pure";
 import { planDeletions } from "./cascade/deletionPropagation.pure";
 import { ENGINE_COMMIT_PREFIX } from "./cascade/proposalRepair.pure";
@@ -28,14 +29,11 @@ import {
   describeConversionDeletions,
   describeRetiredFunctions,
   finalisedCloneFields,
-  frozenOnHead,
   functionsRetiredByConversion,
   functionsToUndeploy,
   isConversionBranch,
   isOpenConversionStatus,
   judgeConversion,
-  judgeTargetFreshness,
-  FROZEN_PATHS_LISTED,
   retiredFunctionsKept,
   type ConversionCloneRow,
   type ConversionWording,
@@ -93,7 +91,6 @@ function input(overrides: Partial<JudgeConversionInput> = {}): JudgeConversionIn
     lineHeads: { dependent: CD_ID, independent: CRM_ID },
     childCount: 0,
     target: { ok: true, parent: CRM_HEAD },
-    targetScope: "modules",
     leaving: {
       kind: "parent",
       name: "NPC Client Dashboard",
@@ -171,8 +168,6 @@ describe("judgeConversion — the clone that may move", () => {
       branch: "main",
       label: "NPC Client Dashboard",
     });
-    // Module-scoped head: the caution names that the tree is partial.
-    expect(j.cautions.some((c) => c.includes("module-scoped"))).toBe(true);
     // Records are never moved, and it says what the target needs.
     const records = j.cautions.find((c) => c.startsWith("Records are not moved."));
     expect(records).toBeDefined();
@@ -181,13 +176,12 @@ describe("judgeConversion — the clone that may move", () => {
     expect(records).toContain(CRM_MODE_COPY.independent.consequence);
   });
 
-  it("accepts an independent clone moving to the dependent line, with no scope caution for a mirror head", () => {
+  it("accepts an independent clone moving to the dependent line", () => {
     const j = judgeConversion(
       input({
         clone: clone({ crm_mode: "independent", parent_clone_id: CRM_ID }),
         toMode: "dependent",
         target: { ok: true, parent: CD_HEAD },
-        targetScope: "mirror",
         leaving: {
           kind: "parent",
           name: "NPC CRM Independent",
@@ -201,7 +195,6 @@ describe("judgeConversion — the clone that may move", () => {
     if (!j.ok) return;
     expect(j.fromMode).toBe("independent");
     expect(j.toMode).toBe("dependent");
-    expect(j.cautions.some((c) => c.includes("module-scoped"))).toBe(false);
     expect(j.cautions).toHaveLength(1);
   });
 
@@ -331,6 +324,31 @@ describe("judgeConversion — every refusal, by name", () => {
     const j = judgeConversion(input({ target }));
     expect(!j.ok && j.kind).toBe("target_parent");
     expect(!j.ok && j.reason).toBe("No parent recorded.");
+  });
+
+  it("refuses to move a clone under a head that is not a mirror", () => {
+    // A clone moved under a module-scoped head would become a copy of a tree
+    // that is the prime's only inside the head's modules, and receive nothing
+    // else through it. The head's own judge refuses it, and the refusal is
+    // carried through in its words.
+    const target = judgeCrmParent({
+      mode: "independent",
+      parentId: CRM_ID,
+      parent: {
+        id: CRM_ID,
+        name: "NPC CRM Independent",
+        github_owner: "Naidu-Group-Pty-Ltd",
+        github_repo: "npc-crm-independent-6505dc",
+        default_branch: "main",
+        last_synced_sha: PRIME_SHA,
+        crm_mode: "independent",
+        sync_scope: "modules",
+      },
+      readFailed: false,
+    });
+    const j = judgeConversion(input({ target }));
+    expect(!j.ok && j.kind).toBe("target_parent");
+    expect(!j.ok && j.reason).toContain("is module-scoped");
   });
 
   it("refuses a target head that has never recorded which prime commit it carries", () => {
@@ -774,127 +792,5 @@ describe("deployHoldsConversion", () => {
     expect(
       deployHoldsConversion({ act: "refused", why: "no project", failed: [] }, false),
     ).toBeNull();
-  });
-});
-
-describe("frozenOnHead — what a module-scoped head carries that no cascade refreshes", () => {
-  // The prime at the head's recorded commit, the head, and a clone that holds
-  // the prime's copies — the shape the acid run of 29 Sep 2026 measured.
-  const prime = new Map([
-    ["CLAUDE.md", "p-claude"],
-    ["address-service/Dockerfile", "p-docker"],
-    ["src/lib/crm/crmProvider.ts", "p-provider"],
-    ["src/pages/Conversations.tsx", "p-conversations"],
-    [".env.example", "p-env"],
-    ["package.json", "p-package"],
-    ["src/pages/Current.tsx", "p-current"],
-    ["src/pages/Unchanged.tsx", "p-same"],
-  ]);
-  const head = new Map([
-    ["CLAUDE.md", "h-claude-old"], // stale copy, outside the modules
-    // address-service/Dockerfile: missing on the head
-    ["src/lib/crm/crmProvider.ts", "h-provider"], // inside the modules: a cascade's business
-    ["src/pages/Conversations.tsx", "h-conversations"], // a routing file: differs by design
-    [".env.example", "h-env"], // held by an exclusion
-    ["package.json", "h-package"], // a repository invariant
-    ["src/pages/Current.tsx", "p-current"], // current
-    ["src/pages/Unchanged.tsx", "h-same"], // stale, but the clone already holds it
-    ["supabase/functions/crm-send-message/index.ts", "h-crm"], // the line's own
-  ]);
-  const cloneTree = new Map([
-    ["CLAUDE.md", "p-claude"],
-    ["address-service/Dockerfile", "p-docker"],
-    ["src/lib/crm/crmProvider.ts", "p-provider"],
-    ["src/pages/Conversations.tsx", "p-conversations"],
-    [".env.example", "p-env"],
-    ["package.json", "p-package"],
-    ["src/pages/Current.tsx", "p-current"],
-    ["src/pages/Unchanged.tsx", "h-same"],
-  ]);
-  const base = {
-    primeTrees: [prime],
-    head,
-    clone: cloneTree,
-    headInstalledGlobs: ["src/lib/crm/**"],
-    invariantGlobs: ["package.json"],
-    exclusions: [{ pattern: ".env.example", reason: "protected" as const }],
-  };
-
-  it("names exactly the stale and missing copies outside the head's scope", () => {
-    expect(frozenOnHead(base)).toEqual(["CLAUDE.md", "address-service/Dockerfile"]);
-  });
-
-  it("is empty when the head's modules cover every path", () => {
-    expect(frozenOnHead({ ...base, headInstalledGlobs: ["**"] })).toEqual([]);
-  });
-
-  it("never counts a file only the line carries", () => {
-    expect(frozenOnHead(base)).not.toContain("supabase/functions/crm-send-message/index.ts");
-  });
-
-  it("measures against the clone's newer prime too, not only the head's older one", () => {
-    // The head matched prime@P1; the clone already carries prime@P2's copy.
-    const p1 = new Map([["docs/guide.md", "g1"]]);
-    const p2 = new Map([["docs/guide.md", "g2"]]);
-    const measured = {
-      ...base,
-      head: new Map([["docs/guide.md", "g1"]]),
-      clone: new Map([["docs/guide.md", "g2"]]),
-    };
-    expect(frozenOnHead({ ...measured, primeTrees: [p1] })).toEqual([]);
-    expect(frozenOnHead({ ...measured, primeTrees: [p1, p2] })).toEqual(["docs/guide.md"]);
-  });
-
-  it("an exclusion on the CLONE holds a path too", () => {
-    expect(
-      frozenOnHead({
-        ...base,
-        exclusions: [...base.exclusions, { pattern: "CLAUDE.md", reason: "protected" }],
-      }),
-    ).toEqual(["address-service/Dockerfile"]);
-  });
-});
-
-describe("judgeTargetFreshness", () => {
-  const ok = judgeConversion(input());
-  it("passes a judgement through where the head is a mirror or nothing is frozen", () => {
-    expect(judgeTargetFreshness(ok, { kind: "not_applicable" }, "NPC Test")).toBe(ok);
-    expect(judgeTargetFreshness(ok, { kind: "measured", frozen: [] }, "NPC Test")).toBe(ok);
-  });
-
-  it("refuses a frozen head by name, listing the files and both remedies", () => {
-    const frozen = Array.from(
-      { length: FROZEN_PATHS_LISTED + 3 },
-      (_, i) => `docs/f${String(i).padStart(2, "0")}.md`,
-    );
-    const j = judgeTargetFreshness(ok, { kind: "measured", frozen }, "NPC Test");
-    expect(j.ok).toBe(false);
-    if (j.ok) return;
-    expect(j.kind).toBe("target_frozen");
-    expect(j.reason).toContain("docs/f00.md");
-    expect(j.reason).not.toContain(`docs/f${FROZEN_PATHS_LISTED}.md`);
-    expect(j.reason).toContain("and 3 more");
-    expect(j.reason).toContain("Make NPC CRM Independent a mirror");
-    expect(j.reason).toContain("install modules");
-  });
-
-  it("an unreadable measurement refuses rather than reading as a current head", () => {
-    const j = judgeTargetFreshness(
-      ok,
-      { kind: "unreadable", why: "GitHub truncated a tree listing" },
-      "NPC Test",
-    );
-    expect(j.ok).toBe(false);
-    if (!j.ok) {
-      expect(j.kind).toBe("unreadable");
-      expect(j.reason).toContain("truncated");
-    }
-  });
-
-  it("never turns a refusal into anything else", () => {
-    const refused = judgeConversion(input({ childCount: 2 }));
-    expect(
-      judgeTargetFreshness(refused, { kind: "measured", frozen: ["CLAUDE.md"] }, "NPC Test"),
-    ).toBe(refused);
   });
 });
