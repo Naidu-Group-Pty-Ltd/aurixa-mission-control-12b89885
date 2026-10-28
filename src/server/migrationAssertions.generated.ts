@@ -1224,4 +1224,17 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       },
     ],
   },
+  {
+    migration: "20261028150000_workspace_message_recall_kind.sql",
+    version: "20261028150000",
+    assertions: [{ kind: "enum", type: "notification_kind" }],
+  },
+  {
+    migration: "20261028150100_workspace_message_recall.sql",
+    version: "20261028150100",
+    assertions: [
+      { kind: "column", table: "clone_announcements", column: "recalled_at" },
+      { kind: "column", table: "clone_announcement_deliveries", column: "withdrawn_at" },
+    ],
+  },
 ];

@@ -46,6 +46,7 @@ import {
   Search,
   Send,
   ShieldCheck,
+  Undo2,
 } from "lucide-react";
 import { ProtectedRoute } from "@/components/protected-route";
 import { RouteError } from "@/components/route-error";
@@ -84,6 +85,7 @@ import {
   listAnnouncements,
   markThreadReadFn,
   publishAnnouncementFn,
+  recallAnnouncementFn,
   replyToWorkspaceFn,
   reraiseAnnouncementFn,
   sendAnnouncementFn,
@@ -107,12 +109,14 @@ import {
   formatInstant,
   isNarrowingScope,
   sendTimingRefusal,
+  withdrawalPending,
   workspaceMatches,
   type AnnouncementSeverity,
   type AnnouncementState,
   type SendTiming,
   type WorkspaceAudienceDraft,
   type WorkspaceAudienceMode,
+  type WithdrawalSummary,
 } from "@/lib/cloneAnnouncements.pure";
 import { signalSentence, type SignalSummary } from "@/lib/workspaceSignal.pure";
 import { useUserRoles } from "@/lib/use-user-roles";
@@ -148,19 +152,29 @@ const TONE_TO_SPINE: Record<ReturnType<typeof announcementTone>, SpineTone> = {
 
 const STATE_WORD: Record<AnnouncementState, string> = {
   draft: "draft",
+  recalled: "recalled",
   scheduled: "scheduled",
   active: "live",
   expired: "expired",
   archived: "archived",
 };
 
-type Filter = "all" | "active" | "scheduled" | "draft" | "expired" | "archived" | "replies";
+type Filter =
+  | "all"
+  | "active"
+  | "scheduled"
+  | "draft"
+  | "recalled"
+  | "expired"
+  | "archived"
+  | "replies";
 
 const FILTERS: Array<{ key: Filter; label: string }> = [
   { key: "all", label: "All" },
   { key: "active", label: "Live" },
   { key: "scheduled", label: "Scheduled" },
   { key: "draft", label: "Drafts" },
+  { key: "recalled", label: "Recalled" },
   { key: "expired", label: "Expired" },
   { key: "archived", label: "Archived" },
   { key: "replies", label: "With replies" },
@@ -333,7 +347,17 @@ function AnnouncementsPage() {
   const query = useQuery({
     queryKey: ["clone-announcements"],
     queryFn: () => list(),
-    refetchInterval: 60_000,
+    // Every few seconds while a fresh recall still waits on a workspace, so
+    // the operator watches it come down; every minute otherwise.
+    refetchInterval: (q) =>
+      withdrawalPending(
+        (q.state.data?.rows ?? []).map((r) => ({
+          recalledAt: r.state === "recalled" ? (r.row.recalled_at ?? null) : null,
+          withdrawal: r.withdrawal,
+        })),
+      )
+        ? 3_000
+        : 60_000,
   });
 
   const refresh = () => qc.invalidateQueries({ queryKey: ["clone-announcements"] });
@@ -413,7 +437,11 @@ function AnnouncementsPage() {
           metrics={[
             { label: "live", value: s.active, tone: "success", alarm: false },
             { label: "scheduled", value: s.scheduled, tone: "warning", alarm: false },
-            { label: "drafts", value: s.drafts },
+            {
+              label: "drafts",
+              value: s.drafts,
+              note: s.recalled > 0 ? `+ ${s.recalled} recalled` : undefined,
+            },
             { label: "expired", value: s.expired },
             { label: "archived", value: s.archived, note: `${s.total} total` },
             {
@@ -568,6 +596,7 @@ function AnnouncementRowView({
   const [busy, setBusy] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [archiveReason, setArchiveReason] = useState("");
+  const [recallOpen, setRecallOpen] = useState(false);
 
   const row = item.row;
   const tone = announcementTone(item.state);
@@ -670,6 +699,14 @@ function AnnouncementRowView({
                 )}
               </>
             )}
+            {item.state === "recalled" && row.recalled_at && item.withdrawal && (
+              <>
+                <span aria-hidden>·</span>
+                <span>recalled {when(row.recalled_at)}</span>
+                <span aria-hidden>·</span>
+                <WithdrawalNote withdrawal={item.withdrawal} />
+              </>
+            )}
             {row.published_at && (
               <>
                 <span aria-hidden>·</span>
@@ -733,28 +770,44 @@ function AnnouncementRowView({
                   <Send className="mr-1.5 h-3.5 w-3.5" /> Publish
                 </Button>
               )}
-              {item.state === "active" && (
-                <>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={busy}
-                    title="Bump the revision so dashboards that dismissed it show it again"
-                    onClick={() => act("Re-raised", () => reraise({ data: { id: row.id } }))}
-                  >
-                    <RefreshCcw className="mr-1.5 h-3.5 w-3.5" /> Re-raise
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={busy}
-                    onClick={() => setArchiveOpen(true)}
-                  >
-                    Archive
-                  </Button>
-                </>
+              {item.state === "recalled" && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy}
+                  title="Send it again exactly as it is — Edit corrects it first"
+                  onClick={() => act("Sent again", () => publish({ data: { id: row.id } }))}
+                >
+                  <Send className="mr-1.5 h-3.5 w-3.5" /> Send again
+                </Button>
               )}
-              {(item.state === "scheduled" || item.state === "expired") && (
+              {item.state === "active" && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy}
+                  title="Bump the revision so dashboards that dismissed it show it again"
+                  onClick={() => act("Re-raised", () => reraise({ data: { id: row.id } }))}
+                >
+                  <RefreshCcw className="mr-1.5 h-3.5 w-3.5" /> Re-raise
+                </Button>
+              )}
+              {(item.state === "active" || item.state === "scheduled") && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy}
+                  className="text-destructive hover:text-destructive"
+                  title="Withdraw it from every dashboard at once, and return it to your drafts"
+                  onClick={() => setRecallOpen(true)}
+                >
+                  <Undo2 className="mr-1.5 h-3.5 w-3.5" /> Recall
+                </Button>
+              )}
+              {(item.state === "active" ||
+                item.state === "scheduled" ||
+                item.state === "recalled" ||
+                item.state === "expired") && (
                 <Button
                   size="sm"
                   variant="outline"
@@ -768,6 +821,13 @@ function AnnouncementRowView({
           )}
         </div>
       </div>
+
+      <RecallDialog
+        item={item}
+        open={recallOpen}
+        onOpenChange={setRecallOpen}
+        onRecalled={onDone}
+      />
 
       <Dialog open={archiveOpen} onOpenChange={setArchiveOpen}>
         <DialogContent>
@@ -808,6 +868,118 @@ function AnnouncementRowView({
     </RecordRow>
   );
 }
+/**
+ * How far a recall has got, as the workspaces report it: a workspace that had
+ * the message confirms the moment its dashboard is next answered without it
+ * (`withdrawn_at`). Never "done" because the act was taken.
+ */
+function WithdrawalNote({ withdrawal }: { withdrawal: WithdrawalSummary }) {
+  const { had, confirmed } = withdrawal;
+  const pending = confirmed < had;
+  return (
+    <span
+      className={cn(pending ? "text-warning" : "text-success")}
+      title="A workspace confirms the moment its dashboard is next answered without the message — within seconds while one is open, or when somebody next opens it."
+    >
+      {had === 0
+        ? "no dashboard had fetched it"
+        : `withdrawn from ${confirmed} of ${had} workspace${had === 1 ? "" : "s"} that had it${
+            pending ? " — the rest confirm when their dashboard next checks in" : ""
+          }`}
+    </span>
+  );
+}
+
+/**
+ * Recall's one confirmation: what comes down, from where, and what becomes of
+ * the message. One click past it, because a message that went out wrong is
+ * urgent — which is also why the note is optional.
+ */
+function RecallDialog({
+  item,
+  open,
+  onOpenChange,
+  onRecalled,
+}: {
+  item: AnnouncementListRow;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onRecalled: () => void;
+}) {
+  const recall = useServerFn(recallAnnouncementFn);
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const row = item.row;
+  const n = item.reaches.length;
+  const workspaces = `${n} workspace${n === 1 ? "" : "s"}`;
+
+  async function confirm() {
+    setBusy(true);
+    try {
+      const result = (await recall({ data: { id: row.id, note: note.trim() || null } })) as {
+        ok: boolean;
+        error?: string;
+        signal?: SignalSummary;
+      };
+      if (!result.ok) {
+        toast.error(
+          result.error === "not_out" || result.error === "ended"
+            ? "It is no longer out — there is nothing to recall."
+            : `Recall failed: ${result.error}`,
+        );
+        return;
+      }
+      toast.success(`Recalled “${row.title}”`, {
+        description: signalSentence(result.signal) ?? undefined,
+      });
+      setNote("");
+      onOpenChange(false);
+      onRecalled();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Recall failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => !busy && onOpenChange(o)}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Recall “{row.title}”</DialogTitle>
+          <DialogDescription>
+            {item.state === "scheduled"
+              ? `It has not gone live yet. Recalling it cancels it before anyone sees it: the ${workspaces} it is addressed to are never shown it.`
+              : `It comes down at once from the ${workspaces} it reaches — the banner, the centred popup, the side notice, the browser notification and the Message Hub.`}{" "}
+            It returns to your drafts marked Recalled, to correct and send again — as a new
+            revision, so everyone sees the corrected one — or to archive. Replies already received
+            stay here.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-2">
+          <Label htmlFor={`recall-note-${row.id}`}>What was wrong (optional)</Label>
+          <Input
+            id={`recall-note-${row.id}`}
+            value={note}
+            maxLength={300}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="Kept in the audit log, and shown to the other operators"
+          />
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
+            Cancel
+          </Button>
+          <Button variant="destructive" onClick={() => void confirm()} disabled={busy}>
+            <Undo2 className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+            {busy ? "Recalling…" : "Recall now"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 /**
  * The starting choice for the editor. A stored scope that names workspaces
  * AND plans with the original AND ("these workspaces, if they are on these
@@ -1066,9 +1238,13 @@ function EditorDialog({
   const [requestId] = useState(newRequestId);
 
   const row = item?.row ?? null;
-  // Only a draft (or a new message) is sent from here. A message already out
-  // is edited with Save, and brought back with Re-raise on the list.
-  const isDraft = !row || item?.state === "draft";
+  // Only a draft (or a new message) is sent from here — a recalled message is
+  // a draft again, sent from here once corrected. A message already out is
+  // edited with Save, brought back with Re-raise, and withdrawn with Recall.
+  const recalled = item?.state === "recalled";
+  const isDraft = !row || item?.state === "draft" || recalled;
+  const canRecall = item?.state === "active" || item?.state === "scheduled";
+  const [recallOpen, setRecallOpen] = useState(false);
   const [timing, setTiming] = useState<Timing>(() =>
     !row ? "now" : row.starts_at && Date.parse(row.starts_at) > Date.now() ? "schedule" : "now",
   );
@@ -1227,12 +1403,20 @@ function EditorDialog({
       <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>
-            {row ? (isDraft ? "Edit draft" : "Edit message") : "New message"}
+            {!row
+              ? "New message"
+              : recalled
+                ? "Correct and send again"
+                : isDraft
+                  ? "Edit draft"
+                  : "Edit message"}
           </DialogTitle>
           <DialogDescription>
             {!isDraft
-              ? "Edits reach workspaces on their next poll, about a minute. Dismissed banners stay dismissed — use Re-raise on the list when everyone should see it again."
-              : "Choose who it is for, what it says, and when it goes out. Send now and Schedule publish it in the same step."}
+              ? "A saved edit reaches every open dashboard within seconds and changes the message in place, so it does not interrupt anyone again — a dismissed banner stays dismissed; Re-raise on the list brings it back to everyone. Narrowing who it is for takes it down from the workspaces you remove. Sent the wrong thing? Recall withdraws it from every dashboard at once."
+              : recalled
+                ? `Recalled ${when(row?.recalled_at ?? null)} — nobody sees it now. Correct it and Send now: it goes out afresh as a new revision, so everyone it is for sees the corrected message, those who had dismissed the wrong one included.`
+                : "Choose who it is for, what it says, and when it goes out. Send now and Schedule publish it in the same step."}
           </DialogDescription>
         </DialogHeader>
 
@@ -1514,6 +1698,18 @@ function EditorDialog({
             {!canWrite ? "Only an administrator can save messages." : (blocker ?? "")}
           </p>
           <div className="flex gap-2">
+            {canRecall && canWrite && item && (
+              <Button
+                variant="outline"
+                className="text-destructive hover:text-destructive"
+                onClick={() => setRecallOpen(true)}
+                disabled={busy}
+                title="Withdraw it from every dashboard at once, and return it to your drafts"
+              >
+                <Undo2 className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+                Recall
+              </Button>
+            )}
             <Button variant="outline" onClick={onClose} disabled={busy}>
               Cancel
             </Button>
@@ -1523,6 +1719,14 @@ function EditorDialog({
             </Button>
           </div>
         </DialogFooter>
+        {canRecall && item && (
+          <RecallDialog
+            item={item}
+            open={recallOpen}
+            onOpenChange={setRecallOpen}
+            onRecalled={onSaved}
+          />
+        )}
       </DialogContent>
     </Dialog>
   );

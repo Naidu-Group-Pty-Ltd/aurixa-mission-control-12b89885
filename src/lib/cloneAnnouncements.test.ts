@@ -14,8 +14,13 @@ import {
   MAX_WIRE_ANNOUNCEMENTS,
   PRIME_WORKSPACE_ID,
   acknowledgeRefusal,
+  describeAnnouncementState,
+  recallRefusal,
   replyRefusal,
   resolveAnnouncementState,
+  RECALL_WATCH_MS,
+  withdrawalOf,
+  withdrawalPending,
   sendTimingRefusal,
   summariseThreads,
   threadForWorkspace,
@@ -536,5 +541,59 @@ describe("formatInstant", () => {
     expect(formatInstant(null)).toBe("—");
     expect(formatInstant("not a date")).toBe("—");
     expect(() => formatInstant("2026-10-17T06:34:00Z")).not.toThrow();
+  });
+});
+
+describe("recall", () => {
+  const recalled = row({ published_at: null, recalled_at: "2026-09-16T11:00:00Z" });
+
+  it("is its own state: a draft the operator withdrew, served to nobody", () => {
+    expect(resolveAnnouncementState(recalled, NOW)).toBe("recalled");
+    expect(
+      resolveAnnouncementState({ ...recalled, archived_at: "2026-09-16T11:30:00Z" }, NOW),
+    ).toBe("archived");
+    expect(activeAnnouncementsForClone([recalled], { id: "c1", planSlug: "scale" }, NOW)).toEqual(
+      [],
+    );
+    expect(announcementTone("recalled")).toBe("danger");
+    expect(describeAnnouncementState(recalled, "recalled")).toMatch(/Edit/);
+  });
+
+  it("can be taken only of a message that is out — live, or scheduled to be", () => {
+    expect(recallRefusal(row(), NOW)).toBeNull();
+    expect(recallRefusal(row({ starts_at: "2026-09-17T00:00:00Z" }), NOW)).toBeNull();
+    expect(recallRefusal(row({ published_at: null }), NOW)).toBe("not_out");
+    expect(recallRefusal(recalled, NOW)).toBe("not_out");
+    expect(recallRefusal(row({ archived_at: "2026-09-16T11:00:00Z" }), NOW)).toBe("ended");
+    expect(recallRefusal(row({ ends_at: "2026-09-16T11:00:00Z" }), NOW)).toBe("ended");
+    expect(recallRefusal(null, NOW)).toBe("not_found");
+  });
+
+  it("counts a withdrawal only from a workspace that had it, and only for this recall", () => {
+    expect(
+      withdrawalOf("2026-09-16T11:00:00Z", [
+        { withdrawnAt: "2026-09-16T11:00:03Z" },
+        // Withdrawn by an earlier recall, not yet by this one.
+        { withdrawnAt: "2026-09-16T09:00:00Z" },
+        { withdrawnAt: null },
+        // Never fetched it: nothing to withdraw.
+        null,
+      ]),
+    ).toEqual({ had: 3, confirmed: 1 });
+  });
+
+  it("is watched closely while a recent recall still waits on a workspace", () => {
+    const at = "2026-09-16T11:59:00Z";
+    expect(withdrawalPending([{ recalledAt: at, withdrawal: { had: 2, confirmed: 1 } }], NOW)).toBe(
+      true,
+    );
+    expect(withdrawalPending([{ recalledAt: at, withdrawal: { had: 2, confirmed: 2 } }], NOW)).toBe(
+      false,
+    );
+    const old = new Date(NOW.getTime() - RECALL_WATCH_MS - 1000).toISOString();
+    expect(
+      withdrawalPending([{ recalledAt: old, withdrawal: { had: 2, confirmed: 0 } }], NOW),
+    ).toBe(false);
+    expect(withdrawalPending([{ recalledAt: null, withdrawal: null }], NOW)).toBe(false);
   });
 });

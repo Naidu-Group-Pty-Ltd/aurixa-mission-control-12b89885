@@ -25,6 +25,8 @@ import {
   audienceSummary,
   isPrimeWorkspace,
   PRIME_WORKSPACE_ID,
+  RECALL_WATCH_MS,
+  recallRefusal,
   replyRefusal,
   resolveAnnouncementState,
   threadForWorkspace,
@@ -213,6 +215,8 @@ export async function recordAnnouncementDeliveries(
           last_delivered_at: now,
           delivery_count: (byId.get(s.id) ?? 0) + 1,
           last_revision: s.revision,
+          // Served again (a recalled message sent again): no longer withdrawn.
+          withdrawn_at: null,
         }),
       )
       .eq("clone_id", cloneId)
@@ -222,6 +226,66 @@ export async function recordAnnouncementDeliveries(
     }
   }
 }
+
+/**
+ * Stamp that a workspace's dashboards no longer hold a recalled message: the
+ * first fetch after the recall answered without it. Only a workspace that had
+ * fetched it has anything to withdraw, so only an existing delivery stamp is
+ * marked, and one already marked for THIS recall is left alone.
+ *
+ * Asks only about the recalls of the last day (a dashboard opened hours later
+ * still confirms), so the common answer, "no recent recall", costs one small
+ * read. Best-effort and awaited, like the delivery stamp: it is
+ * observability, and it never fails the answer.
+ */
+export async function recordAnnouncementWithdrawals(workspaceId: string): Promise<void> {
+  const since = new Date(Date.now() - RECALL_CONFIRM_WINDOW_MS).toISOString();
+  const recalled = await supabaseAdmin
+    .from("clone_announcements")
+    .select("id, recalled_at")
+    .is("published_at", null)
+    .gte("recalled_at", since);
+  if (recalled.error) {
+    console.error("[announcements] recall read failed", recalled.error.message);
+    return;
+  }
+  const recalledAt = new Map(
+    (recalled.data ?? []).map((r) => [r.id as string, r.recalled_at as string]),
+  );
+  if (recalledAt.size === 0) return;
+
+  const stamps = await supabaseAdmin
+    .from("clone_announcement_deliveries")
+    .select("announcement_id, withdrawn_at")
+    .eq("clone_id", workspaceId)
+    .in("announcement_id", [...recalledAt.keys()]);
+  if (stamps.error) {
+    console.error("[announcements] withdrawal read failed", stamps.error.message);
+    return;
+  }
+  const due = (stamps.data ?? [])
+    .filter((d) => {
+      const at = Date.parse(recalledAt.get(d.announcement_id) ?? "");
+      const w = d.withdrawn_at ? Date.parse(d.withdrawn_at) : Number.NaN;
+      return !(Number.isFinite(w) && w >= at);
+    })
+    .map((d) => d.announcement_id);
+  if (due.length === 0) return;
+
+  const { error } = await supabaseAdmin
+    .from("clone_announcement_deliveries")
+    .update(
+      asRow<TablesUpdate<"clone_announcement_deliveries">>({
+        withdrawn_at: new Date().toISOString(),
+      }),
+    )
+    .eq("clone_id", workspaceId)
+    .in("announcement_id", due);
+  if (error) console.error("[announcements] withdrawal stamp failed", error.message);
+}
+
+/** How long after a recall a workspace's fetch still confirms it: a day. */
+const RECALL_CONFIRM_WINDOW_MS = Math.max(RECALL_WATCH_MS, 24 * 60 * 60 * 1000);
 
 /**
  * A member of a workspace's staff opened, dismissed or acknowledged a message.
@@ -677,6 +741,10 @@ export async function sendAnnouncement(
   const earlier = await rowForRequest(input.clientRequestId);
   if (!earlier.ok) return { ok: false, error: earlier.error };
   if (earlier.row?.published_at) return { ok: true, row: earlier.row, repeated: true };
+  // This same act sent it, and it has since been recalled: a late retry of
+  // the send must never put the withdrawn message back out. Sending it again
+  // is a new act from the editor, with its own id.
+  if (earlier.row?.recalled_at) return { ok: true, row: earlier.row, repeated: true };
 
   const draftId = input.id ?? earlier.row?.id ?? null;
   if (draftId) {
@@ -773,6 +841,9 @@ export async function publishAnnouncement(input: {
       asRow<TablesUpdate<"clone_announcements">>({
         published_at: now,
         archived_at: null,
+        // Sent again after a recall: out, so no longer recalled. The audit
+        // log keeps both acts.
+        recalled_at: null,
       }),
     )
     .eq("id", input.id)
@@ -861,5 +932,77 @@ export async function reraiseAnnouncement(input: {
     metadata: { title: row.title, revision: row.revision },
   });
   const signal = await signalMessageChange([row]);
+  return { ok: true, row, signal };
+}
+
+/**
+ * Recall: withdraw a message that went out wrong — the rules are in
+ * `cloneAnnouncements.pure.ts` ("Recall"). It stops being served at once (it
+ * is unpublished), and every workspace it reached is signalled, so the open
+ * dashboards drop it within seconds: the banner, the centred popup, the side
+ * notice, the browser notification and the Message Hub. It returns to the
+ * drafts marked recalled, with the revision bumped, so the corrected message
+ * is new to every dashboard — those that had dismissed the wrong one too.
+ *
+ * The update is guarded on the row still being out, so a recall racing
+ * another act (an archive, a second recall from another console) never
+ * changes it twice. The replies a workspace already sent stay here.
+ */
+export async function recallAnnouncement(input: {
+  id: string;
+  actorId: string;
+  /** What was wrong with it, for the record. Optional. */
+  note?: string | null;
+}): Promise<ActResult> {
+  const current = await supabaseAdmin
+    .from("clone_announcements")
+    .select("*")
+    .eq("id", input.id)
+    .maybeSingle();
+  if (current.error) return { ok: false, error: current.error.message };
+  const before = (current.data as AnnouncementRow | null) ?? null;
+  const refusal = recallRefusal(before);
+  if (refusal || !before) return { ok: false, error: refusal ?? "not_found" };
+
+  const { data, error } = await supabaseAdmin
+    .from("clone_announcements")
+    .update(
+      asRow<TablesUpdate<"clone_announcements">>({
+        published_at: null,
+        recalled_at: new Date().toISOString(),
+        revision: (before.revision ?? 1) + 1,
+      }),
+    )
+    .eq("id", input.id)
+    .not("published_at", "is", null)
+    .is("archived_at", null)
+    .select("*")
+    .maybeSingle();
+  if (error) return { ok: false, error: error.message };
+  if (!data) return { ok: false, error: "not_out" };
+  const row = data as AnnouncementRow;
+  const audience = audienceSummary(factsOf(before));
+  await writeAuditLog({
+    action: "clone_announcement.recalled",
+    entityType: "clone_announcement",
+    entityId: row.id,
+    actorUserId: input.actorId,
+    metadata: {
+      title: row.title,
+      audience,
+      recalled_revision: before.revision,
+      note: input.note ?? null,
+    },
+  });
+  await notifyOperators({
+    kind: "clone_announcement_recalled",
+    severity: "warning",
+    title: `Message recalled: ${row.title}`,
+    body: input.note ? `Withdrawn from ${audience}. ${input.note}` : `Withdrawn from ${audience}.`,
+    url: "/announcements",
+    metadata: { announcement_id: row.id },
+  });
+  // The row as it WAS is the one that reaches the workspaces to tell.
+  const signal = await signalMessageChange([before, row]);
   return { ok: true, row, signal };
 }

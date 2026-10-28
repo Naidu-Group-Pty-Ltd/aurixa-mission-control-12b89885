@@ -19,10 +19,12 @@ import {
   resolveAnnouncementState,
   sendTimingRefusal,
   summariseThreads,
+  withdrawalOf,
   type AnnouncementFacts,
   type AnnouncementState,
   type ReplyFacts,
   type ThreadSummary,
+  type WithdrawalSummary,
 } from "@/lib/cloneAnnouncements.pure";
 import {
   archiveAnnouncement,
@@ -31,6 +33,7 @@ import {
   postOperatorReply,
   publishAnnouncement,
   readRepliesForAnnouncement,
+  recallAnnouncement,
   reraiseAnnouncement,
   sendAnnouncement,
   updateAnnouncement,
@@ -76,6 +79,8 @@ export type AnnouncementListRow = {
         lastRevision: number;
         seenCount: number;
         lastSeenAt: string | null;
+        /** When its dashboards were answered without the message after a recall. */
+        withdrawnAt: string | null;
       } | null;
     }
   >;
@@ -83,6 +88,11 @@ export type AnnouncementListRow = {
   deliveredTo: number;
   /** How many have had a person open, dismiss or acknowledge it. */
   seenBy: number;
+  /**
+   * For a recalled message: how many workspaces had it, and how many have
+   * since been answered without it. Null for every other state.
+   */
+  withdrawal: WithdrawalSummary | null;
   /**
    * One summary per workspace that has a thread on this message. Null when
    * the replies could not be read — never an empty list standing in for one.
@@ -102,6 +112,7 @@ export type AnnouncementListResult = {
     active: number;
     scheduled: number;
     drafts: number;
+    recalled: number;
     expired: number;
     archived: number;
     /** Workspace replies no operator has read yet; null when unknown. */
@@ -181,17 +192,26 @@ export const listAnnouncements = createServerFn({ method: "GET" })
                     lastRevision: d.last_revision,
                     seenCount: d.seen_count ?? 0,
                     lastSeenAt: d.last_seen_at ?? null,
+                    withdrawnAt: d.withdrawn_at ?? null,
                   }
                 : null,
             };
           });
+        const state = resolveAnnouncementState(facts, now);
         return {
           row,
-          state: resolveAnnouncementState(facts, now),
+          state,
           audience: audienceSummary(facts, cloneNames),
           reaches,
           deliveredTo: reaches.filter((r) => r.delivery !== null).length,
           seenBy: reaches.filter((r) => (r.delivery?.seenCount ?? 0) > 0).length,
+          withdrawal:
+            state === "recalled" && row.recalled_at
+              ? withdrawalOf(
+                  row.recalled_at,
+                  reaches.map((r) => r.delivery),
+                )
+              : null,
           threads: replies
             ? summariseThreads(replies.filter((r) => r.announcement_id === row.id))
             : null,
@@ -221,6 +241,7 @@ export const listAnnouncements = createServerFn({ method: "GET" })
         active: rows.filter((r) => r.state === "active").length,
         scheduled: rows.filter((r) => r.state === "scheduled").length,
         drafts: rows.filter((r) => r.state === "draft").length,
+        recalled: rows.filter((r) => r.state === "recalled").length,
         expired: rows.filter((r) => r.state === "expired").length,
         archived: rows.filter((r) => r.state === "archived").length,
       },
@@ -330,6 +351,23 @@ export const reraiseAnnouncementFn = createServerFn({ method: "POST" })
   })
   .handler(async ({ data, context }) =>
     reraiseAnnouncement({ id: data.id, actorId: context.userId }),
+  );
+
+/**
+ * Recall: withdraw a message that went out wrong. The note says what was wrong
+ * with it, for the audit log and the other operators; it is optional, because
+ * a recall is the urgent act and must not wait on a sentence.
+ */
+export const recallAnnouncementFn = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .inputValidator((data: { id: string; note?: string | null }) => {
+    if (!data?.id || !UUID.test(data.id)) throw new Error("id required");
+    const note = data.note?.trim() || null;
+    if (note && note.length > 300) throw new Error("Keep the note under 300 characters");
+    return { id: data.id, note };
+  })
+  .handler(async ({ data, context }) =>
+    recallAnnouncement({ id: data.id, actorId: context.userId, note: data.note }),
   );
 
 /**
