@@ -1841,6 +1841,10 @@ The sweep now compares table privileges on each pass
   `drift_medium` notice on the clone (`metadata.source` is
   `clone_table_privileges`) raised only when a clone's surplus changes or
   clears. A clone that could not be read is `unreadable`, never "0 surplus".
+  Each notice delivered is also recorded as a `clone_table_privileges` audit
+  row on the clone, and the next pass compares against that row rather than
+  the notice. Purging read notifications therefore never announces a standing
+  surplus again or swallows its clearance.
 - **Cost.** One statement on each side: the prime's once a pass, shared, and
   each clone's beside its function reads. Four clones go from 24 Management API
   calls a pass to 29. Each read is about 610 rows and 75 to 100 KB, and ran in

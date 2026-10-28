@@ -551,7 +551,10 @@ export function summariseTableGrants(
 
 // ─── Telling a person ────────────────────────────────────────────────
 
-/** `metadata.source` on the notice, and how the sweep finds the last one it raised. */
+/**
+ * `metadata.source` on the notice, and the audit action that records each one
+ * delivered, which is how the sweep finds the last one it raised.
+ */
 export const TABLE_GRANT_NOTICE_SOURCE = "clone_table_privileges";
 
 export type TableGrantNoticeDecision =

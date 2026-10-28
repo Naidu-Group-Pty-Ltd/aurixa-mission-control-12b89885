@@ -106,11 +106,16 @@ function wireCatalogues() {
   });
 }
 
-/** Mission Control's own tables: the clone list, and the notices already raised. */
+/**
+ * Mission Control's own tables: the clone list, and the audit rows that record
+ * the notices already delivered, newest first, answered as PostgREST would:
+ * only the rows the filters match, and no more than the limit.
+ */
 function fakeSupabase(opts: { ledger?: Row[]; ledgerError?: string } = {}) {
   const reads: Array<{ table: string; filters: Array<[string, unknown]> }> = [];
   const from = (table: string) => {
     const filters: Array<[string, unknown]> = [];
+    let limit: number | undefined;
     const result = () => {
       if (table === "clone_backends") {
         return {
@@ -121,15 +126,19 @@ function fakeSupabase(opts: { ledger?: Row[]; ledgerError?: string } = {}) {
           error: null,
         };
       }
-      if (table === "notifications") {
-        return opts.ledgerError
-          ? { data: null, error: { message: opts.ledgerError } }
-          : { data: opts.ledger ?? [], error: null };
+      if (table === "audit_log") {
+        if (opts.ledgerError) return { data: null, error: { message: opts.ledgerError } };
+        const rows = (opts.ledger ?? []).filter((row) => filters.every(([c, v]) => row[c] === v));
+        return { data: rows.slice(0, limit ?? rows.length), error: null };
       }
       return { data: [], error: null };
     };
     const q: Record<string, unknown> = {};
-    for (const m of ["select", "not", "order", "limit"]) q[m] = () => q;
+    for (const m of ["select", "not", "order"]) q[m] = () => q;
+    q.limit = (n: number) => {
+      limit = n;
+      return q;
+    };
     for (const m of ["eq", "in"]) {
       q[m] = (c: string, v: unknown) => {
         filters.push([c, v]);
@@ -298,25 +307,126 @@ describe("telling a person", () => {
     vi.clearAllMocks();
     wireCatalogues();
     const supabase = fakeSupabase({
-      ledger: [{ clone_id: "c1", metadata: { source: TABLE_GRANT_NOTICE_SOURCE, fingerprint } }],
+      ledger: [{ action: TABLE_GRANT_NOTICE_SOURCE, entity_id: "c1", metadata: { fingerprint } }],
     });
     const second = await run(supabase);
     expect(audit.notifyOperators).not.toHaveBeenCalled();
     expect(second.tables.notices).toEqual({ raised: 0, failed: 0, ledger: "read" });
-    // It asked for exactly its own notices.
-    const ledgerRead = supabase.reads.find((r) => r.table === "notifications");
-    expect(ledgerRead?.filters).toEqual(
-      expect.arrayContaining([
-        ["kind", "drift_medium"],
-        ["metadata->>source", TABLE_GRANT_NOTICE_SOURCE],
-      ]),
+    // It asked for exactly its own record, one clone at a time.
+    const ledgerReads = supabase.reads.filter((r) => r.table === "audit_log");
+    expect(ledgerReads.map((r) => r.filters)).toEqual([
+      [
+        ["action", TABLE_GRANT_NOTICE_SOURCE],
+        ["entity_id", "c1"],
+      ],
+      [
+        ["action", TABLE_GRANT_NOTICE_SOURCE],
+        ["entity_id", "c2"],
+      ],
+    ]);
+  });
+
+  it("records each notice it delivered in the audit log, and reads no notification back", async () => {
+    // An operator may purge read notifications. Read from there, a purged
+    // notice would read as never told, and the same surplus would be
+    // announced again as new (Codex, #387).
+    const supabase = fakeSupabase();
+    const report = await run(supabase);
+    const fingerprint =
+      report.tables.clones[0].read === "ok" ? report.tables.clones[0].fingerprint : null;
+    expect(audit.writeAuditLog).toHaveBeenCalledWith({
+      action: TABLE_GRANT_NOTICE_SOURCE,
+      entityType: "clone",
+      entityId: "c1",
+      metadata: {
+        fingerprint,
+        kind: "surplus",
+        mode: "report_only",
+        surplus: 24,
+        relations: 2,
+        columnSurplus: 0,
+      },
+    });
+    expect(supabase.reads.some((r) => r.table === "notifications")).toBe(false);
+  });
+
+  it("keeps the surplus told once a purge took its notice, and announces its clearance", async () => {
+    const first = await run(fakeSupabase());
+    const fingerprint = first.tables.clones[0].read === "ok" && first.tables.clones[0].fingerprint;
+    const told = [
+      { action: TABLE_GRANT_NOTICE_SOURCE, entity_id: "c1", metadata: { fingerprint } },
+    ];
+
+    // The notice itself is gone; the audit row is what the sweep reads.
+    vi.clearAllMocks();
+    wireCatalogues();
+    await run(fakeSupabase({ ledger: told }));
+    expect(audit.notifyOperators).not.toHaveBeenCalled();
+
+    // The surplus is then taken back: the clearance is still announced.
+    vi.clearAllMocks();
+    tables[DASHBOARD.projectRef] = PRIME_TABLES;
+    wireCatalogues();
+    const report = await run(fakeSupabase({ ledger: told }));
+    expect(audit.notifyOperators).toHaveBeenCalledTimes(1);
+    expect(audit.notifyOperators.mock.calls[0][0]).toMatchObject({
+      cloneId: "c1",
+      severity: "success",
+      metadata: { fingerprint: "" },
+    });
+    expect(report.tables.notices).toEqual({ raised: 1, failed: 0, ledger: "read" });
+  });
+
+  it("does not record a notice the database refused, so the next pass raises it again", async () => {
+    audit.notifyOperators.mockResolvedValueOnce(false);
+    const report = await run(fakeSupabase());
+    expect(report.tables.notices).toEqual({ raised: 0, failed: 1, ledger: "read" });
+    expect(audit.writeAuditLog).not.toHaveBeenCalledWith(
+      expect.objectContaining({ action: TABLE_GRANT_NOTICE_SOURCE }),
     );
+  });
+
+  it("reads each clone's own last row, however much another clone has been told since", async () => {
+    // Newest first, as the query orders them. c1's history is long; c2's one
+    // row, a surplus that has since been taken back, is older than all of it.
+    // A shared window over every clone's rows would lose it, and with it the
+    // clearance.
+    const first = await run(fakeSupabase());
+    const fingerprint = first.tables.clones[0].read === "ok" && first.tables.clones[0].fingerprint;
+    vi.clearAllMocks();
+    wireCatalogues();
+    const ledger = [
+      { action: TABLE_GRANT_NOTICE_SOURCE, entity_id: "c1", metadata: { fingerprint } },
+      ...Array.from({ length: 600 }, (_, i) => ({
+        action: TABLE_GRANT_NOTICE_SOURCE,
+        entity_id: "c1",
+        metadata: { fingerprint: `older-${i}` },
+      })),
+      {
+        action: TABLE_GRANT_NOTICE_SOURCE,
+        entity_id: "c2",
+        metadata: { fingerprint: "an-earlier-surplus" },
+      },
+    ];
+    const report = await run(fakeSupabase({ ledger }));
+    expect(audit.notifyOperators).toHaveBeenCalledTimes(1);
+    expect(audit.notifyOperators.mock.calls[0][0]).toMatchObject({
+      cloneId: "c2",
+      severity: "success",
+    });
+    expect(report.tables.notices).toEqual({ raised: 1, failed: 0, ledger: "read" });
   });
 
   it("announces a clearance, so the same surplus coming back is a change again", async () => {
     const report = await run(
       fakeSupabase({
-        ledger: [{ clone_id: "c2", metadata: { fingerprint: "an-earlier-surplus" } }],
+        ledger: [
+          {
+            action: TABLE_GRANT_NOTICE_SOURCE,
+            entity_id: "c2",
+            metadata: { fingerprint: "an-earlier-surplus" },
+          },
+        ],
       }),
     );
     const cleared = audit.notifyOperators.mock.calls

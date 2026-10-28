@@ -59,7 +59,7 @@
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
-import { notifyOperators } from "./audit.server";
+import { notifyOperators, writeAuditLog } from "./audit.server";
 import { resolveCloneSecretTarget, CloneSecretTargetError } from "./cloneAllowedOrigins.server";
 import { BudgetPause, pastDeadline } from "./provisioningBudget";
 import {
@@ -354,9 +354,15 @@ async function surveyCloneTableGrants(
  * when it grows or shrinks, and when it clears. Never once a half hour for the
  * same thing (`decideTableGrantNotice`).
  *
- * The last notice raised for each clone is the ledger, keyed on what was
- * DELIVERED rather than on what was observed, so a notice the database
+ * The ledger is the audit log: one row per notice that landed, keyed on what
+ * was DELIVERED rather than on what was observed, so a notice the database
  * refused is raised again on the next pass instead of being recorded as told.
+ * It is not the notices themselves, because an operator may purge read
+ * notifications (`purgeReadNotifications`). Read from there, a purged notice
+ * would read as never told, so a standing surplus would be announced again
+ * as new, and a clearance after the purge would never be announced. Nothing
+ * deletes from the audit log, and the held-file drift sweep and the clone CI
+ * watch keep their fingerprints there for the same reason.
  */
 async function announceTableGrantChanges(
   supabase: Db,
@@ -370,31 +376,35 @@ async function announceTableGrantChanges(
   // A dry run is somebody looking. It answers them, and tells nobody else.
   if (dryRun) return { raised: 0, failed: 0, ledger: "dry_run" };
 
-  const { data, error } = await supabase
-    .from("notifications")
-    .select("clone_id, metadata")
-    .eq("kind", "drift_medium")
-    .eq("metadata->>source", TABLE_GRANT_NOTICE_SOURCE)
-    .in(
-      "clone_id",
-      read.map((r) => r.cloneId),
-    )
-    .order("created_at", { ascending: false })
-    .limit(500);
+  // The last row for each clone, one read each, so a clone whose surplus has
+  // stood unchanged for months is never pushed out of a shared window by
+  // another clone's history.
+  const readings = await Promise.all(
+    read.map(async (r) => {
+      const { data, error } = await supabase
+        .from("audit_log")
+        .select("metadata")
+        .eq("action", TABLE_GRANT_NOTICE_SOURCE)
+        .eq("entity_id", r.cloneId)
+        .order("created_at", { ascending: false })
+        .limit(1);
+      return { cloneId: r.cloneId, data, error };
+    }),
+  );
   // A ledger that could not be read is not one that says "never told": read
   // that way, every standing surplus would be announced again on every
   // database hiccup.
-  if (error) return { raised: 0, failed: 0, ledger: "unreadable", error: error.message };
+  const unread = readings.find((x) => x.error);
+  if (unread?.error) {
+    return { raised: 0, failed: 0, ledger: "unreadable", error: unread.error.message };
+  }
 
   const last = new Map<string, string | null>();
-  for (const row of data ?? []) {
-    const id = (row as { clone_id: string | null }).clone_id;
-    if (!id || last.has(id)) continue;
-    const fp = ((row as { metadata: unknown }).metadata as { fingerprint?: unknown } | null)
-      ?.fingerprint;
-    // A notice with no fingerprint cannot vouch for anything, so it reads as
+  for (const { cloneId, data } of readings) {
+    const fp = (data?.[0]?.metadata as { fingerprint?: unknown } | null | undefined)?.fingerprint;
+    // A row with no fingerprint cannot vouch for anything, so it reads as
     // none: the worst that does is one notice too many.
-    last.set(id, typeof fp === "string" ? fp : null);
+    last.set(cloneId, typeof fp === "string" ? fp : null);
   }
 
   let raised = 0;
@@ -419,8 +429,26 @@ async function announceTableGrantChanges(
         columnSurplus: r.columnSurplus,
       },
     });
-    if (landed) raised += 1;
-    else failed += 1;
+    if (!landed) {
+      failed += 1;
+      continue;
+    }
+    raised += 1;
+    // `writeAuditLog` logs a failed insert rather than throwing, so a lost
+    // row means the next pass announces this again: noise, the safe direction.
+    await writeAuditLog({
+      action: TABLE_GRANT_NOTICE_SOURCE,
+      entityType: "clone",
+      entityId: r.cloneId,
+      metadata: {
+        fingerprint: decision.fingerprint,
+        kind: decision.kind,
+        mode: tableGrantMode(),
+        surplus: r.surplus,
+        relations: r.relations,
+        columnSurplus: r.columnSurplus,
+      },
+    });
   }
   return { raised, failed, ledger: "read" };
 }
