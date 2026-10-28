@@ -71,12 +71,81 @@ export type GateState = {
   counting: boolean;
 };
 
-/** Three days. The window a paid clone gets before it must be activated. */
-export const GATE_DEFAULT_HOURS = 72;
+/**
+ * Fourteen days: the free trial a new paid workspace gets before its plan must
+ * be activated. It was 72 hours until the owner confirmed on 28 Oct 2026 that
+ * the free trial the website and the promo videos offer is real, and that it
+ * is 14 days by default.
+ *
+ * This is the FALLBACK. The live default is `prime_config.clone_gate_default_hours`,
+ * which an admin sets on Billing → Payment Gates; this constant is what a gate
+ * is armed with only when that row cannot be read.
+ */
+export const GATE_DEFAULT_HOURS = 14 * 24;
 
 /** An hour is the shortest useful window; a year is the longest honest one. */
 export const GATE_MIN_HOURS = 1;
 export const GATE_MAX_HOURS = 8760;
+
+// ── Trial lengths, in days ──────────────────────────────────────────────────
+//
+// A free trial is offered in days, so the console sets one in days. The gate
+// itself still stores hours (`grace_hours`), because the Window act corrects
+// the terms a gate was armed with and sometimes needs that precision; a day
+// here is exactly 24 of them.
+
+export const HOURS_PER_DAY = 24;
+export const TRIAL_MIN_DAYS = 1;
+/** A year, the gate's own ceiling: `GATE_MAX_HOURS` is 365 × 24. */
+export const TRIAL_MAX_DAYS = GATE_MAX_HOURS / HOURS_PER_DAY;
+
+/** The trial lengths offered when a workspace is provisioned. Anything else is typed. */
+export const TRIAL_LENGTH_PRESET_DAYS = [7, 14, 21, 30, 60, 90] as const;
+
+/**
+ * Validate an operator-typed trial length in whole days.
+ *
+ * Unlike a window, there is no "blank means none" here: every caller offers
+ * "platform default" as its own choice, so a blank reaching this is a field
+ * left empty, and an empty field that quietly became a default is a trial
+ * nobody chose.
+ */
+export function normaliseTrialDays(
+  input: number | string | null | undefined,
+): { ok: true; days: number; hours: number } | { ok: false; error: string } {
+  if (input === null || input === undefined || (typeof input === "string" && !input.trim())) {
+    return { ok: false, error: "required" };
+  }
+  const n = typeof input === "string" ? Number(input.trim()) : input;
+  if (!Number.isFinite(n)) return { ok: false, error: "not_a_number" };
+  if (!Number.isInteger(n)) return { ok: false, error: "not_whole_days" };
+  if (n < TRIAL_MIN_DAYS) return { ok: false, error: "below_minimum" };
+  if (n > TRIAL_MAX_DAYS) return { ok: false, error: "above_maximum" };
+  return { ok: true, days: n, hours: n * HOURS_PER_DAY };
+}
+
+/**
+ * A window as an operator reads it: "14 days", "1 day", "36 hours" becomes
+ * "1 day 12 hours", and null is "no deadline". Whole days are the common case
+ * and read as days; a window set in hours keeps its hours rather than being
+ * rounded into a length nobody set.
+ */
+export function describeWindowHours(hours: number | null | undefined): string {
+  if (hours === null || hours === undefined || !Number.isFinite(hours)) return "no deadline";
+  const whole = Math.round(hours);
+  const days = Math.floor(whole / HOURS_PER_DAY);
+  const rest = whole % HOURS_PER_DAY;
+  const dayPart = `${days} day${days === 1 ? "" : "s"}`;
+  const hourPart = `${rest} hour${rest === 1 ? "" : "s"}`;
+  if (days === 0) return hourPart;
+  return rest === 0 ? dayPart : `${dayPart} ${hourPart}`;
+}
+
+/** A trial length as an adjective: "14-day". Null for a window that is not whole days. */
+export function trialDaysOf(hours: number | null | undefined): number | null {
+  if (hours === null || hours === undefined || !Number.isFinite(hours)) return null;
+  return hours > 0 && hours % HOURS_PER_DAY === 0 ? hours / HOURS_PER_DAY : null;
+}
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -214,9 +283,9 @@ export function computeLocksAt(armedAt: Date | string, graceHours: number | null
  * Validate an operator-typed window.
  *
  * `null` is a legitimate answer meaning "no deadline" and is returned as such.
- * Anything unparseable is an error rather than a silent fallback to 72 — a
- * typed value that quietly becomes something else is how an operator comes to
- * believe they set a window they did not.
+ * Anything unparseable is an error rather than a silent fallback to the
+ * default — a typed value that quietly becomes something else is how an
+ * operator comes to believe they set a window they did not.
  */
 export function normaliseGraceHours(
   input: number | string | null | undefined,
@@ -266,7 +335,7 @@ export function gateEligibility(input: {
  * "2 days 4 hours", "3 hours", "12 minutes", "less than a minute".
  *
  * Deliberately coarse above an hour: a countdown to the minute on a
- * three-day window reads as an emergency for two and a half days.
+ * fourteen-day trial reads as an emergency for thirteen and a half days.
  */
 export function formatRemaining(ms: number | null): string | null {
   if (ms === null || !Number.isFinite(ms)) return null;
@@ -379,6 +448,62 @@ export const GATE_EVENT_LABEL: Readonly<Record<GateEventKind, string>> = {
 /** The label for a kind read back from the database, which is typed `string`. */
 export function gateEventLabel(kind: string): string {
   return (GATE_EVENT_LABEL as Readonly<Record<string, string>>)[kind] ?? kind.replace(/_/g, " ");
+}
+
+// ── What counts as the activation payment ───────────────────────────────────
+//
+// A gate opens for good on one stamp, `paid_at`, and nothing ever clears it.
+// So the question Stripe's events are asked is narrow: did money land, or did
+// somebody with authority waive it? A trial is neither. Stripe models its own
+// trials as a subscription that is `trialing`, a Checkout that completes with
+// `no_payment_required`, and a $0 first invoice that is `paid` — and each of
+// those used to stamp the gate paid, after which the free trial never ended.
+// Nothing in Mission Control mints a Stripe trial today; these rules are what
+// keeps one minted later, or in Stripe's own dashboard, from switching every
+// gate it touches permanently open.
+
+/**
+ * Does a completed Checkout session pay the activation?
+ *
+ * `paid` is money. `no_payment_required` is either a fully discounted order —
+ * an admin's 100% promotion code, which waives the payment on purpose and has
+ * always opened the gate — or a trial, which waives nothing. Stripe reports a
+ * discount on the session, so the two are told apart by it: no payment and no
+ * discount is a trial.
+ */
+export function checkoutPaysActivation(session: {
+  payment_status?: string | null;
+  amount_total?: number | null;
+  total_details?: { amount_discount?: number | null } | null;
+}): boolean {
+  if (session.payment_status === "paid") return true;
+  if (session.payment_status !== "no_payment_required") return false;
+  return (session.total_details?.amount_discount ?? 0) > 0;
+}
+
+/**
+ * Does a subscription's state pay the activation?
+ *
+ * Only `active`. A `trialing` subscription is still on Stripe's trial: nothing
+ * has been charged, and if the card fails at the trial's end it goes
+ * `past_due`, not back to a state that would let the gate close.
+ */
+export function subscriptionPaysActivation(stripeStatus: string | null | undefined): boolean {
+  return stripeStatus === "active";
+}
+
+/**
+ * Does a paid invoice pay the activation?
+ *
+ * Only one that collected money. A $0 invoice is a trial's first invoice or a
+ * fully discounted period. The fully discounted case still opens the gate,
+ * through its subscription going `active`, which is the route that carries
+ * the waiver; the invoice route exists for renewals and for subscriptions
+ * created outside our Checkout, and a renewal that collected nothing has
+ * activated nothing.
+ */
+export function invoicePaysActivation(invoice: { amount_paid?: number | null }): boolean {
+  return (invoice.amount_paid ?? 0) > 0;
 }
 
 // ── Extending a trial ───────────────────────────────────────────────────────

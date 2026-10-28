@@ -313,7 +313,7 @@ it came from.
 ## What a new clone now boots with, that it did not before
 
 A clone provisioned onto a **paid plan** now carries an activation gate: it
-works normally for a window (72 hours by default) and is then locked behind a
+works normally for its free trial (fourteen days by default) and is then locked behind a
 payment screen until Stripe captures its activation payment. See
 [`CLONE_PAYMENT_GATES.md`](./CLONE_PAYMENT_GATES.md).
 

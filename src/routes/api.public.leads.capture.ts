@@ -6,6 +6,7 @@ import {
   cleanLeadText,
   dedupeKeyFor,
   parseSubmission,
+  trialOfferCodeFrom,
   type LeadStage,
   type ParsedLead,
   type ParsedStageUpdate,
@@ -128,7 +129,12 @@ type JsonRecord = { [key: string]: Json };
 
 // Best effort — the lead row is the source of truth; a failed notification or
 // audit entry must not fail (and re-trigger) the webhook delivery.
-async function fanOutLeadCaptured(leadId: string, lead: ParsedLead, channel: Channel) {
+async function fanOutLeadCaptured(
+  leadId: string,
+  lead: ParsedLead,
+  channel: Channel,
+  trialOfferCode: string | null,
+) {
   const entity = lead.entity_name
     ? `${lead.entity_name}${lead.entity_classification ? ` (${lead.entity_classification.replace(/_/g, " ")})` : ""}`
     : "Unknown entity";
@@ -137,8 +143,8 @@ async function fanOutLeadCaptured(leadId: string, lead: ParsedLead, channel: Cha
     await supabaseAdmin.from("notifications").insert({
       kind: "lead_captured",
       severity: "success",
-      title: `New waitlist lead: ${lead.first_name} ${lead.last_name}`,
-      body: `${entity} · ${lead.email}${volume}`,
+      title: `New free-trial application: ${lead.first_name} ${lead.last_name}`,
+      body: `${entity} · ${lead.email}${volume}${trialOfferCode ? ` · trial offer ${trialOfferCode}` : ""}`,
       url: "/leads",
       metadata: {
         lead_id: leadId,
@@ -149,6 +155,7 @@ async function fanOutLeadCaptured(leadId: string, lead: ParsedLead, channel: Cha
         source: lead.source,
         stage: 1,
         channel,
+        trial_offer_code: trialOfferCode,
       },
     });
   } catch (err) {
@@ -307,10 +314,13 @@ export const Route = createFileRoute("/api/public/leads/capture")({
         }
 
         const channel: Channel = trusted ? "make_webhook" : "website";
+        const trialOfferCode = trialOfferCodeFrom(payload);
         const requestMetadata: JsonRecord = {
           channel,
           ...(ip ? { ip } : {}),
           user_agent: cleanLeadText(request.headers.get("user-agent"), 400) || null,
+          // The free-trial offer the application was made under, if any.
+          ...(trialOfferCode ? { trial_offer_code: trialOfferCode } : {}),
         };
 
         return submission.stage === 1
@@ -375,7 +385,8 @@ async function captureStageOne(
     return json({ ok: false, error: "storage_failed" }, 500, origin);
   }
 
-  await fanOutLeadCaptured(inserted.id, lead, channel);
+  const offer = requestMetadata.trial_offer_code;
+  await fanOutLeadCaptured(inserted.id, lead, channel, typeof offer === "string" ? offer : null);
   await raiseStageEmails(inserted.id, { ...lead, stage: 1 });
 
   return json({ ok: true, lead_id: inserted.id, stage: 1, duplicate: false }, 201, origin);

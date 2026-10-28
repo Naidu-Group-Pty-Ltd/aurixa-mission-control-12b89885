@@ -172,6 +172,8 @@ import { Route as CrmAccountsAccountIdRouteImport } from './routes/crm.accounts.
 import { Route as EmailCampaignsCampaignIdRouteImport } from './routes/email.campaigns.$campaignId'
 import { Route as VoiceStudioIndexRouteImport } from './routes/voice.studio.index'
 import { Route as VoiceStudioProjectIdRouteImport } from './routes/voice.studio.$projectId'
+import { Route as WebsiteVideosIndexRouteImport } from './routes/website.videos.index'
+import { Route as WebsiteVideosBriefingIdRouteImport } from './routes/website.videos.$briefingId'
 import { Route as ApiPublicAnthropicIdentityRouteImport } from './routes/api.public.anthropic.identity'
 import { Route as ApiPublicAnthropicJwksRouteImport } from './routes/api.public.anthropic.jwks'
 import { Route as ApiPublicBillingHandoffRouteImport } from './routes/api.public.billing.handoff'
@@ -204,6 +206,8 @@ import { Route as ApiPublicSeatsReleaseRouteImport } from './routes/api.public.s
 import { Route as ApiPublicSeatsReserveRouteImport } from './routes/api.public.seats.reserve'
 import { Route as ApiPublicSecurityIntakeRouteImport } from './routes/api.public.security.intake'
 import { Route as ApiPublicStorefrontAccessRouteImport } from './routes/api.public.storefront.access'
+import { Route as ApiPublicStorefrontBriefingUploadGrantRouteImport } from './routes/api.public.storefront.briefing-upload-grant'
+import { Route as ApiPublicStorefrontBriefingsRouteImport } from './routes/api.public.storefront.briefings'
 import { Route as ApiPublicStorefrontCatalogRouteImport } from './routes/api.public.storefront.catalog'
 import { Route as ApiPublicStorefrontCheckoutRouteImport } from './routes/api.public.storefront.checkout'
 import { Route as ApiPublicStorefrontFeedbackRouteImport } from './routes/api.public.storefront.feedback'
@@ -213,6 +217,7 @@ import { Route as ApiPublicStorefrontPlanChangeRouteImport } from './routes/api.
 import { Route as ApiPublicStorefrontSessionRouteImport } from './routes/api.public.storefront.session'
 import { Route as ApiPublicStorefrontSetupRouteImport } from './routes/api.public.storefront.setup'
 import { Route as ApiPublicStorefrontStrategicReviewRouteImport } from './routes/api.public.storefront.strategic-review'
+import { Route as ApiPublicStorefrontTrialOfferRouteImport } from './routes/api.public.storefront.trial-offer'
 import { Route as ApiPublicStorefrontWalletRouteImport } from './routes/api.public.storefront.wallet'
 import { Route as ApiPublicStripeWebhookRouteImport } from './routes/api.public.stripe.webhook'
 import { Route as ApiPublicSupportAssistantActivityRouteImport } from './routes/api.public.support.assistant-activity'
@@ -1082,6 +1087,16 @@ const VoiceStudioProjectIdRoute = VoiceStudioProjectIdRouteImport.update({
   path: '/voice/studio/$projectId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const WebsiteVideosIndexRoute = WebsiteVideosIndexRouteImport.update({
+  id: '/website/videos/',
+  path: '/website/videos/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const WebsiteVideosBriefingIdRoute = WebsiteVideosBriefingIdRouteImport.update({
+  id: '/website/videos/$briefingId',
+  path: '/website/videos/$briefingId',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiPublicAnthropicIdentityRoute =
   ApiPublicAnthropicIdentityRouteImport.update({
     id: '/api/public/anthropic/identity',
@@ -1258,6 +1273,18 @@ const ApiPublicStorefrontAccessRoute =
     path: '/api/public/storefront/access',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicStorefrontBriefingUploadGrantRoute =
+  ApiPublicStorefrontBriefingUploadGrantRouteImport.update({
+    id: '/api/public/storefront/briefing-upload-grant',
+    path: '/api/public/storefront/briefing-upload-grant',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicStorefrontBriefingsRoute =
+  ApiPublicStorefrontBriefingsRouteImport.update({
+    id: '/api/public/storefront/briefings',
+    path: '/api/public/storefront/briefings',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicStorefrontCatalogRoute =
   ApiPublicStorefrontCatalogRouteImport.update({
     id: '/api/public/storefront/catalog',
@@ -1310,6 +1337,12 @@ const ApiPublicStorefrontStrategicReviewRoute =
   ApiPublicStorefrontStrategicReviewRouteImport.update({
     id: '/api/public/storefront/strategic-review',
     path: '/api/public/storefront/strategic-review',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicStorefrontTrialOfferRoute =
+  ApiPublicStorefrontTrialOfferRouteImport.update({
+    id: '/api/public/storefront/trial-offer',
+    path: '/api/public/storefront/trial-offer',
     getParentRoute: () => rootRouteImport,
   } as any)
 const ApiPublicStorefrontWalletRoute =
@@ -1627,8 +1660,10 @@ export interface FileRoutesByFullPath {
   '/crm/accounts/$accountId': typeof CrmAccountsAccountIdRoute
   '/email/campaigns/$campaignId': typeof EmailCampaignsCampaignIdRoute
   '/voice/studio/$projectId': typeof VoiceStudioProjectIdRoute
+  '/website/videos/$briefingId': typeof WebsiteVideosBriefingIdRoute
   '/crm/accounts/': typeof CrmAccountsIndexRoute
   '/voice/studio/': typeof VoiceStudioIndexRoute
+  '/website/videos/': typeof WebsiteVideosIndexRoute
   '/api/public/anthropic/identity': typeof ApiPublicAnthropicIdentityRoute
   '/api/public/anthropic/jwks': typeof ApiPublicAnthropicJwksRoute
   '/api/public/billing/handoff': typeof ApiPublicBillingHandoffRoute
@@ -1661,6 +1696,8 @@ export interface FileRoutesByFullPath {
   '/api/public/seats/reserve': typeof ApiPublicSeatsReserveRoute
   '/api/public/security/intake': typeof ApiPublicSecurityIntakeRoute
   '/api/public/storefront/access': typeof ApiPublicStorefrontAccessRoute
+  '/api/public/storefront/briefing-upload-grant': typeof ApiPublicStorefrontBriefingUploadGrantRoute
+  '/api/public/storefront/briefings': typeof ApiPublicStorefrontBriefingsRoute
   '/api/public/storefront/catalog': typeof ApiPublicStorefrontCatalogRoute
   '/api/public/storefront/checkout': typeof ApiPublicStorefrontCheckoutRoute
   '/api/public/storefront/feedback': typeof ApiPublicStorefrontFeedbackRoute
@@ -1670,6 +1707,7 @@ export interface FileRoutesByFullPath {
   '/api/public/storefront/session': typeof ApiPublicStorefrontSessionRoute
   '/api/public/storefront/setup': typeof ApiPublicStorefrontSetupRoute
   '/api/public/storefront/strategic-review': typeof ApiPublicStorefrontStrategicReviewRoute
+  '/api/public/storefront/trial-offer': typeof ApiPublicStorefrontTrialOfferRoute
   '/api/public/storefront/wallet': typeof ApiPublicStorefrontWalletRoute
   '/api/public/stripe/webhook': typeof ApiPublicStripeWebhookRouteWithChildren
   '/api/public/support/assistant-activity': typeof ApiPublicSupportAssistantActivityRoute
@@ -1858,8 +1896,10 @@ export interface FileRoutesByTo {
   '/crm/accounts/$accountId': typeof CrmAccountsAccountIdRoute
   '/email/campaigns/$campaignId': typeof EmailCampaignsCampaignIdRoute
   '/voice/studio/$projectId': typeof VoiceStudioProjectIdRoute
+  '/website/videos/$briefingId': typeof WebsiteVideosBriefingIdRoute
   '/crm/accounts': typeof CrmAccountsIndexRoute
   '/voice/studio': typeof VoiceStudioIndexRoute
+  '/website/videos': typeof WebsiteVideosIndexRoute
   '/api/public/anthropic/identity': typeof ApiPublicAnthropicIdentityRoute
   '/api/public/anthropic/jwks': typeof ApiPublicAnthropicJwksRoute
   '/api/public/billing/handoff': typeof ApiPublicBillingHandoffRoute
@@ -1892,6 +1932,8 @@ export interface FileRoutesByTo {
   '/api/public/seats/reserve': typeof ApiPublicSeatsReserveRoute
   '/api/public/security/intake': typeof ApiPublicSecurityIntakeRoute
   '/api/public/storefront/access': typeof ApiPublicStorefrontAccessRoute
+  '/api/public/storefront/briefing-upload-grant': typeof ApiPublicStorefrontBriefingUploadGrantRoute
+  '/api/public/storefront/briefings': typeof ApiPublicStorefrontBriefingsRoute
   '/api/public/storefront/catalog': typeof ApiPublicStorefrontCatalogRoute
   '/api/public/storefront/checkout': typeof ApiPublicStorefrontCheckoutRoute
   '/api/public/storefront/feedback': typeof ApiPublicStorefrontFeedbackRoute
@@ -1901,6 +1943,7 @@ export interface FileRoutesByTo {
   '/api/public/storefront/session': typeof ApiPublicStorefrontSessionRoute
   '/api/public/storefront/setup': typeof ApiPublicStorefrontSetupRoute
   '/api/public/storefront/strategic-review': typeof ApiPublicStorefrontStrategicReviewRoute
+  '/api/public/storefront/trial-offer': typeof ApiPublicStorefrontTrialOfferRoute
   '/api/public/storefront/wallet': typeof ApiPublicStorefrontWalletRoute
   '/api/public/stripe/webhook': typeof ApiPublicStripeWebhookRouteWithChildren
   '/api/public/support/assistant-activity': typeof ApiPublicSupportAssistantActivityRoute
@@ -2092,8 +2135,10 @@ export interface FileRoutesById {
   '/crm/accounts/$accountId': typeof CrmAccountsAccountIdRoute
   '/email/campaigns/$campaignId': typeof EmailCampaignsCampaignIdRoute
   '/voice/studio/$projectId': typeof VoiceStudioProjectIdRoute
+  '/website/videos/$briefingId': typeof WebsiteVideosBriefingIdRoute
   '/crm/accounts/': typeof CrmAccountsIndexRoute
   '/voice/studio/': typeof VoiceStudioIndexRoute
+  '/website/videos/': typeof WebsiteVideosIndexRoute
   '/api/public/anthropic/identity': typeof ApiPublicAnthropicIdentityRoute
   '/api/public/anthropic/jwks': typeof ApiPublicAnthropicJwksRoute
   '/api/public/billing/handoff': typeof ApiPublicBillingHandoffRoute
@@ -2126,6 +2171,8 @@ export interface FileRoutesById {
   '/api/public/seats/reserve': typeof ApiPublicSeatsReserveRoute
   '/api/public/security/intake': typeof ApiPublicSecurityIntakeRoute
   '/api/public/storefront/access': typeof ApiPublicStorefrontAccessRoute
+  '/api/public/storefront/briefing-upload-grant': typeof ApiPublicStorefrontBriefingUploadGrantRoute
+  '/api/public/storefront/briefings': typeof ApiPublicStorefrontBriefingsRoute
   '/api/public/storefront/catalog': typeof ApiPublicStorefrontCatalogRoute
   '/api/public/storefront/checkout': typeof ApiPublicStorefrontCheckoutRoute
   '/api/public/storefront/feedback': typeof ApiPublicStorefrontFeedbackRoute
@@ -2135,6 +2182,7 @@ export interface FileRoutesById {
   '/api/public/storefront/session': typeof ApiPublicStorefrontSessionRoute
   '/api/public/storefront/setup': typeof ApiPublicStorefrontSetupRoute
   '/api/public/storefront/strategic-review': typeof ApiPublicStorefrontStrategicReviewRoute
+  '/api/public/storefront/trial-offer': typeof ApiPublicStorefrontTrialOfferRoute
   '/api/public/storefront/wallet': typeof ApiPublicStorefrontWalletRoute
   '/api/public/stripe/webhook': typeof ApiPublicStripeWebhookRouteWithChildren
   '/api/public/support/assistant-activity': typeof ApiPublicSupportAssistantActivityRoute
@@ -2327,8 +2375,10 @@ export interface FileRouteTypes {
     | '/crm/accounts/$accountId'
     | '/email/campaigns/$campaignId'
     | '/voice/studio/$projectId'
+    | '/website/videos/$briefingId'
     | '/crm/accounts/'
     | '/voice/studio/'
+    | '/website/videos/'
     | '/api/public/anthropic/identity'
     | '/api/public/anthropic/jwks'
     | '/api/public/billing/handoff'
@@ -2361,6 +2411,8 @@ export interface FileRouteTypes {
     | '/api/public/seats/reserve'
     | '/api/public/security/intake'
     | '/api/public/storefront/access'
+    | '/api/public/storefront/briefing-upload-grant'
+    | '/api/public/storefront/briefings'
     | '/api/public/storefront/catalog'
     | '/api/public/storefront/checkout'
     | '/api/public/storefront/feedback'
@@ -2370,6 +2422,7 @@ export interface FileRouteTypes {
     | '/api/public/storefront/session'
     | '/api/public/storefront/setup'
     | '/api/public/storefront/strategic-review'
+    | '/api/public/storefront/trial-offer'
     | '/api/public/storefront/wallet'
     | '/api/public/stripe/webhook'
     | '/api/public/support/assistant-activity'
@@ -2558,8 +2611,10 @@ export interface FileRouteTypes {
     | '/crm/accounts/$accountId'
     | '/email/campaigns/$campaignId'
     | '/voice/studio/$projectId'
+    | '/website/videos/$briefingId'
     | '/crm/accounts'
     | '/voice/studio'
+    | '/website/videos'
     | '/api/public/anthropic/identity'
     | '/api/public/anthropic/jwks'
     | '/api/public/billing/handoff'
@@ -2592,6 +2647,8 @@ export interface FileRouteTypes {
     | '/api/public/seats/reserve'
     | '/api/public/security/intake'
     | '/api/public/storefront/access'
+    | '/api/public/storefront/briefing-upload-grant'
+    | '/api/public/storefront/briefings'
     | '/api/public/storefront/catalog'
     | '/api/public/storefront/checkout'
     | '/api/public/storefront/feedback'
@@ -2601,6 +2658,7 @@ export interface FileRouteTypes {
     | '/api/public/storefront/session'
     | '/api/public/storefront/setup'
     | '/api/public/storefront/strategic-review'
+    | '/api/public/storefront/trial-offer'
     | '/api/public/storefront/wallet'
     | '/api/public/stripe/webhook'
     | '/api/public/support/assistant-activity'
@@ -2791,8 +2849,10 @@ export interface FileRouteTypes {
     | '/crm/accounts/$accountId'
     | '/email/campaigns/$campaignId'
     | '/voice/studio/$projectId'
+    | '/website/videos/$briefingId'
     | '/crm/accounts/'
     | '/voice/studio/'
+    | '/website/videos/'
     | '/api/public/anthropic/identity'
     | '/api/public/anthropic/jwks'
     | '/api/public/billing/handoff'
@@ -2825,6 +2885,8 @@ export interface FileRouteTypes {
     | '/api/public/seats/reserve'
     | '/api/public/security/intake'
     | '/api/public/storefront/access'
+    | '/api/public/storefront/briefing-upload-grant'
+    | '/api/public/storefront/briefings'
     | '/api/public/storefront/catalog'
     | '/api/public/storefront/checkout'
     | '/api/public/storefront/feedback'
@@ -2834,6 +2896,7 @@ export interface FileRouteTypes {
     | '/api/public/storefront/session'
     | '/api/public/storefront/setup'
     | '/api/public/storefront/strategic-review'
+    | '/api/public/storefront/trial-offer'
     | '/api/public/storefront/wallet'
     | '/api/public/stripe/webhook'
     | '/api/public/support/assistant-activity'
@@ -2997,8 +3060,10 @@ export interface RootRouteChildren {
   CrmAccountsAccountIdRoute: typeof CrmAccountsAccountIdRoute
   EmailCampaignsCampaignIdRoute: typeof EmailCampaignsCampaignIdRoute
   VoiceStudioProjectIdRoute: typeof VoiceStudioProjectIdRoute
+  WebsiteVideosBriefingIdRoute: typeof WebsiteVideosBriefingIdRoute
   CrmAccountsIndexRoute: typeof CrmAccountsIndexRoute
   VoiceStudioIndexRoute: typeof VoiceStudioIndexRoute
+  WebsiteVideosIndexRoute: typeof WebsiteVideosIndexRoute
   ApiPublicAnthropicIdentityRoute: typeof ApiPublicAnthropicIdentityRoute
   ApiPublicAnthropicJwksRoute: typeof ApiPublicAnthropicJwksRoute
   ApiPublicBillingHandoffRoute: typeof ApiPublicBillingHandoffRoute
@@ -3031,6 +3096,8 @@ export interface RootRouteChildren {
   ApiPublicSeatsReserveRoute: typeof ApiPublicSeatsReserveRoute
   ApiPublicSecurityIntakeRoute: typeof ApiPublicSecurityIntakeRoute
   ApiPublicStorefrontAccessRoute: typeof ApiPublicStorefrontAccessRoute
+  ApiPublicStorefrontBriefingUploadGrantRoute: typeof ApiPublicStorefrontBriefingUploadGrantRoute
+  ApiPublicStorefrontBriefingsRoute: typeof ApiPublicStorefrontBriefingsRoute
   ApiPublicStorefrontCatalogRoute: typeof ApiPublicStorefrontCatalogRoute
   ApiPublicStorefrontCheckoutRoute: typeof ApiPublicStorefrontCheckoutRoute
   ApiPublicStorefrontFeedbackRoute: typeof ApiPublicStorefrontFeedbackRoute
@@ -3040,6 +3107,7 @@ export interface RootRouteChildren {
   ApiPublicStorefrontSessionRoute: typeof ApiPublicStorefrontSessionRoute
   ApiPublicStorefrontSetupRoute: typeof ApiPublicStorefrontSetupRoute
   ApiPublicStorefrontStrategicReviewRoute: typeof ApiPublicStorefrontStrategicReviewRoute
+  ApiPublicStorefrontTrialOfferRoute: typeof ApiPublicStorefrontTrialOfferRoute
   ApiPublicStorefrontWalletRoute: typeof ApiPublicStorefrontWalletRoute
   ApiPublicStripeWebhookRoute: typeof ApiPublicStripeWebhookRouteWithChildren
   ApiPublicSupportAssistantActivityRoute: typeof ApiPublicSupportAssistantActivityRoute
@@ -4208,6 +4276,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof VoiceStudioProjectIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/website/videos/': {
+      id: '/website/videos/'
+      path: '/website/videos'
+      fullPath: '/website/videos/'
+      preLoaderRoute: typeof WebsiteVideosIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/website/videos/$briefingId': {
+      id: '/website/videos/$briefingId'
+      path: '/website/videos/$briefingId'
+      fullPath: '/website/videos/$briefingId'
+      preLoaderRoute: typeof WebsiteVideosBriefingIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/anthropic/identity': {
       id: '/api/public/anthropic/identity'
       path: '/api/public/anthropic/identity'
@@ -4432,6 +4514,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicStorefrontAccessRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/storefront/briefing-upload-grant': {
+      id: '/api/public/storefront/briefing-upload-grant'
+      path: '/api/public/storefront/briefing-upload-grant'
+      fullPath: '/api/public/storefront/briefing-upload-grant'
+      preLoaderRoute: typeof ApiPublicStorefrontBriefingUploadGrantRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/storefront/briefings': {
+      id: '/api/public/storefront/briefings'
+      path: '/api/public/storefront/briefings'
+      fullPath: '/api/public/storefront/briefings'
+      preLoaderRoute: typeof ApiPublicStorefrontBriefingsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/storefront/catalog': {
       id: '/api/public/storefront/catalog'
       path: '/api/public/storefront/catalog'
@@ -4493,6 +4589,13 @@ declare module '@tanstack/react-router' {
       path: '/api/public/storefront/strategic-review'
       fullPath: '/api/public/storefront/strategic-review'
       preLoaderRoute: typeof ApiPublicStorefrontStrategicReviewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/storefront/trial-offer': {
+      id: '/api/public/storefront/trial-offer'
+      path: '/api/public/storefront/trial-offer'
+      fullPath: '/api/public/storefront/trial-offer'
+      preLoaderRoute: typeof ApiPublicStorefrontTrialOfferRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/public/storefront/wallet': {
@@ -4980,8 +5083,10 @@ const rootRouteChildren: RootRouteChildren = {
   CrmAccountsAccountIdRoute: CrmAccountsAccountIdRoute,
   EmailCampaignsCampaignIdRoute: EmailCampaignsCampaignIdRoute,
   VoiceStudioProjectIdRoute: VoiceStudioProjectIdRoute,
+  WebsiteVideosBriefingIdRoute: WebsiteVideosBriefingIdRoute,
   CrmAccountsIndexRoute: CrmAccountsIndexRoute,
   VoiceStudioIndexRoute: VoiceStudioIndexRoute,
+  WebsiteVideosIndexRoute: WebsiteVideosIndexRoute,
   ApiPublicAnthropicIdentityRoute: ApiPublicAnthropicIdentityRoute,
   ApiPublicAnthropicJwksRoute: ApiPublicAnthropicJwksRoute,
   ApiPublicBillingHandoffRoute: ApiPublicBillingHandoffRoute,
@@ -5015,6 +5120,9 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicSeatsReserveRoute: ApiPublicSeatsReserveRoute,
   ApiPublicSecurityIntakeRoute: ApiPublicSecurityIntakeRoute,
   ApiPublicStorefrontAccessRoute: ApiPublicStorefrontAccessRoute,
+  ApiPublicStorefrontBriefingUploadGrantRoute:
+    ApiPublicStorefrontBriefingUploadGrantRoute,
+  ApiPublicStorefrontBriefingsRoute: ApiPublicStorefrontBriefingsRoute,
   ApiPublicStorefrontCatalogRoute: ApiPublicStorefrontCatalogRoute,
   ApiPublicStorefrontCheckoutRoute: ApiPublicStorefrontCheckoutRoute,
   ApiPublicStorefrontFeedbackRoute: ApiPublicStorefrontFeedbackRoute,
@@ -5025,6 +5133,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicStorefrontSetupRoute: ApiPublicStorefrontSetupRoute,
   ApiPublicStorefrontStrategicReviewRoute:
     ApiPublicStorefrontStrategicReviewRoute,
+  ApiPublicStorefrontTrialOfferRoute: ApiPublicStorefrontTrialOfferRoute,
   ApiPublicStorefrontWalletRoute: ApiPublicStorefrontWalletRoute,
   ApiPublicStripeWebhookRoute: ApiPublicStripeWebhookRouteWithChildren,
   ApiPublicSupportAssistantActivityRoute:

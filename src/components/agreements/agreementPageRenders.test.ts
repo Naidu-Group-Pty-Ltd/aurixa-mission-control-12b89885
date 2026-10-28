@@ -189,6 +189,8 @@ function row(over: Partial<AgreementRow> = {}): AgreementRow {
     signed_record_sha256: null,
     status: "draft",
     template_id: null,
+    trial_days: null,
+    trial_offer_code: null,
     updated_at: "2026-09-24T01:00:00.000Z",
     void_reason: null,
     ...over,

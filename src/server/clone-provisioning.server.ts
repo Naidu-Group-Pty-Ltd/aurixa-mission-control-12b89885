@@ -478,6 +478,7 @@ export async function provisionCloneCore(
     cloneName: data.name,
     planSlug: data.planSlug,
     graceHours: data.gateGraceHours,
+    trialOfferCode: data.gateTrialOfferCode ?? null,
     actorId: userId,
   });
   if (!gate.armed && gate.reason === "write_failed") {

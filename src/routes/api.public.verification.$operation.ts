@@ -32,6 +32,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { resolveCloneApiKey } from "@/server/clone-api-keys.server";
 import { checkRateLimit } from "@/server/token-rate-limit.server";
 import { refusalHeaders } from "@/server/verificationBroker.pure";
+import { assertGateOpen, gateLockedBody } from "@/server/payment-gate.server";
 
 /**
  * A refusal this endpoint makes, marked as ours.
@@ -75,6 +76,17 @@ export const Route = createFileRoute("/api/public/verification/$operation")({
           );
           res.headers.set("Retry-After", String(rl.retry_after_seconds));
           return res;
+        }
+
+        // The activation gate. Each call is a Didit verification billed to
+        // Aurixa's own account, so a workspace whose free trial lapsed unpaid
+        // stops here — the same refusal, in the same shape, as tokens/reserve.
+        const gate = await assertGateOpen(key.clone_id);
+        if (!gate.open) {
+          return new Response(JSON.stringify(gateLockedBody(gate)), {
+            status: 402,
+            headers: refusalHeaders("workspace_locked"),
+          });
         }
 
         const { brokerVerification } = await import("@/server/verificationBroker.server");

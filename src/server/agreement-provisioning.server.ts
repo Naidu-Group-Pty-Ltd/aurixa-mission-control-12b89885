@@ -31,6 +31,7 @@ import {
   uniqueSlug,
   type AgreementProvisionFacts,
 } from "./agreementProvisioning.pure";
+import { HOURS_PER_DAY } from "@/lib/clonePaymentGate.pure";
 
 export type ProvisionFromAgreementResult =
   | { ok: true; cloneId: string; skipped?: false }
@@ -324,6 +325,20 @@ async function runProvisioning(
     });
   }
 
+  // The free trial this agreement promised, read apart from the row (see
+  // `agreement-trial.server.ts`). A read that fails provisions the platform
+  // default rather than failing a customer who has just signed: it is logged,
+  // and the trial can be lengthened from Payment Gates afterwards, whereas a
+  // provisioning failure here leaves them with nothing.
+  const { readAgreementTrial } = await import("./agreement-trial.server");
+  const trial = await readAgreementTrial(supabaseAdmin, agreement.id);
+  if (!trial.ok) {
+    console.error("[agreement-provisioning] free trial unreadable — using the platform default", {
+      agreementId: agreement.id,
+      error: trial.error,
+    });
+  }
+
   const { provisionCloneCore } = await import("./clone-provisioning.server");
   const created = await provisionCloneCore(supabaseAdmin, userId, {
     name: identity.name,
@@ -345,6 +360,10 @@ async function runProvisioning(
     // dedicated backend is the point of the agreement.
     isolatedTenant: true,
     idempotencyKey: `agreement:${agreement.id}`,
+    // Undefined is the platform default, read by `armGate` as it arms.
+    gateGraceHours:
+      trial.ok && trial.trialDays !== null ? trial.trialDays * HOURS_PER_DAY : undefined,
+    gateTrialOfferCode: trial.ok ? trial.trialOfferCode : null,
   });
   if (!created.ok) throw new Error(created.error);
 

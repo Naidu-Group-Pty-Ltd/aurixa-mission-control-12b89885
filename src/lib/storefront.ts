@@ -36,6 +36,19 @@
  */
 export const DEFAULT_STOREFRONT_PRICING_URL = "https://www.aurixasystems.com.au/pricing";
 
+/** The Aurixa Systems website itself, for links operators share. */
+export const WEBSITE_ORIGIN = "https://www.aurixasystems.com.au";
+
+/**
+ * A website link that opens the free-trial application with a trial offer
+ * applied: the page asks `/api/public/storefront/trial-offer` about the code
+ * and says "Start your 30-day free trial". `/contact` is the trial
+ * application's route on the website.
+ */
+export function trialOfferLink(code: string): string {
+  return `${WEBSITE_ORIGIN}/contact?trial=${encodeURIComponent(code)}`;
+}
+
 /**
  * The storefront's own return pages, as the website routes them
  * (`/pricing/success`, `/pricing/cancel`, `/pricing/card-saved` in

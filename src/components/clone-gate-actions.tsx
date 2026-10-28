@@ -37,6 +37,7 @@ import {
   GATE_MIN_HOURS,
   TRIAL_EXTENSION_PRESET_DAYS,
   describeTrialExtensionRefusal,
+  describeWindowHours,
   formatRemaining,
   gateFactsOf,
   normaliseGraceHours,
@@ -446,9 +447,9 @@ export function CloneGateActions({
           <DialogHeader>
             <DialogTitle>Activation window — {cloneName}</DialogTitle>
             <DialogDescription>
-              How long this workspace has before it locks. Measured from when the clone was created,
-              so setting 72 hours on a clone made yesterday still means three days from creation —
-              which is what the customer was told.
+              How long this workspace's free trial runs before it locks. Measured from when the
+              clone was created, so setting 336 hours on a clone made yesterday still means fourteen
+              days from creation — which is what the customer was told.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -473,7 +474,7 @@ export function CloneGateActions({
                 inputMode="numeric"
                 value={hours}
                 onChange={(e) => setHours(e.target.value)}
-                placeholder={`${GATE_DEFAULT_HOURS} — blank for no deadline`}
+                placeholder={`${GATE_DEFAULT_HOURS} (${describeWindowHours(GATE_DEFAULT_HOURS)}) — blank for no deadline`}
               />
               <p className="text-xs text-muted-foreground">{windowPreview}</p>
             </div>

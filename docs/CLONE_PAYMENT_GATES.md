@@ -1,9 +1,9 @@
 # The activation gate
 
-A clone provisioned onto a **paid plan** boots with a clock on it. It works
-normally until the window closes — 72 hours by default — and is then locked
-behind a payment screen until Stripe captures the activation payment, at which
-point it opens by itself.
+A clone provisioned onto a **paid plan** boots with a clock on it: its **free
+trial**. It works normally until the trial ends — fourteen days by default —
+and is then locked behind a payment screen until Stripe captures the
+activation payment, at which point it opens by itself.
 
 **The prime and every clone that already exists are not gated, and cannot
 become gated.** Everything below is arranged to protect that.
@@ -179,7 +179,7 @@ with the derived status either side of it.
   when a customer asks for another week; see
   [Extending a trial](#extending-a-trial-30-sep-2026).
 - **Per-clone window**, measured from `armed_at` rather than from now — so
-  setting "72 hours" on a clone made yesterday means three days from creation,
+  setting "336 hours" on a clone made yesterday means fourteen days from creation,
   which is what the customer was told. Restarting the clock from now is a
   separate, explicit switch, because it is a larger act. This is for
   correcting the terms a gate was armed with, not for giving more time: it
@@ -427,6 +427,90 @@ measured: the stale gate mints at $999, a row that disagrees with today's quote
 is still refused, and each refusal names the workspace. Eight of its ten tests
 fail on the code they replaced.
 
+## The free trial is fourteen days (28 Oct 2026)
+
+The website and the promo videos offer a free trial, and the owner confirmed
+on 28 Oct 2026 that it is real and that it is fourteen days by default. In
+Mission Control that trial **is** the activation gate's window, so the
+change is the window's default, and three gaps the 72-hour window had never
+exposed.
+
+**The default.** `prime_config.clone_gate_default_hours` defaults to 336, and
+`20261028160000_fourteen_day_free_trial.sql` moved the live row from 72 to
+336 only if it still held 72; a value an admin chose is a decision, not a
+default, and is left alone. `GATE_DEFAULT_HOURS` — the fallback when that row
+cannot be read — is 336 too. Gates already armed keep their deadlines: a gate
+holds the trial its customer was told about, and the console's **Extend
+trial** is how an existing customer gets the longer one. The console now
+reads and sets the default in days (`describeWindowHours`,
+`normaliseTrialDays`); the gate still stores hours, because the Window act
+corrects a gate's terms and sometimes needs that precision.
+
+**A Stripe trial is not a payment.** Nothing in Mission Control mints a Stripe
+trial, but one can be made in Stripe's own dashboard, and each of the three
+settlement routes used to read one as the activation payment — after which
+`paid_at` outranked the deadline and the trial never ended:
+
+| Route | Read as paid before | Now (`clonePaymentGate.pure.ts`) |
+| ----- | ------------------- | -------------------------------- |
+| `checkout.session.completed` | any `no_payment_required` session | `checkoutPaysActivation`: `paid`, or `no_payment_required` **with a discount** — an admin's 100% promotion code still opens the gate, a trial does not |
+| `customer.subscription.*` | `trialing`, which the entitlement mapping folds into `active` | `subscriptionPaysActivation`: Stripe's own `active` only |
+| `invoice.paid` | any amount, including a trial's $0 first invoice | `invoicePaysActivation`: only an invoice that collected money |
+
+A fully discounted subscription still opens its gate, through the
+subscription route going `active`, which is the route that carries the
+waiver. The entitlement mapping is unchanged — a `trialing` subscription
+still reads as usable on the clone — because that mapping decides what the
+clone may use, not whether it has paid. `paymentGate.contract.test.ts` pins
+that each route asks its rule.
+
+**A lapsed trial stops spending Aurixa's money on two more paths.**
+`tokens/reserve` and `seats/reserve` were the only guarded endpoints. Two
+others spend Aurixa's own vendor budget on every call and now answer the
+same 402 body: `verification/{operation}` (Didit, billed per verification)
+and `anthropic/identity` (federated model inference, billed to Aurixa's
+organisation — the clone's current token expires within minutes). Usage
+reporting stays open, so spend already incurred is still accounted for, and
+the listings, voice-automation and integrations-secrets endpoints move no
+vendor money and are left as they were.
+
+## Custom trial periods (28 Oct 2026)
+
+A workspace's trial can be set in four places, and every one resolves through
+`resolveTrialChoice` (`src/lib/trialOffers.pure.ts`), so the summary an
+operator reads is the trial that is armed:
+
+- **The platform default**, on Billing → Payment Gates, in days.
+- **The New Clone wizard**: the platform default, a preset (7, 14, 21, 30,
+  60 or 90 days), a typed number of days, or a trial offer.
+- **An agreement's provisioning settings**: the same picker, stored as
+  `client_agreements.trial_days` (null is the default) and read when the
+  signed agreement provisions. This was the one way to provision a workspace
+  that could not set its own trial. The trial is read and written apart from
+  the rest of the row (`agreement-trial.server.ts`), so the agreements list
+  never selects a column that may not exist yet; before the migration
+  applies, an agreement reads as the default and a custom trial is refused
+  in words rather than dropped.
+- **After provisioning**: Extend trial and Window, as before.
+
+**Trial offers** (`trial_offers`, `20261028160100_trial_offers.sql`) are named,
+reusable trial lengths — "Partner referral, 30 days" — with a public code.
+An admin creates, re-lengths and retires them on Payment Gates. An offer can
+be picked in either provisioning picker, and shared as a website link,
+`https://www.aurixasystems.com.au/contact?trial=CODE`: the trial application
+asks `GET /api/public/storefront/trial-offer?code=` (rate limited per
+address; it returns the code, the label and the days, never the notes) and
+offers that length, and the code travels with the lead it creates. A retired
+offer, or one past its campaign end, is refused by reason, and the visitor
+gets the default trial.
+
+**A gate never references an offer.** It keeps the hours it was armed with
+and nothing reads anything else (`resolveGateState`), so re-lengthening or
+retiring an offer moves no deadline a customer was already given. Where a
+trial came from is recorded as provenance only: the `armed` event and the
+audit entry carry `trial_offer_code`, and an agreement keeps the code beside
+its days.
+
 ## Files
 
 | File | What it is |
@@ -444,4 +528,11 @@ fail on the code they replaced.
 | `src/components/clone-gate-actions.tsx` | The operator's acts, Extend trial and Payment link among them |
 | `src/routes/billing.gates.tsx` | The console |
 | `src/components/clone-payment-gate-card.tsx` | The same state on the clone's own page |
-| `src/server/paymentGate.contract.test.ts` | The absences: no backfill, one status rule, 402 where it belongs |
+| `src/server/paymentGate.contract.test.ts` | The absences: no backfill, one status rule, 402 where it belongs, and no Stripe trial read as a payment |
+| `supabase/migrations/20261028160000_fourteen_day_free_trial.sql` | The fourteen-day default, and an agreement's own trial |
+| `supabase/migrations/20261028160100_trial_offers.sql` | Trial offers |
+| `src/lib/trialOffers.pure.ts` | `resolveTrialChoice`, the one reading of a trial picker, and the offer-code rules |
+| `src/server/trial-offers.server.ts`, `src/server/trial-offers.functions.ts` | Offers: list, create, change, retire; `getTrialSettings` for the pickers |
+| `src/server/agreement-trial.server.ts` | An agreement's trial, read and written apart from its row |
+| `src/routes/api.public.storefront.trial-offer.ts` | What the website asks about a `?trial=` code |
+| `src/components/trial-length-picker.tsx`, `src/components/trial-offers-panel.tsx` | The picker both provisioning paths use, and the offers panel |
