@@ -86,10 +86,14 @@ export function WorkspaceReplyAlerts() {
       onDismiss={dismiss}
       onOpen={(id) => {
         dismiss(id);
-        void supabase
-          .from("notifications")
-          .update({ read_at: new Date().toISOString() })
-          .eq("id", id);
+        void (async () => {
+          const { error } = await supabase
+            .from("notifications")
+            .update({ read_at: new Date().toISOString() })
+            .eq("id", id);
+          // The conversation opens either way; the bell keeps it unread.
+          if (error) console.warn("[workspace-replies] could not mark read", error.message);
+        })();
       }}
       offerDesktop={push.supported && !push.enabled && push.permission !== "denied"}
       onEnableDesktop={() => void push.request()}
