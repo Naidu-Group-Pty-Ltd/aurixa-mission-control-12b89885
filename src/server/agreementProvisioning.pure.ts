@@ -11,9 +11,11 @@
  *    a best effort);
  *  - provisioning fires only for an agreement that ARMED it, exactly once
  *    (the caller claims via compare-and-set on `provision_status`);
- *  - the effective module set is the selection minus the named exclusions —
- *    exclusions are recorded facts of the negotiation, never re-derived.
+ *  - the effective module set is the selection minus what the named
+ *    exclusions map to — exclusions are recorded facts of the negotiation,
+ *    never re-derived.
  */
+import { libraryModulesExcludedBy } from "@/lib/pricing/module-mapping";
 
 /** The Connect payload facts the pipeline acts on. */
 export type ConnectEventFacts = {
@@ -101,7 +103,8 @@ export type AgreementProvisionFacts = {
   plan_slug: string | null;
   module_ids: string[];
   addon_slugs: string[];
-  excluded_module_ids: string[];
+  /** Price-list module slugs the negotiation took out (`MODULES[].slug`). */
+  excluded_module_slugs: string[];
   admin_email: string | null;
   client_email: string;
   client_name: string;
@@ -204,14 +207,42 @@ export function decideProvisionOnSignature(a: AgreementProvisionFacts): Provisio
 }
 
 /**
- * The module set actually installed: the selection minus the named
- * exclusions. Order of the selection is preserved; an exclusion that names a
- * module outside the selection is inert (it documents the negotiation, and
- * guards against a later reconciliation re-adding it).
+ * The picked library modules a new clone is given: the selection minus every
+ * library module an excluded price-list slug maps to.
+ *
+ * The selection is library module ids and the exclusions are price-list slugs,
+ * so they meet through `libraryModulesExcludedBy`, the translation the
+ * reconcile uses: the operator's override for the priced module first, else
+ * the derived mapping. Excluding `aml-ctf` drops a picked `aml`, and excluding
+ * `commercial-industrial` drops `commercial` and `industrial`.
+ *
+ * Order of the selection is preserved. An exclusion that maps to nothing picked
+ * is inert here; the clone still records it, so a later reconcile cannot
+ * re-add it. A picked id the catalogue does not hold is kept, because nothing
+ * says an exclusion maps to it. A module that another priced module the plan
+ * includes also maps to is dropped here and installed again by the reconcile,
+ * which is where that rule is decided.
  */
-export function effectiveModuleIds(moduleIds: string[], excludedIds: string[]): string[] {
-  const excluded = new Set(excludedIds);
-  return moduleIds.filter((id) => !excluded.has(id));
+export function effectiveModuleIds(
+  moduleIds: readonly string[],
+  excludedSlugs: readonly string[],
+  library: {
+    /** The live library catalogue, archived modules left out. */
+    modules: ReadonlyArray<{ id: string; slug: string }>;
+    /** Operator overrides, `module:<slug>` → library slugs. */
+    overrides?: Readonly<Record<string, readonly string[]>>;
+  },
+): string[] {
+  if (excludedSlugs.length === 0) return [...moduleIds];
+  const knownModules = new Set(library.modules.map((m) => m.slug));
+  const withheld = new Set(
+    libraryModulesExcludedBy(excludedSlugs, knownModules, library.overrides ?? {}),
+  );
+  const slugOf = new Map(library.modules.map((m) => [m.id, m.slug]));
+  return moduleIds.filter((id) => {
+    const slug = slugOf.get(id);
+    return !slug || !withheld.has(slug);
+  });
 }
 
 /* ───────────────────────────── clone identity ───────────────────────────── */

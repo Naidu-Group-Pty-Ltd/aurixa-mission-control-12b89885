@@ -1184,4 +1184,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       },
     ],
   },
+  {
+    migration: "20261027140000_agreement_exclusions_are_price_list_slugs.sql",
+    version: "20261027140000",
+    assertions: [{ kind: "column", table: "client_agreements", column: "excluded_module_slugs" }],
+  },
 ];

@@ -25,6 +25,15 @@ measured against the live Mission Control database on 2026-08-28.
 > rehearsal (`DELIVERY_SYSTEM_PLAN.md`, W1 and D7). Where this runbook
 > describes a module cascade for a new clone, read it as history.
 
+> **D18: a contract's exclusions are price-list slugs, and they reach the
+> clone.**
+>
+> An agreement used to exclude library module ids. It now excludes price-list
+> slugs (`client_agreements.excluded_module_slugs`, `20261027140000`).
+> `provisionCloneCore` writes them in the clone's own INSERT, and the balance
+> response sends them to the clone as `entitlements.excluded`. See
+> [Contractual exclusions](#contractual-exclusions).
+
 ---
 
 ## The two vocabularies, and the join
@@ -77,9 +86,14 @@ which is most of this document's value:
    seeds a fresh repo's module files.
 3. **Features (what the tenant can actually use).** `entitled_plan_slug`,
    `entitled_module_slugs` and `entitlement_keys` on the clone row, stamped
-   by `reconcileCloneEntitlements`. **The clone gates features on these.**
-   A clone with modules installed but no entitlements renders everything
-   gated OFF — modules "installed but unfunctional".
+   by `reconcileCloneEntitlements`, are Mission Control's record of what the
+   plan entitles. **The clone does not read them.** It gates on its balance
+   response: the plan slug and `entitlements.addons`, less
+   `entitlements.excluded` (`/api/public/tokens/balance`). Measured 27 Oct
+   2026, nothing in the prime reads `entitlement_keys` or
+   `entitled_module_slugs`. The paragraph below and
+   [The hand-made clone is special](#the-hand-made-clone-is-special) were
+   written before that was measured.
 
 That third mechanism is the one the hand-made clone was missing: 18 modules
 were injected on 2026-08-28 while `entitled_plan_slug` stayed NULL and
@@ -113,9 +127,12 @@ The autonomous path; every step is the wizard's own machinery:
    resolvable, module catalogue non-empty, and ONE live probe — reading the
    prime's branch through the GitHub App, the exact call a broken
    installation id fails on. Refusal is named and nothing is spent.
-2. `provisionCloneCore` — as above, with idempotency key `agreement:<id>`.
-3. **Contractual exclusions** written to
-   `clones.contract_excluded_module_slugs`.
+2. **Contractual exclusions, against the picks.** Every picked library module
+   an excluded price-list slug maps to is dropped (`effectiveModuleIds`).
+3. `provisionCloneCore` — as above, with idempotency key `agreement:<id>`.
+   The exclusions go into `clones.contract_excluded_module_slugs` in the
+   clone's own INSERT, so the reconcile it runs already honours them. A retry
+   that finds the clone writes the agreement's current exclusions onto it.
 4. **Initial entitlement reconcile** — stamps
    `entitled_plan_slug/_module_slugs/entitlement_keys` from tier + add-ons
    minus exclusions, and installs any entitled module the operator did not
@@ -123,6 +140,11 @@ The autonomous path; every step is the wizard's own machinery:
    "installed but unfunctional" state.
 5. Backend enqueue — after the reconcile on purpose, so the queue's
    authoritative module set (`clone_modules`) is already complete.
+
+Until D18 the exclusions were written between steps 3 and 4, after
+`provisionCloneCore` returned. Its reconcile had already installed the
+excluded modules by then, and the second reconcile could only record them as
+revoked.
 
 ### Plan changes (the life of the clone)
 
@@ -132,6 +154,59 @@ entitlements and **leave every file in place** (instant re-upgrade, nothing
 in flight breaks). Contractual exclusions are subtracted from **every**
 resolution — an upgrade can never re-install what the agreement bargained
 away (`applyContractExclusions`).
+
+## Contractual exclusions
+
+A signed agreement can take modules out of the tier it sells. It records them
+as **price-list slugs**: `MODULES[].slug` in `aurixa-catalog.ts`, such as
+`aml-ctf`, `finance-portal` or `market-updates`
+(`client_agreements.excluded_module_slugs`). A contract is negotiated in that
+vocabulary, and the prime gates on it.
+
+It used to record library module ids (`excluded_module_ids`): rows of
+`modules`, which name code (`aml`, `commercial`, `backend-aml`) rather than
+what was sold, and which a library reset loses. That column is superseded.
+Nothing reads it, and a save writes it empty. Measured 27 Oct 2026, no
+agreement and no clone held an exclusion, so nothing was translated.
+
+| step | where | what happens |
+| --- | --- | --- |
+| recorded | `configureAgreementProvisioning` | Checked by `validateContractExclusions`. A slug the price list does not know is refused by name, and so is one the same selection buys as an add-on. One the plan does not include is accepted and changes nothing. |
+| picks | `effectiveModuleIds` | Every picked library module an excluded slug maps to is dropped. |
+| clone row | `provisionCloneCore` | Written to `clones.contract_excluded_module_slugs` in the clone's own INSERT. |
+| every reconcile | `applyContractExclusions` | Subtracted, as below. |
+| the clone | `/api/public/tokens/balance` | Sent as `entitlements.excluded`. |
+
+**The reconcile.** For each excluded price-list module:
+
+- it leaves `includedModules` and `addonModules`;
+- the library modules it maps to leave `moduleSlugs`: the operator's override
+  `module:<slug>` first, else `mapPricedModule` (`libraryModulesOf`). A
+  library module that a priced module still in effect also maps to stays, and
+  the result names it (`sharedModulesKept`). A tier baseline keeps nothing:
+  the AML/CTF baseline maps to `aml` too, and excluding `aml-ctf` removes it;
+- its `ENTITLEMENT_ONLY_MODULES` key leaves `entitlementKeys`. For
+  `client-ai` and the other entitlement-only items, that key is the only gate.
+
+A slug the price list does not know is reported (`unknownExclusions`, and in
+the audit row) and subtracts nothing.
+
+**The clone.** A clone reads none of Mission Control's bookkeeping, so the
+balance response is where its exclusions reach it:
+
+```
+entitlements: { addons: string[], excluded?: string[] }
+```
+
+- `excluded` holds the clone's exclusions, sorted and de-duplicated. It is
+  present, possibly `[]`, whenever the clone's row was read, and `[]` for a
+  platform-level key, which has no clone. It is absent only when the read
+  failed, and the clone then keeps the exclusions it last knew.
+- `addons` never contains an excluded slug, and the AML derivation never adds
+  `aml-ctf` when the contract excludes it.
+
+A failed read never fails the balance call. The derivation is
+`balanceEntitlements.pure.ts`.
 
 ## Guardrails inventory (where each lives)
 
@@ -145,7 +220,7 @@ away (`applyContractExclusions`).
 | Provisioning idempotency | idempotency key on `provisionClone`; CAS claim on agreements |
 | Failed auto-provision never auto-retries | `decideProvisionOnSignature` (`failed_needs_operator`) |
 | Engine preflight before autonomous spend | `assessProvisioningPreflight` |
-| Contractual exclusions persist for the clone's life | `clones.contract_excluded_module_slugs`, subtracted in every reconcile |
+| Contractual exclusions persist for the clone's life, and reach it | `clones.contract_excluded_module_slugs`, written in the clone's INSERT, subtracted in every reconcile, sent as `entitlements.excluded` |
 | Drains scheduled + single-driver enforced | `20260826000000_schedule_the_engine.sql`, `check:cron`, `check:cron-auth` |
 
 ## The hand-made clone is special

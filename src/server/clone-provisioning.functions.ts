@@ -2,6 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { requireAdmin } from "@/integrations/supabase/role-middleware";
 import type { Database } from "@/integrations/supabase/types";
 import { isCrmMode, type CrmMode } from "@/lib/crmMode.pure";
+import { validateContractExclusions } from "@/lib/pricing/contract-exclusions";
 
 // Real clone provisioning. For 'fork' and 'template' methods, we actually
 // create the GitHub repo via the App; for 'clone' (independent), we just
@@ -24,6 +25,17 @@ export type ProvisionCloneInput = {
   // cannot tell an upgrade from a downgrade.
   planSlug?: string | null;
   addonSlugs?: string[];
+  /**
+   * Price-list module slugs (`MODULES[].slug`) the clone's contract excluded,
+   * from a signed agreement's `excluded_module_slugs`.
+   *
+   * Written in the clone's own INSERT, so the reconcile that runs inside
+   * provisioning already honours them. They used to be written by the
+   * agreement path after this function returned, and by then that reconcile
+   * had installed exactly what the contract excluded. Omitted, the clone has
+   * none, which is what the wizard asks for.
+   */
+  contractExcludedSlugs?: string[];
   // When true, this clone must run on its own dedicated Supabase backend.
   // The wizard enqueues backend provisioning immediately after; DB triggers
   // prevent the backend from being deleted while this flag is set.
@@ -141,6 +153,16 @@ export const provisionClone = createServerFn({ method: "POST" })
     // reported as a success.
     if (input.crmMode != null && !isCrmMode(input.crmMode)) {
       throw new Error("crmMode must be 'dependent' or 'independent'");
+    }
+    // The wizard offers no exclusions, but this input is the pipeline's, so a
+    // list sent here is held to the agreement's rule rather than written as sent.
+    if (input.contractExcludedSlugs !== undefined) {
+      const slugs = input.contractExcludedSlugs as unknown;
+      if (!Array.isArray(slugs) || !slugs.every((s) => typeof s === "string")) {
+        throw new Error("contractExcludedSlugs must be a list of price-list slugs");
+      }
+      const checked = validateContractExclusions(slugs, { addonSlugs: input.addonSlugs ?? [] });
+      if (!checked.ok) throw new Error(checked.error);
     }
     return {
       ...input,

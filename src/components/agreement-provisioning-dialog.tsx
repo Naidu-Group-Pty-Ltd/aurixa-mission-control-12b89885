@@ -20,6 +20,7 @@ import {
   getProvisioningCatalog,
   type AgreementListRow,
 } from "@/lib/agreements.functions";
+import { exclusionChoices } from "@/lib/pricing/contract-exclusions";
 
 /** The columns the dialog reads — the list's row and the offer page's row both carry them. */
 export type ProvisioningAgreement = Pick<
@@ -31,7 +32,7 @@ export type ProvisioningAgreement = Pick<
   | "plan_slug"
   | "addon_slugs"
   | "module_ids"
-  | "excluded_module_ids"
+  | "excluded_module_slugs"
   | "admin_email"
   | "provision_on_signature"
   | "provision_status"
@@ -84,7 +85,7 @@ export function AgreementProvisioningDialog({
 
   const [selection, setSelection] = useState<TierSelection>({ planSlug: null, addonSlugs: [] });
   const [picked, setPicked] = useState<Set<string>>(new Set());
-  const [excludedIds, setExcludedIds] = useState<string[]>([]);
+  const [excludedSlugs, setExcludedSlugs] = useState<string[]>([]);
   const [adminEmail, setAdminEmail] = useState("");
   const [armed, setArmed] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -95,10 +96,30 @@ export function AgreementProvisioningDialog({
       planSlug: agreement.plan_slug ?? null,
       addonSlugs: agreement.addon_slugs ?? [],
     });
-    setExcludedIds(agreement.excluded_module_ids ?? []);
+    setExcludedSlugs(agreement.excluded_module_slugs ?? []);
     setAdminEmail(agreement.admin_email ?? agreement.client_email);
     setArmed(agreement.provision_on_signature ?? true);
   }, [agreement]);
+
+  // What can be negotiated out is what the tier includes, in the price list's
+  // own names: the modules it bundles, plus AML/CTF, which every tier's
+  // headline SKU carries. A saved exclusion outside that set (the tier changed,
+  // or the price list did) stays listed until the dialog closes, so it can be
+  // seen and removed rather than kept unseen.
+  const exclusionOptions = useMemo(
+    () =>
+      exclusionChoices({
+        planSlug: selection.planSlug,
+        saved: agreement?.excluded_module_slugs ?? [],
+        selected: excludedSlugs,
+      }),
+    [selection.planSlug, agreement?.excluded_module_slugs, excludedSlugs],
+  );
+
+  const toggleExcluded = (slug: string) =>
+    setExcludedSlugs((prev) =>
+      prev.includes(slug) ? prev.filter((s) => s !== slug) : [...prev, slug],
+    );
 
   // The picker keys its selection by module id. The stored ids are loaded
   // once the catalog is (and only then — filtering through an empty catalog
@@ -126,7 +147,7 @@ export function AgreementProvisioningDialog({
           planSlug: selection.planSlug,
           moduleIds,
           addonSlugs: selection.addonSlugs,
-          excludedModuleIds: excludedIds,
+          excludedModuleSlugs: excludedSlugs,
           adminEmail: adminEmail.trim() || undefined,
           armed,
         },
@@ -198,28 +219,35 @@ export function AgreementProvisioningDialog({
           <div className="space-y-2">
             <Label>Modules excluded (negotiated out)</Label>
             <p className="text-xs text-muted-foreground">
-              Contractual exclusions travel onto the clone and hold across every later plan change —
-              a tier upgrade can never re-install what the client bargained away.
+              Price-list modules this tier includes that the client negotiated out. They are written
+              onto the clone when it is created, hold across every later plan change, and reach the
+              clone itself through its balance check — a tier upgrade can never re-install what the
+              client bargained away.
             </p>
-            <div className="grid max-h-32 grid-cols-1 gap-1 overflow-y-auto rounded-md border border-border/60 p-2 sm:grid-cols-2">
-              {modules.map((m) => (
-                <label
-                  key={m.id}
-                  className="flex items-start gap-2 rounded p-1 text-sm hover:bg-muted/40"
-                >
-                  <Checkbox
-                    checked={excludedIds.includes(m.id)}
-                    disabled={locked}
-                    onCheckedChange={() =>
-                      setExcludedIds((prev) =>
-                        prev.includes(m.id) ? prev.filter((x) => x !== m.id) : [...prev, m.id],
-                      )
-                    }
-                  />
-                  <span className="leading-tight">{m.name}</span>
-                </label>
-              ))}
-            </div>
+            {exclusionOptions.length === 0 ? (
+              <p className="rounded-md border border-dashed border-border/60 p-2 text-xs text-muted-foreground">
+                Pick a tier plan to see the modules it includes.
+              </p>
+            ) : (
+              <div className="grid max-h-32 grid-cols-1 gap-1 overflow-y-auto rounded-md border border-border/60 p-2 sm:grid-cols-2">
+                {exclusionOptions.map((m) => (
+                  <label
+                    key={m.slug}
+                    className="flex items-start gap-2 rounded p-1 text-sm hover:bg-muted/40"
+                  >
+                    <Checkbox
+                      checked={excludedSlugs.includes(m.slug)}
+                      disabled={locked}
+                      onCheckedChange={() => toggleExcluded(m.slug)}
+                    />
+                    <span className="leading-tight">
+                      {m.name}
+                      {m.note && <span className="ml-1 text-xs text-warning">({m.note})</span>}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="flex items-center justify-between rounded-md border border-border/60 p-3">

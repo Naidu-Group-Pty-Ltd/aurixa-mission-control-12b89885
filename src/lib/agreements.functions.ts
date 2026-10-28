@@ -31,6 +31,7 @@ import {
   type SubscriptionOffer,
 } from "@/lib/agreements/subscriptionOffer.pure";
 import { SUBSCRIPTION_TEMPLATES } from "@/lib/agreements/subscriptionTemplates";
+import { validateContractExclusions } from "@/lib/pricing/contract-exclusions";
 
 const uuid = z.string().uuid();
 
@@ -66,12 +67,13 @@ type BuilderPartnerColumn =
 /**
  * A row as the list carries it: everything but the working offer and the
  * issued snapshot, which only the offer's own page reads — a hundred of each
- * would be megabytes of JSON behind a table of names — and the Builder
- * Partner columns, which are read apart.
+ * would be megabytes of JSON behind a table of names — the Builder Partner
+ * columns, which are read apart, and `excluded_module_ids`, which
+ * `excluded_module_slugs` superseded and nothing reads.
  */
 export type AgreementListRow = Omit<
   AgreementRow,
-  "offer" | "issued_snapshot" | BuilderPartnerColumn
+  "offer" | "issued_snapshot" | BuilderPartnerColumn | "excluded_module_ids"
 >;
 
 const LIST_COLUMNS = [
@@ -101,7 +103,7 @@ const LIST_COLUMNS = [
   "plan_slug",
   "module_ids",
   "addon_slugs",
-  "excluded_module_ids",
+  "excluded_module_slugs",
   "admin_email",
   "provision_region",
   "provision_on_signature",
@@ -400,7 +402,9 @@ export const deleteDraftAgreement = createServerFn({ method: "POST" })
 
 /**
  * The pickers' catalog: active tier plans, active add-ons, approved modules.
- * Minimal columns — this feeds three multi-selects, not a report.
+ * Minimal columns — this feeds three multi-selects, not a report. Exclusions
+ * are not offered from here: they are price-list modules, and the dialog
+ * offers them from the price list itself (`excludableModules`).
  */
 export const getProvisioningCatalog = createServerFn({ method: "POST" })
   .middleware([requireOperator])
@@ -432,6 +436,11 @@ export const getProvisioningCatalog = createServerFn({ method: "POST" })
  * Record (or update) the commercial selection on an agreement and arm — or
  * disarm — provision-on-signature. Refused once provisioning has started:
  * what a signature provisions must be what the signature saw.
+ *
+ * Exclusions are price-list module slugs (`MODULES[].slug`), the vocabulary a
+ * contract is negotiated in and the prime gates on. They used to be library
+ * module ids (`excluded_module_ids`), which named code rather than what was
+ * sold; a save writes that column empty.
  */
 export const configureAgreementProvisioning = createServerFn({ method: "POST" })
   .middleware([requireOperator])
@@ -442,7 +451,7 @@ export const configureAgreementProvisioning = createServerFn({ method: "POST" })
         planSlug: z.string().min(1).max(100),
         moduleIds: z.array(uuid).max(200).default([]),
         addonSlugs: z.array(z.string().min(1).max(100)).max(100).default([]),
-        excludedModuleIds: z.array(uuid).max(200).default([]),
+        excludedModuleSlugs: z.array(z.string().min(1).max(64)).max(50).default([]),
         adminEmail: z.string().email().max(200).optional(),
         region: z.string().min(1).max(50).optional(),
         armed: z.boolean(),
@@ -450,6 +459,15 @@ export const configureAgreementProvisioning = createServerFn({ method: "POST" })
       .parse(input),
   )
   .handler(async ({ data, context }) => {
+    // Checked against the price list before anything is read: an unknown slug
+    // held until signature would exclude nothing and say nothing. An exclusion
+    // of a priced module this plan does not include is accepted, and records
+    // the negotiation.
+    const exclusions = validateContractExclusions(data.excludedModuleSlugs, {
+      addonSlugs: data.addonSlugs,
+    });
+    if (!exclusions.ok) throw new Error(exclusions.error);
+
     const { data: agreement, error } = await context.supabase
       .from("client_agreements")
       .select("id, client_email, provision_status, document_kind, offer")
@@ -503,11 +521,11 @@ export const configureAgreementProvisioning = createServerFn({ method: "POST" })
             .in("slug", data.addonSlugs)
             .eq("is_active", true)
         : Promise.resolve({ data: [] as Array<{ slug: string }>, error: null }),
-      data.moduleIds.length || data.excludedModuleIds.length
+      data.moduleIds.length
         ? context.supabase
             .from("modules")
             .select("id")
-            .in("id", [...new Set([...data.moduleIds, ...data.excludedModuleIds])])
+            .in("id", [...new Set(data.moduleIds)])
         : Promise.resolve({ data: [] as Array<{ id: string }>, error: null }),
     ]);
     if (!plan.data) throw new Error(`Unknown or inactive plan: ${data.planSlug}`);
@@ -516,9 +534,7 @@ export const configureAgreementProvisioning = createServerFn({ method: "POST" })
     if (missingAddons.length)
       throw new Error(`Unknown or inactive add-on(s): ${missingAddons.join(", ")}`);
     const knownModules = new Set((modules.data ?? []).map((m) => m.id));
-    const missingModules = [...data.moduleIds, ...data.excludedModuleIds].filter(
-      (m) => !knownModules.has(m),
-    );
+    const missingModules = data.moduleIds.filter((m) => !knownModules.has(m));
     if (missingModules.length)
       throw new Error(`Unknown module id(s): ${missingModules.join(", ")}`);
 
@@ -528,7 +544,10 @@ export const configureAgreementProvisioning = createServerFn({ method: "POST" })
         plan_slug: data.planSlug,
         module_ids: data.moduleIds,
         addon_slugs: data.addonSlugs,
-        excluded_module_ids: data.excludedModuleIds,
+        excluded_module_slugs: exclusions.slugs,
+        // Superseded by the slugs above; emptied so no reader can mistake a
+        // stale id for an exclusion in force.
+        excluded_module_ids: [],
         admin_email: data.adminEmail ?? agreement.client_email,
         ...(data.region ? { provision_region: data.region } : {}),
         provision_on_signature: data.armed,
