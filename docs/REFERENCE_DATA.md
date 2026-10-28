@@ -175,6 +175,21 @@ entry's schema, and the `clone_reference_syncs` state row for an `aml` table is
 keyed `aml.<table>` while public tables keep their bare key, so nothing
 already complete re-copied when the field arrived.
 
+## The chart catalogue
+
+`chart_configurations` joined the list on 28 Oct 2026, from the prime's D9
+audit of the rows the clones lack. The Quantitative Reports generator
+(`useReportGenerator` in the product) draws a chart only for a
+`template_name` that has a row there, and every clone held none, so every
+clone's quantitative report drew no chart at all. The prime's thirteen rows
+are migration seeds nobody has edited (`updated_at` equals `created_at` on
+each), carry no person-shaped column, and every line runs the same generator.
+
+It is keyed on `id` because the schema declares no other unique constraint:
+`template_name` reads like a key and is not one. That is safe while a clone
+holds no chart row of its own under another id, and on 28 Oct 2026 every clone
+held zero.
+
 ## Adding a table
 
 1. Confirm it is reference data — check whether its identity columns are

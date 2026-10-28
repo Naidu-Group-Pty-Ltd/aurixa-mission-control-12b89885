@@ -74,10 +74,11 @@
  *   sanctions_entries    → (list_code, external_id)
  *   pep_officeholders    → (source_code, external_id)
  *
- * `monitoring_rules`, `tipping_off_rules`, `sanctions_list_syncs` and
- * `pep_officeholder_syncs` genuinely have no natural key, so `id` is right for
- * them and stays. A column nulled on copy may never appear in a conflict key
- * either — NULLs are distinct in a unique index, so the target would never
+ * `monitoring_rules`, `tipping_off_rules`, `sanctions_list_syncs`,
+ * `pep_officeholder_syncs` and `chart_configurations` genuinely have no natural
+ * key, so `id` is right for them and stays. A column nulled on copy may never
+ * appear in a conflict key either — NULLs are distinct in a unique index, so the
+ * target would never
  * match — which is asserted, and is why `provider_configs.tenant_id` being
  * `keep` is load-bearing.
  *
@@ -279,6 +280,25 @@ export const REFERENCE_TABLES: readonly ReferenceTable[] = [
       },
     },
     reason: "Report section structures the generators read when composing a document.",
+  },
+  {
+    table: "chart_configurations",
+    pageKey: "id",
+    // The primary key is the table's only unique constraint: `template_name`
+    // is not unique in the schema, so there is no natural key to conflict on
+    // (see the header). Measured 28 Oct 2026, every clone held zero rows, so an
+    // id conflict has nothing to miss.
+    conflictKey: ["id"],
+    // 13 rows / ~650 B per row.
+    rowsPerPage: 200,
+    columns: {},
+    reason:
+      "The QuickChart template catalogue the Quantitative Reports generator draws from. It " +
+      "generates a chart only for a template_name that has a row here, so a clone with none — " +
+      "every clone, measured 28 Oct 2026 — draws no chart at all. Thirteen generic chart " +
+      "definitions seeded by 20250827173635 (run on the prime as its twin 20250827173834) and " +
+      "20250902103046, untouched on the prime (updated_at equals created_at on every row); no " +
+      "column names a person.",
   },
   // ── The AML/CTF programme, and the switches in front of it ───────────────
   //

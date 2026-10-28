@@ -36,6 +36,8 @@ const LIVE: Record<string, string[]> = {
   depreciation_comps: "id,created_at,updated_at,purchase_price,purchase_date_category,build_year,property_type,finish_standard,nearest_city,renovated,fully_furnished,dv_year1,dv_year2,dv_year3,dv_year4,dv_year5,dv_year6,dv_year7,dv_year8,dv_year9,dv_year10,pc_year1,pc_year2,pc_year3,pc_year4,pc_year5,pc_year6,pc_year7,pc_year8,pc_year9,pc_year10,notes,source_schedule_id,created_by".split(","),
   document_requirement_templates: "id,purchase_type,category,label,description,default_owner,is_required,sort_order,is_active,created_at,updated_at".split(","),
   report_structure_templates: "id,name,description,template_type,report_tier,report_category,file_path,file_name,file_size,mime_type,parsed_content,is_active,priority,metadata,created_by,created_at,updated_at".split(","),
+  // Read 28 Oct 2026 from dduzbchuswwbefdunfct.
+  chart_configurations: "id,chart_type,template_name,quickchart_config,default_styling,created_at,updated_at".split(","),
   suburb_directory: "id,suburb,state,postcode,created_at".split(","),
   template_library_entries: "id,family_id,slug,version,name,description,long_description,category,report_type,tier,variant,industry,tags,style,orientation,page_size,page_count,schema,config,custom_css,engine,preview_schema,thumbnail_path,preview_image_paths,supported_modules,required_bindings,brand_safe,production_ready,compatibility_version,status,access_tier,visibility,agency_id,source_template_id,created_by_user_id,created_at,updated_at,published_at,deprecated_at,usage_count,last_used_at,design_meta".split(","),
   feature_flags: "key,value,description,updated_by,created_at,updated_at".split(","),

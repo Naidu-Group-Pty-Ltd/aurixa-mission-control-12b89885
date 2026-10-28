@@ -55,6 +55,13 @@ describe("the allow-list", () => {
     expect(isReferenceTable("template_library_entries")).toBe(true);
   });
 
+  it("allows chart_configurations, the chart catalogue the Quantitative Reports draw from", () => {
+    // Generic chart definitions, no person-shaped column, untouched on the
+    // prime; every clone held none on 28 Oct 2026 and so drew no chart.
+    expect(isReferenceTable("chart_configurations")).toBe(true);
+    expect(referenceTable("chart_configurations")?.columns).toEqual({});
+  });
+
   it("excludes stamp_duty_rates_cache — a cache carries somebody else's fetch time", () => {
     expect(isReferenceTable("stamp_duty_rates_cache")).toBe(false);
   });
@@ -321,14 +328,16 @@ describe("a table with a natural unique key conflicts on it", () => {
   });
 
   it("leaves the surrogate id where the table has no natural key", () => {
-    // Not every table has one. These four are keyed on `id` correctly, and a
+    // Not every table has one. These five are keyed on `id` correctly, and a
     // sweep that "fixed" them would be inventing a uniqueness the schema does
-    // not declare.
+    // not declare. `chart_configurations.template_name` reads like a key and
+    // is not one: the table's only unique constraint is its primary key.
     for (const table of [
       "monitoring_rules",
       "tipping_off_rules",
       "sanctions_list_syncs",
       "pep_officeholder_syncs",
+      "chart_configurations",
     ]) {
       const entry = REFERENCE_TABLES.find((e) => e.table === table);
       expect(entry, `${table} is no longer a reference table`).toBeDefined();
