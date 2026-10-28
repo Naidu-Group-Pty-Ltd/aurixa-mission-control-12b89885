@@ -502,19 +502,20 @@ describe("the seed migrations are a projection of this constant, not a second co
   /**
    * Defaults whose seed migration is owed rather than written.
    *
-   * W3 of the delivery plan (27 Oct 2026) appended `vcr-prune.yml` under a
-   * rule that it carry no migration. Nothing live is waiting on one: the two
-   * mirrors that inherit the file from their parent have held this exact
-   * pattern since 26 Oct (written by hand), the third mirror is the parent
-   * that owns the file, and a mirror registered from now on is seeded from
-   * the constant (`seedSyncExclusions`).
+   * Empty since 28 Oct 2026. W3 of the delivery plan (27 Oct) appended
+   * `vcr-prune.yml` under a rule that it carry no migration: the two mirrors
+   * that inherit the file from their parent had held this exact pattern since
+   * 26 Oct (written by hand), and the third mirror is the parent that owns the
+   * file. D15 paid it. The CRM line became a mirror, had never held the file,
+   * and took the constant's row
+   * (`20261028190000_the_crm_line_becomes_a_mirror.sql`).
    *
    * Narrow by construction: an owed entry must be the constant's TAIL, so the
    * append-only rule still holds, and no migration may carry one — the day a
    * migration does, the test below fails until the allowance is deleted, so it
    * cannot outlive its reason.
    */
-  const SEED_OWED: string[] = [".github/workflows/vcr-prune.yml"];
+  const SEED_OWED: string[] = [];
   // Counted from the length, so emptying SEED_OWED leaves the whole constant.
   const owedFrom = DEFAULT_MIRROR_EXCLUSIONS.length - SEED_OWED.length;
   const seeded = () => DEFAULT_MIRROR_EXCLUSIONS.slice(0, owedFrom);
