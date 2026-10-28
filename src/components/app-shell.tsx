@@ -12,7 +12,6 @@ import { KeyboardShortcuts } from "@/components/keyboard-shortcuts";
 import { OnboardingWizard } from "@/components/onboarding-wizard";
 import { GitHubRateLimitMeter } from "@/components/github-rate-limit-meter";
 import { ThemeToggle } from "@/components/theme-toggle";
-import { WorkspaceReplyAlerts } from "@/components/workspace-reply-alerts";
 import {
   Sheet,
   SheetContent,
@@ -201,7 +200,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <div className="p-4 md:p-8">{children}</div>
         </main>
         <CommandPalette />
-        <WorkspaceReplyAlerts />
         <KeyboardShortcuts />
         <OnboardingWizard />
       </div>

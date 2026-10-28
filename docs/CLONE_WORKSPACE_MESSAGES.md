@@ -182,7 +182,7 @@ trading name, which its relay reads from its own settings — never its
 browser — and sends with the reply) and **the workspace** (the clone's name
 here, or "Prime workspace"), who wrote, an excerpt and the message.
 
-- **The pop-up.** `WorkspaceReplyAlerts`, mounted once in the app shell,
+- **The pop-up.** `WorkspaceReplyAlerts`, mounted once in the root layout (so it outlives a change of page),
   hears the same notification insert the bell already hears live and shows a
   card bottom right — business, workspace, author, excerpt, **Open
   conversation** — that stays until it is opened or dismissed (three at a

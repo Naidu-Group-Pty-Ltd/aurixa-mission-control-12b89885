@@ -33,6 +33,9 @@ const MAX_VISIBLE = 3;
  * because a customer's answer is not something to miss by looking away.
  *
  * Respects the operator's mutes, like the browser notification does.
+ *
+ * Mounted once, in the root layout: each route renders its own `AppShell`, so
+ * a pop-up kept there would vanish, unanswered, at the next change of page.
  */
 export function WorkspaceReplyAlerts() {
   const { session } = useAuth();
@@ -65,7 +68,8 @@ export function WorkspaceReplyAlerts() {
               queryKey: ["clone-announcement-replies", meta.announcement_id],
             });
           }
-          if (isMuted(getMutedSnapshot(), row.kind, row.severity)) return;
+          const snap = getMutedSnapshot();
+          if (snap.mute_toasts || isMuted(snap, row.kind, row.severity)) return;
           const alert = workspaceReplyAlertOf(row);
           if (!alert) return;
           setAlerts((prev) => [alert, ...prev.filter((a) => a.id !== alert.id)]);
