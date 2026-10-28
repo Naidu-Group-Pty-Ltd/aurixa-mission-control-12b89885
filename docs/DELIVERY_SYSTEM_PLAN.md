@@ -943,19 +943,39 @@ tables the prime keeps private.
   back.
 - **What was done.** With the owner's approval, the privileges were taken back
   by hand on the four clones between 05:02 and 05:06 UTC, to the prime's state:
-  - the browser roles get nothing on the private tables, except that signed-in
-    users keep `finance_agent_contacts`, which a settings page reads;
+  - the browser roles get nothing on the private tables, except that
+    `authenticated` keeps `finance_agent_contacts`, as on the prime;
   - nobody but the service role writes a reference cache.
 
   All 24 tables read back as intended, and the same count-only request now
   answers 401.
 
+- **What it broke.** `authenticated` was kept on `finance_agent_contacts` for
+  the Settings page's Finance Agent Contacts card, and that kept nothing for
+  it. This app's browser client is anon, because the staff session is an
+  HttpOnly cookie, so the card reads and writes as anon. It has been refused
+  on the clones since 05:02, as it has been on the prime since July (a
+  count-only read as anon answers 401 there). Prime #3400 moves the card onto
+  `finance-portal-admin`, the function the Finance Portal admin pages use.
+
 - **What else was checked.** No clone has a storage policy, so storage fails
   closed. The `net` schema is not served (`PGRST106`), `anon` cannot enter
   `aml`, and no role table has a write policy.
 - **What makes it permanent.** Prime #3399 (`20270204090000`) states the same
-  revokes, and the fleet lane applies it. It is a no-op on the prime and on the
-  four clones.
+  revokes. The prime recorded it at 06:48, and the 07:00 fleet pass applied it
+  to all four clones. It was a no-op on each of the five.
+- **Whether anyone used it.** Each clone's API logs were read for every
+  request made without a secret key, over the project's whole retention: from
+  19 Aug on npc-client-dashboard, 3 Sep on NPC Test and Preflight, and 19 Sep
+  on the CRM.
+  - No outside request read or wrote a private table, wrote a reference cache,
+    or used `/graphql/v1`.
+  - The only other private-table requests were our own count-only probes of
+    28 Oct, and the Finance Agent Contacts card on npc-client-dashboard: four
+    reads and one insert of `finance_agent_contacts`, on 6 and 16 Sep, from
+    one Sydney address with the app's own referer.
+  - Realtime channels are not in the logs, so a subscription to a private
+    table could not be checked.
 - **What it does not cover.** A clone built later is stamped past that version
   and would start with these tables open. The owner chose to extend the
   half-hourly privilege sweep (`/hooks/clone-privilege-reconcile`) to table
