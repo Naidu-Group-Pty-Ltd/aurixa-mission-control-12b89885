@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/select";
 import { BookOpen, Loader2, Pin, X, CheckCircle2, AlertCircle, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
+import { primeCommitLabel } from "@/lib/libraryCommit.pure";
 
 type LibraryEntry = {
   id: string;
@@ -28,6 +29,8 @@ type LibraryEntry = {
   description: string | null;
   approval_status: string;
   is_latest: boolean;
+  /** The prime commit the entry was approved at (D19). */
+  source_commit_sha: string | null;
 };
 
 type PinRow = {
@@ -187,6 +190,8 @@ export function CloneLibraryPinsCard({ cloneId }: { cloneId: string }) {
                   const versions = approvedBySlug.get(p.slug) ?? [];
                   const isStale = versions.length > 0 && versions[0].version > p.version;
                   const issue = issuesBySlug.get(p.slug);
+                  // Only an entry that was read can say it records no commit.
+                  const pinned = allEntries.find((e) => e.id === p.library_entry_id);
                   return (
                     <div
                       key={p.id}
@@ -199,6 +204,11 @@ export function CloneLibraryPinsCard({ cloneId }: { cloneId: string }) {
                           <Badge variant="outline" className="font-mono text-[10px]">
                             v{p.version}
                           </Badge>
+                          {pinned && (
+                            <code className="font-mono text-[10px] text-muted-foreground">
+                              {primeCommitLabel(pinned.source_commit_sha) ?? "no commit recorded"}
+                            </code>
+                          )}
                           {isStale && (
                             <Badge
                               variant="outline"
@@ -216,13 +226,15 @@ export function CloneLibraryPinsCard({ cloneId }: { cloneId: string }) {
                               onValueChange={(v) => handleSet(v)}
                               disabled={busy === p.slug}
                             >
-                              <SelectTrigger className="h-7 w-32 font-mono text-[10px]">
+                              <SelectTrigger className="h-7 w-44 font-mono text-[10px]">
                                 <SelectValue />
                               </SelectTrigger>
                               <SelectContent>
                                 {versions.map((v) => (
                                   <SelectItem key={v.id} value={v.id} className="font-mono text-xs">
-                                    v{v.version} {v.is_latest && "(latest)"}
+                                    v{v.version} ·{" "}
+                                    {primeCommitLabel(v.source_commit_sha) ?? "no commit"}{" "}
+                                    {v.is_latest && "(latest)"}
                                   </SelectItem>
                                 ))}
                               </SelectContent>
@@ -280,13 +292,15 @@ export function CloneLibraryPinsCard({ cloneId }: { cloneId: string }) {
                       <div className="flex items-center gap-1 shrink-0">
                         {versions.length > 1 ? (
                           <Select onValueChange={(v) => handleSet(v)} disabled={busy === slug}>
-                            <SelectTrigger className="h-7 w-32 font-mono text-[10px]">
+                            <SelectTrigger className="h-7 w-44 font-mono text-[10px]">
                               <SelectValue placeholder="pick version" />
                             </SelectTrigger>
                             <SelectContent>
                               {versions.map((v) => (
                                 <SelectItem key={v.id} value={v.id} className="font-mono text-xs">
-                                  v{v.version} {v.is_latest && "(latest)"}
+                                  v{v.version} ·{" "}
+                                  {primeCommitLabel(v.source_commit_sha) ?? "no commit"}{" "}
+                                  {v.is_latest && "(latest)"}
                                 </SelectItem>
                               ))}
                             </SelectContent>
@@ -318,8 +332,8 @@ export function CloneLibraryPinsCard({ cloneId }: { cloneId: string }) {
             {approvedBySlug.size === 0 && (
               <div className="border border-dashed p-4 text-center text-xs text-muted-foreground">
                 <CheckCircle2 className="mx-auto mb-1 h-4 w-4" />
-                No approved library entries available yet. Publish modules and have an admin approve
-                them first.
+                No approved library entries available yet. An admin publishes modules first, which
+                approves each entry at the prime commit its module was detected at.
               </div>
             )}
           </>

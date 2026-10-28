@@ -37,6 +37,7 @@ import {
   Database,
   KeyRound,
   TriangleAlert,
+  GitCommitHorizontal,
 } from "lucide-react";
 import { LibraryReingestDialog } from "@/components/library-reingest-dialog";
 import { PricingMapPanel } from "@/components/pricing-map-panel";
@@ -102,6 +103,7 @@ import { MetricCell } from "@/components/metric-bar";
 import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 import { formatDistanceToNow } from "@/lib/format";
+import { primeCommitLabel } from "@/lib/libraryCommit.pure";
 import type { DetectionStrategy } from "@/server/module-detection.server";
 
 export const Route = createFileRoute("/modules")({
@@ -361,6 +363,18 @@ function ModulesPage() {
                     <SelectItem value="archived">Archived</SelectItem>
                   </SelectContent>
                 </Select>
+                {/* Publishing the catalogue again (D19) is one publication of
+                    every module; ticking ~135 cards one by one is not a way to
+                    make it. */}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-8 font-mono text-[10px]"
+                  disabled={filteredModules.length === 0}
+                  onClick={() => setSelectedIds(new Set(filteredModules.map((m) => m.id)))}
+                >
+                  Select {filteredModules.length} shown
+                </Button>
               </div>
               {selectedIds.size > 0 && (
                 <div className="flex flex-wrap items-center gap-2">
@@ -852,6 +866,16 @@ function DetectionRunRow({
               <code className="font-mono text-[10px]">
                 {(r.tree_hash as string)?.slice(0, 8) ?? "—"}
               </code>
+            </div>
+            <div>
+              <span className="text-muted-foreground">Commit:</span>{" "}
+              {primeCommitLabel(r.commit_sha as string | null) ? (
+                <code className="font-mono text-[10px]">
+                  {primeCommitLabel(r.commit_sha as string | null)}
+                </code>
+              ) : (
+                <span className="text-warning">not recorded</span>
+              )}
             </div>
           </div>
         </div>
@@ -1634,10 +1658,17 @@ function ApproveAndDeployButton({
 
 // ─── Publish to Library Button ──────────────────────────────────────
 
+/**
+ * Publishing approves each entry, by an admin, at the prime commit its
+ * module's files were detected at (`libraryApproval.server.ts`, D19). The
+ * server refuses a module whose detection run recorded no commit and names it;
+ * the dialog keeps those names on screen rather than in a toast that fades.
+ */
 function PublishToLibraryButton({ moduleIds }: { moduleIds: string[] }) {
   const [open, setOpen] = useState(false);
   const [tags, setTags] = useState("");
   const [busy, setBusy] = useState(false);
+  const [refused, setRefused] = useState<Array<{ slug: string | null; reason: string }>>([]);
   const publishFn = useServerFn(publishToLibrary);
 
   const submit = async () => {
@@ -1648,20 +1679,38 @@ function PublishToLibraryButton({ moduleIds }: { moduleIds: string[] }) {
         .map((t) => t.trim())
         .filter(Boolean);
       const res = await publishFn({ data: { moduleIds, tags: tagList } });
-      if (res.ok) {
-        toast.success(`Published ${res.published} module(s) to library`);
-        setOpen(false);
-        setTags("");
-      } else {
+      setRefused(res.refused);
+      for (const w of res.warnings) toast.warning(w);
+      if (!res.ok) {
         toast.error(res.error ?? "Publish failed");
+        return;
       }
+      const commits = [
+        ...new Set(res.entries.map((e) => primeCommitLabel(e.source_commit_sha)).filter(Boolean)),
+      ];
+      const at = commits.length === 1 ? ` at ${commits[0]}` : "";
+      if (res.refused.length > 0) {
+        toast.warning(
+          `Published and approved ${res.published} module(s)${at}; ${res.refused.length} refused`,
+        );
+        return;
+      }
+      toast.success(`Published and approved ${res.published} module(s)${at}`);
+      setOpen(false);
+      setTags("");
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog
+      open={open}
+      onOpenChange={(v) => {
+        setOpen(v);
+        if (!v) setRefused([]);
+      }}
+    >
       <DialogTrigger asChild>
         <Button size="sm" variant="outline">
           <Upload className="mr-1 h-3 w-3" /> Publish ({moduleIds.length})
@@ -1671,7 +1720,9 @@ function PublishToLibraryButton({ moduleIds }: { moduleIds: string[] }) {
         <DialogHeader>
           <DialogTitle>Publish to library</DialogTitle>
           <DialogDescription>
-            Snapshot {moduleIds.length} module(s) as a versioned library entry.
+            Snapshot {moduleIds.length} module(s) as versioned library entries. Publishing approves
+            each entry at the prime commit its module&apos;s files were detected at, so it needs an
+            admin, and a module whose detection run recorded no commit is refused by name.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2">
@@ -1683,6 +1734,18 @@ function PublishToLibraryButton({ moduleIds }: { moduleIds: string[] }) {
             className="font-mono text-xs"
           />
         </div>
+        {refused.length > 0 && (
+          <div className="max-h-48 space-y-1 overflow-y-auto border border-warning/40 bg-warning/5 p-2 text-[11px]">
+            <div className="font-mono uppercase tracking-wider text-warning">
+              refused · {refused.length}
+            </div>
+            {refused.map((r, i) => (
+              <p key={`${r.slug ?? "unknown"}-${i}`} className="text-muted-foreground">
+                {r.reason}
+              </p>
+            ))}
+          </div>
+        )}
         <DialogFooter>
           <Button variant="ghost" onClick={() => setOpen(false)} disabled={busy}>
             Cancel
@@ -1694,7 +1757,7 @@ function PublishToLibraryButton({ moduleIds }: { moduleIds: string[] }) {
               </>
             ) : (
               <>
-                <Upload className="mr-1 h-3.5 w-3.5" /> Publish
+                <Upload className="mr-1 h-3.5 w-3.5" /> Publish and approve
               </>
             )}
           </Button>
@@ -1711,6 +1774,8 @@ function ModuleLibraryPanel() {
   const { user } = useAuth();
   const [isAdmin, setIsAdmin] = useState(false);
   const [entries, setEntries] = useState<Array<Record<string, unknown>>>([]);
+  // Approvers' display names by user id; an approver with none shows the id.
+  const [approvers, setApprovers] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<"all" | "pending" | "approved" | "rejected">("all");
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -1743,7 +1808,12 @@ function ModuleLibraryPanel() {
     setLoading(true);
     try {
       const res = await getLibraryFn({ data: { latestOnly: false } });
-      if (res.ok) setEntries(res.entries as Array<Record<string, unknown>>);
+      if (res.ok) {
+        setEntries(res.entries as Array<Record<string, unknown>>);
+        setApprovers(res.approvers);
+        if (res.approversError)
+          toast.warning(`Approvers' names unavailable: ${res.approversError}`);
+      } else toast.error(res.error ?? "Could not read the library");
     } finally {
       setLoading(false);
     }
@@ -1799,7 +1869,7 @@ function ModuleLibraryPanel() {
         ))}
         {!isAdmin && (
           <Badge variant="outline" className="font-mono text-[10px] text-muted-foreground">
-            <ShieldX className="mr-1 h-3 w-3" /> Admin role required to approve entries
+            <ShieldX className="mr-1 h-3 w-3" /> Admin role required to publish or approve entries
           </Badge>
         )}
       </div>
@@ -1898,7 +1968,7 @@ function ModuleLibraryPanel() {
         <EmptyState
           icon={<Library />}
           title={filter === "all" ? "Library is empty" : `No ${filter} entries`}
-          description="Approve modules in the Modules tab and use Publish to snapshot them as versioned library entries. An admin must approve each snapshot before it can be pinned to a clone."
+          description="Select modules in the Modules tab and use Publish to snapshot them as versioned library entries. Publishing approves each entry at the prime commit its module was detected at, so an admin publishes, and an approved entry can be pinned to a clone."
         />
       ) : (
         <div className="grid gap-3 md:grid-cols-2">
@@ -1906,6 +1976,11 @@ function ModuleLibraryPanel() {
             const tags = (e.tags as string[]) ?? [];
             const fileCount = (e.file_count as number) ?? 0;
             const status = (e.approval_status as string) ?? "pending";
+            // The commit the entry was approved at (D19): every entry published
+            // before commits were recorded has none, and cannot be approved.
+            const commit = primeCommitLabel(e.source_commit_sha as string | null);
+            const approvedBy = e.approved_by as string | null;
+            const approver = approvedBy ? (approvers[approvedBy] ?? approvedBy.slice(0, 8)) : null;
             const statusTone =
               status === "approved"
                 ? "border-success/40 text-success"
@@ -1993,6 +2068,28 @@ function ModuleLibraryPanel() {
                       </Badge>
                     ))}
                   </div>
+                  <div className="flex flex-wrap items-center gap-2 text-[10px] font-mono text-muted-foreground">
+                    {commit ? (
+                      <Badge variant="outline" className="font-mono text-[10px]">
+                        <GitCommitHorizontal className="mr-1 h-3 w-3" />
+                        {commit}
+                      </Badge>
+                    ) : (
+                      <Badge
+                        variant="outline"
+                        className="border-warning/40 font-mono text-[10px] text-warning"
+                      >
+                        <GitCommitHorizontal className="mr-1 h-3 w-3" />
+                        no commit recorded
+                      </Badge>
+                    )}
+                    {status === "approved" && approver ? (
+                      <span>
+                        approved by {approver}
+                        {e.approved_at ? ` · ${formatDistanceToNow(e.approved_at as string)}` : ""}
+                      </span>
+                    ) : null}
+                  </div>
                   {status === "rejected" && e.rejection_reason ? (
                     <p className="text-[11px] text-destructive italic">
                       Reason: {e.rejection_reason as string}
@@ -2063,13 +2160,19 @@ function ModuleLibraryPanel() {
                           <ShieldX className="mr-1 h-3 w-3" /> Reject
                         </Button>
                       )}
-                      <Button
-                        size="sm"
-                        onClick={() => decide(e.id as string, "approved")}
-                        className="bg-success hover:bg-success/90"
-                      >
-                        <ShieldCheck className="mr-1 h-3 w-3" /> Approve
-                      </Button>
+                      {commit ? (
+                        <Button
+                          size="sm"
+                          onClick={() => decide(e.id as string, "approved")}
+                          className="bg-success hover:bg-success/90"
+                        >
+                          <ShieldCheck className="mr-1 h-3 w-3" /> Approve
+                        </Button>
+                      ) : (
+                        <span className="self-center text-[10px] text-muted-foreground">
+                          Records no commit: publish its module again to approve it
+                        </span>
+                      )}
                     </div>
                   )}
                 </CardContent>

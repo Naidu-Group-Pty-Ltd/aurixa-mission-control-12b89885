@@ -26,6 +26,7 @@ import { getModuleLibrary } from "@/server/ai-detect-modules.functions";
 import { Loader2, Pin, AlertTriangle, CheckCircle2, Layers } from "lucide-react";
 import { toast } from "sonner";
 import type { Clone } from "@/lib/queries";
+import { primeCommitLabel } from "@/lib/libraryCommit.pure";
 
 type LibraryEntry = {
   id: string;
@@ -34,6 +35,8 @@ type LibraryEntry = {
   version: number;
   approval_status: string;
   is_latest: boolean;
+  /** The prime commit the entry was approved at (D19). */
+  source_commit_sha: string | null;
 };
 
 type Issue = {
@@ -309,7 +312,7 @@ export function BulkLibraryPinsDialog({
                           value={value}
                           onValueChange={(v) => setPick(slug, v === "_skip" ? "" : v)}
                         >
-                          <SelectTrigger className="h-7 w-32 font-mono text-[10px]">
+                          <SelectTrigger className="h-7 w-44 font-mono text-[10px]">
                             <SelectValue placeholder="skip" />
                           </SelectTrigger>
                           <SelectContent>
@@ -321,7 +324,8 @@ export function BulkLibraryPinsDialog({
                             </SelectItem>
                             {versions.map((v) => (
                               <SelectItem key={v.id} value={v.id} className="font-mono text-xs">
-                                v{v.version}
+                                v{v.version} ·{" "}
+                                {primeCommitLabel(v.source_commit_sha) ?? "no commit"}
                                 {v.is_latest && " (latest)"}
                               </SelectItem>
                             ))}

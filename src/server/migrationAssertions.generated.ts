@@ -1195,6 +1195,14 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     assertions: [{ kind: "cron", jobname: "airtable-waitlist-sync" }],
   },
   {
+    migration: "20261028120000_library_entries_record_their_commit.sql",
+    version: "20261028120000",
+    assertions: [
+      { kind: "column", table: "module_detection_runs", column: "commit_sha" },
+      { kind: "column", table: "module_library", column: "source_commit_sha" },
+    ],
+  },
+  {
     migration: "20261028130000_detection_runs_can_be_purged.sql",
     version: "20261028130000",
     assertions: [
@@ -1202,6 +1210,17 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
         kind: "none",
         reason:
           "changes what two foreign keys do when their run is deleted; no table, column, function, cron job or row is created, and pg_constraint is not observable through PostgREST",
+      },
+    ],
+  },
+  {
+    migration: "20261028140000_library_versions_are_unique.sql",
+    version: "20261028140000",
+    assertions: [
+      {
+        kind: "none",
+        reason:
+          "adds a UNIQUE constraint on two existing columns; no table, column, function, cron job or row is created, and pg_constraint is not observable through PostgREST",
       },
     ],
   },

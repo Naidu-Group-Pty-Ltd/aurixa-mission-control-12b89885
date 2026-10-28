@@ -1,17 +1,16 @@
 import { createServerFn } from "@tanstack/react-start";
-import type { SupabaseClient } from "@supabase/supabase-js";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
-import type { Database } from "@/integrations/supabase/types";
+import { decideLibraryEntry } from "./libraryApproval.server";
+import { describeDbError, judgePinnable } from "./libraryApproval.pure";
+import { validateClonePinsServer } from "./library-validation.server";
 
 // ─── Library approval workflow (admin-only) ────────────────────────
 
-async function isAdmin(supabase: SupabaseClient<Database>, userId: string) {
-  const { data } = await supabase.rpc("has_role", { _user_id: userId, _role: "admin" });
-  if (data === true) return true;
-  const { data: sa } = await supabase.rpc("has_role", { _user_id: userId, _role: "super_admin" });
-  return sa === true;
-}
-
+/**
+ * Approve, reject or reset a library entry. Admin only; approving needs the
+ * commit the entry records, because an entry is approved at a commit
+ * (`libraryApproval.server.ts`, `decideLibraryEntry`; D19).
+ */
 export const setLibraryApprovalStatus = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator(
@@ -22,61 +21,14 @@ export const setLibraryApprovalStatus = createServerFn({ method: "POST" })
       return data;
     },
   )
-  .handler(async ({ data, context }) => {
-    const admin = await isAdmin(context.supabase, context.userId);
-    if (!admin)
-      return { ok: false as const, error: "Admin role required to approve library entries" };
-
-    const update = {
-      approval_status: data.status,
-      approved_by: data.status === "approved" ? context.userId : null,
-      approved_at: data.status === "approved" ? new Date().toISOString() : null,
-      rejection_reason: data.status === "rejected" ? (data.reason ?? null) : null,
-    } satisfies Database["public"]["Tables"]["module_library"]["Update"];
-
-    const { data: updated, error } = await context.supabase
-      .from("module_library")
-      .update(update)
-      .eq("id", data.entryId)
-      .select("id, name, slug, version")
-      .maybeSingle();
-    if (error) return { ok: false as const, error: error.message };
-
-    await context.supabase.from("audit_log").insert({
-      action: `library.${data.status}`,
-      entity_type: "module_library",
-      entity_id: data.entryId,
-      actor_user_id: context.userId,
-      metadata: { status: data.status, reason: data.reason },
-    });
-
-    // Fan-out notification so the fleet sees approval decisions in the bell.
-    if (data.status === "approved" || data.status === "rejected") {
-      const label = updated ? `${updated.name} v${updated.version}` : "Library entry";
-      await context.supabase.from("notifications").insert({
-        kind: data.status === "approved" ? "library_entry_approved" : "library_entry_rejected",
-        severity: data.status === "approved" ? "success" : "warning",
-        title:
-          data.status === "approved"
-            ? `Library approved · ${label}`
-            : `Library rejected · ${label}`,
-        body:
-          data.status === "rejected" && data.reason
-            ? data.reason
-            : data.status === "approved"
-              ? "Now available for pinning to clones."
-              : "Entry was not approved for fleet use.",
-        url: "/modules",
-        metadata: {
-          library_entry_id: data.entryId,
-          slug: updated?.slug,
-          version: updated?.version,
-        },
-      });
-    }
-
-    return { ok: true as const };
-  });
+  .handler(async ({ data, context }) =>
+    decideLibraryEntry(context.supabase, {
+      userId: context.userId,
+      entryId: data.entryId,
+      status: data.status,
+      reason: data.reason,
+    }),
+  );
 
 // ─── Per-clone version pinning ─────────────────────────────────────
 
@@ -104,16 +56,23 @@ export const setCloneLibraryPin = createServerFn({ method: "POST" })
     return data;
   })
   .handler(async ({ data, context }) => {
-    // Resolve the library entry → must be approved
+    // Resolve the library entry → must be approved, at a commit it records
     const { data: entry, error: entryErr } = await context.supabase
       .from("module_library")
-      .select("id, slug, version, approval_status, name")
+      .select("id, slug, version, approval_status, name, source_commit_sha")
       .eq("id", data.libraryEntryId)
       .maybeSingle();
-    if (entryErr || !entry)
-      return { ok: false as const, error: entryErr?.message ?? "Library entry not found" };
-    if ((entry as { approval_status?: string }).approval_status !== "approved") {
-      return { ok: false as const, error: "Only approved library entries can be pinned" };
+    if (entryErr) return { ok: false as const, error: describeDbError(entryErr) };
+    if (!entry) return { ok: false as const, error: "Library entry not found" };
+    const pinnable = judgePinnable(entry);
+    if (!pinnable.ok) {
+      return {
+        ok: false as const,
+        error:
+          pinnable.reason === "not approved"
+            ? "Only approved library entries can be pinned"
+            : `${entry.name} v${entry.version} ${pinnable.reason}, so it cannot be pinned`,
+      };
     }
 
     // Upsert per (clone_id, slug)
@@ -169,31 +128,11 @@ export const bulkApplyClonePins = createServerFn({ method: "POST" })
     const entryIds = Array.from(new Set(data.pins.map((p) => p.libraryEntryId)));
     const { data: entries, error: entryErr } = await context.supabase
       .from("module_library")
-      .select("id, slug, version, approval_status, name, file_paths")
+      .select("id, slug, version, approval_status, name, file_paths, source_commit_sha")
       .in("id", entryIds);
-    if (entryErr) return { ok: false as const, error: entryErr.message, results: [] };
+    if (entryErr) return { ok: false as const, error: describeDbError(entryErr), results: [] };
 
-    const entryMap = new Map<
-      string,
-      {
-        id: string;
-        slug: string;
-        version: number;
-        approval_status: string;
-        name: string;
-        file_paths: string[] | null;
-      }
-    >();
-    for (const e of (entries ?? []) as Array<{
-      id: string;
-      slug: string;
-      version: number;
-      approval_status: string;
-      name: string;
-      file_paths: string[] | null;
-    }>) {
-      entryMap.set(e.id, e);
-    }
+    const entryMap = new Map((entries ?? []).map((e) => [e.id, e]));
 
     type PerClone = {
       cloneId: string;
@@ -225,8 +164,9 @@ export const bulkApplyClonePins = createServerFn({ method: "POST" })
           perClone.skipped.push({ slug: p.slug, reason: `slug mismatch (entry is ${e.slug})` });
           continue;
         }
-        if (e.approval_status !== "approved") {
-          perClone.skipped.push({ slug: p.slug, reason: "not approved" });
+        const pinnable = judgePinnable(e);
+        if (!pinnable.ok) {
+          perClone.skipped.push({ slug: p.slug, reason: pinnable.reason });
           continue;
         }
         rows.push({
@@ -265,8 +205,11 @@ export const bulkApplyClonePins = createServerFn({ method: "POST" })
     return { ok: true as const, results };
   });
 
-// Validate that pinned library entries still exist, are approved, and have file_paths.
-// Used by the cascade engine to gate execution and by the UI to surface stale pins.
+// Validate that pinned library entries still exist, are approved at a commit
+// they record, and have file_paths, and report the commit each pin rests on.
+// The cascade engine's pre-flight reads the same answer from the same module
+// (`library-validation.server.ts`), so the page and the pass cannot disagree
+// about which pin holds a delivery back.
 export const validateClonePins = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((data: { cloneIds: string[] }) => {
@@ -274,94 +217,7 @@ export const validateClonePins = createServerFn({ method: "POST" })
       throw new Error("cloneIds required");
     return data;
   })
-  .handler(async ({ data, context }) => {
-    const { data: pins, error } = await context.supabase
-      .from("clone_library_pins")
-      .select("id, clone_id, slug, version, library_entry_id")
-      .in("clone_id", data.cloneIds);
-    if (error) return { ok: false as const, error: error.message, issues: [] };
-
-    const pinRows = (pins ?? []) as Array<{
-      id: string;
-      clone_id: string;
-      slug: string;
-      version: number;
-      library_entry_id: string;
-    }>;
-    if (pinRows.length === 0) {
-      return { ok: true as const, issues: [], checked: 0 };
-    }
-
-    const entryIds = Array.from(new Set(pinRows.map((p) => p.library_entry_id)));
-    const { data: entries } = await context.supabase
-      .from("module_library")
-      .select("id, slug, version, approval_status, file_paths")
-      .in("id", entryIds);
-
-    const entryMap = new Map<
-      string,
-      {
-        id: string;
-        slug: string;
-        version: number;
-        approval_status: string;
-        file_paths: string[] | null;
-      }
-    >();
-    for (const e of (entries ?? []) as Array<{
-      id: string;
-      slug: string;
-      version: number;
-      approval_status: string;
-      file_paths: string[] | null;
-    }>) {
-      entryMap.set(e.id, e);
-    }
-
-    type Issue = {
-      cloneId: string;
-      slug: string;
-      version: number;
-      severity: "error" | "warning";
-      reason: string;
-    };
-    const issues: Issue[] = [];
-
-    for (const p of pinRows) {
-      const e = entryMap.get(p.library_entry_id);
-      if (!e) {
-        issues.push({
-          cloneId: p.clone_id,
-          slug: p.slug,
-          version: p.version,
-          severity: "error",
-          reason: "Library entry was deleted",
-        });
-        continue;
-      }
-      if (e.approval_status !== "approved") {
-        issues.push({
-          cloneId: p.clone_id,
-          slug: p.slug,
-          version: p.version,
-          severity: "error",
-          reason: `Entry is now ${e.approval_status}`,
-        });
-      }
-      const files = e.file_paths ?? [];
-      if (files.length === 0) {
-        issues.push({
-          cloneId: p.clone_id,
-          slug: p.slug,
-          version: p.version,
-          severity: "error",
-          reason: "Pinned entry has no file paths",
-        });
-      }
-    }
-
-    return { ok: true as const, issues, checked: pinRows.length };
-  });
+  .handler(async ({ data, context }) => validateClonePinsServer(context.supabase, data.cloneIds));
 
 export const removeCloneLibraryPin = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])

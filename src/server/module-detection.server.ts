@@ -34,6 +34,7 @@ import {
   type ModuleBackendManifest,
 } from "./backend-detection.server";
 import { buildFeatureModules, type PartitionStats } from "./feature-detection.server";
+import { describeDbError } from "./libraryApproval.pure";
 import crypto from "crypto";
 
 type Supabase = SupabaseClient<Database>;
@@ -127,15 +128,30 @@ export type DetectionProgress = {
 
 // ─── GitHub Tree Fetch ──────────────────────────────────────────────
 
+/**
+ * The branch's tree, and the commit it is the tree of.
+ *
+ * `commitSha` is what the run records (`module_detection_runs.commit_sha`) and
+ * what every later read in the run is made at, so the run read one commit and
+ * says which: a library entry is approved at the commit its module was
+ * detected at (D19). `treeHash` is a hash of the file list, which two commits
+ * can share.
+ */
 async function fetchRepoTree(
   octokit: Octokit,
   ref: RepoRef,
-): Promise<{ files: string[]; treeHash: string; shaByPath: Map<string, string> }> {
+): Promise<{
+  files: string[];
+  treeHash: string;
+  shaByPath: Map<string, string>;
+  commitSha: string;
+}> {
   const { data: branch } = await octokit.repos.getBranch({
     owner: ref.owner,
     repo: ref.repo,
     branch: ref.branch,
   });
+  const commitSha = branch.commit.sha;
   const treeSha = branch.commit.commit.tree.sha;
   const { data: tree } = await octokit.git.getTree({
     owner: ref.owner,
@@ -169,7 +185,7 @@ async function fetchRepoTree(
     .digest("hex")
     .slice(0, 16);
 
-  return { files, treeHash, shaByPath };
+  return { files, treeHash, shaByPath, commitSha };
 }
 
 /** Dot-paths that are never part of the deployable surface. */
@@ -626,12 +642,30 @@ export async function runDetection(args: {
     // ── Phase 1: Fetch real tree ──
     progress("tree_fetch", "Fetching repository tree from GitHub…", 5);
     const octokit = getAppOctokit();
-    const ref: RepoRef = {
+    const branchRef: RepoRef = {
       owner: prime.github_owner,
       repo: prime.github_repo,
       branch: prime.default_branch,
     };
-    const { files, treeHash, shaByPath } = await fetchRepoTree(octokit, ref);
+    const { files, treeHash, shaByPath, commitSha } = await fetchRepoTree(octokit, branchRef);
+
+    // The commit this run read, recorded before anything is changed. A library
+    // entry is approved at the commit its module was detected at, so a run
+    // that could not say which commit it read must not shape a module: it
+    // fails here, with the reason, before it has written one.
+    const { error: commitErr } = await supabase
+      .from("module_detection_runs")
+      .update({ commit_sha: commitSha })
+      .eq("id", runId);
+    if (commitErr) {
+      throw new Error(
+        `Could not record the commit this run read (${commitSha}): ${describeDbError(commitErr)}`,
+      );
+    }
+
+    // Every file read from here on is read at that commit, not at the branch,
+    // which can move while a run is still reading it.
+    const ref: RepoRef = { ...branchRef, branch: commitSha };
 
     // Delta check
     if (config.deltaMode && previousTreeHash === treeHash) {
@@ -1222,6 +1256,11 @@ export async function runDetection(args: {
         layer: m.layer,
         backend_manifest: JSON.parse(
           JSON.stringify({
+            // The run that found this backend. An approved module has these
+            // fields refreshed while it keeps the run that found its files,
+            // so publication compares the two: an entry is approved at ONE
+            // commit, and two runs read two (libraryApproval.pure.ts).
+            detection_run_id: runId,
             links: m.backend.links.slice(0, 200),
             counts: {
               edge_functions: m.backend.edgeFunctions.length,
