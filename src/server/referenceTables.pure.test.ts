@@ -488,23 +488,29 @@ describe("pickReferenceSyncCandidate — which clone a scheduled pass takes", ()
   });
 
   it("among clones that owe, takes the one whose progress was recorded longest ago", () => {
-    // 28 Oct 2026 after the 13:13 pass: NPC Test held the chart catalogue, and
-    // the other three owed it. Preflight was last visited on 26 Oct.
+    // Measured 28 Oct 2026 at 13:48 UTC: NPC Test held the chart catalogue and
+    // the other three owed it. A pass over a finished clone records nothing, so
+    // their progress was last recorded in September.
     const owing = ALL.filter((t) => t !== "chart_configurations");
     const progress = [
-      ...rows(DASHBOARD, "2026-10-28T12:58:40Z", owing),
-      ...rows(CRM, "2026-10-28T11:13:02Z", owing),
+      ...rows(DASHBOARD, "2026-09-19T14:13:06Z", owing),
+      ...rows(CRM, "2026-09-19T15:14:29Z", owing),
       ...rows(NPC_TEST, "2026-10-28T13:13:04Z"),
-      ...rows(PREFLIGHT, "2026-10-26T11:28:01Z", owing),
+      ...rows(PREFLIGHT, "2026-09-09T14:44:16Z", owing),
     ];
     const fleet = [clone(DASHBOARD), clone(CRM), clone(NPC_TEST), clone(PREFLIGHT)];
     expect(pickReferenceSyncCandidate(fleet, progress)?.clone_id).toBe(PREFLIGHT);
-    // Once Preflight's pass records its copy, the CRM is next, then the dashboard.
+    // Once Preflight's pass records its copy, the dashboard is next, then the CRM.
     const afterPreflight = [
       ...progress.filter((r) => r.clone_id !== PREFLIGHT),
-      ...rows(PREFLIGHT, "2026-10-28T13:28:00Z"),
+      ...rows(PREFLIGHT, "2026-10-28T14:13:00Z"),
     ];
-    expect(pickReferenceSyncCandidate(fleet, afterPreflight)?.clone_id).toBe(CRM);
+    expect(pickReferenceSyncCandidate(fleet, afterPreflight)?.clone_id).toBe(DASHBOARD);
+    const afterDashboard = [
+      ...afterPreflight.filter((r) => r.clone_id !== DASHBOARD),
+      ...rows(DASHBOARD, "2026-10-28T14:28:00Z"),
+    ];
+    expect(pickReferenceSyncCandidate(fleet, afterDashboard)?.clone_id).toBe(CRM);
   });
 
   it("counts a clone with no progress at all as owing every table, and takes it first", () => {

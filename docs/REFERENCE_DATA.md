@@ -116,14 +116,17 @@ table newly added to the allow-list on every clone at once.
 
 **A pass takes one clone, and it chooses which** (`pickReferenceSyncCandidate`).
 It takes the clone that still owes a table, and among those the one whose
-progress was recorded longest ago. With nothing owed anywhere it takes the least
-recently touched. An operator's button names its clone and is taken as named.
+progress was recorded longest ago. A pass over a finished clone records nothing,
+so that is when a table last moved, not when the clone was last visited. With
+nothing owed anywhere it takes the least recently touched. An operator's button
+names its clone and is taken as named.
+
 It used to take `limit(1)` of the ready clones in no order, which Postgres
 answers with whichever row it reaches first. In the 24 hours to 13:14 UTC on
 28 Oct that was npc-client-dashboard 72 times, the CRM 21, NPC Test 3 and
 Preflight never: its last pass had been on 26 Oct. So `chart_configurations`
-reached NPC Test at 13:13 and waited behind a clone that had nothing to copy
-for the other three.
+reached NPC Test at 13:13, and the passes at 13:28 and 13:43 took NPC Test
+again, with nothing left to copy, while the other three waited.
 
 The claim is `clone_backends.reference_sync_started_at` and **not**
 `worker_started_at`, which the fleet migration sync owns. Sharing one column

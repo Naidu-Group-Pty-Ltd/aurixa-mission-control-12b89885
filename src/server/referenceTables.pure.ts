@@ -779,8 +779,9 @@ export type ReferenceSyncProgress = {
  * CRM 21 times, NPC Test 3 times and Preflight never: its last pass was on
  * 26 Oct, at 11:28. A clone whose tables are all finished gets nothing from a
  * pass, because a `complete` table is skipped. So when `chart_configurations`
- * joined the allow-list, NPC Test had it at 13:13 and the other three waited
- * behind a clone with nothing to copy.
+ * joined the allow-list, NPC Test had it at 13:13, and the passes at 13:28 and
+ * 13:43 took NPC Test again, with nothing left to copy, while the other three
+ * waited.
  *
  * ## The order
  *
@@ -790,7 +791,8 @@ export type ReferenceSyncProgress = {
  *    (`tablesToReopen`) is covered, because the child is unfinished.
  * 2. Among those, the one whose progress was recorded longest ago, so a copy
  *    that outlives one pass takes turns with the others rather than holding
- *    the lane.
+ *    the lane. A pass over a finished clone records nothing, so this is when a
+ *    table last moved, not when the clone was last visited.
  * 3. With nothing owed anywhere, the least recently touched, so a pass still
  *    runs as it did. It changes nothing there.
  *
