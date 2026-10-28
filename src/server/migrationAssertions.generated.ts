@@ -1213,4 +1213,15 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       },
     ],
   },
+  {
+    migration: "20261028140000_library_versions_are_unique.sql",
+    version: "20261028140000",
+    assertions: [
+      {
+        kind: "none",
+        reason:
+          "adds a UNIQUE constraint on two existing columns; no table, column, function, cron job or row is created, and pg_constraint is not observable through PostgREST",
+      },
+    ],
+  },
 ];

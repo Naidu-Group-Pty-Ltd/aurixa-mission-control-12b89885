@@ -52,6 +52,8 @@ function moduleRow(
     resolved_files: [`src/routes/${slug}.tsx`],
     file_globs: [`src/components/${slug}/**`],
     backend_file_globs: [`supabase/functions/${slug}-api/**`],
+    // Detection writes the run that found the backend into its manifest.
+    backend_manifest: { detection_run_id: runId, links: [], counts: {} },
     detection_run_id: runId,
     layer: "fullstack",
     cohesion_score: 0.8,
@@ -91,6 +93,42 @@ beforeEach(() => seed());
 
 const library = () => db.tables.module_library;
 const libraryWrites = () => db.writes.filter((w) => w.table === "module_library");
+
+/** An entry already in the library, as another publication left it. */
+function libraryEntry(id: string, slug: string, version: number, isLatest: boolean): Row {
+  return {
+    id,
+    slug,
+    name: slug,
+    entry_file: `src/routes/${slug}.tsx`,
+    version,
+    is_latest: isLatest,
+    approval_status: "approved",
+    source_commit_sha: COMMIT,
+  };
+}
+
+/**
+ * Runs `beforeWrite` once, just before this publication's first `op` on
+ * `module_library` is sent: what another publication did in that gap.
+ */
+function interceptLibrary(op: "insert" | "update", beforeWrite: (values: Row) => void) {
+  const from = db.from;
+  let done = false;
+  db.from = (table: string) => {
+    const builder = from(table);
+    if (table !== "module_library") return builder;
+    const write = builder[op];
+    builder[op] = (values: Row) => {
+      if (!done) {
+        done = true;
+        beforeWrite(values);
+      }
+      return write(values);
+    };
+    return builder;
+  };
+}
 
 describe("publishing is approving, by an admin", () => {
   it("refuses an operator who is not an admin, and writes nothing", async () => {
@@ -234,6 +272,75 @@ describe("publishing is approving, by an admin", () => {
       source_commit_sha: null,
     });
     expect(libraryWrites().map((w) => w.op)).toEqual(["insert", "update"]);
+  });
+
+  it("refuses, by name, an approved module whose backend a later run found, and writes nothing", async () => {
+    // Detected at NEW_RUN and approved; a later run refreshed only its backend,
+    // as detection does for an approved module, and left its run as it was.
+    const LATER_RUN = "7c5e2b10-0000-4000-8000-000000000003";
+    seed({
+      modules: [
+        {
+          ...moduleRow(AML, "aml", "AML Command Centre", NEW_RUN, "approved"),
+          backend_manifest: { detection_run_id: LATER_RUN, links: [], counts: {} },
+        },
+      ],
+    });
+    const answer = await publishModulesToLibrary(client(), { userId: ADMIN, moduleIds: [AML] });
+    expect(answer.ok).toBe(false);
+    expect(answer.refused).toEqual([
+      {
+        moduleId: AML,
+        slug: "aml",
+        reason: expect.stringContaining(
+          "AML Command Centre (aml): its files were detected by run 0a3c9817 and its backend by run 7c5e2b10, so no one commit holds what it would publish",
+        ),
+      },
+    ]);
+    expect(answer.refused[0].reason).toMatch(/only while it is proposed or rejected/);
+    expect(libraryWrites()).toEqual([]);
+  });
+
+  it("refuses a publication whose version another wrote first, and clears nothing", async () => {
+    seed({ module_library: [libraryEntry("their-v1", "aml", 1, true)] });
+    // The other publication read v1 as well, and its v2 landed between this
+    // one's read of the versions and its insert.
+    interceptLibrary("insert", (values) => {
+      db.tables.module_library.push(libraryEntry("their-v2", "aml", Number(values.version), true));
+    });
+    const answer = await publishModulesToLibrary(client(), { userId: ADMIN, moduleIds: [AML] });
+    expect(answer.ok).toBe(false);
+    expect(answer.refused).toEqual([
+      {
+        moduleId: AML,
+        slug: "aml",
+        reason:
+          "AML Command Centre (aml): another publication wrote v2 first, so this one wrote " +
+          "nothing; publish it again to number it after that one",
+      },
+    ]);
+    expect(libraryWrites()).toEqual([]);
+    expect(library().map((e) => [e.id, e.version, e.is_latest])).toEqual([
+      ["their-v1", 1, true],
+      ["their-v2", 2, true],
+    ]);
+  });
+
+  it("never clears a version another publication wrote after its own", async () => {
+    seed({ module_library: [libraryEntry("first", "aml", 1, true)] });
+    // This publication writes v2. Before its supersede runs, another one reads
+    // v2, writes v3 and supersedes everything below it, v2 included.
+    interceptLibrary("update", () => {
+      for (const e of db.tables.module_library) e.is_latest = false;
+      db.tables.module_library.push(libraryEntry("their-v3", "aml", 3, true));
+    });
+    const answer = await publishModulesToLibrary(client(), { userId: ADMIN, moduleIds: [AML] });
+    expect(answer).toMatchObject({ ok: true, published: 1, warnings: [] });
+    expect(
+      library()
+        .filter((e) => e.is_latest)
+        .map((e) => [e.id, e.version]),
+    ).toEqual([["their-v3", 3]]);
   });
 
   it("refuses a module whose versions could not be read, rather than numbering it v1", async () => {

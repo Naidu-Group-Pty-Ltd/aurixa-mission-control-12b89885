@@ -19,11 +19,12 @@
 //    `schema: "before"` is the database before 20261028120000;
 //  - an insert takes production's defaults and meets its constraints, with
 //    Postgres's own codes and wording: NOT NULL, `module_library`'s CHECK on
-//    `approval_status`, and the `notification_kind` enum;
+//    `approval_status`, its UNIQUE (slug, version) from 20261028140000, and
+//    the `notification_kind` enum;
 //  - `has_role` answers as production's has since 20260820: the user's
 //    highest role level against the role's (`ROLE_LEVELS`), and an unknown
 //    role is the enum's 22P02;
-//  - a filter treats NULL as SQL does: `eq`, `neq` and `in` never match it;
+//  - a filter treats NULL as SQL does: `eq`, `neq`, `in` and `lt` never match it;
 //  - `maybeSingle` answers null for no row and PGRST116 for several, and
 //    `single` answers PGRST116 for anything but one;
 //  - `count: "exact"` counts the filtered rows before `range` or `limit`.
@@ -279,8 +280,11 @@ const notNull = (table: Table, column: string): PgError => ({
   hint: null,
 });
 
-/** The constraints production holds an inserted or updated row to. */
-function violation(table: Table, row: Row): PgError | null {
+/**
+ * The constraints production holds an inserted or updated row to. `others` is
+ * every other row the table would hold once the write lands, for the unique key.
+ */
+function violation(table: Table, row: Row, others: Row[]): PgError | null {
   for (const column of REQUIRED[table] ?? []) {
     if (row[column] === null || row[column] === undefined) return notNull(table, column);
   }
@@ -326,6 +330,19 @@ function violation(table: Table, row: Row): PgError | null {
       details: null,
       hint: null,
     };
+  }
+  // A unique key holds NULLs distinct, as Postgres does by default.
+  const present = (v: unknown) => v !== null && v !== undefined;
+  if (table === "module_library" && present(row.slug) && present(row.version)) {
+    const taken = others.find((o) => o.slug === row.slug && o.version === row.version);
+    if (taken) {
+      return {
+        message: 'duplicate key value violates unique constraint "module_library_slug_version_key"',
+        code: "23505",
+        details: `Key (slug, version)=(${String(row.slug)}, ${String(row.version)}) already exists.`,
+        hint: null,
+      };
+    }
   }
   if (
     table === "notifications" &&
@@ -528,15 +545,20 @@ function builder(db: LibraryFakeDb, table: Table, known: Set<string>): Builder {
           ...structuredClone(v),
         }));
         for (const row of created) {
-          const broken = violation(table, row);
+          const others = [...rows(), ...created.filter((c) => c !== row)];
+          const broken = violation(table, row, others);
           if (broken) return { data: null, error: broken };
         }
         rows().push(...created);
         result = created;
       } else {
         result = rows().filter((r) => filters.every((f) => f(r)));
+        const after = (r: Row): Row => (result.includes(r) ? { ...r, ...(values as Row) } : r);
         for (const row of result) {
-          const broken = violation(table, { ...row, ...(values as Row) });
+          const others = rows()
+            .filter((r) => r !== row)
+            .map(after);
+          const broken = violation(table, after(row), others);
           if (broken) return { data: null, error: broken };
         }
         for (const row of result) Object.assign(row, structuredClone(values as Row));
@@ -606,6 +628,8 @@ function builder(db: LibraryFakeDb, table: Table, known: Set<string>): Builder {
     neq: (c: string, v: unknown) => filterOn(c, (x) => x !== null && x !== undefined && x !== v),
     in: (c: string, list: unknown[]) =>
       filterOn(c, (x) => x !== null && x !== undefined && list.includes(x)),
+    lt: (c: string, v: number | string) =>
+      filterOn(c, (x) => x !== null && x !== undefined && (x as number | string) < v),
     is: (c: string, v: unknown) => {
       if (v !== null) throw new Error("library fake: is() is modelled for null only");
       return filterOn(c, (x) => x === null || x === undefined);

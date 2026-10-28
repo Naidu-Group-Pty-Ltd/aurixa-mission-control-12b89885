@@ -95,7 +95,7 @@ export async function probeCommitColumns(supabase: Db): Promise<Check> {
  * the row as an error.
  */
 const MODULE_COLUMNS =
-  "id, name, slug, status, description, routes, route_entry_file, resolved_files, file_globs, backend_file_globs, detection_run_id, layer, cohesion_score, coupling_score, ai_confidence, ai_reasoning, shared_by_modules, edge_functions, database_tables, required_secrets, required_migrations, storage_buckets, cron_jobs";
+  "id, name, slug, status, description, routes, route_entry_file, resolved_files, file_globs, backend_file_globs, backend_manifest, detection_run_id, layer, cohesion_score, coupling_score, ai_confidence, ai_reasoning, shared_by_modules, edge_functions, database_tables, required_secrets, required_migrations, storage_buckets, cron_jobs";
 
 /** Ids per `in` read of `modules`: 100 uuids is about 3.7 KB of query string. */
 const MODULE_READ_CHUNK = 100;
@@ -254,12 +254,18 @@ export async function publishModulesToLibrary(
       .select("id, name, slug, version, source_commit_sha")
       .single();
     if (insertError || !written) {
+      // module_library_slug_version_key (20261028140000): a publication of the
+      // same module that read the same last version wrote this number first.
+      const raced = insertError?.code === "23505";
       refused.push({
         moduleId: m.id,
         slug: m.slug,
-        reason: `${m.name} (${m.slug}): the entry was not written: ${
-          insertError ? describeDbError(insertError) : "no row came back"
-        }`,
+        reason: raced
+          ? `${m.name} (${m.slug}): another publication wrote v${version} first, so this one ` +
+            `wrote nothing; publish it again to number it after that one`
+          : `${m.name} (${m.slug}): the entry was not written: ${
+              insertError ? describeDbError(insertError) : "no row came back"
+            }`,
       });
       continue;
     }
@@ -267,12 +273,15 @@ export async function publishModulesToLibrary(
 
     // Superseded only once the new entry exists. Flipping first, as this used
     // to, left a slug with no latest entry whenever the insert then failed.
+    // Only versions below this one: a publication that numbered itself after
+    // this one, and landed while this one was being written, stays latest.
+    // Clearing every other latest row let two publications clear each other.
     const { error: supersedeError } = await supabase
       .from("module_library")
       .update({ is_latest: false })
       .eq("slug", m.slug)
       .eq("is_latest", true)
-      .neq("id", written.id);
+      .lt("version", version);
     if (supersedeError) {
       warnings.push(
         `${m.slug} v${version} was published, but its earlier versions still read latest: ${supersedeError.message}`,

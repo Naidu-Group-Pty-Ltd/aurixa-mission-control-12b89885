@@ -1256,6 +1256,11 @@ export async function runDetection(args: {
         layer: m.layer,
         backend_manifest: JSON.parse(
           JSON.stringify({
+            // The run that found this backend. An approved module has these
+            // fields refreshed while it keeps the run that found its files,
+            // so publication compares the two: an entry is approved at ONE
+            // commit, and two runs read two (libraryApproval.pure.ts).
+            detection_run_id: runId,
             links: m.backend.links.slice(0, 200),
             counts: {
               edge_functions: m.backend.edgeFunctions.length,

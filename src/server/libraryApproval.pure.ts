@@ -26,6 +26,18 @@
  * until a publication supersedes them. A pin on an approved entry without one
  * is refused at the pass's pin pre-flight, as a pin on an unapproved one is.
  *
+ * ## One run holds everything an entry publishes
+ *
+ * An entry carries the module's frontend files and its backend globs, and
+ * records one commit. Detection refreshes an approved or archived module's
+ * backend fields on every run but keeps the run that found its files, so a
+ * module detected at commit A and detected again at B holds A's files beside
+ * B's functions and migrations, and its run still says A. Published, it would
+ * say it was approved at A while carrying what A never held (Codex, #388).
+ * Each backend manifest names the run that found it, and a module whose
+ * backend another run found, or whose manifest names no run, is refused, by
+ * name.
+ *
  * ## A failed read is never "no commit"
  *
  * The verdicts here are reached only from rows that were read. A read that
@@ -79,6 +91,7 @@ export type PublishableModule = Pick<
   | "resolved_files"
   | "file_globs"
   | "backend_file_globs"
+  | "backend_manifest"
   | "detection_run_id"
   | "layer"
   | "cohesion_score"
@@ -124,6 +137,17 @@ const KEEPS_ITS_FILES =
   "this one only while it is proposed or rejected";
 
 /**
+ * The run a module's backend manifest says found its backend, or null where
+ * it names none: every manifest written before runs were recorded in it.
+ */
+export function backendRunOf(manifest: Json | null | undefined): string | null {
+  if (manifest === null || manifest === undefined) return null;
+  if (typeof manifest !== "object" || Array.isArray(manifest)) return null;
+  const run = manifest.detection_run_id;
+  return typeof run === "string" && run !== "" ? run : null;
+}
+
+/**
  * Whether `module` may be published, and at which commit.
  *
  * `runs` holds the detection runs that were READ, keyed by id. A run the
@@ -131,10 +155,14 @@ const KEEPS_ITS_FILES =
  * the caller does not reach this with a failed read.
  */
 export function judgePublication(
-  module: Pick<PublishableModule, "name" | "slug" | "status" | "detection_run_id">,
+  module: Pick<
+    PublishableModule,
+    "name" | "slug" | "status" | "detection_run_id" | "backend_manifest"
+  >,
   runs: ReadonlyMap<string, DetectionRunCommit>,
 ): PublicationVerdict {
   const who = `${module.name} (${module.slug})`;
+  const keeps = module.status === "approved" || module.status === "archived";
   const runId = module.detection_run_id;
   if (!runId) {
     return {
@@ -148,7 +176,6 @@ export function judgePublication(
   }
   if (run.commit_sha === null || run.commit_sha === "") {
     const when = day(run.created_at);
-    const keeps = module.status === "approved" || module.status === "archived";
     return {
       ok: false,
       reason:
@@ -161,6 +188,25 @@ export function judgePublication(
     return {
       ok: false,
       reason: `${who}: its detection run ${runId.slice(0, 8)} recorded "${run.commit_sha}", which is not a commit`,
+    };
+  }
+  const backendRun = backendRunOf(module.backend_manifest);
+  if (backendRun === null) {
+    return {
+      ok: false,
+      reason:
+        `${who}: its backend manifest names no detection run, so nothing says its functions ` +
+        `and migrations were found at the commit its files were` +
+        (keeps ? KEEPS_ITS_FILES : ""),
+    };
+  }
+  if (backendRun !== runId) {
+    return {
+      ok: false,
+      reason:
+        `${who}: its files were detected by run ${runId.slice(0, 8)} and its backend by run ` +
+        `${backendRun.slice(0, 8)}, so no one commit holds what it would publish` +
+        (keeps ? KEEPS_ITS_FILES : ""),
     };
   }
   return { ok: true, runId, commitSha: run.commit_sha };

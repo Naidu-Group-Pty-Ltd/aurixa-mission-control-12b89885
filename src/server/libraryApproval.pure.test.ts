@@ -8,6 +8,7 @@
 import { describe, expect, it } from "vitest";
 import { isCommitSha, primeCommitLabel } from "@/lib/libraryCommit.pure";
 import {
+  backendRunOf,
   describeDbError,
   judgeApproval,
   judgeClonePins,
@@ -37,6 +38,7 @@ function module(overrides: Partial<PublishableModule> = {}): PublishableModule {
     resolved_files: ["src/routes/aml.tsx", "src/components/aml/case-list.tsx"],
     file_globs: ["src/components/aml/**"],
     backend_file_globs: ["supabase/functions/aml-screen/**"],
+    backend_manifest: { detection_run_id: RUN, links: [], counts: {} },
     detection_run_id: RUN,
     layer: "fullstack",
     cohesion_score: 0.82,
@@ -119,6 +121,43 @@ describe("publishing a module", () => {
       runs({ id: RUN, commit_sha: "main", created_at: "2026-10-28T09:00:00Z" }),
     );
     expect(!garbage.ok && garbage.reason).toMatch(/recorded "main", which is not a commit/);
+  });
+
+  it("is refused when another run found its backend, which no one commit then holds", () => {
+    const LATER = "7c5e2b10-0000-4000-8000-000000000003";
+    const found = runs({ id: RUN, commit_sha: COMMIT, created_at: "2026-10-28T09:00:00Z" });
+
+    const refreshed = judgePublication(
+      module({ status: "approved", backend_manifest: { detection_run_id: LATER } }),
+      found,
+    );
+    expect(refreshed.ok).toBe(false);
+    if (refreshed.ok) return;
+    expect(refreshed.reason).toBe(
+      "AML Command Centre (aml): its files were detected by run 0a3c9817 and its backend by " +
+        "run 7c5e2b10, so no one commit holds what it would publish. Detection keeps an " +
+        "approved or archived module's files as they are, so it re-detects this one only " +
+        "while it is proposed or rejected",
+    );
+
+    // A manifest from before runs were recorded in it says nothing either way.
+    for (const manifest of [null, {}, { detection_run_id: "" }, ["x"], "0a3c9817"]) {
+      const unknown = judgePublication(module({ backend_manifest: manifest }), found);
+      expect(!unknown.ok && unknown.reason).toMatch(
+        /^AML Command Centre \(aml\): its backend manifest names no detection run/,
+      );
+    }
+  });
+});
+
+describe("the run a backend manifest names", () => {
+  it("is its detection_run_id, and nothing else is read as one", () => {
+    expect(backendRunOf({ detection_run_id: RUN, links: [] })).toBe(RUN);
+    expect(backendRunOf(null)).toBeNull();
+    expect(backendRunOf(undefined)).toBeNull();
+    expect(backendRunOf({ links: [] })).toBeNull();
+    expect(backendRunOf({ detection_run_id: 7 })).toBeNull();
+    expect(backendRunOf([RUN])).toBeNull();
   });
 });
 
