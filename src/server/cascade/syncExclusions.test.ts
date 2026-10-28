@@ -22,6 +22,7 @@ import {
   PARENT_DEPLOYMENT_OWN_FILES,
 } from "./syncExclusions.pure";
 import { CASCADE_STREAM_MAX_FILE_BYTES } from "./blobStreamCarry.pure";
+import { parseAssertions } from "../migrationAssertions.pure";
 
 const BACKEND_IDENTITY = "src/integrations/supabase/env.ts";
 
@@ -502,19 +503,20 @@ describe("the seed migrations are a projection of this constant, not a second co
   /**
    * Defaults whose seed migration is owed rather than written.
    *
-   * W3 of the delivery plan (27 Oct 2026) appended `vcr-prune.yml` under a
-   * rule that it carry no migration. Nothing live is waiting on one: the two
-   * mirrors that inherit the file from their parent have held this exact
-   * pattern since 26 Oct (written by hand), the third mirror is the parent
-   * that owns the file, and a mirror registered from now on is seeded from
-   * the constant (`seedSyncExclusions`).
+   * Empty since 28 Oct 2026. W3 of the delivery plan (27 Oct) appended
+   * `vcr-prune.yml` under a rule that it carry no migration: the two mirrors
+   * that inherit the file from their parent had held this exact pattern since
+   * 26 Oct (written by hand), and the third mirror is the parent that owns the
+   * file. D15 paid it. The CRM line became a mirror, had never held the file,
+   * and took the constant's row
+   * (`20261028190000_the_crm_line_becomes_a_mirror.sql`).
    *
    * Narrow by construction: an owed entry must be the constant's TAIL, so the
    * append-only rule still holds, and no migration may carry one — the day a
    * migration does, the test below fails until the allowance is deleted, so it
    * cannot outlive its reason.
    */
-  const SEED_OWED: string[] = [".github/workflows/vcr-prune.yml"];
+  const SEED_OWED: string[] = [];
   // Counted from the length, so emptying SEED_OWED leaves the whole constant.
   const owedFrom = DEFAULT_MIRROR_EXCLUSIONS.length - SEED_OWED.length;
   const seeded = () => DEFAULT_MIRROR_EXCLUSIONS.slice(0, owedFrom);
@@ -578,6 +580,32 @@ describe("the seed migrations are a projection of this constant, not a second co
         /FROM public\.clone_sync_exclusions/,
       );
     }
+  });
+});
+
+describe("the CRM line's switch to a mirror refuses loudly", () => {
+  // Its guard (step 4) refuses by raising, so the switch never leaves the CRM a
+  // whole-tree mirror with a partial policy. The queue answers a failure by
+  // asking the migration's `@asserts` claims whether the effect is already
+  // there, and settles the row as `recorded` when every checkable claim holds
+  // (`20260913090000_a_halt_that_resolves_itself.sql`). Any count of this table
+  // the file could claim already holds from the other clones' rows (166 on
+  // 28 Oct 2026, so `rows:clone_sync_exclusions>=60`, its first claim, read
+  // `present` before it ran), and a refusal would have been recorded as done,
+  // with the CRM still module-scoped. `none` is never evaluated, so a refusal
+  // halts the queue.
+  const SWITCH = "20261028190000_the_crm_line_becomes_a_mirror.sql";
+  const sql = readFileSync(join(process.cwd(), "supabase/migrations", SWITCH), "utf8");
+
+  it("claims nothing the queue could settle a refusal on", () => {
+    const parsed = parseAssertions(sql);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.assertions.map((a) => a.kind)).toEqual(["none"]);
+  });
+
+  it("refuses by raising, which is what halts the queue", () => {
+    expect(sql).toMatch(/RAISE EXCEPTION\s+'refusing to make the CRM a mirror/);
   });
 });
 
