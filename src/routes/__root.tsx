@@ -8,6 +8,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { RealtimeNotifications } from "@/lib/realtime-notifications";
 import { BrowserPushNotifications } from "@/lib/browser-notifications";
+import { WorkspaceReplyAlerts } from "@/components/workspace-reply-alerts";
 import { NotificationPreferencesSync } from "@/components/notification-preferences-sync";
 import { ConfirmProvider } from "@/components/confirm-dialog";
 import { registerServiceWorker } from "@/lib/push-subscription";
@@ -158,6 +159,9 @@ function RootComponent() {
               <RealtimeNotifications />
               <BrowserPushNotifications />
               <Outlet />
+              {/* Here, not in AppShell: each route renders its own shell, and a
+                  reply's pop-up must outlive a change of page. */}
+              <WorkspaceReplyAlerts />
               <SoftphoneOverlay />
               <Toaster />
             </TelephonyProvider>

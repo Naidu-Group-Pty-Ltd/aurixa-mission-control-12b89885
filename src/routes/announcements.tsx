@@ -94,7 +94,9 @@ import {
   type ThreadView,
 } from "@/server/announcements.functions";
 import {
+  ANNOUNCEMENT_SEVERITIES,
   AUDIENCE_MODE_LABEL,
+  SEVERITY_IN_WORKSPACE,
   announcementReachesClone,
   announcementTone,
   audienceDraftOf,
@@ -106,11 +108,13 @@ import {
   isNarrowingScope,
   sendTimingRefusal,
   workspaceMatches,
+  type AnnouncementSeverity,
   type AnnouncementState,
   type SendTiming,
   type WorkspaceAudienceDraft,
   type WorkspaceAudienceMode,
 } from "@/lib/cloneAnnouncements.pure";
+import { signalSentence, type SignalSummary } from "@/lib/workspaceSignal.pure";
 import { useUserRoles } from "@/lib/use-user-roles";
 import { cn } from "@/lib/utils";
 
@@ -170,6 +174,14 @@ const AUDIENCE_FILTERS: Array<{ key: AudienceFilter; label: string }> = [
   { key: "one", label: AUDIENCE_MODE_LABEL.one },
   { key: "selected", label: AUDIENCE_MODE_LABEL.selected },
 ];
+
+/** A severity's swatch in the picker: status colours, which here MEAN status. */
+const SEVERITY_SWATCH: Record<AnnouncementSeverity, string> = {
+  info: "bg-info",
+  success: "bg-success",
+  warning: "bg-warning",
+  critical: "bg-destructive",
+};
 
 const MODE_ICON: Record<WorkspaceAudienceMode, typeof Globe2> = {
   everyone: Globe2,
@@ -568,10 +580,10 @@ function AnnouncementRowView({
   async function act(label: string, fn: () => Promise<unknown>) {
     setBusy(true);
     try {
-      const result = (await fn()) as { ok: boolean; error?: string };
+      const result = (await fn()) as { ok: boolean; error?: string; signal?: SignalSummary };
       if (!result.ok) toast.error(`${label} failed: ${result.error}`);
       else {
-        toast.success(label);
+        toast.success(label, { description: signalSentence(result.signal) ?? undefined });
         onDone();
       }
     } catch (err) {
@@ -1147,7 +1159,7 @@ function EditorDialog({
         endsAt: isoOf(endsAt),
         clientRequestId: requestId,
       };
-      let result: { ok: boolean; error?: string; repeated?: boolean };
+      let result: { ok: boolean; error?: string; repeated?: boolean; signal?: SignalSummary };
       if (isDraft && effectiveTiming !== "draft") {
         result = (await send({
           data: { ...payload, id: row?.id ?? null, timing: effectiveTiming },
@@ -1174,6 +1186,7 @@ function EditorDialog({
                 : row
                   ? "Message updated"
                   : "Draft saved — nobody sees it until it is published",
+          { description: signalSentence(result.signal) ?? undefined },
         );
         onSaved();
       }
@@ -1403,12 +1416,22 @@ function EditorDialog({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="info">Info</SelectItem>
-                    <SelectItem value="success">Success</SelectItem>
-                    <SelectItem value="warning">Warning</SelectItem>
-                    <SelectItem value="critical">Critical</SelectItem>
+                    {ANNOUNCEMENT_SEVERITIES.map((s) => (
+                      <SelectItem key={s} value={s}>
+                        <span className="flex items-center gap-2">
+                          <span aria-hidden className={cn("h-2.5 w-2.5 shrink-0", SEVERITY_SWATCH[s])} />
+                          {SEVERITY_IN_WORKSPACE[s].option}
+                        </span>
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
+                {severity in SEVERITY_IN_WORKSPACE && (
+                  <p className="text-xs text-muted-foreground">
+                    Workspaces see it as “{SEVERITY_IN_WORKSPACE[severity as AnnouncementSeverity].word}”, in{" "}
+                    {SEVERITY_IN_WORKSPACE[severity as AnnouncementSeverity].colour}.
+                  </p>
+                )}
               </div>
               <div className="space-y-2">
                 <Label>Display</Label>
@@ -1605,12 +1628,14 @@ function ConversationsDialog({
           body: entry.body,
           clientRequestId: entry.requestId,
         },
-      })) as { ok: boolean; error?: string };
+      })) as { ok: boolean; error?: string; signal?: SignalSummary };
       if (!result.ok) {
         toast.error(result.error ?? "The reply was not sent");
         return;
       }
-      toast.success(`Sent to ${nameOf(to)} as Aurixa Systems`);
+      toast.success(`Sent to ${nameOf(to)} as Aurixa Systems`, {
+        description: signalSentence(result.signal) ?? undefined,
+      });
       setDrafts((prev) => {
         const next = { ...prev };
         delete next[to];

@@ -34,6 +34,9 @@ import {
   type ReplyFacts,
   type ThreadMessageWire,
 } from "@/lib/cloneAnnouncements.pure";
+import { nextChangeAtFor, type SignalSummary } from "@/lib/workspaceSignal.pure";
+import { replyNotificationOf } from "@/lib/workspaceReplyAlert.pure";
+import { signalMessageChange, signalWorkspaces } from "@/server/workspaceSignal.server";
 
 export type AnnouncementRow = Tables<"clone_announcements">;
 export type DeliveryRow = Tables<"clone_announcement_deliveries">;
@@ -114,7 +117,13 @@ async function readWorkspaceReplies(
 export async function announcementsForWorkspace(
   keyCloneId: string | null,
 ): Promise<
-  | { ok: true; workspaceId: string | null; announcements: CloneAnnouncementWire[] }
+  | {
+      ok: true;
+      workspaceId: string | null;
+      announcements: CloneAnnouncementWire[];
+      /** When this workspace's notices next change by themselves (`nextChangeAtFor`). */
+      nextChangeAt: string | null;
+    }
   | { ok: false; failed: true; error: string }
 > {
   const [live, ws] = await Promise.all([readLiveAnnouncements(), resolveWorkspace(keyCloneId)]);
@@ -123,14 +132,15 @@ export async function announcementsForWorkspace(
   if (!ws.workspace) {
     // A key whose clone row is gone serves nothing — an empty list is the
     // honest answer, not an error the clone would render around.
-    return { ok: true, workspaceId: null, announcements: [] };
+    return { ok: true, workspaceId: null, announcements: [], nextChangeAt: null };
   }
   const now = new Date();
   const facts = live.rows.map(factsOf);
   const served = activeAnnouncementsForClone(facts, ws.workspace, now);
+  const nextChangeAt = nextChangeAtFor(facts, ws.workspace, now);
   const withReplies = served.filter((a) => a.repliesEnabled).map((a) => a.id);
   if (withReplies.length === 0) {
-    return { ok: true, workspaceId: ws.workspace.id, announcements: served };
+    return { ok: true, workspaceId: ws.workspace.id, announcements: served, nextChangeAt };
   }
   const replies = await readWorkspaceReplies(ws.workspace.id, withReplies);
   if (!replies.ok) return replies;
@@ -138,6 +148,7 @@ export async function announcementsForWorkspace(
     ok: true,
     workspaceId: ws.workspace.id,
     announcements: activeAnnouncementsForClone(facts, ws.workspace, now, replies.rows),
+    nextChangeAt,
   };
 }
 
@@ -315,6 +326,8 @@ export async function postWorkspaceReply(input: {
   body: string;
   author: WorkspaceAuthor;
   clientRequestId: string | null;
+  /** The business the workspace's own server says it is, or null (an older relay). */
+  businessName?: string | null;
 }): Promise<
   | { ok: true; thread: ThreadMessageWire[] }
   | { ok: false; status: number; error: string }
@@ -357,11 +370,20 @@ export async function postWorkspaceReply(input: {
   }
 
   if (!duplicate) {
-    const workspaceName = isPrimeWorkspace(workspaceId)
-      ? "the prime"
-      : ((
-          await supabaseAdmin.from("clones").select("name").eq("id", workspaceId).maybeSingle()
-        ).data?.name ?? "a workspace");
+    const cloneName = isPrimeWorkspace(workspaceId)
+      ? null
+      : ((await supabaseAdmin.from("clones").select("name").eq("id", workspaceId).maybeSingle()).data
+          ?.name ?? null);
+    const alert = replyNotificationOf({
+      announcementId: input.announcementId,
+      messageTitle: row!.title,
+      workspaceId,
+      cloneName,
+      businessName: input.businessName ?? null,
+      authorName: input.author.name,
+      body: input.body,
+    });
+    const workspaceName = alert.metadata.workspace_name;
     await writeAuditLog({
       action: "clone_announcement.reply_received",
       entityType: "clone_announcement",
@@ -371,18 +393,21 @@ export async function postWorkspaceReply(input: {
         title: row!.title,
         workspace_id: workspaceId,
         workspace: workspaceName,
+        business: alert.metadata.business_name,
         author: input.author.name,
         author_ref: input.author.ref,
       },
     });
+    // The bell, the pop-up and the desktop notification all draw this row
+    // (`workspaceReplyAlert.pure.ts`), as a phone notification will.
     await notifyOperators({
       kind: "clone_announcement_reply",
       severity: "info",
-      title: `Reply from ${workspaceName}: ${row!.title}`,
-      body: `${input.author.name} wrote: ${input.body.length > 160 ? `${input.body.slice(0, 157)}…` : input.body}`,
+      title: alert.title,
+      body: alert.body,
       cloneId: isPrimeWorkspace(workspaceId) ? null : workspaceId,
-      url: `/announcements?thread=${input.announcementId}&workspace=${workspaceId}`,
-      metadata: { announcement_id: input.announcementId, workspace_id: workspaceId },
+      url: alert.url,
+      metadata: alert.metadata,
     });
   }
 
@@ -407,8 +432,8 @@ export async function readRepliesForAnnouncement(
 
 /**
  * An operator answers inside one workspace's thread. The workspace reads it,
- * signed "Aurixa Systems", on its next poll; only that workspace is ever
- * served it. Answering marks what the workspace wrote as read.
+ * signed "Aurixa Systems", as soon as it is signalled (or on its next poll
+ * where the signal does not land); only that workspace is ever served it. Answering marks what the workspace wrote as read.
  */
 export async function postOperatorReply(input: {
   announcementId: string;
@@ -417,7 +442,7 @@ export async function postOperatorReply(input: {
   actorId: string;
   actorName: string;
   clientRequestId: string | null;
-}): Promise<{ ok: true } | { ok: false; error: string }> {
+}): Promise<{ ok: true; signal?: SignalSummary } | { ok: false; error: string }> {
   const rowQ = await supabaseAdmin
     .from("clone_announcements")
     .select("*")
@@ -469,6 +494,8 @@ export async function postOperatorReply(input: {
       actorUserId: input.actorId,
       metadata: { title: row!.title, workspace_id: input.workspaceId },
     });
+    // Only this workspace: the answer is its own thread, nobody else's.
+    return { ok: true, signal: await signalWorkspaces([input.workspaceId]) };
   }
   return { ok: true };
 }
@@ -514,8 +541,13 @@ export type AnnouncementDraftInput = {
   clientRequestId?: string | null;
 };
 
+/**
+ * `signal` says how many of the workspaces the change reaches were told at
+ * once (`workspaceSignal.pure.ts`); absent where the act changed nothing a
+ * workspace is shown — a draft.
+ */
 type ActResult =
-  | { ok: true; row: AnnouncementRow }
+  | { ok: true; row: AnnouncementRow; signal?: SignalSummary }
   | { ok: false; error: string };
 
 function draftToColumns(input: AnnouncementDraftInput) {
@@ -596,6 +628,13 @@ export async function createAnnouncement(
 export async function updateAnnouncement(
   input: AnnouncementDraftInput & { id: string; actorId: string },
 ): Promise<ActResult> {
+  // The row as it was: an edit that narrows a live message must signal the
+  // workspace that is losing it, not only the ones it still reaches.
+  const before = await supabaseAdmin
+    .from("clone_announcements")
+    .select("audience_plan_slugs, audience_clone_ids, audience_match, published_at")
+    .eq("id", input.id)
+    .maybeSingle();
   const { data, error } = await supabaseAdmin
     .from("clone_announcements")
     .update(
@@ -617,7 +656,9 @@ export async function updateAnnouncement(
     actorUserId: input.actorId,
     metadata: { title: row.title, audience: audienceSummary(factsOf(row)) },
   });
-  return { ok: true, row };
+  if (!row.published_at) return { ok: true, row };
+  const signal = await signalMessageChange([before.data ?? null, row]);
+  return { ok: true, row, signal };
 }
 
 /**
@@ -685,7 +726,8 @@ export async function sendAnnouncement(
     metadata: { title: row.title, audience: audienceSummary(factsOf(row)) },
   });
   await recordPublished(row, input.actorId);
-  return { ok: true, row };
+  const signal = await signalMessageChange([row]);
+  return { ok: true, row, signal };
 }
 
 /** The publish act's record and receipt, shared by Publish and Send now. */
@@ -739,7 +781,8 @@ export async function publishAnnouncement(input: {
   if (error) return { ok: false, error: error.message };
   const row = data as AnnouncementRow;
   await recordPublished(row, input.actorId);
-  return { ok: true, row };
+  const signal = await signalMessageChange([row]);
+  return { ok: true, row, signal };
 }
 
 /** Putting away, never throwing away: the row and its deliveries survive. */
@@ -775,7 +818,9 @@ export async function archiveAnnouncement(input: {
     url: "/announcements",
     metadata: { announcement_id: row.id },
   });
-  return { ok: true, row };
+  // The dashboards showing it drop it now, not on their next check.
+  const signal = await signalMessageChange([row]);
+  return { ok: true, row, signal };
 }
 
 /**
@@ -815,5 +860,6 @@ export async function reraiseAnnouncement(input: {
     actorUserId: input.actorId,
     metadata: { title: row.title, revision: row.revision },
   });
-  return { ok: true, row };
+  const signal = await signalMessageChange([row]);
+  return { ok: true, row, signal };
 }
