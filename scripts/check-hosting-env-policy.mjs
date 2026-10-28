@@ -207,10 +207,13 @@ if (PUBLIC_PREFIXES.length === 0) throw new Error("unreachable");
   // `syncing_env` with no identity, through the same lookup. Its client is
   // named `admin`, which is why that name is on the list below — a check that
   // only knows the names other files use cannot see this one pass its own.
+  // So is the metering tenant's creation at provisioning (D16), which heals
+  // the same gap before the tenant is keyed on the id; its own client is `db`.
   for (const CALLER of [
     "src/server/clone-provisioning.server.ts",
     "src/server/clone-billing-identity.functions.ts",
     "src/routes/hooks.deployment-drain.tsx",
+    "src/server/clone-metering-tenant.server.ts",
   ]) {
     const caller = readFileSync(CALLER, "utf8");
     const passing = caller.match(

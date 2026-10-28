@@ -14,6 +14,12 @@ import type { Database } from "@/integrations/supabase/types";
 import type { ProvisionCloneInput, ProvisionCloneResult } from "./clone-provisioning.functions";
 import { crmChildFields, describeCrmPlacement, type CrmParent } from "./crmLineage.pure";
 import { sortedUniqueSlugs } from "@/lib/pricing/contract-exclusions";
+import {
+  ensureCloneMeteringTenant,
+  resolveSoldPlan,
+  type MeteringTenantOutcome,
+  type SoldPlanResolution,
+} from "./clone-metering-tenant.server";
 
 /**
  * The whole clone-creation pipeline as a plain function, so it has exactly
@@ -37,7 +43,7 @@ export async function provisionCloneCore(
   if (data.idempotencyKey) {
     const { data: existing } = await supabase
       .from("clones")
-      .select("id, github_url")
+      .select("id, github_url, name, slug, billing_user_id, billing_stripe_customer_id")
       .eq("owner_user_id", userId)
       .eq("idempotency_key", data.idempotencyKey)
       .maybeSingle();
@@ -61,10 +67,10 @@ export async function provisionCloneCore(
         It stays `idempotent: true`: the caller asked for a clone and is
         getting the same clone, which is what that word answers.
       */
-      // A failed agreement attempt can be re-configured before its retry, and
-      // the reconcile that follows reads the row. The wizard sends none.
-      const excluded = await recordContractExclusions(supabase, existing.id, data);
-      if (!excluded.ok) return excluded;
+      // The exclusions and the metering tenant first: the reconcile that
+      // follows reads the one, and the backend meters against the other.
+      const settled = await settleRetriedClone(supabase, existing, data);
+      if (!settled.ok) return settled;
       await startRequestedSideEffects(supabase, userId, existing, data);
       return {
         ok: true,
@@ -79,6 +85,13 @@ export async function provisionCloneCore(
   if (!prime) {
     return { ok: false, error: "Prime not configured — set it up in Settings first" };
   }
+
+  // The plan it is sold, checked before anything exists. Its metering tenant
+  // is created on this plan once the row is (D16), and a slug billing_plans
+  // does not hold is refused here, where the refusal costs nothing, rather
+  // than replaced with `free`.
+  const sold = await resolveSoldPlan(data.planSlug);
+  if (!sold.ok) return { ok: false, error: sold.error };
 
   // ─── Which CRM, and therefore which tree ─────────────────────────────
   //
@@ -337,6 +350,20 @@ export async function provisionCloneCore(
   if (insertErr || !inserted) {
     return { ok: false, error: insertErr?.message ?? "Clone insert failed" };
   }
+
+  // ─── The tenant it meters under, on the plan it was sold (D16) ─────
+  //
+  // The plan a clone gates on is its metering tenant's, which the balance
+  // response reports. Nothing here used to create that tenant: the first
+  // call that needed it did, on the cheapest active plan, `free`, whatever
+  // the clone had been sold. It is created (or adopted) now, beside the row.
+  //
+  // Not fatal at this point, because everything below still has to run and a
+  // retry only repeats the side effects. What it withholds is the backend:
+  // the backend is what lets the clone call Mission Control, and its first
+  // call with no tenant would create one on `free`. The function then returns
+  // the failure, so the operator sees it and the retry finishes the clone.
+  const metering = await meterUnderSoldPlan(supabase, inserted, data, sold);
 
   // ─── The sync exclusion policy, before anything cascades ──────────
   //
@@ -653,11 +680,14 @@ export async function provisionCloneCore(
   // The reservation travels back because the deployment step below attaches
   // THIS name — the one fact the extracted block produces that its caller
   // still needs.
+  //
+  // Without its metering tenant the backend waits (see above); the retry,
+  // which settles the tenant first, queues it.
   const { subdomain: reservedSubdomain, fqdn: reservedFqdn } = await startRequestedSideEffects(
     supabase,
     userId,
     inserted,
-    data,
+    metering.ok ? data : { ...data, backend: null },
   );
 
   // ─── Enqueue the deployment ───────────────────────────────────────
@@ -735,6 +765,17 @@ export async function provisionCloneCore(
       crm_mode: lineage?.crm_mode ?? null,
       parent_clone_id: lineage?.parent_clone_id ?? null,
       created_from: `${source.owner}/${source.repo}`,
+      metering_tenant: metering.ok
+        ? {
+            tenant_id: metering.outcome.tenantId,
+            action: metering.outcome.action,
+            plan: metering.outcome.planSlug,
+            // The paid plan it kept, which the clone meters on instead.
+            ...(metering.outcome.action === "conflict"
+              ? { held_plan: metering.outcome.heldPlanSlug }
+              : {}),
+          }
+        : { error: metering.error },
     },
   });
 
@@ -764,6 +805,20 @@ export async function provisionCloneCore(
   // could use, in a drawer, for ever. The key the clone actually runs on is
   // minted and delivered by `ensureCloneMissionControlLink`, which reports
   // its own outcome.
+
+  // A clone whose metering tenant is not on its plan is not provisioned, and
+  // says so. Everything else above ran; the retry, with the same idempotency
+  // key, settles the tenant and starts what was withheld.
+  if (!metering.ok) {
+    return {
+      ok: false,
+      error:
+        `Clone "${data.name}" was created, but the tenant it meters under is not on the plan ` +
+        `it was sold: ${metering.error}` +
+        (data.backend ? " Its backend was not queued." : "") +
+        ` Provision again with the same details; the retry reuses this clone and finishes it.`,
+    };
+  }
 
   return { ok: true, cloneId: inserted.id, githubUrl, subdomainFqdn: reservedFqdn };
 }
@@ -802,6 +857,93 @@ async function warnOnClone(
     // The row IS the telling. Losing it leaves the gap and no trace of it.
     console.error(`[provisionCloneCore] could not warn about ${stage}: ${error.message}`);
   }
+}
+
+/**
+ * What a retry settles on a clone the first attempt created, before its side
+ * effects start: the contract's exclusions (D18), which the reconcile that
+ * follows reads, and the tenant it meters under (D16), without which its
+ * backend is not queued. Either failing fails the retry.
+ */
+async function settleRetriedClone(
+  supabase: SupabaseClient<Database>,
+  clone: MeteredClone,
+  data: ProvisionCloneInput,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const excluded = await recordContractExclusions(supabase, clone.id, data);
+  if (!excluded.ok) return excluded;
+  const metering = await meterUnderSoldPlan(supabase, clone, data);
+  return metering.ok ? { ok: true } : { ok: false, error: metering.error };
+}
+
+type MeteredClone = {
+  id: string;
+  name: string | null;
+  slug: string;
+  billing_user_id: string | null;
+  billing_stripe_customer_id: string | null;
+};
+
+/**
+ * Create or adopt the tenant this clone meters under, on the plan it was sold
+ * (D16), and tell an operator on the clone when that failed or found a
+ * different paid plan already there.
+ *
+ * `sold` is the plan the first submit checked before anything existed. A retry
+ * reads it again.
+ */
+async function meterUnderSoldPlan(
+  supabase: SupabaseClient<Database>,
+  clone: MeteredClone,
+  data: ProvisionCloneInput,
+  sold?: SoldPlanResolution,
+): Promise<
+  { ok: true; outcome: Extract<MeteringTenantOutcome, { ok: true }> } | { ok: false; error: string }
+> {
+  const plan = sold ?? (await resolveSoldPlan(data.planSlug));
+  const outcome = plan.ok
+    ? await ensureCloneMeteringTenant({
+        cloneId: clone.id,
+        cloneName: clone.name ?? data.name,
+        cloneSlug: clone.slug,
+        billingUserId: clone.billing_user_id,
+        billingStripeCustomerId: clone.billing_stripe_customer_id,
+        plan: plan.plan,
+      })
+    : plan;
+  const name = clone.name ?? data.name;
+
+  if (!outcome.ok) {
+    console.error("[provisionCloneCore] metering tenant not settled", {
+      cloneId: clone.id,
+      plan: data.planSlug ?? null,
+      error: outcome.error,
+    });
+    await warnOnClone(
+      supabase,
+      clone.id,
+      `Metering tenant not on its plan: ${name}`,
+      `The tenant this clone meters under could not be put on the plan it was sold ` +
+        `(${data.planSlug ?? "none"}): ${outcome.error} Its backend waits for it. Provision ` +
+        `again with the same details to finish.`,
+      "metering_tenant",
+    );
+    return { ok: false, error: outcome.error };
+  }
+
+  if (outcome.action === "conflict") {
+    await warnOnClone(
+      supabase,
+      clone.id,
+      `Metering tenant on another plan: ${name}`,
+      `The clone was sold "${outcome.planSlug}", and tenant ${outcome.tenantId}, which it ` +
+        `meters under, already holds "${outcome.heldPlanSlug}". Provisioning does not overwrite ` +
+        `a paid plan. Change it in Settings → Billing & Tokens → Tenants if ` +
+        `"${outcome.planSlug}" is the right one.`,
+      "metering_tenant",
+    );
+  }
+  return { ok: true, outcome };
 }
 
 /**

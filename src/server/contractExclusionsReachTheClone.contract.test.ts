@@ -40,11 +40,17 @@ describe("provisionCloneCore", () => {
 
   it("an idempotent retry records the request's exclusions before anything else", () => {
     const branch = core.slice(core.indexOf("if (existing) {"));
-    const recordAt = branch.indexOf("await recordContractExclusions(supabase, existing.id, data);");
-    expect(recordAt).toBeGreaterThan(-1);
-    expect(branch.indexOf("await startRequestedSideEffects(")).toBeGreaterThan(recordAt);
+    const settleAt = branch.indexOf("await settleRetriedClone(supabase, existing, data);");
+    expect(settleAt).toBeGreaterThan(-1);
+    expect(branch.indexOf("await startRequestedSideEffects(")).toBeGreaterThan(settleAt);
     // A failed write fails the retry rather than reconciling the old exclusions.
-    expect(branch.slice(recordAt, recordAt + 200)).toMatch(/if \(!excluded\.ok\) return excluded;/);
+    expect(branch.slice(settleAt, settleAt + 200)).toMatch(/if \(!settled\.ok\) return settled;/);
+
+    // …and settling records them first, returning on failure.
+    const settle = core.slice(core.indexOf("async function settleRetriedClone("));
+    const recordAt = settle.indexOf("await recordContractExclusions(supabase, clone.id, data);");
+    expect(recordAt).toBeGreaterThan(-1);
+    expect(settle.slice(recordAt, recordAt + 120)).toMatch(/if \(!excluded\.ok\) return excluded;/);
   });
 
   it("and leaves a clone alone when the request names no exclusions (the wizard)", () => {

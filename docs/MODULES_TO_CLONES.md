@@ -34,6 +34,21 @@ measured against the live Mission Control database on 2026-08-28.
 > response sends them to the clone as `entitlements.excluded`. See
 > [Contractual exclusions](#contractual-exclusions).
 
+> **D16: a new clone meters on the plan it was sold, from the moment it
+> exists.**
+>
+> The plan a clone gates on is its metering tenant's, which the balance
+> response reports as `tenant.billing_plans.slug`. Nothing at provisioning
+> used to create that tenant. The first call that needed it did, through
+> `ensureTenant`, on the cheapest active plan, `free`: measured 27 Oct 2026,
+> NPC Test (sold `launch`), Preflight and the CRM (both sold `scale`) all gate
+> on `free`. `provisionCloneCore` now creates the tenant, or adopts the one the
+> clone has, on the plan it was sold, straight after the clone's INSERT
+> (`clone-metering-tenant.server.ts`). A sold slug `billing_plans` does not
+> hold is refused before anything is created. No billing period starts and no
+> allowance is issued until the activation payment, which does both. The three
+> clones above stay on `free` until launch, by the owner's decision of 27 Oct.
+
 ---
 
 ## The two vocabularies, and the join
@@ -108,9 +123,14 @@ page → entitlements → reconcile with its plan (`reconcileClone`).
 1. `TierModulePicker` resolves the tier + add-ons through
    `previewTierModules` (same join as above); operator refines.
 2. `provisionCloneCore` — repo (fork/template), `clones` row with
-   `entitled_plan_slug`, add-on purchase rows, `clone_modules`, provision
-   cascade, API key, Codex secrets, subdomain reservation, deployment
-   enqueue.
+   `entitled_plan_slug`, the metering tenant on the plan sold
+   (`ensureCloneMeteringTenant`, D16), add-on purchase rows, `clone_modules`,
+   provision cascade, API key, Codex secrets, subdomain reservation,
+   deployment enqueue. The plan's slug is checked against `billing_plans`
+   before the repository is created. A tenant that cannot be settled holds
+   the backend back and fails the submit, naming why; submitting again with
+   the same details reuses the clone, settles the tenant first and queues
+   the backend.
 3. `provisionBackend` → `clone_backends` queue → the drain builds the
    Supabase project (introspection), deploys edge functions, shells
    secrets, seeds the admin.
@@ -133,6 +153,10 @@ The autonomous path; every step is the wizard's own machinery:
    The exclusions go into `clones.contract_excluded_module_slugs` in the
    clone's own INSERT, so the reconcile it runs already honours them. A retry
    that finds the clone writes the agreement's current exclusions onto it.
+   The metering tenant goes on the agreement's plan
+   (`client_agreements.plan_slug`, which signature-time provisioning
+   requires). A tenant it could not settle fails this step, before the
+   reconcile and the backend enqueue below.
 4. **Initial entitlement reconcile** — stamps
    `entitled_plan_slug/_module_slugs/entitlement_keys` from tier + add-ons
    minus exclusions, and installs any entitled module the operator did not
@@ -221,6 +245,7 @@ A failed read never fails the balance call. The derivation is
 | Failed auto-provision never auto-retries | `decideProvisionOnSignature` (`failed_needs_operator`) |
 | Engine preflight before autonomous spend | `assessProvisioningPreflight` |
 | Contractual exclusions persist for the clone's life, and reach it | `clones.contract_excluded_module_slugs`, written in the clone's INSERT, subtracted in every reconcile, sent as `entitlements.excluded` |
+| A new clone meters on the plan it was sold, never on `free` by default | `ensureCloneMeteringTenant`, run by `provisionCloneCore` beside the INSERT; `resolveSoldPlan` refuses a slug `billing_plans` lacks before anything exists |
 | Drains scheduled + single-driver enforced | `20260826000000_schedule_the_engine.sql`, `check:cron`, `check:cron-auth` |
 
 ## The hand-made clone is special

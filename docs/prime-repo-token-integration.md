@@ -159,7 +159,7 @@ export async function generateReport(params: {
 ### Rules
 
 - **`idempotencyKey` must be deterministic** for a given logical attempt — retrying with the same key returns the existing job instead of double-charging.
-- **`tenantRef`** = your stable user or org id. Mission Control auto-provisions the tenant on first call and grants the default plan's monthly allowance.
+- **`tenantRef`** = your stable user or org id. A clone provisioned since D16 already has the tenant it meters under: provisioning creates it on the plan the clone was sold, holding the clone's billing identity, and the clone's first call (`prime:<project ref>`) adopts it by that identity. Its allowance arrives with the activation payment, which starts its billing period. A ref with no tenant is still auto-provisioned on first call, on the cheapest active plan (`free`), with that plan's monthly allowance; that is how the clones provisioned before D16 came to meter on `free`.
 - **Always commit or cancel.** Uncommitted reservations auto-release after `ttl_seconds` (default 600), but explicit cancel frees balance immediately.
 - **`actualTokens` may exceed the reservation** — Mission Control honors it (subject to plan overage policy). Reserve generously when uncertain.
 
