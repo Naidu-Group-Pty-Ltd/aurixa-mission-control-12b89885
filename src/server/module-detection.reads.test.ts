@@ -164,12 +164,13 @@ beforeEach(() => {
   });
 });
 
-const detect = () =>
+const detect = (guard?: (runId: string) => Promise<string | null>) =>
   runDetection({
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the double is the slice of the builder detection uses
     supabase: db as any,
     userId: "a1a1a1a1-0000-4000-8000-0000000000aa",
     config: { ...DEFAULT_CONFIG, deltaMode: false },
+    guard,
   });
 
 const run = () => db.tables.module_detection_runs[0];
@@ -265,6 +266,31 @@ describe("a run that could not read a file it needed writes no module", () => {
   });
 });
 
+describe("a run started beside another stops before it reads", () => {
+  it("asks its guard with its own run, and stops on an answer, saying why", async () => {
+    const asked: string[] = [];
+    const why = "Detection run 9e9e9e9e has been running since 2026-10-28T22:00:00.000Z.";
+
+    const result = await detect(async (runId) => {
+      asked.push(runId);
+      return why;
+    });
+
+    expect(result).toMatchObject({ ok: false, error: why });
+    expect(asked).toEqual([run().id]);
+    expect(run().status).toBe("failed");
+    expect(run().error_message).toBe(why);
+    expect(github.asked.graphql).toEqual([]);
+    expect(db.tables.modules).toEqual([]);
+  });
+
+  it("goes on when its guard finds nobody", async () => {
+    const result = await detect(async () => null);
+
+    expect(result.ok).toBe(true);
+  });
+});
+
 describe("which run is running", () => {
   const now = Date.parse("2026-10-28T22:00:00Z");
   const runRow = (id: string, status: string, started: string) => ({
@@ -297,6 +323,17 @@ describe("which run is running", () => {
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the double
     const found = await findRunningDetection(db as any, now);
+
+    expect(found).toEqual({ ok: true, running: null });
+  });
+
+  it("leaves out the caller's own run", async () => {
+    db = createLibraryFakeDb({
+      module_detection_runs: [runRow("r-own", "running", "2026-10-28T21:59:00.000Z")],
+    });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the double
+    const found = await findRunningDetection(db as any, now, "r-own");
 
     expect(found).toEqual({ ok: true, running: null });
   });

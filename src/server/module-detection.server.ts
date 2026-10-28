@@ -100,16 +100,18 @@ export const RUNNING_RUN_WINDOW_MS = 30 * 60_000;
 export async function findRunningDetection(
   supabase: Supabase,
   now: number = Date.now(),
+  /** The caller's own run, left out when it looks again after creating it. */
+  excludeRunId?: string,
 ): Promise<
   { ok: true; running: { id: string; started_at: string } | null } | { ok: false; error: string }
 > {
-  const { data, error } = await supabase
+  let query = supabase
     .from("module_detection_runs")
     .select("id, started_at")
     .eq("status", "running")
-    .gt("started_at", new Date(now - RUNNING_RUN_WINDOW_MS).toISOString())
-    .order("started_at", { ascending: false })
-    .limit(1);
+    .gt("started_at", new Date(now - RUNNING_RUN_WINDOW_MS).toISOString());
+  if (excludeRunId) query = query.neq("id", excludeRunId);
+  const { data, error } = await query.order("started_at", { ascending: false }).limit(1);
   if (error) return { ok: false, error: `detection runs unreadable: ${describeDbError(error)}` };
   const row = (data ?? [])[0] as { id: string; started_at: string } | undefined;
   return { ok: true, running: row ?? null };
@@ -728,6 +730,13 @@ export async function runDetection(args: {
   userId: string;
   config: DetectionRunConfig;
   onProgress?: (p: DetectionProgress) => void;
+  /**
+   * Asked once this run's row exists, before anything is read: who else is
+   * working on the catalogue (`catalogueCompetitor`). An answer stops the run,
+   * and the run's row says why. A reset passes none, because it looked after
+   * recording itself and before its wipe.
+   */
+  guard?: (runId: string) => Promise<string | null>;
 }): Promise<{
   ok: boolean;
   runId: string;
@@ -811,6 +820,9 @@ export async function runDetection(args: {
   };
 
   try {
+    const competitor = args.guard ? await args.guard(runId) : null;
+    if (competitor) throw new Error(competitor);
+
     // ── Phase 1: Fetch real tree ──
     progress("tree_fetch", "Fetching repository tree from GitHub…", 5);
     const octokit = getAppOctokit();

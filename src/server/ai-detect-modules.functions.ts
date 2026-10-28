@@ -5,8 +5,6 @@ import { assessBlastRadius } from "@/lib/blast-radius";
 import {
   runDetection,
   analyzeModuleIntelligence,
-  findRunningDetection,
-  runningRefusal,
   DEFAULT_CONFIG,
   type DetectionStrategy,
   type DetectionRunConfig,
@@ -54,14 +52,18 @@ export const detectModules = createServerFn({ method: "POST" })
       orphanAlerts: 0,
       error,
     });
-    const running = await findRunningDetection(context.supabase);
-    if (!running.ok) return refused(running.error);
-    if (running.running) return refused(runningRefusal(running.running, "a detection"));
+    // A detection beside a running reset or another run writes the same
+    // modules. It looks before it starts, and again once its run row exists,
+    // when the look settles it (`catalogueCompetitor`).
+    const { catalogueCompetitor } = await import(/* @vite-ignore */ "./library-reingest.server");
+    const competitor = await catalogueCompetitor(context.supabase, {});
+    if (competitor) return refused(competitor);
 
     return runDetection({
       supabase: context.supabase,
       userId: context.userId,
       config,
+      guard: (runId) => catalogueCompetitor(context.supabase, { runId }),
     });
   });
 
