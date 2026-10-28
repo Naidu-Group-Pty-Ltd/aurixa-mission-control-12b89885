@@ -43,11 +43,12 @@ import {
 type Db = SupabaseClient<Database>;
 
 /** What a tenant is read with: enough to adopt it, and its plan's slug. */
-const TENANT_COLUMNS = "id, clone_id, plan_id, billing_plans:plan_id(slug)";
+const TENANT_COLUMNS = "id, clone_id, billing_user_id, plan_id, billing_plans:plan_id(slug)";
 
 type TenantRead = {
   id: string;
   clone_id: string | null;
+  billing_user_id: string | null;
   plan_id: string | null;
   billing_plans: { slug: string } | null;
 };
@@ -143,7 +144,9 @@ export async function ensureCloneMeteringTenant(
 
   const found = await findCloneTenant(db, cloneId, billingUserId);
   if (!found.ok) return found;
-  if (found.tenant) return adopt(db, found.tenant, plan);
+  if (found.tenant) {
+    return adoptWithIdentity(db, found.tenant, billingUserId, input.billingStripeCustomerId, plan);
+  }
 
   const { data, error } = await db
     .from("tenants")
@@ -168,7 +171,15 @@ export async function ensureCloneMeteringTenant(
   if (error?.code === "23505") {
     const raced = await findCloneTenant(db, cloneId, billingUserId);
     if (!raced.ok) return raced;
-    if (raced.tenant) return adopt(db, raced.tenant, plan);
+    if (raced.tenant) {
+      return adoptWithIdentity(
+        db,
+        raced.tenant,
+        billingUserId,
+        input.billingStripeCustomerId,
+        plan,
+      );
+    }
   }
   return {
     ok: false,
@@ -214,27 +225,19 @@ async function billingIdentityOf(input: {
 }
 
 /**
- * The tenant this clone already has, if any: the one keyed by its id, else the
- * one holding its billing id. A holder that belongs to another clone is
- * refused, because adopting it would meter this clone against somebody else's
- * balance.
+ * The tenant this clone already has, if any: the one holding its billing id,
+ * else the one keyed by its id.
+ *
+ * The holder comes first because it is the tenant the clone's first call
+ * adopts (`ensureTenant`), so it is the one provisioning must settle. A holder
+ * that belongs to another clone is refused, because adopting it would meter
+ * this clone against somebody else's balance.
  */
 async function findCloneTenant(
   db: Db,
   cloneId: string,
   billingUserId: string,
 ): Promise<{ ok: true; tenant: TenantRead | null } | { ok: false; error: string }> {
-  const byRef = await db
-    .from("tenants")
-    .select(TENANT_COLUMNS)
-    .eq("clone_id", cloneId)
-    .eq("external_ref", cloneId)
-    .maybeSingle();
-  if (byRef.error) {
-    return { ok: false, error: `The clone's tenant could not be read: ${byRef.error.message}` };
-  }
-  if (byRef.data) return { ok: true, tenant: byRef.data as TenantRead };
-
   const byBillingId = await db
     .from("tenants")
     .select(TENANT_COLUMNS)
@@ -247,17 +250,90 @@ async function findCloneTenant(
     };
   }
   const holder = byBillingId.data as TenantRead | null;
-  if (!holder) return { ok: true, tenant: null };
-  if (holder.clone_id !== cloneId) {
+  if (holder) {
+    if (holder.clone_id !== cloneId) {
+      return {
+        ok: false,
+        error:
+          `Billing id "${billingUserId}" belongs to tenant ${holder.id} of ` +
+          `${holder.clone_id ? `clone ${holder.clone_id}` : "no clone"}. Give this clone a ` +
+          `distinct billing identity, then provision again.`,
+      };
+    }
+    return { ok: true, tenant: holder };
+  }
+
+  const byRef = await db
+    .from("tenants")
+    .select(TENANT_COLUMNS)
+    .eq("clone_id", cloneId)
+    .eq("external_ref", cloneId)
+    .maybeSingle();
+  if (byRef.error) {
+    return { ok: false, error: `The clone's tenant could not be read: ${byRef.error.message}` };
+  }
+  return { ok: true, tenant: (byRef.data as TenantRead | null) ?? null };
+}
+
+/**
+ * Adopt a tenant only once it carries the clone's billing id.
+ *
+ * The clone's first call finds a tenant keyed by the clone by that id alone
+ * (`ensureTenant`). A tenant carrying another id would be passed over, and the
+ * call would create a second tenant on `free` beside it. Codex found the path
+ * on #385: the id changed on the clone (`setCloneBillingId` writes only the
+ * clone) between two provisioning attempts, and the retry adopted the tenant
+ * the first attempt made.
+ *
+ *  - A missing id is filled in, conditional on it still being missing.
+ *  - A different id is refused, never rewritten. The id is what checkout
+ *    stamps into Stripe and the purchases ledger, and only an operator knows
+ *    which of the two is right.
+ */
+async function adoptWithIdentity(
+  db: Db,
+  tenant: TenantRead,
+  billingUserId: string,
+  billingStripeCustomerId: string | null,
+  plan: SoldPlan | null,
+): Promise<MeteringTenantOutcome> {
+  if (tenant.billing_user_id === billingUserId) return adopt(db, tenant, plan);
+  if (tenant.billing_user_id) {
     return {
       ok: false,
       error:
-        `Billing id "${billingUserId}" belongs to tenant ${holder.id} of ` +
-        `${holder.clone_id ? `clone ${holder.clone_id}` : "no clone"}. Give this clone a ` +
-        `distinct billing identity, then provision again.`,
+        `Tenant ${tenant.id} is keyed by this clone but carries billing id ` +
+        `"${tenant.billing_user_id}", and the clone's billing identity is "${billingUserId}". ` +
+        `The clone's first call finds its tenant by the clone's identity, so it would pass ` +
+        `this one over and create a second on "${FREE_PLAN_SLUG}". Set the clone's billing ` +
+        `identity back to "${tenant.billing_user_id}", then provision again.`,
     };
   }
-  return { ok: true, tenant: holder };
+
+  const { data, error } = await db
+    .from("tenants")
+    .update({
+      billing_user_id: billingUserId,
+      ...(billingStripeCustomerId ? { billing_stripe_customer_id: billingStripeCustomerId } : {}),
+    })
+    .eq("id", tenant.id)
+    .filter("billing_user_id", "is", null)
+    .select("id");
+  if (error) {
+    return {
+      ok: false,
+      error: `Tenant ${tenant.id} could not be given billing id "${billingUserId}": ${error.message}`,
+    };
+  }
+  if (!data || data.length === 0) {
+    return {
+      ok: false,
+      error:
+        `Tenant ${tenant.id}'s billing id changed while it was being read. Provision again ` +
+        `to decide on the id it holds now.`,
+    };
+  }
+  return adopt(db, { ...tenant, billing_user_id: billingUserId }, plan);
 }
 
 /** Put the sold plan on a tenant the clone already has, where the rules allow it. */

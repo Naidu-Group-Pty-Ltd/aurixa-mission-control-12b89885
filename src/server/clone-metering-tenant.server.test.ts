@@ -372,6 +372,52 @@ describe("a tenant the clone already has", () => {
   });
 });
 
+describe("a tenant keyed by the clone and its billing identity (Codex, #385)", () => {
+  // The clone's first call finds a tenant keyed by the clone through the
+  // clone's billing id alone. An attempt that made the tenant, then an
+  // operator's new id on the clone, then a retry: the retry used to adopt the
+  // tenant whatever id it carried.
+  it("is refused when it carries an id the clone no longer has, and nothing is written", async () => {
+    h.db.tables.tenants.push(tenant({ billing_user_id: "acme-advisory-old" }));
+    const r = await ensureCloneMeteringTenant(clone());
+    expect(r).toEqual({
+      ok: false,
+      error: expect.stringContaining('carries billing id "acme-advisory-old"'),
+    });
+    expect(h.db.writes).toEqual([]);
+    // What the refusal prevents: the first call passes that tenant over and
+    // makes a second one on free.
+    const first = await planTheFirstCallReports();
+    expect(first.tenantId).not.toBe("tenant-existing");
+    expect(first.plan).toBe("free");
+  });
+
+  it("is given the clone's id when it has none, and the first call adopts it on the sold plan", async () => {
+    h.db.tables.tenants.push(tenant({ billing_user_id: null }));
+    const r = await ensureCloneMeteringTenant(clone());
+    expect(r).toEqual({ ok: true, tenantId: "tenant-existing", action: "set", planSlug: "launch" });
+    expect(h.db.tables.tenants).toHaveLength(1);
+    expect(h.db.tables.tenants[0].billing_user_id).toBe(BILLING_ID);
+    expect(await planTheFirstCallReports()).toEqual({
+      tenantId: "tenant-existing",
+      plan: "launch",
+    });
+  });
+
+  it("gives way to the tenant holding the clone's id, which is the one the first call adopts", async () => {
+    h.db.tables.tenants.push(
+      tenant({ id: "tenant-keyed", billing_user_id: "acme-advisory-old" }),
+      tenant({ id: "tenant-holder", external_ref: FIRST_CALL_REF }),
+    );
+    const r = await ensureCloneMeteringTenant(clone());
+    expect(r).toEqual({ ok: true, tenantId: "tenant-holder", action: "set", planSlug: "launch" });
+    expect(await planTheFirstCallReports()).toEqual({
+      tenantId: "tenant-holder",
+      plan: "launch",
+    });
+  });
+});
+
 describe("before this, the clone's first call chose the plan", () => {
   it("and chose free: the lazy path's own answer for a clone with no tenant", async () => {
     // The state every engine clone was provisioned into. Pinned so the test
