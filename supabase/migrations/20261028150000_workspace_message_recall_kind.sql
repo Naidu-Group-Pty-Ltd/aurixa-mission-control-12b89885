@@ -1,0 +1,14 @@
+-- @asserts enum:notification_kind
+--
+-- The record a recall raises (`recallAnnouncement`): an operator withdrew a
+-- message that went out wrong, and the other operators should know it came
+-- down and why.
+--
+-- Its own value rather than `clone_announcement_archived`: archiving files a
+-- finished message away, a recall says one should not have gone out, and an
+-- operator who mutes archive receipts (`notification_preferences.muted_kinds`)
+-- must still hear that a message was pulled.
+--
+-- ALTER TYPE lives in its own migration on purpose: a new enum value cannot be
+-- added and used in the same transaction.
+ALTER TYPE public.notification_kind ADD VALUE IF NOT EXISTS 'clone_announcement_recalled';

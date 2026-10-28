@@ -20,6 +20,8 @@ const h = vi.hoisted(() => ({
   /** What reached a workspace's Realtime: the URL posted to, and the body. */
   broadcasts: [] as Array<{ url: string; body: { messages: Array<Record<string, unknown>> } }>,
   refusing: new Set<string>(),
+  /** An update the database refuses this once, as a write lost to a timeout would be. */
+  refuseUpdate: null as null | ((table: string, values: Row) => boolean),
 }));
 
 /** The unique indexes of 20261027120100_workspace_message_replies.sql. */
@@ -27,6 +29,13 @@ const UNIQUE: Record<string, string[][]> = {
   clone_announcements: [["client_request_id"]],
   clone_announcement_replies: [["workspace_id", "client_request_id"]],
   clone_announcement_deliveries: [["announcement_id", "clone_id"]],
+};
+
+/** The CHECKs of 20261028150100_workspace_message_recall.sql. */
+const CHECKS: Record<string, Array<[string, (r: Row) => boolean]>> = {
+  clone_announcements: [
+    ["clone_announcements_recalled_is_unpublished", (r) => !r.recalled_at || !r.published_at],
+  ],
 };
 
 vi.mock("@/integrations/supabase/client.server", () => {
@@ -61,7 +70,23 @@ vi.mock("@/integrations/supabase/client.server", () => {
         return { data: made.map((r) => ({ ...r })), error: null };
       }
       let rows = rowsOf().filter((r) => filters.every((f) => f(r)));
+      if (op === "update" && h.refuseUpdate?.(table, values as Row)) {
+        h.refuseUpdate = null;
+        return { data: null, error: { message: "canceling statement due to statement timeout" } };
+      }
       if (op === "update") {
+        // The CHECKs the migrations declare, refused as Postgres refuses them.
+        for (const r of rows) {
+          const next = { ...r, ...(values as Row) };
+          for (const [name, holds] of CHECKS[table] ?? []) {
+            if (!holds(next)) {
+              return {
+                data: null,
+                error: { message: `violates check constraint "${name}"`, code: "23514" },
+              };
+            }
+          }
+        }
         for (const r of rows) Object.assign(r, values);
       }
       if (order) {
@@ -87,6 +112,7 @@ vi.mock("@/integrations/supabase/client.server", () => {
       is: (c: string, v: unknown) => (filters.push((r) => (r[c] ?? null) === v), b),
       not: (c: string, _op: string, v: unknown) => (filters.push((r) => (r[c] ?? null) !== v), b),
       in: (c: string, vs: unknown[]) => (filters.push((r) => vs.includes(r[c])), b),
+      gte: (c: string, v: string) => (filters.push((r) => r[c] != null && String(r[c]) >= v), b),
       order: (column: string, o?: { ascending?: boolean }) => (
         (order = { column, ascending: o?.ascending !== false }),
         b
@@ -145,8 +171,11 @@ import {
   archiveAnnouncement,
   postOperatorReply,
   postWorkspaceReply,
+  publishAnnouncement,
+  recallAnnouncement,
   recordAnnouncementDeliveries,
   recordAnnouncementSeen,
+  recordAnnouncementWithdrawals,
   sendAnnouncement,
   updateAnnouncement,
 } from "./announcements.server";
@@ -221,6 +250,7 @@ beforeEach(() => {
   h.seq = 0;
   h.broadcasts = [];
   h.refusing = new Set();
+  h.refuseUpdate = null;
 });
 
 describe("the prime is served", () => {
@@ -564,5 +594,222 @@ describe("an operator is told who answered", () => {
         }),
       }),
     ]);
+  });
+});
+
+describe("recall", () => {
+  it("takes a live message down at once: unpublished, marked recalled, the revision bumped", async () => {
+    h.tables.clone_announcements = [message({ revision: 10 })];
+    const recalled = await recallAnnouncement({
+      id: "ann-1",
+      actorId: "operator-1",
+      note: "Wrong date",
+    });
+    expect(recalled.ok).toBe(true);
+    const [row] = h.tables.clone_announcements;
+    expect(row.published_at).toBeNull();
+    expect(row.recalled_at).toEqual(expect.any(String));
+    expect(row.revision).toBe(11);
+    expect(h.audits).toEqual(["clone_announcement.recalled"]);
+    expect(h.notices).toEqual([
+      expect.objectContaining({
+        kind: "clone_announcement_recalled",
+        title: "Message recalled: " + row.title,
+      }),
+    ]);
+    // No workspace is served it any more.
+    const read = await announcementsForWorkspace(CLONE);
+    expect(read.ok && read.announcements).toEqual([]);
+  });
+
+  it("signals every workspace it reached, so their dashboards drop it within seconds", async () => {
+    h.tables.clone_announcements = [message()];
+    const recalled = await recallAnnouncement({ id: "ann-1", actorId: "operator-1" });
+    expect(recalled.ok && recalled.signal).toEqual({ reached: 3, signalled: 3, failed: 0 });
+    expect(h.broadcasts.map((b) => b.url).sort()).toEqual([CLONE_RT, OTHER_RT, PRIME_RT].sort());
+    expect(JSON.stringify(h.broadcasts)).not.toContain("Going Live");
+  });
+
+  it("recalls a scheduled message before anyone sees it", async () => {
+    h.tables.clone_announcements = [
+      message({
+        starts_at: new Date(Date.now() + 3_600_000).toISOString(),
+        audience_clone_ids: [OTHER],
+      }),
+    ];
+    const recalled = await recallAnnouncement({ id: "ann-1", actorId: "operator-1" });
+    expect(recalled.ok).toBe(true);
+    expect(h.tables.clone_announcements[0].published_at).toBeNull();
+    expect(h.broadcasts.map((b) => b.url)).toEqual([OTHER_RT]);
+  });
+
+  it("refuses what is not out — a draft, a recalled or an archived message — and changes nothing", async () => {
+    h.tables.clone_announcements = [
+      message({ id: "draft", published_at: null }),
+      message({ id: "archived", archived_at: new Date().toISOString() }),
+    ];
+    expect(await recallAnnouncement({ id: "draft", actorId: "o" })).toEqual({
+      ok: false,
+      error: "not_out",
+    });
+    expect(await recallAnnouncement({ id: "archived", actorId: "o" })).toEqual({
+      ok: false,
+      error: "ended",
+    });
+    expect(await recallAnnouncement({ id: "missing", actorId: "o" })).toEqual({
+      ok: false,
+      error: "not_found",
+    });
+    expect(h.audits).toEqual([]);
+    expect(h.broadcasts).toEqual([]);
+
+    h.tables.clone_announcements = [message()];
+    await recallAnnouncement({ id: "ann-1", actorId: "o" });
+    expect(await recallAnnouncement({ id: "ann-1", actorId: "o" })).toEqual({
+      ok: false,
+      error: "not_out",
+    });
+    expect(h.audits).toEqual(["clone_announcement.recalled"]);
+  });
+
+  it("a late retry of the send that put it out never puts it back", async () => {
+    const sent = await sendAnnouncement(draftInput);
+    const id = sent.ok ? (sent.row.id as string) : "";
+    await recallAnnouncement({ id, actorId: "operator-1" });
+    const retry = await sendAnnouncement(draftInput);
+    expect(retry.ok && retry.repeated).toBe(true);
+    expect(h.tables.clone_announcements[0].published_at).toBeNull();
+    expect(h.audits.filter((a) => a === "clone_announcement.published")).toHaveLength(1);
+  });
+
+  it("sent again from the editor, it goes out corrected, no longer recalled, and new to every dashboard", async () => {
+    h.tables.clone_announcements = [message({ revision: 4 })];
+    await recallAnnouncement({ id: "ann-1", actorId: "operator-1" });
+    const again = await sendAnnouncement({
+      ...draftInput,
+      id: "ann-1",
+      title: "Going Live - 1 November 2026",
+      clientRequestId: "6f1d9c2e-1b7a-4c55-8e0b-5a3e9d7c2f10",
+    });
+    expect(again.ok).toBe(true);
+    const [row] = h.tables.clone_announcements;
+    expect(row.published_at).toEqual(expect.any(String));
+    expect(row.recalled_at).toBeNull();
+    // The dismissals of revision 4 do not hide revision 5.
+    expect(row.revision).toBe(5);
+    expect(row.title).toBe("Going Live - 1 November 2026");
+  });
+
+  it("publishing a recalled message clears the recall, as the database requires", async () => {
+    h.tables.clone_announcements = [message()];
+    await recallAnnouncement({ id: "ann-1", actorId: "operator-1" });
+    expect((await publishAnnouncement({ id: "ann-1", actorId: "operator-1" })).ok).toBe(true);
+    expect(h.tables.clone_announcements[0].recalled_at).toBeNull();
+  });
+
+  it("a send again that fails changes nothing, and its retry sends the correction", async () => {
+    h.tables.clone_announcements = [message()];
+    await recallAnnouncement({ id: "ann-1", actorId: "operator-1" });
+    const again = {
+      ...draftInput,
+      id: "ann-1",
+      title: "Going Live - 1 November 2026",
+      clientRequestId: "6f1d9c2e-1b7a-4c55-8e0b-5a3e9d7c2f10",
+    };
+    h.refuseUpdate = (table, values) => table === "clone_announcements" && !!values.published_at;
+    expect((await sendAnnouncement(again)).ok).toBe(false);
+    expect(h.tables.clone_announcements[0]).toMatchObject({
+      title: message().title,
+      published_at: null,
+      recalled_at: expect.any(String),
+    });
+
+    // The same act, tried again: sent, not reported already sent.
+    const retry = await sendAnnouncement(again);
+    expect(retry.ok && retry.repeated).toBeFalsy();
+    expect(h.tables.clone_announcements[0]).toMatchObject({
+      title: "Going Live - 1 November 2026",
+      published_at: expect.any(String),
+      recalled_at: null,
+    });
+  });
+});
+
+describe("a recall is confirmed by the workspaces themselves", () => {
+  const stamp = (cloneId: string, extra: Row = {}): Row => ({
+    announcement_id: "ann-1",
+    clone_id: cloneId,
+    first_delivered_at: new Date(Date.now() - 3_600_000).toISOString(),
+    last_delivered_at: new Date(Date.now() - 600_000).toISOString(),
+    delivery_count: 3,
+    last_revision: 1,
+    withdrawn_at: null,
+    ...extra,
+  });
+
+  it("a workspace that had it confirms on its next fetch; one that never fetched it has nothing to withdraw", async () => {
+    h.tables.clone_announcements = [message()];
+    h.tables.clone_announcement_deliveries = [stamp(CLONE)];
+    await recallAnnouncement({ id: "ann-1", actorId: "operator-1" });
+
+    await recordAnnouncementWithdrawals(CLONE, []);
+    await recordAnnouncementWithdrawals(OTHER, []);
+    expect(h.tables.clone_announcement_deliveries).toEqual([
+      expect.objectContaining({ clone_id: CLONE, withdrawn_at: expect.any(String) }),
+    ]);
+  });
+
+  it("an answer read before the recall landed, still holding it, withdraws nothing", async () => {
+    h.tables.clone_announcements = [message()];
+    h.tables.clone_announcement_deliveries = [stamp(CLONE)];
+    await recallAnnouncement({ id: "ann-1", actorId: "operator-1" });
+    await recordAnnouncementWithdrawals(CLONE, [{ id: "ann-1" }]);
+    expect(h.tables.clone_announcement_deliveries[0].withdrawn_at).toBeNull();
+    await recordAnnouncementWithdrawals(CLONE, []);
+    expect(h.tables.clone_announcement_deliveries[0].withdrawn_at).toEqual(expect.any(String));
+  });
+
+  it("is stamped once, at the first fetch after the recall", async () => {
+    h.tables.clone_announcements = [message()];
+    h.tables.clone_announcement_deliveries = [stamp(CLONE)];
+    await recallAnnouncement({ id: "ann-1", actorId: "operator-1" });
+    await recordAnnouncementWithdrawals(CLONE, []);
+    const first = h.tables.clone_announcement_deliveries[0].withdrawn_at;
+    await new Promise((r) => setTimeout(r, 5));
+    await recordAnnouncementWithdrawals(CLONE, []);
+    expect(h.tables.clone_announcement_deliveries[0].withdrawn_at).toBe(first);
+  });
+
+  it("a withdrawal from an earlier recall does not count for a later one", async () => {
+    h.tables.clone_announcements = [message()];
+    h.tables.clone_announcement_deliveries = [
+      stamp(CLONE, { withdrawn_at: new Date(Date.now() - 3_000_000).toISOString() }),
+    ];
+    await recallAnnouncement({ id: "ann-1", actorId: "operator-1" });
+    await recordAnnouncementWithdrawals(CLONE, []);
+    const w = Date.parse(h.tables.clone_announcement_deliveries[0].withdrawn_at as string);
+    expect(w).toBeGreaterThanOrEqual(
+      Date.parse(h.tables.clone_announcements[0].recalled_at as string),
+    );
+  });
+
+  it("delivered again after it is sent again, it is no longer withdrawn", async () => {
+    h.tables.clone_announcement_deliveries = [
+      stamp(CLONE, { withdrawn_at: new Date().toISOString() }),
+    ];
+    await recordAnnouncementDeliveries(CLONE, [{ id: "ann-1", revision: 2 }]);
+    expect(h.tables.clone_announcement_deliveries[0].withdrawn_at).toBeNull();
+  });
+
+  it("with no recent recall it reads one small list and writes nothing", async () => {
+    h.tables.clone_announcements = [message()];
+    h.tables.clone_announcement_deliveries = [stamp(CLONE)];
+    await recordAnnouncementWithdrawals(CLONE, []);
+    expect(h.tables.clone_announcement_deliveries[0].withdrawn_at).toBeNull();
+  });
+
+  it("never fails a workspace's answer when it cannot read", async () => {
+    h.failing.add("clone_announcements:select");
+    await expect(recordAnnouncementWithdrawals(CLONE, [])).resolves.toBeUndefined();
   });
 });

@@ -142,6 +142,7 @@ browser received it 190 ms (prime) and 224 ms (NPC Test) after it was sent.
 | Act | Who is signalled |
 |---|---|
 | Send now, Publish, Re-raise, Archive | every workspace the message reaches |
+| Recall | every workspace the message reached |
 | Edit of a published message | every workspace it reached before **or** reaches now — a narrowed message must leave the workspace it was taken from |
 | Schedule | every workspace it will reach, so their dashboards learn the start time |
 | An operator's answer in a thread | that workspace alone |
@@ -199,11 +200,55 @@ here, or "Prime workspace"), who wrote, an excerpt and the message.
 - A relay deployed before this change sends no business; the operator is
   shown the workspace's name alone.
 
+## Recall (28 Oct 2026)
+
+The owner asked for a way to withdraw a message that went out wrong, at once,
+from every dashboard it reached. **Recall** sits beside Re-raise on a live or
+scheduled message, and in the Edit dialog of one.
+
+**Why not Archive?** Archive already takes a message down, but it files it as
+finished. Recall says it should not have gone out:
+
+- It returns to the drafts, marked **Recalled**, so it can be corrected and
+  sent again.
+- It bumps the revision, so the corrected message is new to every dashboard,
+  including those that had dismissed the wrong one.
+- It tells the operator, workspace by workspace, when the message has
+  actually come down.
+
+**What happens** (`recallAnnouncement`, rules in `cloneAnnouncements.pure.ts`):
+
+| | |
+|---|---|
+| The row | `published_at` cleared, `recalled_at` stamped, `revision` + 1, in one update guarded on the message still being out, so a racing act never changes it twice. A CHECK forbids recalled and out at once; publishing again clears `recalled_at`. |
+| The fleet | Every workspace it reached is signalled. Mission Control no longer serves it, so each open dashboard's next read drops it: the banner, the centred popup, the side notice and the Message Hub. The dashboard also closes any browser notification it raised for a notice it no longer holds. |
+| The record | `clone_announcement.recalled` in the audit log with the optional note, and a `clone_announcement_recalled` notification to the other operators. Replies already received stay. |
+| The proof | A workspace that had fetched it stamps `withdrawn_at` on its delivery row the first time it fetches after the recall (`recordAnnouncementWithdrawals`). The console reads "withdrawn from 1 of 1 workspace that had it" from those stamps, and polls every 3 s while a recall from the last 10 minutes still waits on one. A workspace with no dashboard open confirms when somebody next opens it. |
+
+Measured speed: the signal reaches an open dashboard in about 0.2 s, the
+dashboard asks within 1.2 s, and its relay answers in 1.5–4 s. So an open
+dashboard drops a recalled message in about 2–5 s.
+
+**Recall and Edit.** They work together, not instead of each other:
+
+- A **Save** changes a live message in place and interrupts nobody again.
+- **Narrowing** the audience in Edit takes the message down from the
+  workspaces removed; that is a recall for those workspaces only.
+- **Recall** takes it down everywhere.
+- A recalled message opens in Edit as **Correct and send again**, and Send
+  now puts it out afresh.
+- **Send again** on the list sends it unchanged, for a recall that was
+  itself the mistake.
+
+A late retry of the Send now that first put the message out finds it
+recalled and does nothing, so a recalled message cannot be resent by
+accident.
+
 ## Who may do what
 
 Reads use `requireOperator`, so support can see what the fleet is being told
-and read replies. Writing, sending, publishing, archiving, re-raising and
-answering use `requireAdmin`. The page hides the write controls from operators,
+and read replies. Writing, sending, publishing, archiving, re-raising,
+recalling and answering use `requireAdmin`. The page hides the write controls from operators,
 and the server enforces the same rule whatever the page shows.
 
 ## How a workspace receives it
@@ -241,6 +286,13 @@ means no dashboard it reaches has asked since it went live — a workspace asks
 only while somebody has its dashboard open.
 
 ## Deploying it
+
+Recall adds two migrations: `20261028150000_workspace_message_recall_kind.sql`
+(the notification kind) and `20261028150100_workspace_message_recall.sql`
+(`recalled_at`, `withdrawn_at`). Both are additive, and they are applied on
+merge before the console that writes them is published. The workspace half
+(closing a recalled notice's browser notification) ships from the prime. A
+dashboard without it still drops the message itself.
 
 The 28 Oct 2026 change needs no migration here. The workspace half (the
 dashboard's signal listener, the relay carrying `nextChangeAt` and the

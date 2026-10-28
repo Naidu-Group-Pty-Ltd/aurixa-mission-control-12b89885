@@ -24,6 +24,8 @@ export type AnnouncementSeverity = "info" | "success" | "warning" | "critical";
 export type AnnouncementDisplay = "banner" | "modal";
 export type AnnouncementState =
   | "draft"
+  /** Withdrawn by its operator after it went out: a draft again, marked so (`recallRefusal`). */
+  | "recalled"
   | "scheduled"
   | "active"
   | "expired"
@@ -97,6 +99,8 @@ export interface AnnouncementFacts {
   revision: number;
   published_at: string | null;
   archived_at: string | null;
+  /** When it was recalled; absent on every row written before recall existed. */
+  recalled_at?: string | null;
 }
 
 /** The scope columns, and how they combine. */
@@ -117,12 +121,12 @@ export interface AudienceClone {
 export function resolveAnnouncementState(
   row: Pick<
     AnnouncementFacts,
-    "published_at" | "archived_at" | "starts_at" | "ends_at"
+    "published_at" | "archived_at" | "starts_at" | "ends_at" | "recalled_at"
   >,
   now: Date = new Date(),
 ): AnnouncementState {
   if (row.archived_at) return "archived";
-  if (!row.published_at) return "draft";
+  if (!row.published_at) return row.recalled_at ? "recalled" : "draft";
   if (row.starts_at && Date.parse(row.starts_at) > now.getTime()) {
     return "scheduled";
   }
@@ -370,6 +374,8 @@ export function announcementTone(
       return "success";
     case "scheduled":
       return "warning";
+    case "recalled":
+      return "danger";
     case "expired":
     case "archived":
     case "draft":
@@ -385,6 +391,8 @@ export function describeAnnouncementState(
   switch (state) {
     case "draft":
       return "A draft nobody can see. Publish it to put it in front of its audience.";
+    case "recalled":
+      return "Recalled: withdrawn from every workspace it reached, and served to nobody. Correct it with Edit and send it again, or archive it.";
     case "scheduled":
       return `Published, waiting for its start time${row.starts_at ? ` (${row.starts_at})` : ""}.`;
     case "active":
@@ -396,6 +404,90 @@ export function describeAnnouncementState(
     case "archived":
       return "Archived. Kept for the record, served to nobody.";
   }
+}
+
+/* ------------------------------------------------------------------------- *
+ * Recall: withdrawing a message that went out wrong (28 Oct 2026).
+ *
+ * Archive files a message away as finished. Recall says it should not have
+ * gone out: it comes down from every dashboard at once — Mission Control
+ * stops serving it and signals every workspace it reached — and returns to
+ * the operator as a draft marked recalled, to be corrected and sent again or
+ * archived. Recalling bumps the revision, so the corrected message is new to
+ * every dashboard, those that had dismissed the wrong one included.
+ *
+ * Whether it has come down is read from the effect, never assumed from the
+ * act: a workspace that had fetched it confirms the withdrawal the first time
+ * it fetches after the recall (`withdrawn_at` on its delivery stamp).
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Why this message cannot be recalled, or null. Only a message that is out
+ * — live, or scheduled to go live — can be: a draft is nobody's to withdraw,
+ * an archived or ended one is already served to nobody.
+ */
+export function recallRefusal(
+  row: Pick<
+    AnnouncementFacts,
+    "published_at" | "archived_at" | "starts_at" | "ends_at" | "recalled_at"
+  > | null,
+  now: Date = new Date(),
+): null | "not_found" | "not_out" | "ended" {
+  if (!row) return "not_found";
+  const state = resolveAnnouncementState(row, now);
+  if (state === "active" || state === "scheduled") return null;
+  if (state === "draft" || state === "recalled") return "not_out";
+  return "ended";
+}
+
+/** What a recall has done so far, as the workspaces themselves report it. */
+export type WithdrawalSummary = {
+  /** Workspaces that had fetched the message at least once, so had something to withdraw. */
+  had: number;
+  /** Of those, the ones that have fetched since the recall, and so no longer hold it. */
+  confirmed: number;
+};
+
+/**
+ * Count the withdrawal from the delivery stamps of the workspaces the message
+ * reaches. A stamp withdrawn before THIS recall (a message recalled, sent
+ * again and recalled again) does not count for it.
+ */
+export function withdrawalOf(
+  recalledAt: string,
+  stamps: ReadonlyArray<{ withdrawnAt: string | null } | null>,
+): WithdrawalSummary {
+  const at = Date.parse(recalledAt);
+  let had = 0;
+  let confirmed = 0;
+  for (const s of stamps) {
+    if (!s) continue;
+    had += 1;
+    const w = s.withdrawnAt ? Date.parse(s.withdrawnAt) : Number.NaN;
+    if (Number.isFinite(w) && Number.isFinite(at) && w >= at) confirmed += 1;
+  }
+  return { had, confirmed };
+}
+
+/** How long after a recall the console watches for the withdrawals closely. */
+export const RECALL_WATCH_MS = 10 * 60 * 1000;
+
+/**
+ * Is a recent recall still waiting on a workspace? The console then asks
+ * every few seconds, so the operator watches the message come down rather
+ * than waiting a minute to learn it has.
+ */
+export function withdrawalPending(
+  rows: ReadonlyArray<{ recalledAt: string | null; withdrawal: WithdrawalSummary | null }>,
+  now: Date = new Date(),
+): boolean {
+  return rows.some(
+    (r) =>
+      r.recalledAt !== null &&
+      r.withdrawal !== null &&
+      r.withdrawal.confirmed < r.withdrawal.had &&
+      now.getTime() - Date.parse(r.recalledAt) < RECALL_WATCH_MS,
+  );
 }
 
 /* ------------------------------------------------------------------------- *

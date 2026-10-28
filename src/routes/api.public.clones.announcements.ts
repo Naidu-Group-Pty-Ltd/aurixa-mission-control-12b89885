@@ -3,6 +3,7 @@ import { jsonResponse, resolveCloneApiKey } from "@/server/clone-api-keys.server
 import {
   announcementsForWorkspace,
   recordAnnouncementDeliveries,
+  recordAnnouncementWithdrawals,
 } from "@/server/announcements.server";
 import { checkRateLimit } from "@/server/token-rate-limit.server";
 
@@ -105,6 +106,11 @@ export const Route = createFileRoute("/api/public/clones/announcements")({
             read.workspaceId,
             read.announcements.map((a) => ({ id: a.id, revision: a.revision })),
           ).catch((err) => console.error("[announcements] delivery stamp threw", err));
+          // And a recalled message this answer no longer holds is withdrawn
+          // here: the console's "withdrawn from N of M" is read from this.
+          await recordAnnouncementWithdrawals(read.workspaceId, read.announcements).catch((err) =>
+            console.error("[announcements] withdrawal stamp threw", err),
+          );
         }
 
         // `nextChangeAt` and `serverTime` let an open dashboard ask again at

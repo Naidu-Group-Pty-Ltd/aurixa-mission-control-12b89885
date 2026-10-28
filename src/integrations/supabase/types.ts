@@ -1600,6 +1600,7 @@ export type Database = {
           last_revision: number
           last_seen_at: string | null
           seen_count: number
+          withdrawn_at: string | null
         }
         Insert: {
           announcement_id: string
@@ -1611,6 +1612,7 @@ export type Database = {
           last_revision?: number
           last_seen_at?: string | null
           seen_count?: number
+          withdrawn_at?: string | null
         }
         Update: {
           announcement_id?: string
@@ -1622,6 +1624,7 @@ export type Database = {
           last_revision?: number
           last_seen_at?: string | null
           seen_count?: number
+          withdrawn_at?: string | null
         }
         Relationships: [
           {
@@ -1703,6 +1706,7 @@ export type Database = {
           link_label: string | null
           link_url: string | null
           published_at: string | null
+          recalled_at: string | null
           replies_enabled: boolean
           revision: number
           severity: string
@@ -1726,6 +1730,7 @@ export type Database = {
           link_label?: string | null
           link_url?: string | null
           published_at?: string | null
+          recalled_at?: string | null
           replies_enabled?: boolean
           revision?: number
           severity?: string
@@ -1749,6 +1754,7 @@ export type Database = {
           link_label?: string | null
           link_url?: string | null
           published_at?: string | null
+          recalled_at?: string | null
           replies_enabled?: boolean
           revision?: number
           severity?: string
@@ -16696,6 +16702,7 @@ export type Database = {
         | "clone_announcement_published"
         | "clone_announcement_archived"
         | "clone_announcement_reply"
+        | "clone_announcement_recalled"
         | "deployment_bundle_identity"
         | "lead_stage_email_failed"
         | "calendar_booking_failed"
@@ -17201,6 +17208,7 @@ export const Constants = {
         "clone_announcement_published",
         "clone_announcement_archived",
         "clone_announcement_reply",
+        "clone_announcement_recalled",
         "deployment_bundle_identity",
         "lead_stage_email_failed",
         "calendar_booking_failed",
