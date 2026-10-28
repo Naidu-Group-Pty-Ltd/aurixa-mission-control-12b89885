@@ -214,9 +214,9 @@ export const getCloneMigrationStatus = createServerFn({ method: "POST" })
       /** The highest runnable version the clone itself records. */
       latestAppliedVersion: standing?.latestAppliedVersion ?? null,
       /**
-       * What the recorded coverage rests on: executed here, asserted, or
-       * recorded before anybody was writing the difference down. Null = not
-       * measured, which is never the same as "all executed".
+       * What the recorded coverage rests on: executed here, asserted, run by
+       * another applier, or recorded before anybody was writing the difference
+       * down. Null = not measured, which is never the same as "all executed".
        */
       coverage,
       /** One sentence for an operator, or null when there is no caveat. */

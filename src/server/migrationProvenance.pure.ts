@@ -71,16 +71,43 @@
  * classified by eight exact strings, and the eight slug-named APPLIES sitting
  * beside them are left unknown rather than swept up by a rule that could not
  * tell them apart.
+ *
+ * ## A row another applier wrote
+ *
+ * `external` is a version some other applier ran and recorded, so this lane
+ * has no record of it. The test is the writer's own, exact and in the data:
+ * every Mission Control writer of the canonical ledger stores NO body (the
+ * lane's `ledgerRecordSql` and `stampMigrationLedgerFromPrime` both write
+ * `ARRAY[]::text[]`), and the lane always writes the legacy row beside it. So a
+ * canonical row that carries the file's body, with no legacy row, was recorded
+ * by something else: the repository's own "Apply a migration" workflow (its
+ * recorder stores the body it applied), the Supabase CLI, or a hand-run
+ * `apply_migration`. Measured 27 Oct 2026, these are exactly:
+ *
+ *   - on npc-crm-independent-6505dc, the five versions its own workflow applied
+ *     on 26 Oct (run 40406460451) while this lane was holding them behind four
+ *     holes, the reason that workflow now stands down where this lane applies
+ *     (D13);
+ *   - on the three mirrors, 6, 8 and 8 hand-run applies between 6 and 13 Sep,
+ *     recorded under the time they ran rather than a prime version.
+ *
+ * It describes, like the other two, and never decides: the union is unchanged,
+ * and an external row means "do not send" exactly as the others do.
  */
 
 /** How a recorded version came to be recorded. */
-export type MigrationProvenance = "applied" | "asserted";
+export type MigrationProvenance = "applied" | "asserted" | "external";
 
-/** The two values the column accepts, for the check constraint and for tests. */
+/** The values the column accepts, for the check constraint and for tests. */
 export const MIGRATION_PROVENANCE_VALUES: readonly MigrationProvenance[] = [
   "applied",
   "asserted",
+  "external",
 ] as const;
+
+/** The note an `external` row carries, before the name its applier gave it. */
+export const EXTERNAL_APPLY_NOTE =
+  "recorded with its body by an applier other than Mission Control";
 
 /** One provenance record read back from a clone. */
 export type ProvenanceRow = { version: string; provenance: MigrationProvenance };
@@ -98,6 +125,8 @@ export type CoverageComposition = {
   applied: number;
   /** Recorded because somebody asserted the clone was already level. */
   asserted: number;
+  /** Run and recorded here by an applier other than Mission Control. */
+  external: number;
   /** Recorded before anybody was writing this down. Unknown, not a kind. */
   unclassified: number;
 };
@@ -199,17 +228,25 @@ export function provenanceFromLedgerName(
 /**
  * Read provenance off a canonical-ledger row.
  *
- * Symmetric with {@link provenanceFromLedgerName} and just as narrow: it
- * recognises only names whose writer is on {@link KNOWN_ASSERTION_NAMES}, and
- * answers null — unknown — for everything else, including every filename.
- * The canonical ledger's `name` is `coalesce(name, version)` from the prime, so
- * a filename there says nothing about what happened on the CLONE.
+ * Symmetric with {@link provenanceFromLedgerName} and just as narrow. A name
+ * whose writer is on {@link KNOWN_ASSERTION_NAMES} is an assertion. A row that
+ * carries the file's body, with no legacy row beside it, is `external`: no
+ * Mission Control writer stores a body, and the lane always writes the legacy
+ * row (see "A row another applier wrote" above). Everything else is null —
+ * unknown — including every filename: the canonical ledger's `name` is
+ * `coalesce(name, version)` from the prime, so a filename there says nothing
+ * about what happened on the CLONE.
  */
-export function provenanceFromCanonicalName(
-  name: string | null | undefined,
-): MigrationProvenance | null {
-  if (!name) return null;
-  return KNOWN_ASSERTION_NAMES.includes(name.trim()) ? "asserted" : null;
+export function provenanceFromCanonicalRow(row: {
+  name: string | null | undefined;
+  /** The row's `statements` holds at least one statement. */
+  hasBody: boolean;
+  /** `aurixa.schema_migrations` records the same version. */
+  hasLegacyRow: boolean;
+}): MigrationProvenance | null {
+  const name = row.name?.trim() ?? "";
+  if (name && KNOWN_ASSERTION_NAMES.includes(name)) return "asserted";
+  return row.hasBody && !row.hasLegacyRow ? "external" : null;
 }
 
 /**
@@ -232,16 +269,19 @@ export function composeCoverage(
 
   let applied = 0;
   let asserted = 0;
+  let external = 0;
   for (const kind of byVersion.values()) {
     if (kind === "applied") applied += 1;
-    else asserted += 1;
+    else if (kind === "asserted") asserted += 1;
+    else external += 1;
   }
 
   return {
     recorded: recorded.size,
     applied,
     asserted,
-    unclassified: recorded.size - applied - asserted,
+    external,
+    unclassified: recorded.size - applied - asserted - external,
   };
 }
 
@@ -259,6 +299,9 @@ export function describeCoverage(c: CoverageComposition): string | null {
   const parts: string[] = [];
   if (c.asserted > 0) {
     parts.push(`${c.asserted} rest on an assertion that the clone was already level`);
+  }
+  if (c.external > 0) {
+    parts.push(`${c.external} were run here by an applier other than Mission Control`);
   }
   if (c.unclassified > 0) {
     parts.push(`${c.unclassified} were recorded before this was written down`);

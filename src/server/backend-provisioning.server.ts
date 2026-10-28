@@ -41,6 +41,7 @@ import {
 } from "./sharedVersionDelivery.pure";
 import { ledgerWriteRefusal } from "./migrationLedgerWrites.pure";
 import { mentionedVersionsOf } from "./migrationVersionMentions.pure";
+import { MIGRATION_PROVENANCE_VALUES } from "./migrationProvenance.pure";
 import {
   parseStoredSecretDigests,
   planSecretWrite,
@@ -2749,7 +2750,15 @@ export async function replicateRealtimePublication(
  * which is the state most clones are in most of the time, and exactly the
  * state whose coverage is worth describing. A backfill that could only run on
  * a clone that was already behind would have annotated almost nothing.
+ *
+ * The values the check accepts come from `MIGRATION_PROVENANCE_VALUES`, so the
+ * column and the classifier cannot disagree about what a row may say; and a
+ * table made under a narrower list is widened by the same statement.
  */
+const PROVENANCE_VALUES_SQL = MIGRATION_PROVENANCE_VALUES.map((v) => `'${v}'`).join(", ");
+const PROVENANCE_CHECK_IS_NARROW = MIGRATION_PROVENANCE_VALUES.map(
+  (v) => `pg_get_constraintdef(oid) not like '%''${v}''%'`,
+).join(" or ");
 export const PROVENANCE_TABLE_SQL = `
 create schema if not exists aurixa;
 -- HOW a version came to be recorded, which neither migration ledger can say.
@@ -2765,10 +2774,28 @@ create schema if not exists aurixa;
 -- and the only honest one for anything written before this existed.
 create table if not exists aurixa.migration_provenance (
   version text primary key,
-  provenance text not null check (provenance in ('applied', 'asserted')),
+  provenance text not null check (provenance in (${PROVENANCE_VALUES_SQL})),
   recorded_at timestamptz not null default now(),
   note text
 );
+-- A table made under a narrower list (before 'external', 27 Oct 2026) keeps
+-- that check under its default name. Widened once, a no-op on every pass after.
+do $provenance$
+begin
+  if exists (
+    select 1 from pg_constraint
+    where conrelid = 'aurixa.migration_provenance'::regclass
+      and conname = 'migration_provenance_provenance_check'
+      and (${PROVENANCE_CHECK_IS_NARROW})
+  ) then
+    alter table aurixa.migration_provenance
+      drop constraint migration_provenance_provenance_check;
+    alter table aurixa.migration_provenance
+      add constraint migration_provenance_provenance_check
+      check (provenance in (${PROVENANCE_VALUES_SQL}));
+  end if;
+end
+$provenance$;
 `.trim();
 
 const TRACKING_TABLE_SQL = `

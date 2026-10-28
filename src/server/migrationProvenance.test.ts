@@ -1,13 +1,15 @@
 import { readFileSync } from "node:fs";
 import { upgradeNote } from "./migrationProvenance.server";
+import { PROVENANCE_TABLE_SQL } from "./backend-provisioning.server";
 import { describe, expect, it } from "vitest";
 import {
   BASELINE_ASSERTION_NAME,
   composeCoverage,
   describeCoverage,
   KNOWN_ASSERTION_NAMES,
+  EXTERNAL_APPLY_NOTE,
   MIGRATION_PROVENANCE_VALUES,
-  provenanceFromCanonicalName,
+  provenanceFromCanonicalRow,
   provenanceFromLedgerName,
   type ProvenanceRow,
 } from "./migrationProvenance.pure";
@@ -88,13 +90,16 @@ describe("provenanceFromLedgerName", () => {
   });
 });
 
-describe("provenanceFromCanonicalName", () => {
+describe("provenanceFromCanonicalRow", () => {
+  // What the lane's own writers leave: no body, and a legacy row beside it.
+  const mine = { hasBody: false, hasLegacyRow: true };
+
   it("recognises the one assertion writer whose run is known", () => {
-    expect(provenanceFromCanonicalName("aurixa-baseline")).toBe("asserted");
+    expect(provenanceFromCanonicalRow({ name: "aurixa-baseline", ...mine })).toBe("asserted");
   });
 
   it("tolerates surrounding whitespace", () => {
-    expect(provenanceFromCanonicalName("  aurixa-baseline  ")).toBe("asserted");
+    expect(provenanceFromCanonicalRow({ name: "  aurixa-baseline  ", ...mine })).toBe("asserted");
   });
 
   it.each([
@@ -105,11 +110,13 @@ describe("provenanceFromCanonicalName", () => {
   ])("answers unknown for everything else (%s)", (name) => {
     // A filename in the CANONICAL ledger is copied from the prime by
     // `stampMigrationLedgerFromPrime` and says nothing about the clone.
-    expect(provenanceFromCanonicalName(name)).toBeNull();
+    expect(provenanceFromCanonicalRow({ name, ...mine })).toBeNull();
+    // Nor does a bare name with no legacy row: a stamp carries no body.
+    expect(provenanceFromCanonicalRow({ name, hasBody: false, hasLegacyRow: false })).toBeNull();
   });
 
   it.each([[null], [undefined], [""]])("answers null for %s", (name) => {
-    expect(provenanceFromCanonicalName(name as string | null)).toBeNull();
+    expect(provenanceFromCanonicalRow({ name: name as string | null, ...mine })).toBeNull();
   });
 
   it("keeps the known-writer list a list, not a pattern", () => {
@@ -123,29 +130,107 @@ describe("provenanceFromCanonicalName", () => {
   });
 });
 
+describe("a row another applier wrote", () => {
+  /*
+    Measured 27 Oct 2026. npc-crm-independent-6505dc's own "Apply a migration"
+    workflow ran five versions on 26 Oct (run 40406460451) while this lane held
+    them behind four holes; its recorder stores the body it applied and writes
+    no legacy row. The three mirrors carry 6, 8 and 8 hand-run applies from
+    6-13 Sep, recorded the same way. Every Mission Control writer of the
+    canonical ledger stores `ARRAY[]::text[]` and the lane writes the legacy
+    row beside it, so the two marks together are the writer's own signature.
+  */
+
+  it("labels a body with no legacy row external", () => {
+    expect(
+      provenanceFromCanonicalRow({
+        name: "brand_settings_logo_dark_url",
+        hasBody: true,
+        hasLegacyRow: false,
+      }),
+    ).toBe("external");
+  });
+
+  it("labels it external whatever name its applier gave it, or none", () => {
+    for (const name of ["20261026090000", "20261026090000_x.sql", "", null, undefined]) {
+      expect(provenanceFromCanonicalRow({ name, hasBody: true, hasLegacyRow: false })).toBe(
+        "external",
+      );
+    }
+  });
+
+  it("leaves a body beside a legacy row unknown", () => {
+    // The legacy row is the lane's own mark. A row carrying both is not one
+    // this rule can attribute, so it answers what it can read: nothing.
+    expect(
+      provenanceFromCanonicalRow({ name: "20261026090000", hasBody: true, hasLegacyRow: true }),
+    ).toBeNull();
+  });
+
+  it("leaves a row with no body unknown", () => {
+    // The shape every Mission Control writer leaves, legacy row or not: the
+    // stamp `stampMigrationLedgerFromPrime` copies from the prime is bodiless.
+    expect(
+      provenanceFromCanonicalRow({ name: "20261026090000", hasBody: false, hasLegacyRow: false }),
+    ).toBeNull();
+  });
+
+  it("lets a known assertion name outrank the body test", () => {
+    // An assertion is what somebody wrote down. A body beside it does not make
+    // the assertion an execution, and the rule never decides that it does.
+    expect(
+      provenanceFromCanonicalRow({ name: "aurixa-baseline", hasBody: true, hasLegacyRow: false }),
+    ).toBe("asserted");
+  });
+
+  it("notes the row with what it is, before the name it was given", () => {
+    expect(EXTERNAL_APPLY_NOTE).toBe(
+      "recorded with its body by an applier other than Mission Control",
+    );
+    expect(EXTERNAL_APPLY_NOTE).not.toMatch(/applied here|executed here|Mission Control ran/i);
+  });
+
+  it("reads the body as a boolean, never the body itself", () => {
+    // A clone's bodies are megabytes this has no use for, and the mark the
+    // rule reads is whether a body exists, not what it says.
+    const server = read("src/server/migrationProvenance.server.ts");
+    expect(server).toContain("cardinality(coalesce(statements, '{}'::text[])) > 0 as has_body");
+    expect(server).not.toMatch(/select\s+version,\s*name,\s*statements\b/i);
+  });
+
+  it("asks the legacy ledger of the same pass, not a second read", () => {
+    const server = read("src/server/migrationProvenance.server.ts");
+    expect(server).toContain("const legacyVersions = new Set(legacy.map((r) => str(r.version)));");
+    expect(server).toContain("hasLegacyRow: legacyVersions.has(version)");
+  });
+});
+
 describe("composeCoverage", () => {
-  const rows = (...pairs: Array<[string, "applied" | "asserted"]>): ProvenanceRow[] =>
+  const rows = (...pairs: Array<[string, ProvenanceRow["provenance"]]>): ProvenanceRow[] =>
     pairs.map(([version, provenance]) => ({ version, provenance }));
 
   it("partitions the recorded set and always sums to it", () => {
     const c = composeCoverage(
-      ["a", "b", "c", "d", "e"],
-      rows(["a", "applied"], ["b", "applied"], ["c", "asserted"]),
+      ["a", "b", "c", "d", "e", "f"],
+      rows(["a", "applied"], ["b", "applied"], ["c", "asserted"], ["d", "external"]),
     );
-    expect(c).toEqual({ recorded: 5, applied: 2, asserted: 1, unclassified: 2 });
-    expect(c.applied + c.asserted + c.unclassified).toBe(c.recorded);
+    expect(c).toEqual({ recorded: 6, applied: 2, asserted: 1, external: 1, unclassified: 2 });
+    expect(c.applied + c.asserted + c.external + c.unclassified).toBe(c.recorded);
   });
 
   it("ignores provenance for a version the clone does not record", () => {
     // The table annotates the ledgers; it is never a second opinion on them.
-    const c = composeCoverage(["a"], rows(["a", "applied"], ["ghost", "applied"]));
-    expect(c).toEqual({ recorded: 1, applied: 1, asserted: 0, unclassified: 0 });
+    const c = composeCoverage(
+      ["a"],
+      rows(["a", "applied"], ["ghost", "applied"], ["phantom", "external"]),
+    );
+    expect(c).toEqual({ recorded: 1, applied: 1, asserted: 0, external: 0, unclassified: 0 });
   });
 
   it("counts a version once however many provenance rows name it", () => {
-    const c = composeCoverage(["a"], rows(["a", "applied"], ["a", "asserted"]));
+    const c = composeCoverage(["a"], rows(["a", "applied"], ["a", "asserted"], ["a", "external"]));
     expect(c.recorded).toBe(1);
-    expect(c.applied + c.asserted).toBe(1);
+    expect(c.applied + c.asserted + c.external).toBe(1);
   });
 
   it("de-duplicates the recorded set", () => {
@@ -157,6 +242,7 @@ describe("composeCoverage", () => {
       recorded: 0,
       applied: 0,
       asserted: 0,
+      external: 0,
       unclassified: 0,
     });
   });
@@ -167,20 +253,47 @@ describe("composeCoverage", () => {
     expect(c.unclassified).toBe(3);
     expect(c.applied).toBe(0);
     expect(c.asserted).toBe(0);
+    expect(c.external).toBe(0);
+  });
+
+  it("counts an external row as neither applied here nor unknown", () => {
+    // The CRM's five: run by its own workflow, so not the lane's execution,
+    // and recorded with their bodies, so not unknown either.
+    const c = composeCoverage(
+      ["v1", "v2", "v3", "v4", "v5", "v6"],
+      rows(
+        ["v1", "external"],
+        ["v2", "external"],
+        ["v3", "external"],
+        ["v4", "external"],
+        ["v5", "external"],
+      ),
+    );
+    expect(c).toEqual({ recorded: 6, applied: 0, asserted: 0, external: 5, unclassified: 1 });
   });
 });
 
 describe("describeCoverage", () => {
   it("says nothing when every recorded version was applied here", () => {
-    expect(describeCoverage({ recorded: 7, applied: 7, asserted: 0, unclassified: 0 })).toBeNull();
+    expect(
+      describeCoverage({ recorded: 7, applied: 7, asserted: 0, external: 0, unclassified: 0 }),
+    ).toBeNull();
   });
 
   it("says nothing about an empty clone", () => {
-    expect(describeCoverage({ recorded: 0, applied: 0, asserted: 0, unclassified: 0 })).toBeNull();
+    expect(
+      describeCoverage({ recorded: 0, applied: 0, asserted: 0, external: 0, unclassified: 0 }),
+    ).toBeNull();
   });
 
   it("names both populations when both are present", () => {
-    const s = describeCoverage({ recorded: 980, applied: 22, asserted: 783, unclassified: 175 });
+    const s = describeCoverage({
+      recorded: 980,
+      applied: 22,
+      asserted: 783,
+      external: 0,
+      unclassified: 175,
+    });
     expect(s).toContain("980");
     expect(s).toContain("22 were applied here");
     expect(s).toContain("783");
@@ -188,17 +301,52 @@ describe("describeCoverage", () => {
   });
 
   it("names only what is there", () => {
-    const s = describeCoverage({ recorded: 10, applied: 4, asserted: 0, unclassified: 6 });
+    const s = describeCoverage({
+      recorded: 10,
+      applied: 4,
+      asserted: 0,
+      external: 0,
+      unclassified: 6,
+    });
     expect(s).not.toContain("assertion");
+    expect(s).not.toContain("another applier");
+    expect(s).not.toContain("other than Mission Control");
     expect(s).toContain("6 were recorded before this was written down");
+  });
+
+  it("names the rows another applier ran, and never as applied here", () => {
+    const s = describeCoverage({
+      recorded: 1001,
+      applied: 990,
+      asserted: 0,
+      external: 5,
+      unclassified: 6,
+    });
+    expect(s).toBe(
+      "Of 1001 recorded versions, 990 were applied here and " +
+        "5 were run here by an applier other than Mission Control, and " +
+        "6 were recorded before this was written down.",
+    );
+  });
+
+  it("speaks even when every row it cannot vouch for is external", () => {
+    // `applied !== recorded`, so silence would read as "all executed here".
+    const s = describeCoverage({
+      recorded: 8,
+      applied: 0,
+      asserted: 0,
+      external: 8,
+      unclassified: 0,
+    });
+    expect(s).toContain("8 were run here by an applier other than Mission Control");
   });
 });
 
 describe("the rules this module exists to keep", () => {
   const pure = read("src/server/migrationProvenance.pure.ts");
 
-  it("offers exactly two provenance values", () => {
-    expect([...MIGRATION_PROVENANCE_VALUES]).toEqual(["applied", "asserted"]);
+  it("offers exactly three provenance values", () => {
+    expect([...MIGRATION_PROVENANCE_VALUES]).toEqual(["applied", "asserted", "external"]);
   });
 
   it("produces 'asserted' only by exact membership, never from shape", () => {
@@ -209,7 +357,9 @@ describe("the rules this module exists to keep", () => {
       expect(provenanceFromLedgerName(known, "20260101000000")).toBe("asserted");
       expect(provenanceFromLedgerName(known.slice(0, -1), "20260101000000")).toBeNull();
       expect(provenanceFromLedgerName(`${known}.`, "20260101000000")).toBeNull();
-      expect(provenanceFromCanonicalName(known.slice(1))).toBeNull();
+      expect(
+        provenanceFromCanonicalRow({ name: known.slice(1), hasBody: false, hasLegacyRow: true }),
+      ).toBeNull();
     }
   });
 
@@ -351,5 +501,44 @@ describe("the backfill does not depend on the replay having run", () => {
     const earlyReturn = lane.indexOf("clone already at prime migration head");
     expect(backfill).toBeGreaterThan(-1);
     expect(backfill).toBeLessThan(earlyReturn);
+  });
+});
+
+describe("the column accepts what the classifier says, and no more", () => {
+  /*
+    A clone whose table was made before `external` existed carries the
+    two-value check, and every external row the backfill tried to write there
+    would be refused. Run against Postgres 16 on 27 Oct 2026: on a table made by
+    the previous DDL the statement widens the check and keeps its rows, still
+    refuses a value off the list, and on a second pass (and on a fresh table)
+    leaves the constraint's oid where it was.
+  */
+  const provisioning = read("src/server/backend-provisioning.server.ts");
+  const list = MIGRATION_PROVENANCE_VALUES.map((v) => `'${v}'`).join(", ");
+
+  it("checks the column against the classifier's own list", () => {
+    const checks = PROVENANCE_TABLE_SQL.split(`check (provenance in (${list}))`).length - 1;
+    // Once where the table is made, once where an older table is widened.
+    expect(checks).toBe(2);
+  });
+
+  it("derives the list rather than restating it", () => {
+    expect(provisioning).toContain("MIGRATION_PROVENANCE_VALUES.map");
+    expect(provisioning).not.toMatch(/'applied',\s*'asserted'/);
+  });
+
+  it("widens only the default-named check, and only when a value is missing", () => {
+    expect(PROVENANCE_TABLE_SQL).toContain("conname = 'migration_provenance_provenance_check'");
+    for (const v of MIGRATION_PROVENANCE_VALUES) {
+      expect(PROVENANCE_TABLE_SQL).toContain(`pg_get_constraintdef(oid) not like '%''${v}''%'`);
+    }
+    const guard = PROVENANCE_TABLE_SQL.indexOf("if exists (");
+    const drop = PROVENANCE_TABLE_SQL.indexOf(
+      "drop constraint migration_provenance_provenance_check",
+    );
+    expect(guard).toBeGreaterThan(-1);
+    expect(drop).toBeGreaterThan(guard);
+    // Nothing else about the table is touched: no row is rewritten to fit.
+    expect(PROVENANCE_TABLE_SQL).not.toMatch(/\b(update|delete from|truncate)\b/i);
   });
 });
