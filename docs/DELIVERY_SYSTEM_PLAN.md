@@ -723,6 +723,7 @@ without loss.
 | D17 | Solicitor Portal is sold at $299 a month with a live Stripe price and gated by nothing, so every plan already has it                                                                                                                 | Gate it on the add-on in the prime's capability registry, or withdraw it from sale (`directSale` or `comingSoon`, the Stripe price deactivated).                                                                                                                                                                                                                                                                                                   |
 | D18 | Contract exclusions never reach a clone, and the core reconcile installs an excluded module before the exclusion is written                                                                                                          | Shipped: the prime refuses an excluded capability above its tier, add-ons and exemption, and keeps the last list stated (prime #3398; `20270203090000` reached all four clones at 06:00 on 28 Oct). Mission Control states the exclusions as price-list slugs on each balance call that reads the clone's row, stores them as slugs (`20261027140000`), and `provisionCloneCore` writes them before the first reconcile (#381).                    |
 | D19 | The module catalogue was last detected on 31 Jul (61 of 430 functions belong to no module), and all 134 library entries are `pending`, so no pin can be used                                                                         | Decide whether pins stay; if they do, approve entries at publish and record a commit per entry. After D7, stop using module globs as a delivery scope and keep modules as entitlement vocabulary generated from the prime (§9.3).                                                                                                                                                                                                                  |
+| D20 | Enforcing table privileges on the clones. The sweep reports what a clone's browser roles hold and the prime's do not, and revokes nothing (answered 28 Oct: "Sweep tables, report first")                                            | After a week of reports, decide two things: the 66 relations (79 on the CRM) `20270205090000` leaves, which the prime grants less on, and whether the revoke is built behind `ENFORCE_TABLE_GRANTS` (§14). `finance_agent_contacts` is not among them: keeping `authenticated` there was this work's own mistake, and a prime file takes it back as on the prime.                                                                                  |
 
 ### The owner's answers (27 Oct 2026, evening)
 
@@ -980,3 +981,24 @@ tables the prime keeps private.
   and would start with these tables open. The owner chose to extend the
   half-hourly privilege sweep (`/hooks/clone-privilege-reconcile`) to table
   grants: report-only for a week, then enforced.
+- **What the sweep reports.** Each pass compares the table privileges of
+  `anon` and `authenticated` on every `public` relation both sides hold with
+  the prime's live ACL, and revokes nothing (`tablePrivileges.pure.ts`,
+  `ENFORCE_TABLE_GRANTS` off). It reports under `tables` in the hook's answer,
+  in its audit row, and in a `drift_medium` notice when a clone's surplus
+  changes (THE_CLONING_ENGINE.md).
+  - Measured with its own code over the live catalogues on 28 Oct, after the
+    hand revokes and `20270204090000`: 2,598 surplus privileges on 190
+    relations on npc-client-dashboard, NPC Test and Preflight each, and 2,805
+    on 203 on the CRM.
+  - `20270205090000` takes back 1,595 of them, on its 124 relations. That
+    leaves 1,003 on 66 relations (1,210 on 79 on the CRM): 64 (77) relations
+    neither migration names, `dashboard_modules`' REFERENCES and TRIGGER, and
+    `finance_agent_contacts`.
+  - `finance_agent_contacts` was kept for `authenticated` above "as on the
+    prime", and the prime has not given `authenticated` anything there since
+    `20260721141000`. Every clone gives it all eight, under a
+    `TO public USING (true)` policy. Keeping it kept nothing for a screen,
+    because the browser is anon, and sign-up is off on all four clones (read
+    28 Oct), so only an existing account could use it. A prime file takes it
+    back, as on the prime.

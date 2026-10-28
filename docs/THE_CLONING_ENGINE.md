@@ -1808,3 +1808,64 @@ The answer names the grants, revokes and view statements it would apply, with
 a sample. After a real pass, the clone's security advisor should list no more
 anon-callable SECURITY DEFINER functions than the prime's 4, plus whatever is
 in `cloneOnlyExposedDefiners`.
+
+### Table privileges: compared and reported, not yet taken back
+
+On 28 Oct 2026 every clone gave `anon` SELECT, INSERT, UPDATE and DELETE on 24
+tables whose policies are `TO public USING (true)` (DELIVERY_SYSTEM_PLAN.md
+§14). The grants stage adds a prime grant a clone lacks and never revokes one it
+holds, and a clone is built with Supabase's default privileges, so a new clone
+starts with every browser role holding everything on every `public` table.
+
+The sweep now compares table privileges on each pass
+(`tablePrivileges.pure.ts`):
+
+- **What is compared.** The table-level privileges of `anon` and
+  `authenticated`, read from `relacl`, on every table, view and materialised
+  view in `public` that both the prime and the clone hold. A surplus is a
+  privilege the clone gives a browser role and the prime does not. A relation
+  only one side holds is counted and ignored.
+- **Column grants are their own thing.** They come from `attacl` and are
+  compared apart. `template_comments` gives `authenticated` UPDATE on three
+  columns and none at table level, on all five projects, and that is not a
+  difference. An entry whose role and privilege the prime also grants on
+  columns says so, because a table-level revoke would take them.
+- **MAINTAIN** is compared where both servers have it (all five run 17), and
+  dropped from both sides where one does not.
+- **Report only.** By the owner's decision of 28 Oct 2026, nothing is revoked
+  until the owner has reviewed a week of reports. `ENFORCE_TABLE_GRANTS` is off
+  and nothing that writes a grant is built behind it.
+- **Where it says so.** Under `tables` in the hook's answer, in the
+  `clone_privilege_reconcile_cron` audit row (filed on every scheduled pass
+  while any clone holds a surplus or could not be read), and in a
+  `drift_medium` notice on the clone (`metadata.source` is
+  `clone_table_privileges`) raised only when a clone's surplus changes or
+  clears. A clone that could not be read is `unreadable`, never "0 surplus".
+  Each notice delivered is also recorded as a `clone_table_privileges` audit
+  row on the clone, and the next pass compares against that row rather than
+  the notice. Purging read notifications therefore never announces a standing
+  surplus again or swallows its clearance.
+- **Cost.** One statement on each side: the prime's once a pass, shared, and
+  each clone's beside its function reads. Four clones go from 24 Management API
+  calls a pass to 29. Each read is about 610 rows and 75 to 100 KB, and ran in
+  59 ms on the CRM.
+
+Measured 28 Oct 2026 with the comparison's own code over the live catalogues,
+after the hand revokes and `20270204090000`:
+
+| Clone | Surplus privileges | Relations | anon / authenticated |
+| --- | --- | --- | --- |
+| npc-client-dashboard | 2,598 | 190 | 1,434 / 1,164 |
+| npc-test-76b3b3 | 2,598 | 190 | 1,434 / 1,164 |
+| preflight-property-group | 2,598 | 190 | 1,434 / 1,164 |
+| npc-crm-independent-6505dc | 2,805 | 203 | 1,538 / 1,267 |
+
+`20270205090000` takes back 1,595 of those on each clone (its 124 relations).
+The rest, 1,003 on 66 relations (1,210 on 79 on the CRM), stay:
+
+- 64 relations (77 on the CRM) neither prime migration names, where the prime
+  grants a browser role less, most of them nothing at all;
+- two of `20270204090000`'s 24. `dashboard_modules` keeps REFERENCES and
+  TRIGGER for both roles. `finance_agent_contacts` keeps all eight for
+  `authenticated`, under a `TO public USING (true)` policy, although the prime
+  has given `authenticated` nothing there since `20260721141000`.

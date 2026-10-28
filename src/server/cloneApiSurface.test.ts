@@ -3,9 +3,11 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { mergeExposedSchemas } from "./backend-provisioning.server";
 import {
+  RELATION_ACL_QUERY,
   buildSchemaGrantDdl,
   buildDefaultAclDdl,
   defaultAclNoun,
+  isReadOnlySourceQuery,
 } from "./schema-introspection.server";
 
 /**
@@ -149,6 +151,43 @@ describe("the engine replicates the project's API surface, not only its database
   it("replicates DEFAULT privileges, so a later cascaded table is not born unreachable", () => {
     expect(intro).toContain("defaultAcls:");
     expect(intro).toContain("pg_default_acl");
+  });
+});
+
+describe("the sweep reads table privileges, and writes none (report first, 28 Oct 2026)", () => {
+  /*
+    Every clone gave `anon` the default privileges on 24 open-policy tables
+    because the grants stage adds what a clone lacks and never revokes. The
+    sweep now compares table grants, and the owner's decision is that it only
+    reports until the owner has reviewed a week of it.
+  */
+  const sweep = read("clonePrivilegeRepair.server.ts");
+  const intro = read("schema-introspection.server.ts");
+
+  it("reads relacl and attacl apart, from the catalogue, in one read-only statement", () => {
+    expect(RELATION_ACL_QUERY).toContain(
+      "aclexplode(coalesce(c.relacl, acldefault('r', c.relowner)))",
+    );
+    expect(RELATION_ACL_QUERY).toContain("aclexplode(att.attacl)");
+    expect(RELATION_ACL_QUERY).not.toContain("information_schema");
+    expect(RELATION_ACL_QUERY).not.toContain(";");
+    expect(isReadOnlySourceQuery(RELATION_ACL_QUERY)).toBe(true);
+  });
+
+  it("hands the table comparison nothing that can apply a statement", () => {
+    const survey = sweep.slice(
+      sweep.indexOf("async function surveyCloneTableGrants"),
+      sweep.indexOf("async function announceTableGrantChanges"),
+    );
+    expect(survey).toContain("compareTableGrants(");
+    expect(survey).not.toMatch(/applyStatements|runSqlOnProject|ensureApplyHelper|converge/);
+  });
+
+  it("leaves the provisioning grants stage adding only what a clone lacks", () => {
+    const stage = intro.slice(intro.indexOf('enterStage("grants")'));
+    const body = stage.slice(0, stage.indexOf("        60,"));
+    expect(body).not.toContain("RELATION_ACL_QUERY");
+    expect(body).not.toMatch(/revoke [a-z, ]+ on table/i);
   });
 });
 

@@ -39,6 +39,12 @@ import {
   type RoutineAclPlan,
   type ViewOptions,
 } from "./routinePrivileges.pure";
+import {
+  BROWSER_ROLES,
+  TABLE_GRANT_SCHEMA,
+  toRelationAcls,
+  type RelationAclReading,
+} from "./tablePrivileges.pure";
 
 /** Schemas replicated onto a clone. `aml` is not optional — the prime keeps 106 tables there. */
 export const REPLICATED_SCHEMAS = ["public", "aml"] as const;
@@ -48,6 +54,9 @@ const SCHEMA_LIST = REPLICATED_SCHEMAS.map((s) => `'${s}'`).join(", ");
 /** Data API roles whose table privileges must come across, or PostgREST 401/403s on every table. */
 export const API_ROLES = ["anon", "authenticated", "service_role"] as const;
 const API_ROLE_LIST = API_ROLES.map((r) => `'${r}'`).join(", ");
+
+/** The roles a browser runs as. Table privileges are compared for these and no other. */
+const BROWSER_ROLE_LIST = BROWSER_ROLES.map((r) => `'${r}'`).join(", ");
 
 /** Max passes for the function-convergence loop, so a genuine error cannot loop forever. */
 export const MAX_FUNCTION_PASSES = 5;
@@ -2089,6 +2098,85 @@ export async function convergeClonePrivileges(
   result.failed = applied.failed;
   result.errors = applied.errors;
   return result;
+}
+
+// ─── Table privileges, read for the sweep's report ───────────────────
+
+/**
+ * Every relation in `public` and what the browser roles hold on it, in ONE
+ * statement per side. The comparison and its rules are in
+ * `tablePrivileges.pure.ts`; nothing reads this to write.
+ *
+ * Read from the catalogue, never from configuration, and never from
+ * `information_schema.role_table_grants`, which answers according to who is
+ * asking (see `Q.grants`):
+ *   - table-level privileges from `relacl`. A NULL one is the default ACL,
+ *     expanded with `acldefault`, which gives a browser role nothing;
+ *   - column grants from `attacl`, apart. They are a privilege on a different
+ *     object, and a table-level revoke takes them with it;
+ *   - what decides whether privileges are a relation's only gate: RLS, a
+ *     view's options, and the SELECT policies that open it with `true` or
+ *     narrow it restrictively;
+ *   - whether this server has MAINTAIN at all (Postgres 17).
+ *
+ * About 610 rows and 75 to 100 KB on each project measured on 28 Oct 2026.
+ */
+export const RELATION_ACL_QUERY = `select quote_ident(n.nspname) || '.' || quote_ident(c.relname) as relation,
+       c.relkind::text as kind,
+       acl.anon, acl.authenticated, acl.public,
+       col.grants as column_grants,
+       c.relrowsecurity as rls,
+       case when c.relkind = 'v' then coalesce(c.reloptions::text, '{}') end as options,
+       pol.open_read, pol.restricted_read,
+       current_setting('server_version_num')::int >= 170000 as maintain
+  from pg_class c
+  join pg_namespace n on n.oid = c.relnamespace
+  cross join lateral (
+    select string_agg(distinct a.privilege_type, ',' order by a.privilege_type)
+             filter (where r.rolname = 'anon') as anon,
+           string_agg(distinct a.privilege_type, ',' order by a.privilege_type)
+             filter (where r.rolname = 'authenticated') as authenticated,
+           string_agg(distinct a.privilege_type, ',' order by a.privilege_type)
+             filter (where a.grantee = 0) as public
+      from aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a
+      left join pg_roles r on r.oid = a.grantee
+     where a.grantee = 0 or r.rolname in (${BROWSER_ROLE_LIST})) acl
+  cross join lateral (
+    select jsonb_agg(jsonb_build_object(
+             'grantee', case when a.grantee = 0 then 'PUBLIC' else r.rolname end,
+             'privilege', a.privilege_type,
+             'column', att.attname) order by att.attname, a.privilege_type) as grants
+      from pg_attribute att
+      cross join lateral aclexplode(att.attacl) a
+      left join pg_roles r on r.oid = a.grantee
+     where att.attrelid = c.oid and att.attnum > 0 and not att.attisdropped
+       and att.attacl is not null
+       and (a.grantee = 0 or r.rolname in (${BROWSER_ROLE_LIST}))) col
+  cross join lateral (
+    select string_agg(distinct g.name, ',')
+             filter (where p.permissive and p.qual = 'true') as open_read,
+           string_agg(distinct g.name, ',')
+             filter (where not p.permissive and p.qual is distinct from 'true') as restricted_read
+      from (select pol.polpermissive as permissive,
+                   pg_get_expr(pol.polqual, pol.polrelid) as qual,
+                   pol.polroles
+              from pg_policy pol
+             where pol.polrelid = c.oid and pol.polcmd in ('r', '*')) p
+      cross join lateral (
+        select case when x.oid = 0 then 'PUBLIC' else rr.rolname end as name
+          from unnest(p.polroles) as x(oid)
+          left join pg_roles rr on rr.oid = x.oid) g
+     where g.name in ('PUBLIC', ${BROWSER_ROLE_LIST})) pol
+ where n.nspname = '${TABLE_GRANT_SCHEMA}'
+   and c.relkind in ('r', 'p', 'v', 'm', 'f')
+ order by 1`;
+
+/**
+ * One project's relation ACLs. A catalogue that cannot be read throws, and the
+ * caller reports that side as unreadable: this is never an empty reading.
+ */
+export async function readRelationAcls(ref: string): Promise<RelationAclReading> {
+  return toRelationAcls(await query(ref, RELATION_ACL_QUERY));
 }
 
 // ─── Emptiness verification ──────────────────────────────────────────

@@ -15,6 +15,11 @@ import { verifyCronAuth } from "@/server/cron-auth.server";
 // clones whose schema was verified before it did. See
 // `clonePrivilegeRepair.server.ts` and `routinePrivileges.pure.ts`.
 //
+// It also compares the TABLE privileges of `anon` and `authenticated` on each
+// clone with the prime's, and reports what the clone gives and the prime does
+// not under `tables`. Report-only, by the owner's decision of 28 Oct 2026: it
+// revokes nothing (`tablePrivileges.pure.ts`).
+//
 // Body (all optional): `{ "dryRun": true }` plans without writing and returns
 // a sample of the statements; `{ "cloneId": "…" }` limits the run to one clone.
 const INVOCATION_BUDGET_MS = 45_000;
@@ -39,18 +44,20 @@ export const Route = createFileRoute("/hooks/clone-privilege-reconcile")({
             : undefined;
 
         try {
-          const { reconcileClonePrivileges } = await import("@/server/clonePrivilegeRepair.server");
+          const { reconcileClonePrivileges, privilegeSweepIsNoteworthy } =
+            await import("@/server/clonePrivilegeRepair.server");
           const report = await reconcileClonePrivileges(supabaseAdmin, {
             deadlineAt: Date.now() + INVOCATION_BUDGET_MS,
             dryRun,
             cloneId,
           });
 
-          // A breadcrumb only when the run changed something, was stopped, or
-          // refused a clone. Once the fleet is aligned every pass is two reads
-          // a side and nothing to say.
-          const wrote = report.changed.some((c) => c.applied > 0 || c.failed > 0);
-          if (wrote || report.refused.length || (report.pausedAt && !dryRun)) {
+          // A breadcrumb only when the run changed something, was stopped,
+          // refused a clone, or found a clone's table privileges differing
+          // from the prime's. The last is the report the owner reviews, so
+          // while any clone holds a surplus every scheduled pass files it.
+          // Once the fleet is aligned a pass has nothing to say.
+          if (privilegeSweepIsNoteworthy(report)) {
             await writeAuditLog({
               action: "clone_privilege_reconcile_cron",
               entityType: "cron",
