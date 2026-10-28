@@ -759,3 +759,74 @@ export function tablesToReopen(
   }
   return reopen;
 }
+
+/** One row of a clone's reference-sync progress, as the picker reads it. */
+export type ReferenceSyncProgress = {
+  clone_id: string;
+  table_name: string;
+  status: string | null;
+  updated_at: string | null;
+};
+
+/**
+ * Which ready clone a scheduled reference-sync pass takes.
+ *
+ * ## Why it is chosen, not taken
+ *
+ * A pass used to take `limit(1)` of the ready clones in no order, and Postgres
+ * answers that with whichever row it reaches first. Measured 28 Oct 2026, in
+ * the 24 hours to 13:14 UTC the lane took npc-client-dashboard 72 times, the
+ * CRM 21 times, NPC Test 3 times and Preflight never: its last pass was on
+ * 26 Oct, at 11:28. A clone whose tables are all finished gets nothing from a
+ * pass, because a `complete` table is skipped. So when `chart_configurations`
+ * joined the allow-list, NPC Test had it at 13:13 and the other three waited
+ * behind a clone with nothing to copy.
+ *
+ * ## The order
+ *
+ * 1. A clone that still owes a table goes first. It owes one when an
+ *    allow-listed table has no progress row for it, or a row that is neither
+ *    `complete` nor `skipped`. A `complete` parent re-opened by its child
+ *    (`tablesToReopen`) is covered, because the child is unfinished.
+ * 2. Among those, the one whose progress was recorded longest ago, so a copy
+ *    that outlives one pass takes turns with the others rather than holding
+ *    the lane.
+ * 3. With nothing owed anywhere, the least recently touched, so a pass still
+ *    runs as it did. It changes nothing there.
+ *
+ * Ties break on the clone id, so the same inputs always pick the same clone.
+ */
+export function pickReferenceSyncCandidate<C extends { clone_id: string }>(
+  candidates: readonly C[],
+  progress: readonly ReferenceSyncProgress[],
+): C | null {
+  if (candidates.length === 0) return null;
+  const statusOf = new Map<string, Map<string, string | null>>();
+  const touched = new Map<string, number>();
+  for (const row of progress) {
+    let byTable = statusOf.get(row.clone_id);
+    if (!byTable) {
+      byTable = new Map();
+      statusOf.set(row.clone_id, byTable);
+    }
+    byTable.set(row.table_name, row.status);
+    const at = row.updated_at ? Date.parse(row.updated_at) : Number.NaN;
+    if (!Number.isNaN(at))
+      touched.set(row.clone_id, Math.max(touched.get(row.clone_id) ?? -Infinity, at));
+  }
+  const names = REFERENCE_TABLES.map(refName);
+  const owes = (cloneId: string): boolean => {
+    const byTable = statusOf.get(cloneId);
+    return names.some((name) => {
+      const status = byTable?.get(name);
+      return status !== "complete" && status !== "skipped";
+    });
+  };
+  const lastTouched = (cloneId: string): number => touched.get(cloneId) ?? -Infinity;
+  return [...candidates].sort(
+    (a, b) =>
+      Number(owes(b.clone_id)) - Number(owes(a.clone_id)) ||
+      lastTouched(a.clone_id) - lastTouched(b.clone_id) ||
+      a.clone_id.localeCompare(b.clone_id),
+  )[0];
+}

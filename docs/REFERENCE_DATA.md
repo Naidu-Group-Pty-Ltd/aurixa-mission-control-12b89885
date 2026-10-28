@@ -108,9 +108,22 @@ worse failure than a row one version behind. **Seeding is not replication.**
 
 ## Scheduling and claims
 
-`reference-data-sync-hourly` at `43 * * * *`, hourly because seeding a clone
-finishes and then costs one cheap "already complete" read per tick forever
-after; the only work it picks up later is a newly provisioned clone.
+`reference-data-sync-15min` at `13,28,43,58 * * * *` (read from `cron.job` on
+28 Oct 2026; it was hourly, as `reference-data-sync-hourly`, when this was first
+written). Seeding a clone finishes and then costs one cheap "already complete"
+read per tick. The work it picks up later is a newly provisioned clone, and a
+table newly added to the allow-list on every clone at once.
+
+**A pass takes one clone, and it chooses which** (`pickReferenceSyncCandidate`).
+It takes the clone that still owes a table, and among those the one whose
+progress was recorded longest ago. With nothing owed anywhere it takes the least
+recently touched. An operator's button names its clone and is taken as named.
+It used to take `limit(1)` of the ready clones in no order, which Postgres
+answers with whichever row it reaches first. In the 24 hours to 13:14 UTC on
+28 Oct that was npc-client-dashboard 72 times, the CRM 21, NPC Test 3 and
+Preflight never: its last pass had been on 26 Oct. So `chart_configurations`
+reached NPC Test at 13:13 and waited behind a clone that had nothing to copy
+for the other three.
 
 The claim is `clone_backends.reference_sync_started_at` and **not**
 `worker_started_at`, which the fleet migration sync owns. Sharing one column

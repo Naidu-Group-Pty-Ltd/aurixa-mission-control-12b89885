@@ -21,6 +21,17 @@ const state = vi.hoisted(() => ({
   claimError: null as { message: string } | null,
   pickError: null as { message: string } | null,
   /**
+   * Every ready clone the candidate read answers with. Null answers with
+   * `backendRow` alone, the one clone most tests are about.
+   */
+  candidates: null as Array<Record<string, unknown>> | null,
+  /** The fleet's progress rows, as the picker's paged read sees them. */
+  progressRows: [] as Array<Record<string, unknown>>,
+  /** When set, the picker's progress read answers this error. */
+  progressReadError: null as { message: string } | null,
+  /** How many times the picker read the fleet's progress. */
+  progressReads: 0,
+  /**
    * When set, a `clone_reference_syncs` upsert whose values match is REFUSED
    * with an error rather than stored — which is what PostgREST does and what
    * `record` swallows. Without this the double could not express the one
@@ -114,14 +125,24 @@ function fakeSupabase() {
       return {
         update: (values: Record<string, unknown>) => backendsUpdateChain(values),
         select: () => {
+          const answer = () => ({
+            data: state.pickError
+              ? null
+              : (state.candidates ?? (state.backendRow ? [state.backendRow] : [])),
+            error: state.pickError,
+          });
           const b: Record<string, unknown> = {
-            eq: () => b,
+            eq: (col: string, value: unknown) => {
+              // The operator's button names its clone.
+              if (col === "clone_id" && state.candidates) {
+                state.candidates = state.candidates.filter((c) => c.clone_id === value);
+              }
+              return b;
+            },
             is: () => b,
             not: () => b,
-            limit: async () => ({
-              data: state.pickError ? null : state.backendRow ? [state.backendRow] : [],
-              error: state.pickError,
-            }),
+            limit: async () => answer(),
+            then: (resolve: (v: unknown) => void) => resolve(answer()),
           };
           return b;
         },
@@ -136,12 +157,24 @@ function fakeSupabase() {
     }
     if (table === "clone_reference_syncs") {
       return {
-        select: () => ({
-          eq: async () =>
-            state.syncStateReadError
-              ? { data: null, error: state.syncStateReadError }
-              : { data: [...state.syncRows.values()], error: null },
-        }),
+        select: () => {
+          const fleet: Record<string, unknown> = {
+            order: () => fleet,
+            range: async (from: number, to: number) => {
+              state.progressReads += 1;
+              return state.progressReadError
+                ? { data: null, error: state.progressReadError }
+                : { data: state.progressRows.slice(from, to + 1), error: null };
+            },
+          };
+          return {
+            eq: async () =>
+              state.syncStateReadError
+                ? { data: null, error: state.syncStateReadError }
+                : { data: [...state.syncRows.values()], error: null },
+            order: () => fleet,
+          };
+        },
         upsert: async (values: Record<string, unknown>) => {
           if (state.syncUpsertRefuses?.(values)) {
             return { error: { message: "clone_reference_syncs write refused" } };
@@ -183,6 +216,10 @@ beforeEach(() => {
   state.backendRow = { clone_id: CLONE_ID, supabase_project_ref: CLONE };
   state.claimError = null;
   state.pickError = null;
+  state.candidates = null;
+  state.progressRows = [];
+  state.progressReadError = null;
+  state.progressReads = 0;
   state.syncUpsertRefuses = null;
   state.notifyFails = false;
   state.syncStateReadError = null;
@@ -497,6 +534,85 @@ describe("runReferenceDataSync", () => {
     expect(meta.clone_project_ref).toBe(CLONE);
     expect(meta.trigger).toBe("operator");
     expect((meta.tables as unknown[]).length).toBe(REFERENCE_TABLES.length);
+  });
+});
+
+describe("which clone a scheduled pass takes", () => {
+  const PREFLIGHT_ID = "2242c67f-fc1d-4723-84fe-6a86898136d2";
+  const PREFLIGHT_REF = "egrmsulhtmqnmhvuccxr";
+  const dashboard = () => ({ clone_id: CLONE_ID, supabase_project_ref: CLONE });
+  const preflight = () => ({ clone_id: PREFLIGHT_ID, supabase_project_ref: PREFLIGHT_REF });
+  const finished = (clone_id: string, updated_at: string) =>
+    REFERENCE_TABLES.map((t) => ({
+      clone_id,
+      table_name: refName(t),
+      status: "complete",
+      updated_at,
+    }));
+
+  it("takes the clone that still owes a table, not the first ready row", async () => {
+    // Measured 28 Oct 2026: the lane took the dashboard 72 times in 24 hours
+    // and Preflight not once since 26 Oct, though the dashboard owed nothing.
+    state.candidates = [dashboard(), preflight()];
+    state.progressRows = finished(CLONE_ID, "2026-10-28T12:58:40Z");
+    const res = await runReferenceDataSync(fakeSupabase());
+    expect(res.cloneId).toBe(PREFLIGHT_ID);
+    expect(state.audits[0]?.entityId).toBe(PREFLIGHT_ID);
+    expect(state.ran.length).toBeGreaterThan(0);
+    expect(
+      state.ran.every((r) => r.startsWith(`${PRIME}::`) || r.startsWith(`${PREFLIGHT_REF}::`)),
+    ).toBe(true);
+  });
+
+  it("takes the clone an operator names, without weighing the rest", async () => {
+    state.candidates = [dashboard(), preflight()];
+    state.progressRows = finished(CLONE_ID, "2026-10-28T12:58:40Z");
+    const res = await runReferenceDataSync(fakeSupabase(), { cloneId: CLONE_ID });
+    expect(res.cloneId).toBe(CLONE_ID);
+    expect(state.progressReads).toBe(0);
+  });
+
+  it("takes a lone ready clone without reading anyone's progress", async () => {
+    state.candidates = [dashboard()];
+    const res = await runReferenceDataSync(fakeSupabase());
+    expect(res.cloneId).toBe(CLONE_ID);
+    expect(state.progressReads).toBe(0);
+  });
+
+  it("progress that could not be read is not a fleet that owes nothing, and nothing is claimed", async () => {
+    state.candidates = [dashboard(), preflight()];
+    state.progressReadError = { message: "permission denied for table clone_reference_syncs" };
+    const res = await runReferenceDataSync(fakeSupabase());
+    expect(res.error).toBe(
+      "Could not read the clones' reference-sync progress: permission denied for table clone_reference_syncs",
+    );
+    expect(res.done).toBe(false);
+    expect(state.backendUpdates.some((u) => u.eqClone && u.values.reference_sync_started_at)).toBe(
+      false,
+    );
+    expect(state.audits).toEqual([]);
+  });
+
+  it("reads the fleet's progress a page at a time, so rows past the first page still count", async () => {
+    // 1,100 rows of clones that are not candidates fill the first page, so
+    // Preflight's rows arrive on the second. Read whole, nobody owes anything
+    // and the dashboard, untouched for longest, is taken. Read one page only,
+    // Preflight would look unvisited and be taken instead.
+    state.candidates = [dashboard(), preflight()];
+    const others = Array.from({ length: 1100 }, (_, i) => ({
+      clone_id: `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`,
+      table_name: "suburb_directory",
+      status: "complete",
+      updated_at: "2026-10-28T00:00:00Z",
+    }));
+    state.progressRows = [
+      ...others,
+      ...finished(CLONE_ID, "2026-10-20T00:00:00Z"),
+      ...finished(PREFLIGHT_ID, "2026-10-28T13:00:00Z"),
+    ];
+    const res = await runReferenceDataSync(fakeSupabase());
+    expect(state.progressReads).toBe(2);
+    expect(res.cloneId).toBe(CLONE_ID);
   });
 });
 

@@ -48,9 +48,11 @@ import { runSqlOnProject } from "./backend-provisioning.server";
 import { notifyOperators, writeAuditLog } from "./audit.server";
 import {
   REFERENCE_TABLES,
+  pickReferenceSyncCandidate,
   planColumns,
   refName,
   tablesToReopen,
+  type ReferenceSyncProgress,
   type ReferenceTable,
 } from "./referenceTables.pure";
 import {
@@ -128,6 +130,31 @@ async function reclaimStale(supabase: Db): Promise<void> {
     .not("reference_sync_started_at", "is", null)
     .lt("reference_sync_started_at", cutoff);
   if (error) throw new Error(`Could not reclaim stale reference-sync claims: ${error.message}`);
+}
+
+/** Rows a page of `readSyncProgress` asks for; PostgREST answers at most 1,000. */
+const PROGRESS_PAGE = 1_000;
+
+/**
+ * Every clone's per-table progress, which the picker weighs. Read whole, a
+ * page at a time in a stable order, rather than filtered by a list of clone
+ * ids that grows with the fleet.
+ */
+async function readSyncProgress(
+  supabase: Db,
+): Promise<{ rows: ReferenceSyncProgress[]; error: string | null }> {
+  const rows: ReferenceSyncProgress[] = [];
+  for (let from = 0; ; from += PROGRESS_PAGE) {
+    const { data, error } = await supabase
+      .from("clone_reference_syncs")
+      .select("clone_id, table_name, status, updated_at")
+      .order("clone_id")
+      .order("table_name")
+      .range(from, from + PROGRESS_PAGE - 1);
+    if (error) return { rows: [], error: error.message };
+    rows.push(...((data ?? []) as ReferenceSyncProgress[]));
+    if (!data || data.length < PROGRESS_PAGE) return { rows, error: null };
+  }
 }
 
 /**
@@ -268,12 +295,30 @@ export async function runReferenceDataSync(
     .is("reference_sync_started_at", null)
     .not("supabase_project_ref", "is", null);
   if (opts?.cloneId) q = q.eq("clone_id", opts.cloneId);
-  const { data: candidates, error: pickErr } = await q.limit(1);
+  const { data: candidates, error: pickErr } = await q;
   // A candidate list that could not be READ is not a fleet with nothing to do.
   if (pickErr) {
     return { ...EMPTY, error: `Could not read clone backends: ${pickErr.message}` };
   }
-  const backend = candidates?.[0];
+  /*
+    Which of them. An operator's button names its clone. A scheduled pass
+    takes the clone that still owes a table, longest untouched first
+    (`pickReferenceSyncCandidate`), rather than whichever row Postgres reached
+    first, which on 28 Oct had left Preflight unvisited since 26 Oct. Progress
+    that could not be read is not a fleet that owes nothing, so the pass
+    refuses, as the reads above do. No claim is held yet.
+  */
+  let backend: NonNullable<typeof candidates>[number] | undefined = candidates?.[0];
+  if (!opts?.cloneId && candidates && candidates.length > 1) {
+    const progress = await readSyncProgress(supabase);
+    if (progress.error) {
+      return {
+        ...EMPTY,
+        error: `Could not read the clones' reference-sync progress: ${progress.error}`,
+      };
+    }
+    backend = pickReferenceSyncCandidate(candidates, progress.rows) ?? undefined;
+  }
   if (!backend?.supabase_project_ref) return { ...EMPTY, done: true };
 
   const cloneId = backend.clone_id;
