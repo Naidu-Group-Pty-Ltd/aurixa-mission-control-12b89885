@@ -7,7 +7,9 @@ import {
   crmLineCronReason,
   crmLineFeatureForPath,
   crmLineFunctionsIn,
+  CRM_LINE_KEPT_PATTERNS,
   CRM_LINE_VARIANT_PATTERNS,
+  crmLineKeptPattern,
   crmLineVariantFunctionNames,
   crmLineVariantPattern,
   crmLineWithheldFunctionNames,
@@ -18,7 +20,11 @@ import {
   withheldLineFunctions,
 } from "@/server/crmLineFeatures.pure";
 import { PRIME_ONLY_FEATURES, isPrimeOnlyFunction } from "@/server/primeOnlyFeatures.pure";
-import { partitionCascadePaths } from "@/server/cascade/syncExclusions.pure";
+import {
+  approvableHeld,
+  partitionCascadePaths,
+  reportableHeld,
+} from "@/server/cascade/syncExclusions.pure";
 import { cascadeBackendWork } from "@/server/cascadeBackendWork.pure";
 import {
   functionsToRestore,
@@ -390,5 +396,83 @@ describe("the independent line's own copies", () => {
       fromAnotherLine: true,
     });
     expect(p.held).toEqual([]);
+  });
+});
+
+describe("the trees the independent line keeps as its own", () => {
+  const RULE =
+    ".claude/rules/billing/014-the-activation-gate-a-clone-may-be-locked-until-it-pays.md";
+  const AGENT_SPEC = "src/lib/agent/__tests__/marketNews.spec.tsx";
+  const IMPORT_SPEC = "src/lib/clients/__tests__/clientImportRecords.spec.ts";
+
+  it("names the three the owner chose, for the independent line alone", () => {
+    expect(crmLineKeptPattern(RULE, "independent")).toBe(".claude/**");
+    expect(crmLineKeptPattern(AGENT_SPEC, "independent")).toBe("src/lib/agent/__tests__/**");
+    expect(crmLineKeptPattern(IMPORT_SPEC, "independent")).toBe(IMPORT_SPEC);
+    for (const mode of ["dependent", null, undefined]) {
+      expect(crmLineKeptPattern(RULE, mode), String(mode)).toBeNull();
+    }
+    // The two specs the owner let through follow the prime.
+    expect(crmLineKeptPattern("src/lib/buildVersion.test.ts", "independent")).toBeNull();
+    expect(
+      crmLineKeptPattern("src/lib/pricing/__tests__/planEntitlements.spec.ts", "independent"),
+    ).toBeNull();
+    // Neither the agent's own code nor the line's index is a kept tree.
+    expect(crmLineKeptPattern("src/lib/agent/parityRegister.ts", "independent")).toBeNull();
+    expect(crmLineKeptPattern("CLAUDE.md", "independent")).toBeNull();
+  });
+
+  it("holds a write from outside the line silently, with nothing to approve", () => {
+    const fromPrime = partitionCascadePaths([RULE, AGENT_SPEC, IMPORT_SPEC, "src/a.ts"], [], {
+      crmMode: "independent",
+      fromAnotherLine: true,
+    });
+    expect(fromPrime.write).toEqual(["src/a.ts"]);
+    expect(fromPrime.held.map((h) => [h.path, h.reason, h.pattern])).toEqual([
+      [RULE, "protected", "(crm-line kept: .claude/**)"],
+      [AGENT_SPEC, "protected", "(crm-line kept: src/lib/agent/__tests__/**)"],
+      [IMPORT_SPEC, "protected", `(crm-line kept: ${IMPORT_SPEC})`],
+    ]);
+    expect(reportableHeld(fromPrime.held)).toEqual([]);
+    expect(approvableHeld(fromPrime.held)).toEqual([]);
+
+    // The head's child reads the head, and receives the head's own copies.
+    const fromParent = partitionCascadePaths([RULE, AGENT_SPEC], [], { crmMode: "independent" });
+    expect(fromParent.held).toEqual([]);
+
+    // A dependent clone reading the prime keeps nothing of the kind.
+    const dependent = partitionCascadePaths([RULE], [], {
+      crmMode: "dependent",
+      fromAnotherLine: true,
+    });
+    expect(dependent.held).toEqual([]);
+  });
+
+  it("holds a deletion from outside the line too, and none in a conversion", () => {
+    const fromPrime = partitionCascadePaths([RULE, "src/gone.ts"], [], {
+      purpose: "delete",
+      crmMode: "independent",
+      fromAnotherLine: true,
+    });
+    expect(fromPrime.write).toEqual(["src/gone.ts"]);
+    expect(fromPrime.held.map((h) => [h.path, h.pattern])).toEqual([
+      [RULE, "(crm-line kept: .claude/**)"],
+    ]);
+
+    // A conversion takes the other line's copy of everything it carries.
+    const conversion = partitionCascadePaths([RULE], [], {
+      purpose: "delete",
+      crmMode: "independent",
+    });
+    expect(conversion.held).toEqual([]);
+  });
+
+  it("swallows no variant, which has to stay a decision", () => {
+    for (const pattern of CRM_LINE_VARIANT_PATTERNS.independent ?? []) {
+      expect(crmLineKeptPattern(pattern, "independent"), pattern).toBeNull();
+    }
+    for (const pattern of CRM_LINE_KEPT_PATTERNS.independent ?? []) {
+      expect(isCrmLineWithheldPath(pattern, "independent"), pattern).toBe(false);
+    }
   });
 });

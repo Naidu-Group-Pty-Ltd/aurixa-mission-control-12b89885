@@ -42,8 +42,9 @@ what became of it.
 Still open: the rest of P1 (L1–L7, L9, L10), P2, and the owner's decisions in
 §10. Of the owner's 27 Oct answers, D13, C7, D16, D17 and D18 have shipped and
 been read back, D9's owed list is delivered, and D20 reports. D14 is parked by
-the owner (28 Oct), D15 waits on its step-0 decisions, and D19 on when the
-catalogue is detected again. D3 and D8 are the ones that stand between this
+the owner (28 Oct). D15's step 0 was decided on 28 Oct and it ships in two
+parts, the engine first and the switch once the engine is live (§10), and D19
+waits on D15. D3 and D8 are the ones that stand between this
 fleet and a launch, and D3 is smaller than §4.2 read (§15). §14 records the
 clones' open tables, found and closed on 28 Oct, and §15 what else 28 Oct
 found.
@@ -787,6 +788,38 @@ production, then D14's rotation, then D17, D9 and D19, and D15 last.
   the price stamped when it was armed (§15).
 - **Preflight's administrator:** its one account takes the owner's address in
   place of the dry-run address it was provisioned with (§15).
+- **D15, step 0:** all four recommendations, taken after a replay of the switch
+  with the cascade engine against the live records.
+  - The prime's agent specs (`src/lib/agent/__tests__/**`) stay off the CRM
+    line. 115 of them import `src/lib/agent/parityRegister.ts`, which the line
+    removed, so delivered they would turn the cascade pull request red.
+  - The line's own rules (`.claude/**`) stay its own.
+  - `buildVersion.test.ts` and `planEntitlements.spec.ts` take the prime's
+    copies, which pass there, and `clientImportRecords.spec.ts` stays the
+    line's, because the prime's reads GoHighLevel code the line does not carry.
+  - The CRM gets the three default rows it lacks: `.github/dependabot.yml`,
+    `src/integrations/supabase/supabaseTarget.pure.ts` and
+    `.github/workflows/vcr-prune.yml`.
+
+  The preview is re-run at the day's heads and shown, and the switch is sent
+  only when it is clean. The three kept trees are the engine's
+  (`CRM_LINE_KEPT_PATTERNS`), held `protected` for a deletion as well as a
+  write, and only against bytes from outside the line. The engine ships first
+  and the switch after it is live, because the migration flips the scope the
+  moment it applies: a cascade on the old engine would carry all three trees
+  in.
+
+- **D19:** the catalogue is detected again after D15.
+- **A refusal that names the workspace's plan:** the staff transport no longer
+  reads it as a failed sign-in, refreshes the session and sends again (prime
+  #3413). At 17:42 NPC Test's unpaid workspace refused two modules four times
+  while its owner was signed in, and each refusal drew a refresh and an
+  identical resend.
+- **The Template Builder's comments:** follow prime #3406's per-template rule,
+  as the Builder's other tables do, and are seen through their template (prime
+  #3414). `template_components` cannot: it is a shared library of blocks with
+  no `template_id`, so there is no template to see it through, and its writes
+  are already held to the `templates` module.
 
 ---
 

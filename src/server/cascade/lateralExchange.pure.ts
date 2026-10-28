@@ -1137,6 +1137,8 @@ export function planLateralDeletions(args: {
   destination: LateralDestination;
   survivingFiles: Readonly<Record<string, string>> | null;
   cap?: number;
+  /** The origin's recorded `crm_mode`, as `judgeLateralWrites` takes it. */
+  originCrmMode?: string | null;
 }): LateralDeletionPlan {
   const { destination } = args;
   const cap = args.cap ?? MAX_DELETIONS_PER_CASCADE;
@@ -1153,9 +1155,13 @@ export function planLateralDeletions(args: {
   }
 
   // A path an exclusion claims is the destination's to keep, whoever deleted
-  // it elsewhere — the same reason the vertical cascade never deletes one.
+  // it elsewhere — the same reason the vertical cascade never deletes one. So
+  // is a tree the destination's line keeps as its own, against an origin on
+  // another line.
   const partition = partitionCascadePaths([...byPath.keys()].sort(), destination.exclusions, {
     purpose: "delete",
+    crmMode: destination.crmMode ?? null,
+    fromAnotherLine: (args.originCrmMode ?? null) !== (destination.crmMode ?? null),
   });
   for (const h of partition.held) {
     kept.push({ path: h.path, why: `Claimed on ${destination.repo} by \`${h.pattern}\`.` });

@@ -949,6 +949,36 @@ describe("deletions", () => {
     expect(p.kept[0].why).toContain("scripts/**");
   });
 
+  it("keeps a tree the destination's line keeps as its own, against an origin on another line", () => {
+    const RULE = ".claude/rules/crm/001-the-native-crm.md";
+    const independent = destination({
+      repo: IND,
+      crmMode: "independent",
+      tree: tree({ [RULE]: "r", "src/lib/old.ts": "o" }),
+    });
+    const fromOtherLine = planLateralDeletions({
+      deletes: [
+        { path: RULE, deletedOn: DEP },
+        { path: "src/lib/old.ts", deletedOn: DEP },
+      ],
+      destination: independent,
+      survivingFiles: {},
+      originCrmMode: "dependent",
+    });
+    expect(fromOtherLine.deletes).toEqual(["src/lib/old.ts"]);
+    expect(fromOtherLine.kept.map((k) => k.path)).toEqual([RULE]);
+    expect(fromOtherLine.kept[0].why).toContain("(crm-line kept: .claude/**)");
+
+    // A sibling on the same line deletes from the line's own tree.
+    const sameLine = planLateralDeletions({
+      deletes: [{ path: RULE, deletedOn: IND }],
+      destination: independent,
+      survivingFiles: {},
+      originCrmMode: "independent",
+    });
+    expect(sameLine.deletes).toEqual([RULE]);
+  });
+
   it("withholds every deletion when the importers could not all be read", () => {
     const p = planLateralDeletions({
       deletes: [{ path: "src/lib/old.ts", deletedOn: IND }],
