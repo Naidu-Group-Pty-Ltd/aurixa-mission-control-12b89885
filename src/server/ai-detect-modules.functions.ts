@@ -5,6 +5,8 @@ import { assessBlastRadius } from "@/lib/blast-radius";
 import {
   runDetection,
   analyzeModuleIntelligence,
+  findRunningDetection,
+  runningRefusal,
   DEFAULT_CONFIG,
   type DetectionStrategy,
   type DetectionRunConfig,
@@ -42,6 +44,19 @@ export const detectModules = createServerFn({ method: "POST" })
         data.synthesizeBackendModules ?? DEFAULT_CONFIG.synthesizeBackendModules,
       maxBackendBlobs: data.maxBackendBlobs ?? DEFAULT_CONFIG.maxBackendBlobs,
     };
+
+    const refused = (error: string) => ({
+      ok: false,
+      runId: "",
+      proposed: 0,
+      inserted: 0,
+      updated: 0,
+      orphanAlerts: 0,
+      error,
+    });
+    const running = await findRunningDetection(context.supabase);
+    if (!running.ok) return refused(running.error);
+    if (running.running) return refused(runningRefusal(running.running, "a detection"));
 
     return runDetection({
       supabase: context.supabase,

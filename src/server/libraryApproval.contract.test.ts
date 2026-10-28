@@ -166,7 +166,7 @@ describe("detection records the commit it read", () => {
       detection.indexOf("const ROOT_DOT_NOISE"),
     );
     expect(fetch).toContain("const commitSha = branch.commit.sha;");
-    expect(fetch).toContain("return { files, treeHash, shaByPath, commitSha };");
+    expect(fetch).toContain("return { files, treeHash, shaByPath, sizeByPath, commitSha };");
   });
 
   it("records it on the run, or fails the run, before a module is written", () => {
@@ -181,7 +181,11 @@ describe("detection records the commit it read", () => {
     const run = detection.slice(detection.indexOf("export async function runDetection("));
     const pinned = run.indexOf("const ref: RepoRef = { ...branchRef, branch: commitSha };");
     expect(pinned).toBeGreaterThan(-1);
-    expect(pinned).toBeLessThan(run.indexOf("await traceImports("));
+    // The first read is the trace's prefetch, and it reads at the pinned ref.
+    const firstRead = run.indexOf("await prefetchTraceSources({");
+    expect(firstRead).toBeGreaterThan(-1);
+    expect(pinned).toBeLessThan(firstRead);
+    expect(run.slice(firstRead, firstRead + 120)).toMatch(/\bref,/);
   });
 });
 

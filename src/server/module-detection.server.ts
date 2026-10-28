@@ -13,7 +13,9 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
-import { getAppOctokit, type RepoRef } from "./github-app.server";
+import { getAppOctokit, readBlobTextsExact, type RepoRef } from "./github-app.server";
+import type { TextWant } from "./cascade/primeTextBatch.pure";
+import { CASCADE_MAX_FILE_BYTES } from "./cascade/syncExclusions.pure";
 import type { Octokit } from "@octokit/rest";
 import { validateModuleGlobs } from "@/lib/module-globs";
 import { parseFunctionConfig } from "./prime-backend.server";
@@ -77,6 +79,49 @@ export const DEFAULT_CONFIG: DetectionRunConfig = {
   synthesizeBackendModules: true,
   maxBackendBlobs: 4000,
 };
+
+/**
+ * How long a run that says `running` is taken to be running. On 31 Jul 2026 a
+ * reset's run took eleven and a half minutes reading file by file, and two
+ * more runs were started while it read. A run that still says `running` after
+ * this died with its invocation, and refusing behind it for ever would leave
+ * nothing able to detect.
+ */
+export const RUNNING_RUN_WINDOW_MS = 30 * 60_000;
+
+/**
+ * The detection run in progress, if one is: a run started inside
+ * `RUNNING_RUN_WINDOW_MS` that has not finished. Asked before a reset wipes
+ * anything and before a detection starts, because two at once write the same
+ * modules, and a reset beside a run wipes what the run is writing.
+ *
+ * A failed read is an error, never "none running".
+ */
+export async function findRunningDetection(
+  supabase: Supabase,
+  now: number = Date.now(),
+): Promise<
+  { ok: true; running: { id: string; started_at: string } | null } | { ok: false; error: string }
+> {
+  const { data, error } = await supabase
+    .from("module_detection_runs")
+    .select("id, started_at")
+    .eq("status", "running")
+    .gt("started_at", new Date(now - RUNNING_RUN_WINDOW_MS).toISOString())
+    .order("started_at", { ascending: false })
+    .limit(1);
+  if (error) return { ok: false, error: `detection runs unreadable: ${describeDbError(error)}` };
+  const row = (data ?? [])[0] as { id: string; started_at: string } | undefined;
+  return { ok: true, running: row ?? null };
+}
+
+/** The refusal a second run meets, naming the one already running. */
+export function runningRefusal(running: { id: string; started_at: string }, what: string): string {
+  return (
+    `Detection run ${running.id.slice(0, 8)} has been running since ${running.started_at}, ` +
+    `so ${what} now would write the same modules beside it. Wait for it to finish.`
+  );
+}
 
 type ImportEdge = {
   source_file: string;
@@ -144,6 +189,8 @@ async function fetchRepoTree(
   files: string[];
   treeHash: string;
   shaByPath: Map<string, string>;
+  /** Each blob's size, as the listing gives it: what decides whether it can be held. */
+  sizeByPath: Map<string, number>;
   commitSha: string;
 }> {
   const { data: branch } = await octokit.repos.getBranch({
@@ -177,7 +224,11 @@ async function fetchRepoTree(
     .filter((p) => !REAL_ENV_FILE.test(p));
 
   const shaByPath = new Map<string, string>();
-  for (const n of blobs) shaByPath.set(n.path as string, n.sha as string);
+  const sizeByPath = new Map<string, number>();
+  for (const n of blobs) {
+    shaByPath.set(n.path as string, n.sha as string);
+    if (typeof n.size === "number") sizeByPath.set(n.path as string, n.size);
+  }
 
   const treeHash = crypto
     .createHash("sha256")
@@ -185,7 +236,7 @@ async function fetchRepoTree(
     .digest("hex")
     .slice(0, 16);
 
-  return { files, treeHash, shaByPath, commitSha };
+  return { files, treeHash, shaByPath, sizeByPath, commitSha };
 }
 
 /** Dot-paths that are never part of the deployable surface. */
@@ -202,85 +253,221 @@ const REAL_ENV_FILE = /(^|\/)\.env(\.local|\.development|\.production|\.test)?$/
  */
 const BACKEND_MODULE_CAP = 80;
 
-// Fetch content of specific files
-async function fetchFileContents(
-  octokit: Octokit,
-  ref: RepoRef,
-  filePaths: string[],
-  maxSize: number = 8192,
-): Promise<Map<string, string>> {
-  const contents = new Map<string, string>();
+// ─── Reading files by batch ─────────────────────────────────────────
 
-  // Batch in groups of 5
-  for (let i = 0; i < filePaths.length; i += 5) {
-    const batch = filePaths.slice(i, i + 5);
-    const results = await Promise.allSettled(
-      batch.map(async (file) => {
-        try {
-          const res = await octokit.repos.getContent({
-            owner: ref.owner,
-            repo: ref.repo,
-            path: file,
-            ref: ref.branch,
-          });
-          const data = res.data as { type?: string; content?: string };
-          if (data.type !== "file" || !data.content) return null;
-          const content = Buffer.from(data.content, "base64").toString("utf8").slice(0, maxSize);
-          return { file, content };
-        } catch {
-          return null;
-        }
-      }),
-    );
-    for (const r of results) {
-      if (r.status === "fulfilled" && r.value) {
-        contents.set(r.value.file, r.value.content);
-      }
-    }
+/** What a read of many files did not bring back, by path. */
+export type UnreadFiles = {
+  /** Larger than the reader holds: never asked for, and named so nothing reads one as empty. */
+  tooLarge: string[];
+  /** Asked for and not answered. A fault, never an absence. */
+  unread: string[];
+};
+
+/** At most this many files, or `READ_CHUNK_BYTES` of them, are read and held at once. */
+const READ_CHUNK_WANTS = 400;
+const READ_CHUNK_BYTES = 16 * 1024 * 1024;
+
+/**
+ * The exact text of each of `wants`, handed to `take` a chunk at a time and
+ * then let go, so a scan of thousands of files never holds more than a chunk.
+ *
+ * Reads go through `readBlobTextsExact`: eighty blobs to a GraphQL query, by
+ * the ids the tree listing gave, and a text is kept only where its blob id is
+ * that id. A file over `maxBytes` is never asked for. A file asked for and not
+ * answered, or one `take` could not parse, is `unread` and named: the caller
+ * decides what a missing file costs, and nothing here reads it as empty.
+ */
+async function readExactInChunks(args: {
+  octokit: Octokit;
+  ref: RepoRef;
+  wants: TextWant[];
+  maxBytes: number;
+  take: (want: TextWant, text: string) => void;
+  onChunk?: (done: number, total: number) => void;
+}): Promise<UnreadFiles> {
+  const { octokit, ref, wants, maxBytes, take, onChunk } = args;
+  const out: UnreadFiles = { tooLarge: [], unread: [] };
+  const asked: TextWant[] = [];
+  for (const want of wants) {
+    if (typeof want.size === "number" && want.size > maxBytes) out.tooLarge.push(want.path);
+    else asked.push(want);
   }
 
-  return contents;
+  const chunks: TextWant[][] = [];
+  let current: TextWant[] = [];
+  let currentBytes = 0;
+  for (const want of asked) {
+    const size = want.size ?? 0;
+    if (
+      current.length >= READ_CHUNK_WANTS ||
+      (current.length > 0 && currentBytes + size > READ_CHUNK_BYTES)
+    ) {
+      chunks.push(current);
+      current = [];
+      currentBytes = 0;
+    }
+    current.push(want);
+    currentBytes += size;
+  }
+  if (current.length > 0) chunks.push(current);
+
+  let done = 0;
+  for (const chunk of chunks) {
+    const texts = await readBlobTextsExact(octokit, ref, chunk, { maxBytes });
+    for (const want of chunk) {
+      const text = texts.get(want.path);
+      if (text === undefined) {
+        out.unread.push(want.path);
+        continue;
+      }
+      try {
+        take(want, text);
+      } catch {
+        out.unread.push(want.path);
+      }
+    }
+    done += chunk.length;
+    onChunk?.(done, asked.length);
+  }
+  return out;
+}
+
+/** The files the import trace reads, as it always has. */
+const TRACEABLE = /\.(ts|tsx|js|jsx)$/;
+
+/** How much of each file the trace keeps: imports sit at the top, and this is what it always read. */
+const TRACE_TEXT_CHARS = 8192;
+
+/**
+ * The largest file the trace reads. It used to read each file through the
+ * contents API, which serves no text above 1 MB, so it never read a larger
+ * one. On the prime that is `src/integrations/supabase/types.ts` (1.3 MB,
+ * importing nothing). Held at the same line, a detection traces the files it
+ * always traced.
+ */
+const TRACE_MAX_BYTES = 1024 * 1024;
+
+/**
+ * Read every source file the import trace can reach, before it walks.
+ *
+ * The trace asked the contents API for each file as it came to it, one call at
+ * a time. Replayed against prime@122b761 on 28 Oct 2026 that was 3,622 calls,
+ * 228 of them for `types.ts` again, because a file the API never answered was
+ * never remembered. The App's window is 5,000 an hour and the cascade spends
+ * from it too, and a call refused there was swallowed, so the file was traced
+ * as importing nothing and its domain came out smaller with no word said.
+ *
+ * This walks the same graph breadth-first from every route at once, to the
+ * same depth, and asks each level's files by batch: the same files for a few
+ * dozen queries. Each text is cut to the 8,192 characters the trace read.
+ */
+async function prefetchTraceSources(args: {
+  octokit: Octokit;
+  ref: RepoRef;
+  roots: string[];
+  allFilesSet: Set<string>;
+  shaByPath: Map<string, string>;
+  sizeByPath: Map<string, number>;
+  contentCache: Map<string, string>;
+  maxDepth?: number;
+}): Promise<UnreadFiles> {
+  const { octokit, ref, roots, allFilesSet, shaByPath, sizeByPath, contentCache } = args;
+  const maxDepth = args.maxDepth ?? TRACE_MAX_DEPTH;
+  const out: UnreadFiles = { tooLarge: [], unread: [] };
+  const seen = new Set<string>();
+  let frontier = [...new Set(roots)];
+
+  for (let depth = 0; depth <= maxDepth && frontier.length > 0; depth++) {
+    for (const path of frontier) seen.add(path);
+    const wants = frontier
+      .filter((path) => TRACEABLE.test(path) && !contentCache.has(path))
+      .map((path) => ({ path, sha: shaByPath.get(path) ?? "", size: sizeByPath.get(path) }));
+    const level = await readExactInChunks({
+      octokit,
+      ref,
+      wants,
+      maxBytes: TRACE_MAX_BYTES,
+      take: (want, text) => contentCache.set(want.path, text.slice(0, TRACE_TEXT_CHARS)),
+    });
+    out.tooLarge.push(...level.tooLarge);
+    out.unread.push(...level.unread);
+
+    const next = new Set<string>();
+    for (const path of frontier) {
+      const content = contentCache.get(path);
+      if (!content) continue;
+      for (const spec of extractImports(path, content)) {
+        const target = findActualFile(spec, allFilesSet);
+        if (target && !seen.has(target)) next.add(target);
+      }
+    }
+    frontier = [...next];
+  }
+  return out;
+}
+
+/**
+ * A run that could not read a file it needed writes no module. Read as empty,
+ * a source file would be traced as importing nothing and a migration as
+ * declaring nothing, and the modules shaped from that would be approved at a
+ * commit whose files they do not describe.
+ */
+function unreadRefusal(what: string, unread: string[]): Error {
+  const shown = unread.slice(0, 10).join(", ");
+  const more = unread.length > 10 ? ` and ${unread.length - 10} more` : "";
+  return new Error(
+    `${unread.length} ${what} could not be read (${shown}${more}), so this run wrote no module. ` +
+      `Run detection again.`,
+  );
 }
 
 // ─── Cached blob reading ────────────────────────────────────────────
 
 /**
- * Read many blobs with bounded concurrency, memoised on git blob SHA.
+ * Read many blobs by batch, memoised on git blob SHA.
  *
  * A full backend scan of the prime touches ~1,400 files (756 migrations plus
  * 619 edge-function sources). Blobs are content-addressed, so a parse result
  * keyed on SHA is valid forever: after the first run only files that actually
  * changed cost an API call. Without this, every detection run would burn most
  * of the GitHub App's hourly budget.
+ *
+ * By 28 Oct 2026 it was 3,575 files, and 25 of the migrations were template
+ * seeds of 37 to 43 MB. A blob read through the API arrives whole, base64 in
+ * JSON, inside a Worker isolate of 128 MB: a cascade pass died on one such
+ * seed on every attempt on 2 Sep (`docs/CASCADE_LARGE_FILES.md`), and this
+ * read them eight at a time. A blob over `CASCADE_MAX_FILE_BYTES`, what an
+ * invocation can hold, is never read, and comes back named in `tooLarge`. The
+ * seeds hold rows only, so the catalogue loses nothing by it. A blob that was
+ * asked for and not answered comes back in `unread`, where it used to be
+ * dropped with its module resolving "with less backend detail".
  */
 async function readBlobsCached<T>(args: {
   octokit: Octokit;
   ref: RepoRef;
   supabase: Supabase;
-  /** path → blob sha */
-  targets: Array<{ path: string; sha: string }>;
+  /** Each blob as the listing gives it: path, sha and size. */
+  targets: TextWant[];
   kind: string;
   parse: (content: string, path: string) => T;
-  concurrency?: number;
   maxBlobs?: number;
   onProgress?: (done: number, total: number) => void;
-}): Promise<{ results: Map<string, T>; fetched: number; cached: number; skipped: number }> {
-  const {
-    octokit,
-    ref,
-    supabase,
-    targets,
-    kind,
-    parse,
-    concurrency = 8,
-    maxBlobs = 4000,
-    onProgress,
-  } = args;
+}): Promise<
+  {
+    results: Map<string, T>;
+    fetched: number;
+    cached: number;
+    skipped: number;
+  } & UnreadFiles
+> {
+  const { octokit, ref, supabase, targets, kind, parse, maxBlobs = 4000, onProgress } = args;
 
   const results = new Map<string, T>();
   const capped = targets.slice(0, maxBlobs);
   const skipped = targets.length - capped.length;
-  if (capped.length === 0) return { results, fetched: 0, cached: 0, skipped };
+  if (capped.length === 0) {
+    return { results, fetched: 0, cached: 0, skipped, tooLarge: [], unread: [] };
+  }
 
   // ── Cache lookup (chunked; `in` has a practical URL length limit) ──
   const cacheHits = new Map<string, T>();
@@ -296,14 +483,14 @@ async function readBlobsCached<T>(args: {
     }
   }
 
-  const misses: Array<{ path: string; sha: string }> = [];
+  const misses: TextWant[] = [];
   for (const t of capped) {
     const hit = cacheHits.get(t.sha);
     if (hit !== undefined) results.set(t.path, hit);
     else misses.push(t);
   }
 
-  // ── Fetch + parse the misses ──
+  // ── Read + parse the misses ──
   const toCache: Array<{
     blob_sha: string;
     path: string;
@@ -311,42 +498,24 @@ async function readBlobsCached<T>(args: {
     analysis: T;
     byte_size: number;
   }> = [];
-  let done = 0;
-  let cursor = 0;
-
-  const worker = async () => {
-    for (;;) {
-      const i = cursor++;
-      if (i >= misses.length) return;
-      const { path, sha } = misses[i];
-      try {
-        const { data } = await octokit.git.getBlob({
-          owner: ref.owner,
-          repo: ref.repo,
-          file_sha: sha,
-        });
-        const content = Buffer.from((data.content ?? "").replace(/\n/g, ""), "base64").toString(
-          "utf8",
-        );
-        const analysis = parse(content, path);
-        results.set(path, analysis);
-        toCache.push({
-          blob_sha: sha,
-          path,
-          kind,
-          analysis,
-          byte_size: content.length,
-        });
-      } catch {
-        // A single unreadable blob must not sink the run — the module it
-        // belongs to simply resolves with less backend detail.
-      }
-      done++;
-      if (done % 50 === 0) onProgress?.(done, misses.length);
-    }
-  };
-
-  await Promise.all(Array.from({ length: Math.min(concurrency, misses.length) }, worker));
+  const reads = await readExactInChunks({
+    octokit,
+    ref,
+    wants: misses,
+    maxBytes: CASCADE_MAX_FILE_BYTES,
+    take: (want, content) => {
+      const analysis = parse(content, want.path);
+      results.set(want.path, analysis);
+      toCache.push({
+        blob_sha: want.sha,
+        path: want.path,
+        kind,
+        analysis,
+        byte_size: content.length,
+      });
+    },
+    onChunk: onProgress,
+  });
 
   // ── Persist new analyses ──
   for (let i = 0; i < toCache.length; i += 100) {
@@ -367,7 +536,14 @@ async function readBlobsCached<T>(args: {
       .in("blob_sha", hitShas.slice(i, i + 200));
   }
 
-  return { results, fetched: misses.length, cached: cacheHits.size, skipped };
+  return {
+    results,
+    fetched: toCache.length,
+    cached: cacheHits.size,
+    skipped,
+    tooLarge: reads.tooLarge,
+    unread: reads.unread,
+  };
 }
 
 // ─── Import Resolution ──────────────────────────────────────────────
@@ -432,15 +608,17 @@ function findActualFile(specifier: string, allFiles: Set<string>): string | null
   return null;
 }
 
-// Recursively trace all imports from a root file
-async function traceImports(
+/** How deep the trace follows imports from a route. */
+const TRACE_MAX_DEPTH = 20;
+
+// Recursively trace all imports from a root file, through the texts
+// `prefetchTraceSources` read: the walk itself reads nothing.
+function traceImports(
   rootFile: string,
   allFilesSet: Set<string>,
   contentCache: Map<string, string>,
-  octokit: Octokit,
-  ref: RepoRef,
-  maxDepth: number = 20,
-): Promise<{ files: string[]; edges: ImportEdge[] }> {
+  maxDepth: number = TRACE_MAX_DEPTH,
+): { files: string[]; edges: ImportEdge[] } {
   const visited = new Set<string>();
   const edges: ImportEdge[] = [];
   const queue: Array<{ file: string; depth: number }> = [{ file: rootFile, depth: 0 }];
@@ -450,13 +628,7 @@ async function traceImports(
     if (visited.has(file) || depth > maxDepth) continue;
     visited.add(file);
 
-    // Get content
-    let content = contentCache.get(file);
-    if (!content && /\.(ts|tsx|js|jsx)$/.test(file)) {
-      const fetched = await fetchFileContents(octokit, ref, [file]);
-      content = fetched.get(file);
-      if (content) contentCache.set(file, content);
-    }
+    const content = contentCache.get(file);
     if (!content) continue;
 
     const imports = extractImports(file, content);
@@ -647,7 +819,10 @@ export async function runDetection(args: {
       repo: prime.github_repo,
       branch: prime.default_branch,
     };
-    const { files, treeHash, shaByPath, commitSha } = await fetchRepoTree(octokit, branchRef);
+    const { files, treeHash, shaByPath, sizeByPath, commitSha } = await fetchRepoTree(
+      octokit,
+      branchRef,
+    );
 
     // The commit this run read, recorded before anything is changed. A library
     // entry is approved at the commit its module was detected at, so a run
@@ -723,8 +898,21 @@ export async function runDetection(args: {
     // ── Phase 3: Trace imports for each route ──
     // Runs under every strategy: it is what pulls file contents into the cache,
     // which both the feature partition and the backend pass read from.
-    progress("import_tracing", "Tracing import trees for each route…", 30);
+    progress("import_tracing", "Reading the source files the routes reach…", 30);
     const contentCache = new Map<string, string>();
+    const traceReads = await prefetchTraceSources({
+      octokit,
+      ref,
+      roots: routeFiles,
+      allFilesSet,
+      shaByPath,
+      sizeByPath,
+      contentCache,
+    });
+    if (traceReads.unread.length > 0) {
+      throw unreadRefusal("source file(s) the import trace reaches", traceReads.unread);
+    }
+    progress("import_tracing", "Tracing import trees for each route…", 32);
     const allEdges: ImportEdge[] = [];
     const routeModules: RouteModule[] = [];
     const fileOwnership = new Map<string, string[]>(); // file → [slug, slug, ...]
@@ -739,13 +927,7 @@ export async function runDetection(args: {
       const pct = 30 + Math.round((i / routeFiles.length) * 40);
       progress("import_tracing", `Tracing ${rf} (${i + 1}/${routeFiles.length})…`, pct);
 
-      const { files: resolvedFiles, edges } = await traceImports(
-        rf,
-        allFilesSet,
-        contentCache,
-        octokit,
-        ref,
-      );
+      const { files: resolvedFiles, edges } = traceImports(rf, allFilesSet, contentCache);
       allEdges.push(...edges);
 
       const slug = routeFileToSlug(rf);
@@ -916,15 +1098,21 @@ export async function runDetection(args: {
       const analysable = (p: string) =>
         /\.(ts|tsx|js|mjs|cjs|sql|toml)$/.test(p) || p.includes(".env.");
 
+      const want = (path: string): TextWant => ({
+        path,
+        sha: shaByPath.get(path) ?? "",
+        size: sizeByPath.get(path),
+      });
+
       const migrationTargets = backendPaths
         .filter((x) => x.info.kind === "migration")
-        .map((x) => ({ path: x.path, sha: shaByPath.get(x.path) ?? "" }))
+        .map((x) => want(x.path))
         .filter((t) => t.sha);
 
       const fnTargets = backendPaths
         .filter((x) => x.info.kind === "edge_function" || x.info.kind === "edge_shared")
         .filter((x) => analysable(x.path))
-        .map((x) => ({ path: x.path, sha: shaByPath.get(x.path) ?? "" }))
+        .map((x) => want(x.path))
         .filter((t) => t.sha);
 
       // Migration SQL → declared database objects.
@@ -963,44 +1151,38 @@ export async function runDetection(args: {
           ),
       });
 
-      // config.toml drives per-function verify_jwt.
-      let functionConfig = new Map<string, { verifyJwt: boolean }>();
-      const configSha = shaByPath.get("supabase/config.toml");
-      if (configSha) {
-        try {
-          const { data } = await octokit.git.getBlob({
-            owner: ref.owner,
-            repo: ref.repo,
-            file_sha: configSha,
-          });
-          const toml = Buffer.from((data.content ?? "").replace(/\n/g, ""), "base64").toString(
-            "utf8",
-          );
-          functionConfig = parseFunctionConfig(toml);
-        } catch {
-          // verify_jwt defaults to true per function — matches the CLI default.
-        }
-      }
-
+      // config.toml drives per-function verify_jwt; with no config.toml in the
+      // tree, verify_jwt defaults to true per function, as the CLI's does.
       // `.env.example` contributes secret names (never values).
-      const envTargets = backendPaths.filter((x) => x.info.kind === "env_template");
+      let functionConfig = new Map<string, { verifyJwt: boolean }>();
       const envContents = new Map<string, string>();
-      for (const t of envTargets) {
-        const sha = shaByPath.get(t.path);
-        if (!sha) continue;
-        try {
-          const { data } = await octokit.git.getBlob({
-            owner: ref.owner,
-            repo: ref.repo,
-            file_sha: sha,
-          });
-          envContents.set(
-            t.path,
-            Buffer.from((data.content ?? "").replace(/\n/g, ""), "base64").toString("utf8"),
-          );
-        } catch {
-          // Optional input — absence just means fewer known secret names.
-        }
+      const settingsWants = [
+        ...(shaByPath.has("supabase/config.toml") ? [want("supabase/config.toml")] : []),
+        ...backendPaths
+          .filter((x) => x.info.kind === "env_template" && shaByPath.has(x.path))
+          .map((x) => want(x.path)),
+      ];
+      const settingsReads = await readExactInChunks({
+        octokit,
+        ref,
+        wants: settingsWants,
+        maxBytes: CASCADE_MAX_FILE_BYTES,
+        take: (w, text) => {
+          if (w.path === "supabase/config.toml") functionConfig = parseFunctionConfig(text);
+          else envContents.set(w.path, text);
+        },
+      });
+
+      // A config.toml or a template that could not be read would have every
+      // function read as verify_jwt true, or a secret as not needed.
+      const backendUnread = [
+        ...migrationAnalysis.unread,
+        ...fnAnalysis.unread,
+        ...settingsReads.unread,
+        ...settingsReads.tooLarge,
+      ];
+      if (backendUnread.length > 0) {
+        throw unreadRefusal("backend file(s)", backendUnread);
       }
 
       // buildBackendInventory works on raw text; feed it the parse results by
@@ -1163,6 +1345,8 @@ export async function runDetection(args: {
           functions_fetched: fnAnalysis.fetched,
           functions_cached: fnAnalysis.cached,
           functions_skipped: fnAnalysis.skipped,
+          // Never read, by name: what they declare is unknown, not nothing.
+          too_large_to_hold: [...migrationAnalysis.tooLarge, ...fnAnalysis.tooLarge],
         },
       };
 
@@ -1473,7 +1657,9 @@ export async function runDetection(args: {
           : 0,
         secret_count: totalSecrets,
         backend_module_count: backendModuleCount,
-        backend_summary: JSON.parse(JSON.stringify(backendSummary)),
+        backend_summary: JSON.parse(
+          JSON.stringify({ ...backendSummary, trace_too_large_to_hold: traceReads.tooLarge }),
+        ),
         completed_at: new Date().toISOString(),
       })
       .eq("id", runId);
