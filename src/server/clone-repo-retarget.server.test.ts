@@ -1,7 +1,10 @@
 import { readFileSync } from "node:fs";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 import { REPOSITORY_INVARIANTS } from "./cascade/repositoryInvariants.pure";
-import { PARENT_DEPLOYMENT_OWN_FILES } from "./cascade/syncExclusions.pure";
+import {
+  PARENT_DEPLOYMENT_OWN_FILES,
+  PARENT_DEPLOYMENT_OWN_TREES,
+} from "./cascade/syncExclusions.pure";
 import {
   retargetCloneRepo,
   DEPENDABOT_CONFIG_PATH,
@@ -624,13 +627,41 @@ describe("the isolation spec a clone copied from a parent inherits", () => {
  */
 const github = vi.hoisted(() => ({
   repos: {
+    get: vi.fn(),
     getContent: vi.fn(),
     deleteFile: vi.fn(),
     createOrUpdateFileContents: vi.fn(),
   },
+  git: {
+    getRef: vi.fn(),
+    getCommit: vi.fn(),
+    getTree: vi.fn(),
+    createTree: vi.fn(),
+    createCommit: vi.fn(),
+    updateRef: vi.fn(),
+  },
   request: vi.fn(),
 }));
 vi.mock("./github-app.server", () => ({ getAppOctokit: () => github }));
+
+/** Every call forgotten, and a repository whose root holds no parent's tree. */
+function resetGithub() {
+  for (const fn of [
+    github.repos.get,
+    github.repos.getContent,
+    github.repos.deleteFile,
+    github.repos.createOrUpdateFileContents,
+    ...Object.values(github.git),
+    github.request,
+  ]) {
+    fn.mockReset();
+  }
+  github.request.mockResolvedValue({ data: {} });
+  github.repos.deleteFile.mockResolvedValue({ data: {} });
+  github.git.getRef.mockResolvedValue({ data: { object: { sha: "head" } } });
+  github.git.getCommit.mockResolvedValue({ data: { tree: { sha: "root" } } });
+  github.git.getTree.mockResolvedValue({ data: { tree: [], truncated: false } });
+}
 
 describe("a parent deployment's own files, on a clone copied from a parent", () => {
   const VCR_PRUNE = ".github/workflows/vcr-prune.yml";
@@ -650,16 +681,7 @@ describe("a parent deployment's own files, on a clone copied from a parent", () 
   const deleted = () => github.repos.deleteFile.mock.calls.map(([args]) => args.path as string);
 
   beforeEach(() => {
-    for (const fn of [
-      github.repos.getContent,
-      github.repos.deleteFile,
-      github.repos.createOrUpdateFileContents,
-      github.request,
-    ]) {
-      fn.mockReset();
-    }
-    github.request.mockResolvedValue({ data: {} });
-    github.repos.deleteFile.mockResolvedValue({ data: {} });
+    resetGithub();
   });
 
   it("deletes each one the copy carries, on the clone's branch, by the blob it read", async () => {
@@ -727,5 +749,151 @@ describe("a parent deployment's own files, on a clone copied from a parent", () 
     expect(caller).toMatch(
       /retargetCloneRepo\([\s\S]{0,1600}\{ fromParentClone: Boolean\(cloneRow\.parent_clone_id\) \}/,
     );
+  });
+});
+
+describe("a parent deployment's own trees, on a clone copied from a parent", () => {
+  const REPO = { owner: "Naidu-Group-Pty-Ltd", repo: "npc-child", branch: "main" };
+  const notFound = () => Promise.reject(Object.assign(new Error("Not Found"), { status: 404 }));
+  const STACK = PARENT_DEPLOYMENT_OWN_TREES[0];
+
+  /** A root holding the voice stack, with these files under it. */
+  const withStack = (files: string[], truncated = false) =>
+    github.git.getTree.mockImplementation(({ tree_sha }: { tree_sha: string }) =>
+      Promise.resolve({
+        data:
+          tree_sha === "root"
+            ? {
+                tree: [
+                  { path: "src", type: "tree", sha: "src-tree" },
+                  { path: "voice-agents", type: "tree", sha: "stack-tree" },
+                ],
+                truncated: false,
+              }
+            : {
+                tree: files.map((path) => ({
+                  path,
+                  type: "blob",
+                  mode: "100644",
+                  sha: `b-${path}`,
+                })),
+                truncated,
+              },
+      }),
+    );
+
+  beforeEach(() => {
+    resetGithub();
+    github.repos.getContent.mockImplementation(() => notFound());
+    github.git.createTree.mockResolvedValue({ data: { sha: "new-tree" } });
+    github.git.createCommit.mockResolvedValue({ data: { sha: "new-commit" } });
+    github.git.updateRef.mockResolvedValue({ data: {} });
+  });
+
+  it("removes the whole tree in one commit on the clone's branch, moving the ref forward", async () => {
+    withStack([
+      "crm-independent/make/hooks.json",
+      "crm-independent/vapi/numbers.json",
+      "README.md",
+    ]);
+    const result = await retargetCloneRepo(REPO, CLONE, "anon", { fromParentClone: true });
+
+    expect(result.actions).toContainEqual({
+      target: STACK,
+      status: "deleted",
+      detail: "3 file(s)",
+    });
+    expect(github.git.getRef).toHaveBeenCalledWith(
+      expect.objectContaining({
+        owner: "Naidu-Group-Pty-Ltd",
+        repo: "npc-child",
+        ref: "heads/main",
+      }),
+    );
+    expect(github.git.createTree).toHaveBeenCalledTimes(1);
+    const tree = github.git.createTree.mock.calls[0][0];
+    expect(tree.base_tree).toBe("root");
+    expect(tree.tree).toEqual([
+      {
+        path: "voice-agents/crm-independent/make/hooks.json",
+        mode: "100644",
+        type: "blob",
+        sha: null,
+      },
+      {
+        path: "voice-agents/crm-independent/vapi/numbers.json",
+        mode: "100644",
+        type: "blob",
+        sha: null,
+      },
+      { path: "voice-agents/README.md", mode: "100644", type: "blob", sha: null },
+    ]);
+    const commit = github.git.createCommit.mock.calls[0][0];
+    expect(commit).toMatchObject({ tree: "new-tree", parents: ["head"] });
+    expect(commit.message).toMatch(
+      /^chore\(aurixa\): drop voice-agents\/, the parent deployment's own tree/,
+    );
+    expect(github.git.updateRef).toHaveBeenCalledWith(
+      expect.objectContaining({ ref: "heads/main", sha: "new-commit" }),
+    );
+    expect(github.git.updateRef.mock.calls[0][0]).not.toHaveProperty("force");
+    // Not one contents-API commit per file.
+    expect(github.repos.deleteFile).not.toHaveBeenCalled();
+  });
+
+  it("reports a tree that is not there as absent, and writes nothing", async () => {
+    const result = await retargetCloneRepo(REPO, CLONE, "anon", { fromParentClone: true });
+    expect(result.actions).toContainEqual({ target: STACK, status: "absent" });
+    expect(github.git.createTree).not.toHaveBeenCalled();
+    expect(github.git.updateRef).not.toHaveBeenCalled();
+  });
+
+  it("never touches a clone with no parent: a parent's own tree is its to keep", async () => {
+    withStack(["crm-independent/make/hooks.json"]);
+    const result = await retargetCloneRepo(REPO, CLONE, "anon");
+    expect(github.git.getRef).not.toHaveBeenCalled();
+    expect(github.git.createTree).not.toHaveBeenCalled();
+    expect(result.actions.some((a) => a.target === STACK)).toBe(false);
+  });
+
+  it("fails on a listing GitHub cut short, rather than removing part of the tree", async () => {
+    withStack(["crm-independent/make/hooks.json"], true);
+    const result = await retargetCloneRepo(REPO, CLONE, "anon", { fromParentClone: true });
+    expect(result.actions).toContainEqual({
+      target: STACK,
+      status: "failed",
+      detail: "GitHub truncated the listing of voice-agents/",
+    });
+    expect(github.git.createTree).not.toHaveBeenCalled();
+  });
+
+  it("reports a branch that moved in between, never forces it, and carries on", async () => {
+    withStack(["crm-independent/make/hooks.json"]);
+    github.git.updateRef.mockRejectedValue(
+      Object.assign(new Error("Update is not a fast forward"), { status: 422 }),
+    );
+    const result = await retargetCloneRepo(REPO, CLONE, "anon", { fromParentClone: true });
+    expect(result.actions).toContainEqual({
+      target: STACK,
+      status: "failed",
+      detail: "Update is not a fast forward",
+    });
+    // Step 6 still ran after it.
+    const read = github.repos.getContent.mock.calls.map(([args]) => args.path as string);
+    expect(read).toContain(SHIPPED_BACKEND_PAIR_PATHS[0]);
+  });
+
+  it("reads the default branch when the repository reference names none", async () => {
+    github.repos.get.mockResolvedValue({ data: { default_branch: "trunk" } });
+    withStack(["crm-independent/make/hooks.json"]);
+    await retargetCloneRepo({ owner: "o", repo: "r" }, CLONE, "anon", { fromParentClone: true });
+    expect(github.git.getRef).toHaveBeenCalledWith(expect.objectContaining({ ref: "heads/trunk" }));
+  });
+
+  it("reads the list beside the exclusions and spells no tree of its own", () => {
+    const src = readFileSync("src/server/clone-repo-retarget.server.ts", "utf8");
+    const step = src.slice(src.indexOf("// 5c."), src.indexOf("// 6. The shipped Supabase pair"));
+    expect(step).toContain("for (const root of PARENT_DEPLOYMENT_OWN_TREES)");
+    for (const root of PARENT_DEPLOYMENT_OWN_TREES) expect(step).not.toContain(`"${root}"`);
   });
 });

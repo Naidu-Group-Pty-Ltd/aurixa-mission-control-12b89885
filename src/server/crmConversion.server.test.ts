@@ -384,7 +384,7 @@ describe("the environment follows the line", () => {
       default_branch: "main",
       last_synced_sha: "headsha",
       crm_mode: "independent",
-      sync_scope: "modules",
+      sync_scope: "mirror",
       parent_clone_id: null,
     });
     const db = fakeSupabase(w);

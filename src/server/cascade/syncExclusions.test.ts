@@ -20,6 +20,8 @@ import {
   oversizeHold,
   oversizeHoldNotice,
   PARENT_DEPLOYMENT_OWN_FILES,
+  PARENT_DEPLOYMENT_OWN_TREES,
+  parentDeploymentOwnTree,
 } from "./syncExclusions.pure";
 import { CASCADE_STREAM_MAX_FILE_BYTES } from "./blobStreamCarry.pure";
 import { parseAssertions } from "../migrationAssertions.pure";
@@ -80,6 +82,63 @@ describe("a parent deployment's own files", () => {
     expect(write).toEqual([".github/workflows/ci.yml"]);
     expect(held).toMatchObject([{ path: VCR_PRUNE, reason: "protected" }]);
     expect(reportableHeld(held)).toEqual([]);
+  });
+});
+
+describe("a parent deployment's own trees", () => {
+  // The CRM's voice stack (148 files on 28 Oct 2026) names its Vapi numbers
+  // and its ten live Make webhooks. A child copies the parent's repository and
+  // then reads the parent's tree on every cascade, so the hold is on the
+  // delivery's SOURCE, not on a row the child would have to be seeded with.
+  const HOOKS = "voice-agents/crm-independent/make/hooks.json";
+  const PAGE = "src/pages/Index.tsx";
+
+  it("start with the voice stack, at the repository root", () => {
+    expect(PARENT_DEPLOYMENT_OWN_TREES).toContain("voice-agents/");
+    expect(parentDeploymentOwnTree(HOOKS)).toBe("voice-agents/");
+    expect(parentDeploymentOwnTree("docs/voice-agents/guide.md")).toBeNull();
+    expect(parentDeploymentOwnTree("voice-agents-notes.md")).toBeNull();
+  });
+
+  it("are held from another deployment's bytes, silently", () => {
+    const { write, held } = partitionCascadePaths([HOOKS, PAGE], [], {
+      fromAnotherDeployment: true,
+    });
+    expect(write).toEqual([PAGE]);
+    expect(held).toMatchObject([
+      { path: HOOKS, reason: "protected", pattern: "(another deployment's own: voice-agents/)" },
+    ]);
+    expect(reportableHeld(held)).toEqual([]);
+    expect(approvableHeld(held)).toEqual([]);
+  });
+
+  it("travel from the prime, which carries none today: a stack meant for every deployment is shared", () => {
+    expect(partitionCascadePaths([HOOKS, PAGE], []).write).toEqual([HOOKS, PAGE]);
+  });
+
+  it("are held ahead of a row, so no row can release them", () => {
+    const rules: SyncExclusion[] = [{ pattern: "voice-agents/**", reason: "manual_reconcile" }];
+    const { held } = partitionCascadePaths([HOOKS], rules, { fromAnotherDeployment: true });
+    expect(held).toMatchObject([{ reason: "protected" }]);
+  });
+
+  it("hold no deletion: none reaches them from the prime's history", () => {
+    const { write, held } = partitionCascadePaths([HOOKS], [], {
+      purpose: "delete",
+      fromAnotherDeployment: true,
+    });
+    expect(write).toEqual([HOOKS]);
+    expect(held).toEqual([]);
+  });
+
+  it("are held by the engine wherever the bytes come from another clone", () => {
+    // A child reads its parent, and a conversion its target head; both set the
+    // delivery's provenance, and only the prime's own bytes leave it unset.
+    const engine = readFileSync(join(process.cwd(), "src/server/cascade-engine.server.ts"), "utf8");
+    const opts = engine.slice(engine.indexOf("const lineOpts = {"));
+    expect(opts.slice(0, opts.indexOf("};"))).toContain(
+      "fromAnotherDeployment: args.provenance !== undefined",
+    );
   });
 });
 

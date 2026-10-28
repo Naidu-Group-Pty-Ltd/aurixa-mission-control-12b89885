@@ -31,7 +31,7 @@ function row(overrides: Partial<CrmParentRow> = {}): CrmParentRow {
     default_branch: "main",
     last_synced_sha: PRIME_SHA,
     crm_mode: "independent",
-    sync_scope: "modules",
+    sync_scope: "mirror",
     parent_clone_id: null,
     ...overrides,
   };
@@ -164,6 +164,55 @@ describe("judgeCrmParent", () => {
       expect(j.ok).toBe(false);
       if (!j.ok) expect(j.kind).toBe("no_repository");
     }
+  });
+
+  it("refuses a parent that is not a mirror, and says how to make it one", () => {
+    // D15: a module-scoped head is the prime only inside its modules' globs,
+    // so a clone created from it would start without the rest and never
+    // receive it. The CRM read `in_sync` on 27 Oct 2026 missing 495 files.
+    const j = judgeCrmParent({
+      mode: "independent",
+      parentId: CRM_ID,
+      parent: row({ sync_scope: "modules" }),
+      readFailed: false,
+    });
+    expect(j.ok).toBe(false);
+    if (!j.ok) {
+      expect(j.kind).toBe("parent_not_mirror");
+      expect(j.reason).toContain("is module-scoped");
+      expect(j.reason).toContain("Make NPC CRM Independent a mirror");
+    }
+  });
+
+  it("refuses a scope it does not recognise, rather than reading it as a mirror", () => {
+    for (const scope of [null, "", "Mirror"]) {
+      const j = judgeCrmParent({
+        mode: "dependent",
+        parentId: CD_ID,
+        parent: row({ id: CD_ID, crm_mode: "dependent", sync_scope: scope }),
+        readFailed: false,
+      });
+      expect(!j.ok && j.kind).toBe("parent_not_mirror");
+    }
+  });
+
+  it("judges the line and the repository before the scope", () => {
+    // A head that runs the other CRM, or has nothing to copy, is refused for
+    // that first: making it a mirror would not make it a usable head.
+    const other = judgeCrmParent({
+      mode: "dependent",
+      parentId: CRM_ID,
+      parent: row({ sync_scope: "modules" }),
+      readFailed: false,
+    });
+    expect(!other.ok && other.kind).toBe("wrong_mode");
+    const bare = judgeCrmParent({
+      mode: "independent",
+      parentId: CRM_ID,
+      parent: row({ sync_scope: "modules", github_repo: null }),
+      readFailed: false,
+    });
+    expect(!bare.ok && bare.kind).toBe("no_repository");
   });
 
   it("accepts a parent of the chosen line, trimmed", () => {
