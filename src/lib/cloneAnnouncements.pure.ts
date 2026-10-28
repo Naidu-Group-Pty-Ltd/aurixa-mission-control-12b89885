@@ -36,6 +36,23 @@ export const ANNOUNCEMENT_SEVERITIES: readonly AnnouncementSeverity[] = [
   "critical",
 ] as const;
 
+/**
+ * How each severity reads in a workspace — the word beside it and the colour
+ * it is drawn in there (the workspace's `src/components/announcements/severity.ts`,
+ * since 28 Oct 2026: the platform's own colours, the same in every workspace,
+ * never the workspace's white-label brand). Shown beside the severity picker
+ * so the operator chooses what the reader will see.
+ */
+export const SEVERITY_IN_WORKSPACE: Record<
+  AnnouncementSeverity,
+  { option: string; word: string; colour: string }
+> = {
+  info: { option: "Info", word: "Information", colour: "Aurixa blue" },
+  success: { option: "Success", word: "Good news", colour: "green" },
+  warning: { option: "Warning", word: "Needs attention", colour: "Aurixa orange" },
+  critical: { option: "Critical", word: "Critical", colour: "red" },
+};
+
 export const ANNOUNCEMENT_DISPLAYS: readonly AnnouncementDisplay[] = [
   "banner",
   "modal",

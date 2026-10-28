@@ -17,6 +17,9 @@ const h = vi.hoisted(() => ({
     url?: string | null;
   }>,
   seq: 0,
+  /** What reached a workspace's Realtime: the URL posted to, and the body. */
+  broadcasts: [] as Array<{ url: string; body: { messages: Array<Record<string, unknown>> } }>,
+  refusing: new Set<string>(),
 }));
 
 /** The unique indexes of 20261027120100_workspace_message_replies.sql. */
@@ -55,7 +58,7 @@ vi.mock("@/integrations/supabase/client.server", () => {
           rowsOf().push(row);
           made.push(row);
         }
-        return { data: made, error: null };
+        return { data: made.map((r) => ({ ...r })), error: null };
       }
       let rows = rowsOf().filter((r) => filters.every((f) => f(r)));
       if (op === "update") {
@@ -68,7 +71,9 @@ vi.mock("@/integrations/supabase/client.server", () => {
             String(a[column] ?? "").localeCompare(String(b[column] ?? "")) * (ascending ? 1 : -1),
         );
       }
-      return { data: rows, error: null };
+      // A copy, as PostgREST's answer is: a row read before an update must
+      // not change under the reader when the update lands.
+      return { data: rows.map((r) => ({ ...r })), error: null };
     };
     const first = () => {
       const r = result();
@@ -111,13 +116,39 @@ vi.mock("@/server/audit.server", () => ({
   ),
 }));
 
+// The Management API, which the signal asks for the prime's publishable key.
+vi.mock("@/server/backend-provisioning.server", () => ({
+  getProjectApiKeys: vi.fn(async () => [{ name: "anon", api_key: "prime-anon" }]),
+  selectProjectKeys: (keys: Array<{ name: string; api_key: string }>) => ({
+    anonKey: keys.find((k) => k.name === "anon")?.api_key ?? null,
+    serviceRoleKey: null,
+    gatewayKey: null,
+  }),
+}));
+vi.mock("@/server/prime-backend.server", () => ({
+  resolvePrimeBackendRef: vi.fn(async () => "dduzbchuswwbefdunfct"),
+}));
+
+// Each workspace's Realtime broadcast endpoint: 202 on acceptance, as measured
+// on the wire on 28 Oct 2026; a refusing host answers 503.
+vi.stubGlobal(
+  "fetch",
+  vi.fn(async (url: string, init: { body: string }) => {
+    if (h.refusing.has(new URL(url).host)) return new Response("{}", { status: 503 });
+    h.broadcasts.push({ url, body: JSON.parse(init.body) });
+    return new Response(null, { status: 202 });
+  }),
+);
+
 import {
   announcementsForWorkspace,
+  archiveAnnouncement,
   postOperatorReply,
   postWorkspaceReply,
   recordAnnouncementDeliveries,
   recordAnnouncementSeen,
   sendAnnouncement,
+  updateAnnouncement,
 } from "./announcements.server";
 import { PRIME_WORKSPACE_ID } from "@/lib/cloneAnnouncements.pure";
 
@@ -169,17 +200,27 @@ const author = {
   role: "superadmin",
 };
 
+const PRIME_RT = "https://dduzbchuswwbefdunfct.supabase.co/realtime/v1/api/broadcast";
+const CLONE_RT = "https://plisdzywzleljorrphxv.supabase.co/realtime/v1/api/broadcast";
+const OTHER_RT = "https://qvuwrvwzjyigptmnijyb.supabase.co/realtime/v1/api/broadcast";
+
 beforeEach(() => {
   h.tables = {
     clones: [
       { id: CLONE, name: "NPC Client Dashboard", entitled_plan_slug: "scale" },
       { id: OTHER, name: "NPC CRM Independent", entitled_plan_slug: "launch" },
     ],
+    clone_backends: [
+      { clone_id: CLONE, supabase_url: "https://plisdzywzleljorrphxv.supabase.co", anon_key: "clone-anon" },
+      { clone_id: OTHER, supabase_url: "https://qvuwrvwzjyigptmnijyb.supabase.co", anon_key: "other-anon" },
+    ],
   };
   h.failing = new Set();
   h.audits = [];
   h.notices = [];
   h.seq = 0;
+  h.broadcasts = [];
+  h.refusing = new Set();
 });
 
 describe("the prime is served", () => {
@@ -347,7 +388,7 @@ describe("replies", () => {
     expect(h.tables.clone_announcement_replies[0].workspace_id).toBe(PRIME_WORKSPACE_ID);
     expect(h.notices[0]).toMatchObject({
       cloneId: null,
-      title: expect.stringContaining("the prime"),
+      title: expect.stringContaining("Prime workspace"),
     });
   });
 
@@ -368,7 +409,9 @@ describe("replies", () => {
       actorName: "Jane Operator",
       clientRequestId: "6a9a8b1e-1111-4c4c-9d9d-0e0e0e0e0e0e",
     });
-    expect(answered).toEqual({ ok: true });
+    expect(answered).toEqual({ ok: true, signal: { reached: 1, signalled: 1, failed: 0 } });
+    // The answer is that workspace's own thread: only its Realtime is told.
+    expect(h.broadcasts.map((b) => b.url)).toEqual([CLONE_RT]);
     const inbound = h.tables.clone_announcement_replies.find((r) => r.direction === "workspace");
     expect(inbound?.operator_read_at).toBeTruthy();
     const read = await announcementsForWorkspace(CLONE);
@@ -420,5 +463,106 @@ describe("seen", () => {
       ok: false,
       error: "not_addressed",
     });
+  });
+});
+
+describe("a workspace hears at once", () => {
+  it("Send now signals the workspace it reaches, with nothing about the message", async () => {
+    const sent = await sendAnnouncement(draftInput);
+    expect(sent.ok && sent.signal).toEqual({ reached: 1, signalled: 1, failed: 0 });
+    expect(h.broadcasts).toHaveLength(1);
+    const [b] = h.broadcasts;
+    expect(b.url).toBe(PRIME_RT);
+    expect(b.body.messages).toEqual([
+      {
+        topic: "aurixa-systems-notices",
+        event: "changed",
+        payload: { at: expect.any(String) },
+        private: false,
+      },
+    ]);
+    expect(JSON.stringify(b.body)).not.toContain("Maintenance tonight");
+  });
+
+  it("a message to every workspace signals the prime and every clone", async () => {
+    const sent = await sendAnnouncement({ ...draftInput, audienceCloneIds: null });
+    expect(sent.ok && sent.signal).toEqual({ reached: 3, signalled: 3, failed: 0 });
+    expect(h.broadcasts.map((b) => b.url).sort()).toEqual([CLONE_RT, OTHER_RT, PRIME_RT].sort());
+  });
+
+  it("a draft signals nobody", async () => {
+    h.tables.clone_announcements = [message({ published_at: null })];
+    const saved = await updateAnnouncement({ ...draftInput, id: "ann-1", clientRequestId: null });
+    expect(saved.ok && saved.signal).toBeUndefined();
+    expect(h.broadcasts).toHaveLength(0);
+  });
+
+  it("narrowing a live message signals the workspace that is losing it", async () => {
+    h.tables.clone_announcements = [message({ audience_clone_ids: [CLONE, OTHER] })];
+    await updateAnnouncement({
+      ...draftInput,
+      id: "ann-1",
+      audienceCloneIds: [CLONE],
+      clientRequestId: null,
+    });
+    expect(h.broadcasts.map((b) => b.url).sort()).toEqual([CLONE_RT, OTHER_RT].sort());
+  });
+
+  it("archiving signals the workspaces that are showing it", async () => {
+    h.tables.clone_announcements = [message({ audience_clone_ids: [OTHER] })];
+    const archived = await archiveAnnouncement({ id: "ann-1", actorId: "operator-1", reason: "Done" });
+    expect(archived.ok).toBe(true);
+    expect(h.broadcasts.map((b) => b.url)).toEqual([OTHER_RT]);
+  });
+
+  it("a workspace whose Realtime refuses is counted, and the message is still sent", async () => {
+    h.refusing.add("qvuwrvwzjyigptmnijyb.supabase.co");
+    const sent = await sendAnnouncement({ ...draftInput, audienceCloneIds: [CLONE, OTHER] });
+    expect(sent.ok && sent.signal).toEqual({ reached: 2, signalled: 1, failed: 1 });
+    expect(h.tables.clone_announcements[0].published_at).toBeTruthy();
+  });
+
+  it("a workspace with no known Realtime is counted as not signalled", async () => {
+    h.tables.clone_backends = [];
+    const sent = await sendAnnouncement({ ...draftInput, audienceCloneIds: [CLONE] });
+    expect(sent.ok && sent.signal).toEqual({ reached: 1, signalled: 0, failed: 1 });
+    expect(h.broadcasts).toHaveLength(0);
+  });
+
+  it("the answer says when the workspace's notices next change by themselves", async () => {
+    const startsAt = new Date(Date.now() + 30 * 60_000).toISOString();
+    h.tables.clone_announcements = [
+      message({ id: "now" }),
+      message({ id: "later", starts_at: startsAt }),
+    ];
+    const read = await announcementsForWorkspace(null);
+    expect(read.ok && read.announcements.map((a) => a.id)).toEqual(["now"]);
+    expect(read.ok && read.nextChangeAt).toBe(startsAt);
+  });
+});
+
+describe("an operator is told who answered", () => {
+  it("names the business the workspace's own server reported, and the workspace", async () => {
+    h.tables.clone_announcements = [message({ replies_enabled: true })];
+    await postWorkspaceReply({
+      keyCloneId: CLONE,
+      announcementId: "ann-1",
+      body: "We are ready.",
+      author,
+      clientRequestId: REQ,
+      businessName: "Preflight Property Group",
+    });
+    expect(h.notices).toEqual([
+      expect.objectContaining({
+        kind: "clone_announcement_reply",
+        title: "New reply from Preflight Property Group (NPC Client Dashboard)",
+        metadata: expect.objectContaining({
+          business_name: "Preflight Property Group",
+          workspace_name: "NPC Client Dashboard",
+          author_name: "Rugesh Naidu",
+          excerpt: "We are ready.",
+        }),
+      }),
+    ]);
   });
 });

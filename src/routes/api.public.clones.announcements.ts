@@ -38,6 +38,14 @@ import { checkRateLimit } from "@/server/token-rate-limit.server";
  * dashboard to display — and a key minted before any narrower scope existed
  * must not silence the fleet's announcement channel.
  *
+ * ## How fast a dashboard hears
+ *
+ * Mission Control signals each workspace a change reaches the moment it is
+ * made (`workspaceSignal.pure.ts`), and the dashboards there ask this route
+ * at once. A scheduled message needs no signal at its start: the answer
+ * carries `nextChangeAt`, the next moment this workspace's notices change by
+ * themselves, and an open dashboard asks again then.
+ *
  * ## Failure shape
  *
  * A failed read is 503, never an empty 200 — the clone's broker treats any
@@ -59,9 +67,12 @@ export const Route = createFileRoute("/api/public/clones/announcements")({
         if (!key) return jsonResponse({ ok: false, error: "unauthorized" }, 401);
 
         // Its own bucket, like the gate's: polling announcements must never
-        // eat the token budget, and 120/min covers ~600 concurrent tabs at
-        // the hook's five-minute cadence. A 429 fails soft on the clone —
-        // the broker serves an empty list and the dashboard shows nothing.
+        // eat the token budget. A dashboard asks every two minutes while
+        // Mission Control's signal reaches it (every one while it does not),
+        // and once per signal, spread over a second or so — 120/min covers
+        // well over a hundred open tabs on one key. A 429 fails soft on the
+        // workspace: its relay marks the read unavailable, and the dashboard
+        // keeps the notices it is already showing.
         const rl = await checkRateLimit(key.id, 120, "announcements");
         if (!rl.ok) {
           return new Response(
@@ -96,7 +107,15 @@ export const Route = createFileRoute("/api/public/clones/announcements")({
           ).catch((err) => console.error("[announcements] delivery stamp threw", err));
         }
 
-        return jsonResponse({ ok: true, announcements: read.announcements });
+        // `nextChangeAt` and `serverTime` let an open dashboard ask again at
+        // the exact moment a scheduled message goes live or a live one ends,
+        // measured against this server's clock rather than the browser's.
+        return jsonResponse({
+          ok: true,
+          announcements: read.announcements,
+          nextChangeAt: read.nextChangeAt,
+          serverTime: new Date().toISOString(),
+        });
       },
     },
   },

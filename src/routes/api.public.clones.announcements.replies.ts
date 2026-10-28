@@ -36,6 +36,13 @@ const Schema = z.object({
     email: z.string().trim().max(320).optional().nullable(),
     role: z.string().trim().max(60).optional().nullable(),
   }),
+  // The business the workspace trades as, named by its own server (never its
+  // browser). Optional: a relay deployed before 28 Oct 2026 does not send it,
+  // and the operator is then shown the workspace's name alone.
+  workspace: z
+    .object({ business: z.string().trim().max(200).optional().nullable() })
+    .optional()
+    .nullable(),
 });
 
 export const Route = createFileRoute("/api/public/clones/announcements/replies")({
@@ -82,6 +89,7 @@ export const Route = createFileRoute("/api/public/clones/announcements/replies")
           body: parsed.data.body,
           author: parsed.data.author,
           clientRequestId: parsed.data.client_request_id ?? null,
+          businessName: parsed.data.workspace?.business ?? null,
         });
         if (!result.ok) return jsonResponse({ ok: false, error: result.error }, result.status);
         return jsonResponse({ ok: true, thread: result.thread });
