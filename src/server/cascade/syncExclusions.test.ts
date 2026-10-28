@@ -22,6 +22,7 @@ import {
   PARENT_DEPLOYMENT_OWN_FILES,
 } from "./syncExclusions.pure";
 import { CASCADE_STREAM_MAX_FILE_BYTES } from "./blobStreamCarry.pure";
+import { parseAssertions } from "../migrationAssertions.pure";
 
 const BACKEND_IDENTITY = "src/integrations/supabase/env.ts";
 
@@ -579,6 +580,32 @@ describe("the seed migrations are a projection of this constant, not a second co
         /FROM public\.clone_sync_exclusions/,
       );
     }
+  });
+});
+
+describe("the CRM line's switch to a mirror refuses loudly", () => {
+  // Its guard (step 4) refuses by raising, so the switch never leaves the CRM a
+  // whole-tree mirror with a partial policy. The queue answers a failure by
+  // asking the migration's `@asserts` claims whether the effect is already
+  // there, and settles the row as `recorded` when every checkable claim holds
+  // (`20260913090000_a_halt_that_resolves_itself.sql`). Any count of this table
+  // the file could claim already holds from the other clones' rows (166 on
+  // 28 Oct 2026, so `rows:clone_sync_exclusions>=60`, its first claim, read
+  // `present` before it ran), and a refusal would have been recorded as done,
+  // with the CRM still module-scoped. `none` is never evaluated, so a refusal
+  // halts the queue.
+  const SWITCH = "20261028190000_the_crm_line_becomes_a_mirror.sql";
+  const sql = readFileSync(join(process.cwd(), "supabase/migrations", SWITCH), "utf8");
+
+  it("claims nothing the queue could settle a refusal on", () => {
+    const parsed = parseAssertions(sql);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.assertions.map((a) => a.kind)).toEqual(["none"]);
+  });
+
+  it("refuses by raising, which is what halts the queue", () => {
+    expect(sql).toMatch(/RAISE EXCEPTION\s+'refusing to make the CRM a mirror/);
   });
 });
 

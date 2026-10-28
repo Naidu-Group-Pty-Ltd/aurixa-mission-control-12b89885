@@ -1268,6 +1268,12 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
   {
     migration: "20261028190000_the_crm_line_becomes_a_mirror.sql",
     version: "20261028190000",
-    assertions: [{ kind: "rows", table: "clone_sync_exclusions", atLeast: 60 }],
+    assertions: [
+      {
+        kind: "none",
+        reason:
+          "one clone's scope and its missing exclusion rows; no object is created, and no table-wide count could tell this ran",
+      },
+    ],
   },
 ];

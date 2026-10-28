@@ -1,8 +1,15 @@
--- @asserts rows:clone_sync_exclusions>=60
+-- @asserts none:one clone's scope and its missing exclusion rows; no object is created, and no table-wide count could tell this ran
 --
--- The floor is what this migration guarantees BY CONSTRUCTION. Step 4 refuses
--- to finish unless each of the two mirrors it copies from holds at least 20
--- exclusions and the CRM then holds every pattern they hold: 3 x 20.
+-- It claims nothing the queue can check, on purpose. The queue asks a
+-- migration that failed whether the effect it claims is already present, and
+-- settles it as `recorded` when every checkable claim holds
+-- (`20260913090000_a_halt_that_resolves_itself.sql`). Any count of
+-- `clone_sync_exclusions` this file could claim already holds from the other
+-- clones' rows (166 on 28 Oct 2026), so a refusal by the guard in step 4 would
+-- be recorded as done and the queue would move on with the CRM still
+-- module-scoped. The queue never evaluates `none`, so a refusal halts it. The
+-- guard is this file's proof of its effect, and the read-back after it applies
+-- is the CRM's own row: `mirror`, with 31 exclusions.
 
 -- `npc-crm-independent-6505dc`, the independent CRM line's head, becomes a
 -- mirror (D15 of docs/DELIVERY_SYSTEM_PLAN.md).
