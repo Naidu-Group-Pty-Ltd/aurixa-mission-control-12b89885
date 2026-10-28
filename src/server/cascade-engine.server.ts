@@ -3087,7 +3087,9 @@ export async function processClone(args: {
   const deletionPartition = partitionCascadePaths(
     deletionCandidates.map((c) => c.path),
     exclusions,
-    { purpose: "delete" },
+    // The line's options as well: a tree the line keeps as its own
+    // (`CRM_LINE_KEPT_PATTERNS`) loses nothing to a prime deletion.
+    { purpose: "delete", ...lineOpts },
   );
   const probeable = new Set(deletionPartition.write);
   let deletionVerdicts: DeletionVerdict[] = [];

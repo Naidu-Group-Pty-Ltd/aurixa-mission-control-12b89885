@@ -720,3 +720,72 @@ export const CRM_LINE_ORIGIN_VARIANT_NOTE =
 export const CRM_LINE_VARIANT_NOTE =
   "Independent CRM line: this clone's copy is the line's own, so the prime's does not overwrite it. " +
   "Approve an overwrite here only to take the prime's version deliberately.";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The trees the independent line keeps entirely as its own
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Paths whose whole set the independent line keeps as its own, so no copy,
+ * change or deletion of the PRIME's reaches them.
+ *
+ * A variant above is one file the line carries in its own shape, and a prime
+ * change to it is work the line may want, so the hold is a decision. These
+ * are trees where the line's set is the line's and the prime's set describes
+ * another deployment, so there is nothing to decide:
+ *
+ * - `.claude/**`, the rules an agent loads. The line keeps its own, indexed by
+ *   its own `CLAUDE.md` (a variant). Delivered whole, the prime's 148 rule
+ *   files would land beside the line's, with 56 topics then covered twice
+ *   under different numbers (counted 27 Oct 2026).
+ * - `src/lib/agent/__tests__/**`, the agent's specs. 115 of the prime's import
+ *   `src/lib/agent/parityRegister.ts`, which the head removed (b2809b77), so
+ *   delivered they fail to load and the cascade pull request goes red, and the
+ *   drain never merges a red one.
+ * - `src/lib/clients/__tests__/clientImportRecords.spec.ts`. The prime's copy
+ *   reads GoHighLevel code the line does not carry, and one of its tests
+ *   fails there.
+ *
+ * `protected`, so a pass carries them silently, with nothing listed and
+ * nothing to approve. Held only where the bytes come from OUTSIDE the line
+ * (`fromAnotherLine`), like a variant: a child of the head reads the head and
+ * receives the head's own copies. A deletion is held too, unlike a withheld
+ * feature's: the file at that path on the line is the line's own, whatever
+ * the prime did with its copy.
+ *
+ * The owner chose these on 28 Oct 2026, for D15, the CRM line becoming a
+ * mirror (`docs/DELIVERY_SYSTEM_PLAN.md`). Two specs the line had edited,
+ * `buildVersion.test.ts` and `planEntitlements.spec.ts`, were left to the
+ * prime's copies, which pass there.
+ */
+export const CRM_LINE_KEPT_PATTERNS: Readonly<Partial<Record<CrmMode, readonly string[]>>> = {
+  independent: [
+    ".claude/**",
+    "src/lib/agent/__tests__/**",
+    "src/lib/clients/__tests__/clientImportRecords.spec.ts",
+  ],
+};
+
+const keptRules = new Map<CrmMode, { pattern: string; rx: RegExp }[]>();
+for (const [mode, patterns] of Object.entries(CRM_LINE_KEPT_PATTERNS) as [
+  CrmMode,
+  readonly string[],
+][]) {
+  keptRules.set(
+    mode,
+    patterns.map((pattern) => ({ pattern, rx: globToRegex(pattern) })),
+  );
+}
+
+/** The kept pattern a path falls under on this line, or null. */
+export function crmLineKeptPattern(
+  path: string,
+  crmMode: string | null | undefined,
+): string | null {
+  if (crmMode !== "independent" && crmMode !== "dependent") return null;
+  const hit = keptRules.get(crmMode)?.find((r) => r.rx.test(path));
+  return hit?.pattern ?? null;
+}
+
+export const CRM_LINE_KEPT_NOTE =
+  "Independent CRM line: the line keeps its own files in this tree, so the prime's are never carried here.";

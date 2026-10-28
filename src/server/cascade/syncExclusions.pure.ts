@@ -61,8 +61,11 @@
  * The same rule, keyed on the clone's recorded `crm_mode`:
  * `CRM_LINE_FEATURES` names what a line does not carry (the GoHighLevel
  * integration, on the independent line). A write is held as `protected` with
- * the pattern `(crm-line: <key>)`; a deletion is not held. An unrecorded mode
- * holds nothing, so a caller that does not pass one behaves as before.
+ * the pattern `(crm-line: <key>)`; a deletion is not held. The trees a line
+ * keeps as its own (`CRM_LINE_KEPT_PATTERNS`) are held as `protected` with the
+ * pattern `(crm-line kept: <glob>)`, a write and a deletion alike, wherever the
+ * bytes come from outside the line. An unrecorded mode holds nothing, so a
+ * caller that does not pass one behaves as before.
  *
  * Pure: no imports beyond the shared glob compiler and the two registers,
  * which are themselves pure.
@@ -70,9 +73,11 @@
 import { globToRegex, isSafeRepoPath } from "@/lib/module-globs";
 import { primeOnlyFeatureForPath } from "@/server/primeOnlyFeatures.pure";
 import {
+  CRM_LINE_KEPT_NOTE,
   CRM_LINE_ORIGIN_VARIANT_NOTE,
   CRM_LINE_VARIANT_NOTE,
   crmLineFeatureForPath,
+  crmLineKeptPattern,
   crmLineVariantPattern,
 } from "@/server/crmLineFeatures.pure";
 
@@ -202,8 +207,9 @@ export function partitionCascadePaths(
      * True when this delivery's bytes come from outside the clone's own CRM
      * line — the prime, or a lateral sibling on the other line — and it is not
      * a CRM conversion. Only then are the line's own copies
-     * (`CRM_LINE_VARIANT_PATTERNS`) held: a child of the line head reads the
-     * head, and must receive them.
+     * (`CRM_LINE_VARIANT_PATTERNS`) and the trees it keeps whole
+     * (`CRM_LINE_KEPT_PATTERNS`) held: a child of the line head reads the
+     * head, and must receive them. A kept tree is held for a deletion too.
      */
     fromAnotherLine?: boolean;
     /**
@@ -217,6 +223,9 @@ export function partitionCascadePaths(
   const holdPrimeOnly = (opts.purpose ?? "write") === "write";
   const lineMode = holdPrimeOnly ? (opts.crmMode ?? null) : null;
   const variantMode = lineMode && opts.fromAnotherLine === true ? lineMode : null;
+  // Not gated on the purpose: the line's kept trees are its own, so a prime
+  // deletion there takes nothing off it either.
+  const keptMode = opts.fromAnotherLine === true ? (opts.crmMode ?? null) : null;
   const originVariantMode =
     holdPrimeOnly &&
     opts.fromAnotherLine === true &&
@@ -260,6 +269,16 @@ export function partitionCascadePaths(
         pattern: `(crm-line: ${lineFeature.key})`,
         reason: "protected",
         note: lineFeature.reason,
+      });
+      continue;
+    }
+    const kept = keptMode ? crmLineKeptPattern(path, keptMode) : null;
+    if (kept) {
+      held.push({
+        path,
+        pattern: `(crm-line kept: ${kept})`,
+        reason: "protected",
+        note: CRM_LINE_KEPT_NOTE,
       });
       continue;
     }

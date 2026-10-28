@@ -456,6 +456,17 @@ describe("the rules the engine has to keep", () => {
     expect(probeAt).toBeGreaterThan(partitionAt);
   });
 
+  it("partitions deletion candidates with the line's options, so a tree the line keeps loses nothing", () => {
+    /* `CRM_LINE_KEPT_PATTERNS` holds the independent line's own trees for a
+       deletion as well as a write. Without the line's options the partition
+       cannot tell the line's own file from the prime's, and a prime deletion
+       under `.claude/**` would take the line's copy off it (D15, 28 Oct 2026). */
+    const partition = code.slice(code.indexOf("const deletionPartition = partitionCascadePaths("));
+    expect(partition.slice(0, partition.indexOf(");"))).toContain(
+      '{ purpose: "delete", ...lineOpts }',
+    );
+  });
+
   it("checks references before it plans, and plans before it writes the tree", () => {
     const withholdAt = code.indexOf("withholdReferencedDeletions(");
     const planAt = code.indexOf("planDeletions(deletionVerdicts, deletionCap, deletionOverCap)");

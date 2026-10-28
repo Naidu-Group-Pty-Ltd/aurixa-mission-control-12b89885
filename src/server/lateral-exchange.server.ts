@@ -1161,6 +1161,7 @@ async function passDirection(p: {
     deletes: offerDeletes,
     destination: p.rule.deletes,
     survivingFiles: surviving,
+    originCrmMode: from.clone.crm_mode,
   });
 
   r.writes = judgement.write;
