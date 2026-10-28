@@ -102,9 +102,18 @@ export const Route = createFileRoute("/api/public/clones/gate")({
           });
         }
 
-        // Best-effort, unawaited: a gate no deployment has ever read is
+        // Best-effort, and awaited: a gate no deployment has ever read is
         // otherwise indistinguishable from one that is working.
-        recordGateCheck(key.clone_id, state.locked).catch(() => {});
+        //
+        // Left unawaited, the stamp was lost. On 28 Oct 2026 NPC Test's lock
+        // screen asked for its verdict again at 17:42 after a reload, and
+        // `check_count` stayed at the 1 it had reached at 16:09; Preflight's
+        // asked at 17:45, and its row still said it had never been read. The
+        // likely reason is that the host does not finish work still running
+        // when the response ends, and awaiting it removes the question. The
+        // stamp is two small queries, and a failed stamp never fails the
+        // verdict.
+        await recordGateCheck(key.clone_id, state.locked).catch(() => {});
 
         const { data: clone } = await supabaseAdmin
           .from("clones")

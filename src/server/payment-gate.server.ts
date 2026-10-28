@@ -940,10 +940,12 @@ export async function cloneIdForStripe(input: {
 // ── Observability ───────────────────────────────────────────────────────────
 
 /**
- * Stamp that the clone asked. Best-effort and deliberately unawaited by its
- * caller: a gate whose deployment has never once read it is otherwise
- * indistinguishable from one that is working, and that is exactly the class of
- * silence this platform has shipped before.
+ * Stamp that the clone asked. Best-effort: a gate whose deployment has never
+ * once read it is otherwise indistinguishable from one that is working, and
+ * that is exactly the class of silence this platform has shipped before.
+ *
+ * The caller awaits it. Left running after the response it was lost (the
+ * verdict route records how that was found, 28 Oct 2026).
  */
 export async function recordGateCheck(cloneId: string, locked: boolean): Promise<void> {
   const now = new Date().toISOString();
