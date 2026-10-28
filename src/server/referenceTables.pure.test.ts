@@ -3,9 +3,11 @@ import {
   REFERENCE_TABLES,
   isReferenceTable,
   isIdentityCandidate,
+  pickReferenceSyncCandidate,
   planColumns,
   referenceTable,
   tablesToReopen,
+  type ReferenceSyncProgress,
   type ReferenceTable,
   refName,
 } from "./referenceTables.pure";
@@ -448,5 +450,118 @@ describe("tablesToReopen", () => {
     state.set("suburb_directory", "copying");
     // An unfinished table with no dependants re-opens nothing.
     expect([...tablesToReopen(state)]).toEqual([]);
+  });
+});
+
+describe("pickReferenceSyncCandidate — which clone a scheduled pass takes", () => {
+  const DASHBOARD = "37b3e65a-716e-4141-9cb6-2e13583dbdd9";
+  const CRM = "e97f18ab-a3e3-4350-a0c9-d3f8584d6243";
+  const NPC_TEST = "7e2c004d-5a56-4d9f-bdae-09d28885d234";
+  const PREFLIGHT = "2242c67f-fc1d-4723-84fe-6a86898136d2";
+  const ALL = REFERENCE_TABLES.map(refName);
+  const clone = (clone_id: string) => ({
+    clone_id,
+    supabase_project_ref: `ref-${clone_id.slice(0, 4)}`,
+  });
+
+  /** One row per named table, every one at `status`, last written at `at`. */
+  const rows = (
+    clone_id: string,
+    at: string,
+    tables: readonly string[] = ALL,
+    status = "complete",
+  ): ReferenceSyncProgress[] =>
+    tables.map((table_name) => ({ clone_id, table_name, status, updated_at: at }));
+
+  it("takes the clone that still owes a table over one with nothing to copy", () => {
+    const progress = [
+      ...rows(DASHBOARD, "2026-10-01T00:00:00Z"),
+      ...rows(
+        PREFLIGHT,
+        "2026-10-28T12:00:00Z",
+        ALL.filter((t) => t !== "chart_configurations"),
+      ),
+    ];
+    expect(
+      pickReferenceSyncCandidate([clone(DASHBOARD), clone(PREFLIGHT)], progress)?.clone_id,
+    ).toBe(PREFLIGHT);
+  });
+
+  it("among clones that owe, takes the one whose progress was recorded longest ago", () => {
+    // Measured 28 Oct 2026 at 13:48 UTC: NPC Test held the chart catalogue and
+    // the other three owed it. A pass over a finished clone records nothing, so
+    // their progress was last recorded in September.
+    const owing = ALL.filter((t) => t !== "chart_configurations");
+    const progress = [
+      ...rows(DASHBOARD, "2026-09-19T14:13:06Z", owing),
+      ...rows(CRM, "2026-09-19T15:14:29Z", owing),
+      ...rows(NPC_TEST, "2026-10-28T13:13:04Z"),
+      ...rows(PREFLIGHT, "2026-09-09T14:44:16Z", owing),
+    ];
+    const fleet = [clone(DASHBOARD), clone(CRM), clone(NPC_TEST), clone(PREFLIGHT)];
+    expect(pickReferenceSyncCandidate(fleet, progress)?.clone_id).toBe(PREFLIGHT);
+    // Once Preflight's pass records its copy, the dashboard is next, then the CRM.
+    const afterPreflight = [
+      ...progress.filter((r) => r.clone_id !== PREFLIGHT),
+      ...rows(PREFLIGHT, "2026-10-28T14:13:00Z"),
+    ];
+    expect(pickReferenceSyncCandidate(fleet, afterPreflight)?.clone_id).toBe(DASHBOARD);
+    const afterDashboard = [
+      ...afterPreflight.filter((r) => r.clone_id !== DASHBOARD),
+      ...rows(DASHBOARD, "2026-10-28T14:28:00Z"),
+    ];
+    expect(pickReferenceSyncCandidate(fleet, afterDashboard)?.clone_id).toBe(CRM);
+  });
+
+  it("counts a clone with no progress at all as owing every table, and takes it first", () => {
+    const progress = rows(DASHBOARD, "2026-10-28T12:58:40Z", ALL, "copying");
+    expect(pickReferenceSyncCandidate([clone(DASHBOARD), clone(CRM)], progress)?.clone_id).toBe(
+      CRM,
+    );
+  });
+
+  it("treats complete and skipped as finished, and pending, copying and failed as owed", () => {
+    const [first, ...rest] = ALL;
+    const finishedBut = (status: string) => [
+      { clone_id: CRM, table_name: first, status, updated_at: "2026-10-28T13:00:00Z" },
+      ...rows(CRM, "2026-10-28T13:00:00Z", rest.slice(0, 1), "skipped"),
+      ...rows(CRM, "2026-10-28T13:00:00Z", rest.slice(1)),
+    ];
+    const done = rows(DASHBOARD, "2026-10-01T00:00:00Z");
+    for (const owed of ["pending", "copying", "failed"]) {
+      expect(
+        pickReferenceSyncCandidate([clone(DASHBOARD), clone(CRM)], [...done, ...finishedBut(owed)])
+          ?.clone_id,
+      ).toBe(CRM);
+    }
+    // With nothing owed anywhere, the least recently touched is taken, as before.
+    expect(
+      pickReferenceSyncCandidate(
+        [clone(DASHBOARD), clone(CRM)],
+        [...done, ...finishedBut("complete")],
+      )?.clone_id,
+    ).toBe(DASHBOARD);
+  });
+
+  it("breaks a tie on the clone id, so the same inputs always pick the same clone", () => {
+    const progress = [
+      ...rows(CRM, "2026-10-28T13:00:00Z"),
+      ...rows(DASHBOARD, "2026-10-28T13:00:00Z"),
+    ];
+    expect(pickReferenceSyncCandidate([clone(CRM), clone(DASHBOARD)], progress)?.clone_id).toBe(
+      DASHBOARD,
+    );
+    expect(pickReferenceSyncCandidate([clone(DASHBOARD), clone(CRM)], progress)?.clone_id).toBe(
+      DASHBOARD,
+    );
+  });
+
+  it("picks nothing from nothing, and ignores progress of clones that are not candidates", () => {
+    expect(pickReferenceSyncCandidate([], rows(CRM, "2026-10-28T13:00:00Z"))).toBeNull();
+    const progress = [
+      ...rows(PREFLIGHT, "2026-10-01T00:00:00Z", ALL, "failed"),
+      ...rows(CRM, "2026-10-28T13:00:00Z"),
+    ];
+    expect(pickReferenceSyncCandidate([clone(CRM)], progress)?.clone_id).toBe(CRM);
   });
 });
