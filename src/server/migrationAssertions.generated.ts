@@ -1184,4 +1184,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       },
     ],
   },
+  {
+    migration: "20261028090000_airtable_waitlist_sync_every_six_hours.sql",
+    version: "20261028090000",
+    assertions: [{ kind: "cron", jobname: "airtable-waitlist-sync" }],
+  },
 ];

@@ -473,7 +473,7 @@ describe("the applicant backstop survives being enqueued too early", () => {
 
   it("raises it on a later tick, once the mirror has looked and found nothing", async () => {
     // t=0 from the website, then the sweep six hours later — by which time the
-    // hourly mirror has read the record and it still carries no receipt.
+    // six-hourly mirror has read the record and it still carries no receipt.
     await enqueueStageEmails({ leadId: "lead-1", lead: lead(60_000), trigger: "ingest" });
     await enqueueStageEmails({ leadId: "lead-1", lead: lead(6 * 3_600_000), trigger: "manual" });
 
