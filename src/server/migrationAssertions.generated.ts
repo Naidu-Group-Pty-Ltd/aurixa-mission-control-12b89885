@@ -1350,4 +1350,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20261029180000",
     assertions: [{ kind: "none", reason: "drops an index, creates no object" }],
   },
+  {
+    migration: "20261029190000_accountant_portal_addon.sql",
+    version: "20261029190000",
+    assertions: [{ kind: "rows", table: "addon_modules", atLeast: 33 }],
+  },
 ];

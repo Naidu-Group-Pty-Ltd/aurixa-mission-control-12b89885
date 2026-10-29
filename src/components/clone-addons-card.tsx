@@ -17,7 +17,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Loader2, Plus, X, CreditCard, Hand, TriangleAlert, PackageCheck } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
-import { MODULES, isModulePurchasable } from "@/lib/pricing/aurixa-catalog";
+import { MODULES, isModuleGrantable } from "@/lib/pricing/aurixa-catalog";
 import {
   listCloneAddons,
   grantCloneAddon,
@@ -85,12 +85,13 @@ export function CloneAddonsCard({ cloneId }: { cloneId: string }) {
   const heldSlugs = useMemo(() => new Set(live.map((p) => p.addon_slug)), [live]);
   const history = useMemo(() => purchases.filter((p) => p.status === "cancelled"), [purchases]);
 
-  // Only sellable add-ons. A module is withheld either because it has no
+  // Only grantable add-ons. A module is withheld either because it has no
   // agreed price (`comingSoon`) or because it has one and is sold directly
-  // (`directSale`); `isModulePurchasable` is the single place that decides, so
-  // this list cannot fall behind a new reason to withhold.
+  // (`directSale`); one whose price is undecided is had by grant until it is
+  // priced. `isModuleGrantable` is the single place that decides, so this list
+  // cannot fall behind a new reason to withhold.
   const grantable = useMemo(
-    () => MODULES.filter((m) => !heldSlugs.has(m.slug) && isModulePurchasable(m.slug)),
+    () => MODULES.filter((m) => !heldSlugs.has(m.slug) && isModuleGrantable(m.slug)),
     [heldSlugs],
   );
 

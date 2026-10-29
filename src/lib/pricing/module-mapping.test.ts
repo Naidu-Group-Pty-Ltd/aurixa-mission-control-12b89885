@@ -63,6 +63,8 @@ const KNOWN = new Set([
   // A real approved module in production. Its absence here is what let the
   // `intelligence-hub` alias look unresolved while the test still passed.
   "report-qa",
+  // Approved in production since 8 Oct 2026, and sold as an add-on since 29 Oct.
+  "accountant-portal",
 ]);
 
 const priced = (slug: string) => MODULES.find((m) => m.slug === slug)!;

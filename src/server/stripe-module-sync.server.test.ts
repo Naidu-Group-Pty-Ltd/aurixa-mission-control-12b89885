@@ -135,6 +135,41 @@ describe("moduleProductShape", () => {
     expect(agent.metadata.included_in).toBe("");
   });
 
+  it("describes the Accountant Portal's placeholder product as Stripe holds it, and clears its marker once priced", () => {
+    // prod_VX6f7zMP6x6zyo was created on 29 Oct 2026 in this exact shape, so
+    // the product search adopts it rather than making a second one.
+    const accountant = moduleBySlug("accountant-portal")!;
+    expect(moduleProductShape(accountant)).toEqual({
+      name: "Aurixa Accountant Portal",
+      description:
+        "Partner hand-off portal for the client's accountant. A portal fee buys that portal's own scope and never grants AML/CTF. Available on every tier as an add-on.",
+      metadata: {
+        aurixa_module: "accountant-portal",
+        module_category: "Administration",
+        included_in: "",
+        pricing_status: "undecided",
+      },
+    });
+    // Priced, the same module is shaped with the marker emptied, which is how
+    // Stripe is told to drop it.
+    const priced = { ...accountant, priceUndecided: false };
+    expect(moduleProductShape(priced).metadata.pricing_status).toBe("");
+  });
+
+  it("never plans to sell the Accountant Portal while its price is undecided", () => {
+    const plan = planModuleSync([
+      {
+        id: "row",
+        slug: "accountant-portal",
+        name: "Accountant Portal",
+        price_min_cents: 100,
+        is_active: true,
+      },
+    ]);
+    expect(plan.modules.map((m) => m.slug)).not.toContain("accountant-portal");
+    expect(plan.skipped).toContain("accountant-portal");
+  });
+
   it("reads as a list, not a chain of ands", () => {
     // Client Forms is on all three tiers; "Launch and Growth and Scale" is
     // what a naive join produces and it appears on customer invoices.

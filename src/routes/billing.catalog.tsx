@@ -49,8 +49,10 @@ function money(cents: number, currency = "AUD") {
   }).format(cents / 100);
 }
 
-function priceRange(min: number, max: number, currency = "AUD") {
-  if (min === max || max === 0) return money(min, currency);
+function priceRange(min: number | null, max: number | null, currency = "AUD") {
+  // An add-on whose price is undecided is presented with none (`presentAddonRow`).
+  if (min == null) return "Price to be confirmed";
+  if (min === max || !max) return money(min, currency);
   return `${money(min, currency)} – ${money(max, currency)}`;
 }
 
@@ -209,7 +211,11 @@ function CatalogPage() {
                   <CardContent className="space-y-2">
                     <div className="text-sm font-medium">
                       {priceRange(a.price_min_cents, a.price_max_cents, a.currency)}
-                      <span className="text-muted-foreground font-normal">/{a.billing_period}</span>
+                      {a.price_min_cents != null && (
+                        <span className="text-muted-foreground font-normal">
+                          /{a.billing_period}
+                        </span>
+                      )}
                     </div>
                     {a.included_in_plans?.length > 0 && (
                       <div className="flex flex-wrap gap-1">

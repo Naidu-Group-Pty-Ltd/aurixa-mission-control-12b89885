@@ -26,6 +26,11 @@
 //     it is on the page for the roadmap with no agreed price, the Builder /
 //     Developer Portal because it is priced but sold directly. Neither may
 //     reach Stripe. Skipped loudly, in the plan, rather than silently dropped.
+//     A module whose price is undecided (the Accountant Portal, 29 Oct 2026)
+//     is skipped too, and its row is never linked, so no checkout can sell its
+//     placeholder. Its Stripe product was created at the A$1 placeholder by
+//     the owner's decision; once it is priced, the product search below finds
+//     that product by its `aurixa_module` metadata and adds the real price.
 import Stripe from "stripe";
 import { getStripe } from "@/server/stripe.server";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
@@ -121,6 +126,10 @@ export function moduleProductShape(mod: PricedModule): {
       // empty one differently on update, and a module losing its last bundled
       // tier must actually clear the field rather than keep the stale list.
       included_in: mod.includedIn.join(","),
+      // The marker the Accountant Portal's placeholder product was created
+      // with (29 Oct 2026). The sync shapes only modules it sells, so this
+      // clears the marker the first time it adopts that product, once priced.
+      pricing_status: mod.priceUndecided ? "undecided" : "",
     },
   };
 }

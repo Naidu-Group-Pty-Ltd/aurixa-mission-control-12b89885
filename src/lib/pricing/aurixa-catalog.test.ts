@@ -7,8 +7,10 @@ import {
   AML_REFERENCE_COMPONENT_CENTS,
   MODULES,
   PURCHASABLE_MODULES,
+  isModuleGrantable,
   isModulePurchasable,
   moduleSaleBlock,
+  presentAddonRow,
   TIERS,
   annualCents,
   annualPerMonthCents,
@@ -196,8 +198,10 @@ describe("the AML component, the conditional discount and the net uplift", () =>
 });
 
 describe("module catalogue", () => {
-  it("carries all 25 priced modules from the pricing model", () => {
-    expect(MODULES).toHaveLength(25);
+  it("carries the pricing model's 25 priced modules, and the Accountant Portal", () => {
+    // The Accountant Portal is the owner's addition of 29 Oct 2026, after the
+    // model: an add-on in no tier, its price still undecided.
+    expect(MODULES).toHaveLength(26);
     expect(MODULES.every((m) => m.monthlyInclGstCents > 0)).toBe(true);
   });
 
@@ -240,8 +244,23 @@ describe("module catalogue", () => {
       expect(moduleBySlug(slug), slug).toBeDefined();
       expect(moduleBySlug(slug)!.monthlyInclGstCents, slug).toBe(cents);
     }
-    // Every module except Lenders, which the model retires to price history.
-    expect(Object.keys(published).length).toBe(MODULES.length - 1);
+    // Every module except Lenders, which the model retires to price history,
+    // and the Accountant Portal, which has no price yet: neither figure is one
+    // anybody publishes.
+    expect(Object.keys(published).length).toBe(MODULES.length - 2);
+    expect(MODULES.filter((m) => !(m.slug in published)).map((m) => m.slug)).toEqual([
+      "lenders",
+      "accountant-portal",
+    ]);
+  });
+
+  it("sells the Accountant Portal as the Solicitor Portal is, with its price undecided", () => {
+    const accountant = moduleBySlug("accountant-portal")!;
+    expect(accountant.includedIn).toEqual([]);
+    expect(accountant.category).toBe(moduleBySlug("solicitor-portal")!.category);
+    expect(accountant.priceUndecided).toBe(true);
+    // The A$1 its Stripe price was created at: a placeholder, not a price.
+    expect(accountant.monthlyInclGstCents).toBe(100);
   });
 
   it("only ever references tiers that exist", () => {
@@ -278,18 +297,54 @@ describe("module catalogue", () => {
 });
 
 describe("what may be sold through a checkout", () => {
-  it("withholds Lenders and the Builder / Developer Portal, and nothing else", () => {
+  it("withholds Lenders, the Builder / Developer Portal and the Accountant Portal, and nothing else", () => {
     const withheld = MODULES.filter((m) => !isModulePurchasable(m.slug)).map((m) => m.slug);
-    expect(withheld.sort()).toEqual(["builder-developer-portal", "lenders"]);
-    expect(PURCHASABLE_MODULES).toHaveLength(MODULES.length - 2);
+    expect(withheld.sort()).toEqual(["accountant-portal", "builder-developer-portal", "lenders"]);
+    expect(PURCHASABLE_MODULES).toHaveLength(MODULES.length - 3);
   });
 
-  it("says WHICH reason, because the two send an operator elsewhere", () => {
+  it("says WHICH reason, because each sends an operator elsewhere", () => {
     // No agreed price is a roadmap problem; a price with no agreed buyer is a
-    // contract problem. Collapsing them loses the difference.
+    // contract problem; a built module with no price is a pricing decision.
+    // Collapsing them loses the difference.
     expect(moduleSaleBlock("lenders")).toBe("coming_soon");
     expect(moduleSaleBlock("builder-developer-portal")).toBe("direct_sale");
+    expect(moduleSaleBlock("accountant-portal")).toBe("price_undecided");
     expect(moduleSaleBlock("finance-portal")).toBeNull();
+  });
+
+  it("lets an operator grant what a checkout sells, and a module whose only gap is its price", () => {
+    // The owner's decision of 29 Oct 2026: until it is priced, the Accountant
+    // Portal is had by grant, which charges nothing.
+    expect(isModuleGrantable("accountant-portal")).toBe(true);
+    expect(isModuleGrantable("finance-portal")).toBe(true);
+    expect(isModuleGrantable("lenders")).toBe(false);
+    expect(isModuleGrantable("builder-developer-portal")).toBe(false);
+    expect(isModuleGrantable("no-such-module")).toBe(false);
+    for (const m of PURCHASABLE_MODULES) expect(isModuleGrantable(m.slug), m.slug).toBe(true);
+  });
+
+  it("presents an undecided price as none, so the placeholder is never quoted", () => {
+    const row = {
+      slug: "accountant-portal",
+      price_min_cents: 100,
+      price_max_cents: 100,
+      metadata: { tax_inclusive: true },
+    };
+    expect(presentAddonRow(row)).toEqual({
+      slug: "accountant-portal",
+      price_min_cents: null,
+      price_max_cents: null,
+      metadata: { tax_inclusive: true, price_undecided: true },
+    });
+    // A row with no metadata column selected still says why its price is absent.
+    expect(
+      presentAddonRow({ slug: "accountant-portal", price_min_cents: 100, price_max_cents: 100 })
+        .metadata,
+    ).toEqual({ price_undecided: true });
+    // Every other row passes through untouched, figure and all.
+    const priced = { slug: "solicitor-portal", price_min_cents: 29900, price_max_cents: 29900 };
+    expect(presentAddonRow(priced)).toBe(priced);
   });
 
   it("keeps a withheld module priced and listed rather than hidden", () => {
