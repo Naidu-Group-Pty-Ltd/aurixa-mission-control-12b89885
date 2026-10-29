@@ -80,7 +80,16 @@ vi.mock("@/integrations/supabase/client.server", () => {
         mode = "delete";
         return b;
       },
-      eq: (c: string, v: unknown) => (filters.push((r) => r[c] === v), b),
+      eq: (c: string, v: unknown) => {
+        // `metadata->>env` reads a jsonb key as text, as PostgREST does.
+        const [column, key] = c.split("->>");
+        filters.push((r) =>
+          key === undefined
+            ? r[c] === v
+            : String((r[column] as Row | null)?.[key] ?? "") === String(v),
+        );
+        return b;
+      },
       is: (c: string, v: unknown) => (filters.push((r) => (r[c] ?? null) === v), b),
       in: (c: string, vs: unknown[]) => (filters.push((r) => vs.includes(r[c])), b),
       order: () => b,
@@ -105,6 +114,7 @@ const {
   buildAnnouncementFrom,
   createUploadGrant,
   finalizeUpload,
+  lastWebsiteBuildRead,
   listPublicListings,
   requestWebsiteRebuild,
   setWebsiteBriefingStatus,
@@ -455,5 +465,36 @@ describe("going live", () => {
     if (!listed.ok) return;
     expect(listed.listings.map((l) => l.slug)).toEqual(["soon"]);
     expect(listed.listings[0].media).toBeNull();
+  });
+});
+
+describe("the last production build that read the listings", () => {
+  const read = (created_at: string, metadata: Row): Row => ({
+    action: "website.build_read_listings",
+    created_at,
+    metadata,
+  });
+
+  it("is a production build's, and says whether it was given the listings", async () => {
+    db.tables.audit_log = [
+      read("2026-10-29T05:00:00.000Z", {
+        env: "production",
+        build: "dpl_b",
+        ok: false,
+        listings: 0,
+      }),
+    ];
+    expect(await lastWebsiteBuildRead()).toEqual({
+      at: "2026-10-29T05:00:00.000Z",
+      build: "dpl_b",
+      ok: false,
+    });
+  });
+
+  it("is not a preview build's", async () => {
+    db.tables.audit_log = [
+      read("2026-10-29T05:00:00.000Z", { env: "preview", build: "dpl_p", ok: true, listings: 3 }),
+    ];
+    expect(await lastWebsiteBuildRead()).toBeNull();
   });
 });

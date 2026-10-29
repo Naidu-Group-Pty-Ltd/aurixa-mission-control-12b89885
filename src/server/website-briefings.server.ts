@@ -782,8 +782,18 @@ export async function recordWebsiteBuildRead(
   });
 }
 
-/** When a production build of the website last read the listings. */
-export async function lastWebsiteBuildRead(): Promise<{ at: string; build: string } | null> {
+/**
+ * When a production build of the website last read the listings, and whether
+ * it was given them. A build whose read failed was answered 503 and built from
+ * the site's committed snapshot: it is still the last rebuild, so it is shown
+ * as one, and as one that did not carry the listings — never as a success, and
+ * never hidden behind an older read that did.
+ */
+export async function lastWebsiteBuildRead(): Promise<{
+  at: string;
+  build: string;
+  ok: boolean;
+} | null> {
   const { data, error } = await supabaseAdmin
     .from("audit_log")
     .select("created_at, metadata")
@@ -793,8 +803,8 @@ export async function lastWebsiteBuildRead(): Promise<{ at: string; build: strin
     .limit(1)
     .maybeSingle();
   if (error || !data) return null;
-  const metadata = (data.metadata ?? {}) as { build?: string };
-  return { at: data.created_at as string, build: metadata.build ?? "" };
+  const metadata = (data.metadata ?? {}) as { build?: string; ok?: unknown };
+  return { at: data.created_at as string, build: metadata.build ?? "", ok: metadata.ok === true };
 }
 
 export const websiteRebuildConfigured = () => Boolean(process.env.WEBSITE_DEPLOY_HOOK_URL?.trim());

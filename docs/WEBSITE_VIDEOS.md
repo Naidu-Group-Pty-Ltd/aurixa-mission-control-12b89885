@@ -110,7 +110,10 @@ The proof is the effect. A Vercel build of the website sends
 `X-Aurixa-Build-Env` and `X-Aurixa-Build-Id` when it reads the listings, and
 Mission Control records each read (`website.build_read_listings`, rate limited
 per address). The line under the heading on the list says when a production
-build last read them.
+build last read them. A build whose read failed was answered `503` and built
+from the website's committed snapshot: the line still names it as the last
+rebuild, and says it could not read the listings. It is never shown as a
+success, and never hidden behind an older read that succeeded.
 
 ### Setting up the hook
 

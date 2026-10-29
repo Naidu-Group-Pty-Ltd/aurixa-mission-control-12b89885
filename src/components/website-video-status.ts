@@ -24,14 +24,16 @@ const shortTime = (at: string) =>
 export function rebuildLine(rebuild: {
   configured: boolean;
   last: { at: string; reason: string | null; outcome?: "requested" | "unconfirmed" } | null;
-  built?: { at: string; build: string } | null;
+  built?: { at: string; build: string; ok?: boolean } | null;
 }): string {
   if (!rebuild.configured) {
     return "Website rebuilds are not connected: set WEBSITE_DEPLOY_HOOK_URL, and until then changes reach the website on its next deploy.";
   }
-  const built = rebuild.built
-    ? ` The live website last rebuilt ${shortTime(rebuild.built.at)} — its build read the listings.`
-    : "";
+  const built = !rebuild.built
+    ? ""
+    : rebuild.built.ok === false
+      ? ` The live website last rebuilt ${shortTime(rebuild.built.at)}, but its build could not read the listings — it was built from the website's committed snapshot, so a change made since may not be on it.`
+      : ` The live website last rebuilt ${shortTime(rebuild.built.at)} — its build read the listings.`;
   if (!rebuild.last)
     return `Publishing a change asks the website to rebuild; it is live a couple of minutes later.${built}`;
   const asked =
