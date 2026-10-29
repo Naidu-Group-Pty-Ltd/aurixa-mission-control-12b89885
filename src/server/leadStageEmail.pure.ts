@@ -347,7 +347,7 @@ export function composeStageEmail(input: ComposeInput): ComposedEmail {
 }
 
 const STAGE_EYEBROW: Record<LeadStage, string> = {
-  1: "Stage 1 · Priority access application",
+  1: "Stage 1 · Free trial application",
   2: "Stage 2 · Business readiness questionnaire",
   3: "Stage 3 · Strategic review",
 };
@@ -364,11 +364,11 @@ function composeInternal({ lead, stage, consoleUrl }: ComposeInput): ComposedEma
   let subject: string;
 
   if (stage === 1) {
-    title = "A new priority access application";
+    title = "A new free trial application";
     subject = `[Aurixa] New application — ${who}${org}`;
     blocks.push({
       kind: "paragraph",
-      text: `${who} applied for priority access${lead.entity_name ? ` on behalf of ${lead.entity_name}` : ""}. Nothing is owed yet — this is the record that they have asked.`,
+      text: `${who} applied for a free trial${lead.entity_name ? ` on behalf of ${lead.entity_name}` : ""}. Nothing is owed yet — this is the record that they have asked.`,
     });
   } else if (stage === 2) {
     title = "Readiness questionnaire completed";
@@ -487,7 +487,7 @@ function composeInternal({ lead, stage, consoleUrl }: ComposeInput): ComposedEma
   blocks.push({ kind: "cta", label: "Open in Mission Control", href: leadLink });
 
   const footnote =
-    "Sent by Aurixa Mission Control because this applicant reached a new stage of the priority-access funnel. Every figure above is the applicant's own answer — Mission Control has not scored, ranked or interpreted them.";
+    "Sent by Aurixa Mission Control because this applicant reached a new stage of the free trial application. Every figure above is the applicant's own answer — Mission Control has not scored, ranked or interpreted them.";
 
   return {
     subject,
@@ -512,12 +512,12 @@ function composeApplicant({ lead, stage, nextStepUrl }: ComposeInput): ComposedE
 
   if (stage === 1) {
     title = "Your application has been received";
-    subject = "Application received — Aurixa Systems priority access";
-    preheader = "We have your priority access application. Here is what happens next.";
+    subject = "Application received — your Aurixa Systems free trial";
+    preheader = "We have your free trial application. Here is what happens next.";
     blocks.push({ kind: "paragraph", text: greeting });
     blocks.push({
       kind: "paragraph",
-      text: "Thank you for applying for priority access to Aurixa Systems. Your application has been received and is with our team for review.",
+      text: "Thank you for applying for a free trial of Aurixa Systems. Your application has been received and is with our team for review.",
     });
     blocks.push({
       kind: "rows",
@@ -604,7 +604,7 @@ function composeApplicant({ lead, stage, nextStepUrl }: ComposeInput): ComposedE
   }
 
   const footnote =
-    "Aurixa Systems · This message relates to your priority access application. Reply to this email if anything above is wrong and we will correct it.";
+    "Aurixa Systems · This message relates to your free trial application. Your trial starts the day your workspace goes live. Reply to this email if anything above is wrong and we will correct it.";
 
   return {
     subject,

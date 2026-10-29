@@ -225,6 +225,19 @@ describe("applicant stage email", () => {
     }
   });
 
+  it("calls it a free trial application, never priority access, at every stage", () => {
+    // The offer became a free trial on 28 Oct 2026. Neither email states a
+    // length: a trial offer can set one other than the 14-day default.
+    expect(applicant(1).subject).toBe("Application received — your Aurixa Systems free trial");
+    expect(applicant(1).text).toContain("free trial of Aurixa Systems");
+    for (const stage of [1, 2, 3] as const) {
+      for (const email of [applicant(stage), internal(stage)]) {
+        expect(`${email.subject}\n${email.text}\n${email.html}`).not.toMatch(/priority[ -]access/i);
+        expect(email.text).not.toMatch(/\d+-day/);
+      }
+    }
+  });
+
   it("does not quote their questionnaire answers back at them", () => {
     // The applicant wrote them; repeating the whole set reads as a transcript
     // and gives a partner-forwarded email more than it needs to carry.
