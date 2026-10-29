@@ -1350,4 +1350,12 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20261029180000",
     assertions: [{ kind: "none", reason: "drops an index, creates no object" }],
   },
+  {
+    migration: "20261029230000_website_briefing_images.sql",
+    version: "20261029230000",
+    assertions: [
+      { kind: "column", table: "website_briefings", column: "media_thumbnail" },
+      { kind: "column", table: "website_briefing_uploads", column: "kind" },
+    ],
+  },
 ];

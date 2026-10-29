@@ -9,11 +9,15 @@
  *     which Mission Control holds no key to. A grant is a single-use token for
  *     one listing's next version folder and the files it will hold; the
  *     website's `briefing-upload-sign` function asks `verifyUploadGrant`
- *     before it signs anything. Only the token's SHA-256 is stored.
- *   • Reading the stream back. `finalizeUpload` fetches what was uploaded from
+ *     before it signs anything. Only the token's SHA-256 is stored. A grant is
+ *     for a `package` (the encoded video) or for `images` (the thumbnail,
+ *     poster or link-preview card on their own), and is finished only by the
+ *     act for its kind.
+ *   • Reading the upload back. `finalizeUpload` fetches what was uploaded from
  *     the public bucket — master playlist, every rendition, the poster — and
  *     only then points the listing at it, with the running time and
  *     orientation measured from the stream rather than typed.
+ *     `finalizePicturesUpload` reads each picture's size from its own bytes.
  *   • Rebuilding the website. The website renders its pages at build time, so
  *     a change to a live listing asks Vercel for a production build through a
  *     deploy hook (`WEBSITE_DEPLOY_HOOK_URL`).
@@ -24,21 +28,33 @@ import type { Json, Tables, TablesInsert, TablesUpdate } from "@/integrations/su
 import { asRow } from "@/lib/json-cast";
 import {
   LIVE_STATUSES,
+  PICTURES,
+  PICTURE_FIELD,
+  PICTURE_FILE,
   UPLOAD_GRANT_HOURS,
   UPLOAD_PATH,
   affectsWebsite,
+  hasMedia,
+  jpegSize,
+  liveOrder,
   mediaFieldsFor,
   nextVersion,
   orientationOf,
   parseMasterPlaylist,
+  pictureFieldsFor,
+  pictureShape,
+  picturesAfterPackage,
+  planPicturesUpload,
   planUpload,
   playlistDuration,
   premiereProblems,
   publishProblems,
+  reorderPlan,
   resolveWithin,
   sydneyDate,
   toPublicListing,
   type BriefingStatus,
+  type Picture,
   type PublicListing,
 } from "@/lib/websiteBriefings.pure";
 import { writeAuditLog } from "./audit.server";
@@ -66,6 +82,14 @@ const sha256 = (value: string) => crypto.createHash("sha256").update(value).dige
 function isSchemaPending(error: { code?: string | null } | null): boolean {
   return error?.code === "PGRST205" || error?.code === "42P01";
 }
+
+/** A column the code writes that the database does not have yet: its migration has not applied. */
+function isColumnPending(error: { code?: string | null } | null): boolean {
+  return error?.code === "PGRST204" || error?.code === "42703";
+}
+
+export const PICTURES_MIGRATION = "20261029230000_website_briefing_images";
+const PICTURES_PENDING = `Pictures uploaded on their own need the database update that adds them (migration ${PICTURES_MIGRATION}). Ask an admin to apply it.`;
 
 // ── Reads ───────────────────────────────────────────────────────────────────
 
@@ -188,7 +212,7 @@ export async function saveWebsiteBriefing(input: {
   if (!current.ok) return { ok: false, error: current.error };
   if (!current.row) return { ok: false, error: "That video no longer exists." };
   const before = current.row;
-  if (input.slug !== before.slug && before.media_version) {
+  if (input.slug !== before.slug && hasMedia(before)) {
     return {
       ok: false,
       error: "The slug is fixed once media has been uploaded: the media folder is named after it.",
@@ -323,17 +347,29 @@ export async function setWebsiteBriefingStatus(input: {
   return { ok: true, row, rebuild };
 }
 
-/** A draft that never went anywhere can be deleted outright; anything else is archived instead. */
+/**
+ * A draft that never went anywhere can be deleted outright; anything else is
+ * archived instead. Media of any kind — the stream or a picture uploaded on
+ * its own — keeps it: its folder in the bucket is named after the slug, and a
+ * new listing given the slug would start counting versions again from v1.
+ */
 export async function deleteDraftWebsiteBriefing(input: {
   id: string;
   actorId: string;
 }): Promise<{ ok: true } | { ok: false; error: string }> {
+  const current = await readWebsiteBriefing(input.id);
+  if (!current.ok) return { ok: false, error: current.error };
+  if (current.row && hasMedia(current.row)) {
+    return { ok: false, error: "Only a draft with no media can be deleted. Archive it instead." };
+  }
   const { data, error } = await supabaseAdmin
     .from("website_briefings")
     .delete()
     .eq("id", input.id)
     .eq("status", "draft")
     .is("media_version", null)
+    .is("media_poster", null)
+    .is("media_card", null)
     .select("id, slug");
   if (error) return { ok: false, error: error.message };
   if (!data || data.length === 0) {
@@ -351,14 +387,18 @@ export async function deleteDraftWebsiteBriefing(input: {
 
 // ── Upload grants ───────────────────────────────────────────────────────────
 
+export type UploadKind = "package" | "images";
+
 /**
  * Grant an upload of these files into this listing's next version folder.
- * Returns the token once; only its hash is kept.
+ * Returns the token once; only its hash is kept. A `package` is the encoded
+ * video; `images` is one or more of its pictures on their own.
  */
 export async function createUploadGrant(input: {
   briefingId: string;
   paths: string[];
   actorId: string;
+  kind?: UploadKind;
 }): Promise<
   | {
       ok: true;
@@ -371,9 +411,17 @@ export async function createUploadGrant(input: {
     }
   | { ok: false; error: string; problems?: string[] }
 > {
-  const plan = planUpload(input.paths);
+  const kind = input.kind ?? "package";
+  const plan = kind === "images" ? planPicturesUpload(input.paths) : planUpload(input.paths);
   if (!plan.ok)
-    return { ok: false, error: "That folder cannot be uploaded.", problems: plan.problems };
+    return {
+      ok: false,
+      error:
+        kind === "images"
+          ? "Those pictures cannot be uploaded."
+          : "That folder cannot be uploaded.",
+      problems: plan.problems,
+    };
 
   const current = await readWebsiteBriefing(input.briefingId);
   if (!current.ok) return { ok: false, error: current.error };
@@ -399,6 +447,9 @@ export async function createUploadGrant(input: {
         paths: plan.files.map((f) => f.path),
         expires_at: expiresAt,
         created_by: input.actorId,
+        // A package grant leaves `kind` to its default, so the video keeps
+        // uploading before the migration that adds the column has applied.
+        ...(kind === "images" ? { kind } : {}),
       }),
     )
     .select("id")
@@ -408,6 +459,7 @@ export async function createUploadGrant(input: {
     // takes the next one.
     if (error.code === "23505")
       return { ok: false, error: "Another upload just started for this video. Try again." };
+    if (isColumnPending(error)) return { ok: false, error: PICTURES_PENDING };
     return { ok: false, error: error.message };
   }
   await writeAuditLog({
@@ -415,7 +467,7 @@ export async function createUploadGrant(input: {
     entityType: "website_briefing",
     entityId: briefing.id,
     actorUserId: input.actorId,
-    metadata: { slug: briefing.slug, version, files: plan.files.length },
+    metadata: { slug: briefing.slug, version, kind, files: plan.files.length },
   });
   return {
     ok: true,
@@ -491,6 +543,25 @@ async function exists(url: string): Promise<boolean> {
   }
 }
 
+/** The first bytes of the object at this URL: enough to read a picture's frame header. */
+async function readHead(
+  url: string,
+): Promise<{ ok: true; bytes: Uint8Array } | { ok: false; status: number }> {
+  try {
+    const response = await fetch(url, {
+      headers: { range: "bytes=0-65535" },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      return { ok: false, status: response.status };
+    }
+    return { ok: true, bytes: new Uint8Array(await response.arrayBuffer()) };
+  } catch {
+    return { ok: false, status: 0 };
+  }
+}
+
 /**
  * Check the uploaded package from the public bucket, the way a viewer's
  * player will see it, and point the listing at it.
@@ -500,6 +571,9 @@ async function exists(url: string): Promise<boolean> {
  * first rendition's segments summed, and the orientation is the largest
  * rendition's shape. Nothing is pointed at until all of that holds; the grant
  * is then spent, so its token can sign nothing more.
+ *
+ * Pictures uploaded on their own stay (`picturesAfterPackage`): a new render
+ * does not replace a thumbnail or poster someone chose for the listing.
  */
 export async function finalizeUpload(input: { uploadId: string; actorId: string }): Promise<
   | {
@@ -507,6 +581,7 @@ export async function finalizeUpload(input: { uploadId: string; actorId: string 
       row: WebsiteBriefingRow;
       durationSeconds: number | null;
       orientation: "landscape" | "portrait";
+      kept: Picture[];
       rebuild: RebuildResult | null;
     }
   | { ok: false; error: string; problems?: string[] }
@@ -520,6 +595,11 @@ export async function finalizeUpload(input: { uploadId: string; actorId: string 
   const grant = grantData as WebsiteBriefingUploadRow | null;
   if (!grant) return { ok: false, error: "That upload no longer exists." };
   if (grant.completed_at) return { ok: false, error: "That upload has already been finished." };
+  if (grant.kind === "images")
+    return {
+      ok: false,
+      error: "That upload holds pictures, not a video. Finish it from Pictures.",
+    };
 
   const current = await readWebsiteBriefing(grant.briefing_id);
   if (!current.ok) return { ok: false, error: current.error };
@@ -578,11 +658,17 @@ export async function finalizeUpload(input: { uploadId: string; actorId: string 
     return { ok: false, error: "The upload is not complete — nothing was changed.", problems };
   }
 
+  const pictures = picturesAfterPackage(before, fields, orientation);
+  // A row read before the pictures migration has no thumbnail column to
+  // write: the stream must still land.
+  const thumbnailColumn = "media_thumbnail" in before;
+  const { media_thumbnail, ...withoutThumbnail } = { ...fields, ...pictures.fields };
   const { data, error } = await supabaseAdmin
     .from("website_briefings")
     .update(
       asRow<TablesUpdate<"website_briefings">>({
-        ...fields,
+        ...withoutThumbnail,
+        ...(thumbnailColumn ? { media_thumbnail } : {}),
         media_version: grant.version,
         duration_seconds: durationSeconds,
         orientation,
@@ -624,6 +710,7 @@ export async function finalizeUpload(input: { uploadId: string; actorId: string 
       version: grant.version,
       duration_seconds: durationSeconds,
       orientation,
+      kept_pictures: pictures.kept,
     },
   });
   const rebuild =
@@ -633,7 +720,293 @@ export async function finalizeUpload(input: { uploadId: string; actorId: string 
           actorId: input.actorId,
         })
       : null;
-  return { ok: true, row, durationSeconds, orientation, rebuild };
+  return { ok: true, row, durationSeconds, orientation, kept: pictures.kept, rebuild };
+}
+
+// ── Pictures ────────────────────────────────────────────────────────────────
+
+/**
+ * Check pictures uploaded on their own and point the listing at them.
+ *
+ * Each picture is read back from the public bucket and its size taken from
+ * its own frame header: it must be exactly the size the browser writes for its
+ * slot (`pictureShape`; the poster in the video's shape). Only the pictures in
+ * the upload change; the stream, and `media_version` with it, stay as they are.
+ */
+export async function finalizePicturesUpload(input: {
+  uploadId: string;
+  actorId: string;
+}): Promise<
+  | { ok: true; row: WebsiteBriefingRow; pictures: Picture[]; rebuild: RebuildResult | null }
+  | { ok: false; error: string; problems?: string[] }
+> {
+  const { data: grantData, error: grantError } = await supabaseAdmin
+    .from("website_briefing_uploads")
+    .select("*")
+    .eq("id", input.uploadId)
+    .maybeSingle();
+  if (grantError) return { ok: false, error: grantError.message };
+  const grant = grantData as WebsiteBriefingUploadRow | null;
+  if (!grant) return { ok: false, error: "That upload no longer exists." };
+  if (grant.completed_at) return { ok: false, error: "That upload has already been finished." };
+  if (grant.kind !== "images")
+    return { ok: false, error: "That upload is a video package. Finish it from Video." };
+
+  const current = await readWebsiteBriefing(grant.briefing_id);
+  if (!current.ok) return { ok: false, error: current.error };
+  if (!current.row) return { ok: false, error: "That video no longer exists." };
+  const before = current.row;
+
+  const origin = websiteMediaOrigin();
+  const prefix = `videos/${before.slug}/${grant.version}/`;
+  const fields = pictureFieldsFor(prefix, grant.paths);
+  const pictures = PICTURES.filter((p) => fields[PICTURE_FIELD[p]]);
+  const problems: string[] = [];
+  for (const picture of pictures) {
+    const file = PICTURE_FILE[picture];
+    const head = await readHead(`${origin}/${prefix}${file}`);
+    if (!head.ok) {
+      problems.push(`${file} does not answer (HTTP ${head.status}).`);
+      continue;
+    }
+    const size = jpegSize(head.bytes);
+    const shape = pictureShape(picture, before.orientation);
+    if (!size) problems.push(`${file} is not a JPEG.`);
+    else if (size.width !== shape.width || size.height !== shape.height)
+      problems.push(
+        `${file} is ${size.width}×${size.height}; the ${picture} is ${shape.width}×${shape.height}.`,
+      );
+  }
+  if (pictures.length === 0) problems.push("The upload holds no pictures.");
+  if (problems.length > 0) {
+    return { ok: false, error: "The pictures did not check out — nothing was changed.", problems };
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("website_briefings")
+    .update(
+      asRow<TablesUpdate<"website_briefings">>({
+        ...fields,
+        updated_by: input.actorId,
+        updated_at: new Date().toISOString(),
+      }),
+    )
+    .eq("id", before.id)
+    .eq("slug", before.slug)
+    // The poster was checked against this shape.
+    .eq("orientation", before.orientation)
+    .select("*")
+    .maybeSingle();
+  if (error) {
+    if (isColumnPending(error)) return { ok: false, error: PICTURES_PENDING };
+    return { ok: false, error: error.message };
+  }
+  if (!data)
+    return {
+      ok: false,
+      error: "The video changed while uploading. Nothing was pointed at the new pictures.",
+    };
+
+  const { error: spendError } = await supabaseAdmin
+    .from("website_briefing_uploads")
+    .update(
+      asRow<TablesUpdate<"website_briefing_uploads">>({ completed_at: new Date().toISOString() }),
+    )
+    .eq("id", grant.id);
+  if (spendError) {
+    console.error("[website-briefings] could not spend upload grant", grant.id, spendError.message);
+  }
+
+  const row = data as WebsiteBriefingRow;
+  await writeAuditLog({
+    action: "website_briefing.pictures_uploaded",
+    entityType: "website_briefing",
+    entityId: row.id,
+    actorUserId: input.actorId,
+    metadata: {
+      slug: row.slug,
+      version: grant.version,
+      pictures,
+      replaced: Object.fromEntries(pictures.map((p) => [p, before[PICTURE_FIELD[p]] ?? null])),
+    },
+  });
+  // Only a published listing carries media on the website: a premiere's card
+  // shows the brand artwork until it goes live.
+  const rebuild =
+    row.status === "published"
+      ? await requestWebsiteRebuild({
+          reason: `New ${pictures.join(", ")} for "${row.title}"`,
+          actorId: input.actorId,
+        })
+      : null;
+  return { ok: true, row, pictures, rebuild };
+}
+
+/**
+ * Take a picture uploaded on its own off the listing. The thumbnail is
+ * removed (the website's cards fall back to the poster); the poster and the
+ * card go back to the ones the stream now playing came with, read from its
+ * grant, and must answer in the bucket before the listing points at them.
+ */
+export async function resetBriefingPicture(input: {
+  id: string;
+  picture: Picture;
+  actorId: string;
+}): Promise<
+  | { ok: true; row: WebsiteBriefingRow; path: string | null; rebuild: RebuildResult | null }
+  | { ok: false; error: string; problems?: string[] }
+> {
+  const current = await readWebsiteBriefing(input.id);
+  if (!current.ok) return { ok: false, error: current.error };
+  if (!current.row) return { ok: false, error: "That video no longer exists." };
+  const before = current.row;
+  const field = PICTURE_FIELD[input.picture];
+
+  let path: string | null = null;
+  if (input.picture !== "thumbnail") {
+    if (!before.media_version)
+      return {
+        ok: false,
+        error: "There is no video yet, so there is no picture of its own to go back to.",
+      };
+    const stream = `videos/${before.slug}/${before.media_version}/`;
+    const { data: grant, error: grantError } = await supabaseAdmin
+      .from("website_briefing_uploads")
+      .select("paths")
+      .eq("briefing_id", before.id)
+      .eq("version", before.media_version)
+      .maybeSingle();
+    // A failed read is not "no grant": the encoder's names would then stand in
+    // for a package that may have held other pictures.
+    if (grantError) return { ok: false, error: grantError.message };
+    // The first three listings were seeded with their media and no grant: the
+    // encoder's own names are the stream's pictures there.
+    const own = grant
+      ? mediaFieldsFor(stream, (grant as { paths: string[] }).paths)[field]
+      : `${stream}${PICTURE_FILE[input.picture]}`;
+    if (own && !(await exists(`${websiteMediaOrigin()}/${own}`))) {
+      return {
+        ok: false,
+        error: `The video's own ${input.picture} is not in its folder (${stream}). Upload one instead.`,
+      };
+    }
+    path = own ?? null;
+  }
+  if ((before[field] ?? null) === path) return { ok: true, row: before, path, rebuild: null };
+
+  const next = { ...before, [field]: path };
+  if (before.status === "published") {
+    const problems = publishProblems(next);
+    if (problems.length > 0)
+      return {
+        ok: false,
+        error: "This video is on the website, and that would break it.",
+        problems,
+      };
+  }
+  const { data, error } = await supabaseAdmin
+    .from("website_briefings")
+    .update(
+      asRow<TablesUpdate<"website_briefings">>({
+        [field]: path,
+        updated_by: input.actorId,
+        updated_at: new Date().toISOString(),
+      }),
+    )
+    .eq("id", before.id)
+    .eq("slug", before.slug)
+    .select("*")
+    .maybeSingle();
+  if (error) {
+    if (isColumnPending(error)) return { ok: false, error: PICTURES_PENDING };
+    return { ok: false, error: error.message };
+  }
+  if (!data)
+    return {
+      ok: false,
+      error: "The video changed while you were looking at it. Reload and try again.",
+    };
+  const row = data as WebsiteBriefingRow;
+  await writeAuditLog({
+    action: "website_briefing.picture_reset",
+    entityType: "website_briefing",
+    entityId: row.id,
+    actorUserId: input.actorId,
+    metadata: { slug: row.slug, picture: input.picture, from: before[field] ?? null, to: path },
+  });
+  const rebuild =
+    row.status === "published"
+      ? await requestWebsiteRebuild({
+          reason: `${input.picture === "thumbnail" ? "Removed the thumbnail" : `The video's own ${input.picture}`} for "${row.title}"`,
+          actorId: input.actorId,
+        })
+      : null;
+  return { ok: true, row, path, rebuild };
+}
+
+// ── Library order ───────────────────────────────────────────────────────────
+
+/**
+ * Put the listings in this order (every listing, top to bottom). Positions
+ * are renumbered 10, 20, 30 …; the website is rebuilt only when the order of
+ * the listings it shows changed.
+ */
+export async function reorderWebsiteBriefings(input: {
+  order: string[];
+  actorId: string;
+}): Promise<{ ok: true; rebuild: RebuildResult | null } | { ok: false; error: string }> {
+  const { data, error } = await supabaseAdmin
+    .from("website_briefings")
+    .select("id, slug, status, sort_order, created_at")
+    .order("sort_order", { ascending: true })
+    .order("created_at", { ascending: true });
+  if (error) return { ok: false, error: error.message };
+  const rows = (data ?? []) as Array<
+    Pick<WebsiteBriefingRow, "id" | "slug" | "status" | "sort_order">
+  >;
+  const plan = reorderPlan(rows, input.order);
+  if (!plan.ok)
+    return {
+      ok: false,
+      error: "The list changed while you were ordering it. Reload and try again.",
+    };
+  if (plan.changes.length === 0) return { ok: true, rebuild: null };
+
+  const now = new Date().toISOString();
+  for (const change of plan.changes) {
+    const { error: updateError } = await supabaseAdmin
+      .from("website_briefings")
+      .update(
+        asRow<TablesUpdate<"website_briefings">>({
+          sort_order: change.sort_order,
+          updated_by: input.actorId,
+          updated_at: now,
+        }),
+      )
+      .eq("id", change.id);
+    if (updateError) return { ok: false, error: updateError.message };
+  }
+
+  const position = new Map(plan.changes.map((c) => [c.id, c.sort_order]));
+  const after = rows.map((r) => ({ ...r, sort_order: position.get(r.id) ?? r.sort_order }));
+  const liveBefore = liveOrder(rows);
+  const liveAfter = liveOrder(after);
+  await writeAuditLog({
+    action: "website_briefing.reordered",
+    entityType: "website_briefing",
+    entityId: null,
+    actorUserId: input.actorId,
+    metadata: {
+      order: input.order.map((id) => rows.find((r) => r.id === id)?.slug ?? id),
+      live_before: liveBefore,
+      live_after: liveAfter,
+    },
+  });
+  const rebuild =
+    liveBefore.join() !== liveAfter.join()
+      ? await requestWebsiteRebuild({ reason: "Reordered the library", actorId: input.actorId })
+      : null;
+  return { ok: true, rebuild };
 }
 
 // ── Rebuilding the website ──────────────────────────────────────────────────

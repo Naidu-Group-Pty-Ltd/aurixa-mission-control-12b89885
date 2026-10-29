@@ -123,6 +123,18 @@ export function factsFromForm<T extends BriefingFacts>(row: T, form: BriefingFor
   return { ...row, ...copy, slug, chapters: copy.chapters };
 }
 
+/**
+ * The form's chapters in time order. One whose time cannot be read goes to
+ * the end, where the form names it; chapters at the same time keep their order.
+ */
+export function chaptersInOrder<T extends { time: string }>(chapters: readonly T[]): T[] {
+  const at = (c: T) => parseChapterTime(c.time) ?? Number.POSITIVE_INFINITY;
+  return chapters
+    .map((c, index) => ({ c, index }))
+    .sort((a, b) => at(a.c) - at(b.c) || a.index - b.index)
+    .map(({ c }) => c);
+}
+
 /** The suggested label for a page, so picking a page fills a label nobody has to write. */
 export function exploreLabelFor(to: string): string {
   return WEBSITE_EXPLORE_TARGETS.find((t) => t.to === to)?.label ?? "Explore the platform";

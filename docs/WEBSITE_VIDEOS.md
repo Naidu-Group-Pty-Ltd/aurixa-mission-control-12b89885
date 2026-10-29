@@ -20,7 +20,17 @@ Reads are `requireOperator`; every write — copy, media, publishing — is
 | `published` | A page at `/watch/<slug>` with its own title, description and link-preview card, in the library, the sitemap and `llms.txt`. |
 | `archived` | Nothing. Restorable as a draft. |
 
-A draft with no media can be deleted; anything else is archived instead.
+A draft with no media can be deleted; anything else is archived instead. A
+picture uploaded on its own counts as media: its folder is named after the
+slug, and a new listing given the slug would count versions from `v1` again.
+
+**The library's order is the list's.** The arrows beside each listing on
+Website → Videos move it up or down; the order is saved whole (positions
+10, 20, 30 …, `website_briefing.reordered`), and the website rebuilds only
+when the order of the listings it shows changed. Each live listing wears the
+code tag its card shows on the website (BRF-01 …), read from the order the
+website is served. The filters above the list count each status, and a draft
+says how many things stand between it and Publish.
 
 **The rules are the website's.** The website's build drops any listing that
 breaks one of its publishing rules (`src/lib/videos/validate.ts` in
@@ -79,6 +89,57 @@ A new upload is always a **new version folder** (`v2`, `v3` …), granted once a
 never again, so the version playing keeps playing until the new one is
 verified, and nothing published is ever uploaded over. The slug is fixed once
 media exists, because the folder is named after it.
+
+The editor plays the video playing now (its fallback MP4, which every browser
+plays; the website streams the ladder), and **Add one at m:ss** puts a chapter
+where the player is. **Put in time order** sorts the chapters. The orientation
+is measured from the video once there is one, and cannot be set by hand.
+
+## Pictures
+
+A listing has three pictures, each uploaded on its own on the listing's
+**Pictures** panel, without uploading the video again:
+
+| Picture | Where the website shows it | Written as |
+| ------- | -------------------------- | ---------- |
+| Thumbnail (`media_thumbnail`) | The library card and the theatre's up-next card, as landscape art under a light wash (aurixa-systems `cardArtwork`, `.watch-card__thumb--designed`) | `thumbnail.jpg`, 1920×1080 |
+| Poster (`media_poster`) | The theatre's player before the first frame plays | `poster.jpg`, 1080×1920 for a portrait video, 1920×1080 for a landscape one |
+| Link preview (`media_card`) | A shared link's og:image | `card.jpg`, 1200×630 |
+
+Without a thumbnail the cards show the poster (a portrait reel's small, over a
+blur of itself), as they always have.
+
+1. **Choose image** on a slot: a PNG, JPEG or WebP in the slot's shape
+   (within 1%) and at least 1280×720 (720×1280, 1200×630). An image of another
+   shape is refused, never cropped: a thumbnail is designed for its frame, and
+   its type and logo sit where the website leaves room for them. The browser
+   makes the JPEG at exactly the size above (`briefingPictures.ts`), and the
+   link preview can be made from the thumbnail (centred: 3% off the top and
+   the bottom).
+2. **Upload and check**: Mission Control grants an `images` upload
+   (`website_briefing_uploads.kind`) for the next version folder and the
+   pictures picked; the browser uploads them through the same signing
+   function, create-only. Mission Control then reads each picture back from
+   the bucket and takes its size from the JPEG's own frame header: only when
+   each is exactly its slot's size does the listing point at them. Only those
+   fields change: the stream, and `media_version`, stay as they are, so a
+   listing's media may point into different version folders.
+3. A published listing rebuilds the website; a premiere's card shows its brand
+   artwork until it goes live.
+
+Each slot says where its picture came from: **uploaded on its own** or **from
+the video**. A new video upload keeps the pictures uploaded on their own (the
+upload says which), except a poster when the video changed shape. **Remove**
+takes the thumbnail off; **Use the video's own** puts the poster or card the
+playing stream was uploaded with back, once it answers in the bucket
+(`website_briefing.picture_reset`). Below the slots, **On the website** draws
+the library card with its code and running-time tags, the theatre's poster
+under its play button, and a shared link's preview, with the pictures chosen.
+
+An `images` grant is finished only from Pictures and a `package` grant only
+from Video, so neither can point a listing at something it does not hold.
+Until `20261029230000_website_briefing_images.sql` applies, the panel says the
+pictures need it, and the video uploads as before.
 
 ## Rebuilding the website
 
@@ -139,9 +200,12 @@ committed `briefings.data.ts` unchanged.
 | File | What it is |
 | ---- | ---------- |
 | `supabase/migrations/20261028160200_website_briefings.sql` | The listings, the upload grants, and the three seeded briefings |
-| `src/lib/websiteBriefings.pure.ts` | The rules, the upload plan, reading a stream back, the wire shape |
+| `supabase/migrations/20261029230000_website_briefing_images.sql` | The thumbnail, and an upload grant's kind |
+| `src/lib/websiteBriefings.pure.ts` | The rules, the upload plans, the pictures' shapes, reading a stream back, the library order, the wire shape |
 | `src/lib/websiteBriefingForm.ts` | The editor's form, and the payload Save writes |
 | `src/lib/briefingUpload.ts` | The browser's upload: sign, then put phase by phase |
+| `src/lib/briefingPictures.ts` | The browser's pictures: a picked image made into the JPEG its slot expects |
+| `src/components/website-video-pictures-panel.tsx` | The Pictures panel and its website previews |
 | `src/server/website-briefings.server.ts` | Reads, writes, grants, verification, the rebuild |
 | `src/server/website-briefings.functions.ts` | The operator RPCs |
 | `src/routes/website.videos.index.tsx`, `src/routes/website.videos.$briefingId.tsx` | The list and the editor |

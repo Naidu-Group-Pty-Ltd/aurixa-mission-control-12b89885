@@ -10,8 +10,11 @@ import { z } from "zod";
 import { requireAdmin, requireOperator } from "@/integrations/supabase/role-middleware";
 import {
   BRIEFING_STATUSES,
+  PICTURES,
+  PICTURE_FILE,
   SLUG_PATTERN,
   UPLOAD_PATH,
+  libraryCode,
   publishProblems,
   premiereProblems,
 } from "@/lib/websiteBriefings.pure";
@@ -19,12 +22,16 @@ import {
   createUploadGrant,
   createWebsiteBriefing,
   deleteDraftWebsiteBriefing,
+  finalizePicturesUpload,
   finalizeUpload,
   lastWebsiteBuildRead,
   lastWebsiteRebuild,
+  listPublicListings,
   listWebsiteBriefings,
   readWebsiteBriefing,
+  reorderWebsiteBriefings,
   requestWebsiteRebuild,
+  resetBriefingPicture,
   saveWebsiteBriefing,
   setWebsiteBriefingStatus,
   websiteMediaOrigin,
@@ -38,16 +45,23 @@ const text = (max: number) => z.string().max(max);
 export const listWebsiteBriefingsFn = createServerFn({ method: "POST" })
   .middleware([requireOperator])
   .handler(async () => {
-    const [rows, rebuild, built] = await Promise.all([
+    const [rows, rebuild, built, served] = await Promise.all([
       listWebsiteBriefings(),
       lastWebsiteRebuild(),
       lastWebsiteBuildRead(),
+      listPublicListings(),
     ]);
+    const slugs = served.ok ? served.listings.map((l) => l.slug) : [];
     return {
       rows: rows.ok ? rows.rows : [],
       error: rows.ok ? null : rows.schemaPending ? "schema_pending" : rows.error,
       mediaOrigin: websiteMediaOrigin(),
       rebuild: { configured: websiteRebuildConfigured(), last: rebuild, built },
+      /** Each live listing's code tag on the website's library cards. */
+      codes: Object.fromEntries(slugs.map((slug) => [slug, libraryCode(slugs, slug)])) as Record<
+        string,
+        string
+      >,
     };
   });
 
@@ -55,7 +69,7 @@ export const getWebsiteBriefingFn = createServerFn({ method: "POST" })
   .middleware([requireOperator])
   .inputValidator((input) => z.object({ id }).parse(input))
   .handler(async ({ data }) => {
-    const read = await readWebsiteBriefing(data.id);
+    const [read, served] = await Promise.all([readWebsiteBriefing(data.id), listPublicListings()]);
     if (!read.ok) throw new Error(read.error);
     return {
       row: read.row,
@@ -63,6 +77,13 @@ export const getWebsiteBriefingFn = createServerFn({ method: "POST" })
       premiereProblems: read.row ? premiereProblems(read.row) : [],
       mediaOrigin: websiteMediaOrigin(),
       rebuildConfigured: websiteRebuildConfigured(),
+      libraryCode:
+        read.row && served.ok
+          ? libraryCode(
+              served.listings.map((l) => l.slug),
+              read.row.slug,
+            )
+          : null,
     };
   });
 
@@ -161,10 +182,52 @@ export const finalizeBriefingUploadFn = createServerFn({ method: "POST" })
           ok: true as const,
           durationSeconds: result.durationSeconds,
           orientation: result.orientation,
+          kept: result.kept,
           rebuild: result.rebuild,
         }
       : { ok: false as const, error: result.error, problems: result.problems ?? [] };
   });
+
+const pictureFile = z.enum(Object.values(PICTURE_FILE) as [string, ...string[]]);
+
+export const createBriefingPicturesUploadFn = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .inputValidator((input) =>
+    z.object({ briefingId: id, paths: z.array(pictureFile).min(1).max(3) }).parse(input),
+  )
+  .handler(async ({ data, context }) => {
+    const result = await createUploadGrant({ ...data, kind: "images", actorId: context.userId });
+    return result.ok
+      ? result
+      : { ok: false as const, error: result.error, problems: result.problems ?? [] };
+  });
+
+export const finalizeBriefingPicturesUploadFn = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .inputValidator((input) => z.object({ uploadId: id }).parse(input))
+  .handler(async ({ data, context }) => {
+    const result = await finalizePicturesUpload({ ...data, actorId: context.userId });
+    return result.ok
+      ? { ok: true as const, pictures: result.pictures, rebuild: result.rebuild }
+      : { ok: false as const, error: result.error, problems: result.problems ?? [] };
+  });
+
+export const resetBriefingPictureFn = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .inputValidator((input) => z.object({ id, picture: z.enum(PICTURES) }).parse(input))
+  .handler(async ({ data, context }) => {
+    const result = await resetBriefingPicture({ ...data, actorId: context.userId });
+    return result.ok
+      ? { ok: true as const, path: result.path, rebuild: result.rebuild }
+      : { ok: false as const, error: result.error, problems: result.problems ?? [] };
+  });
+
+export const reorderWebsiteBriefingsFn = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .inputValidator((input) => z.object({ order: z.array(id).min(1).max(500) }).parse(input))
+  .handler(async ({ data, context }) =>
+    reorderWebsiteBriefings({ ...data, actorId: context.userId }),
+  );
 
 export const requestWebsiteRebuildFn = createServerFn({ method: "POST" })
   .middleware([requireAdmin])
