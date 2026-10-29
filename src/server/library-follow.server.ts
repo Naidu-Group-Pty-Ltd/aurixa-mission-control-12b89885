@@ -19,7 +19,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import { getAppOctokit } from "./github-app.server";
-import { DEFAULT_CONFIG, RUNNING_RUN_WINDOW_MS, runDetection } from "./module-detection.server";
+import { DEFAULT_CONFIG, runDetection } from "./module-detection.server";
 import { catalogueCompetitor } from "./library-reingest.server";
 import { MODULE_COLUMNS, writeLibraryEntries } from "./libraryApproval.server";
 import {
@@ -34,7 +34,10 @@ import {
   FOLLOW_ATTEMPTS,
   FOLLOW_AUDIT_ACTION,
   FOLLOW_HELD,
+  FOLLOW_RUN_WINDOW_MS,
   FOLLOW_SKIPPED,
+  PRUNE_START_BY_MS,
+  SETTLE_START_BY_MS,
   emptyFollowReport,
   entryChange,
   followAuditMetadata,
@@ -132,8 +135,13 @@ async function readPaged<T>(
  * The audit row a follow that did something, or could not, records. `ownRun`
  * is the run this tick wrote, whose earlier runs' diagnostics it prunes first.
  */
-async function record(supabase: Db, report: FollowReport, ownRun?: string | null): Promise<void> {
-  if (ownRun) await pruneDiagnostics(supabase, report, ownRun);
+async function record(
+  supabase: Db,
+  report: FollowReport,
+  ownRun?: string | null,
+  pastDeadline?: () => boolean,
+): Promise<void> {
+  if (ownRun) await pruneDiagnostics(supabase, report, ownRun, pastDeadline);
   const { error } = await supabase.from("audit_log").insert({
     action: FOLLOW_AUDIT_ACTION,
     entity_type: "module_detection_run",
@@ -161,12 +169,13 @@ async function recordFailure(
   supabase: Db,
   report: FollowReport,
   ownRun?: string | null,
+  pastDeadline?: () => boolean,
 ): Promise<void> {
   report.outcome = "failed";
   // The third failure in a row, at whatever commits: the follow slows to its
   // backoff from here, and says so once.
   if (report.attempt === FOLLOW_ATTEMPTS) await tellOperators(supabase, report);
-  await record(supabase, report, ownRun);
+  await record(supabase, report, ownRun, pastDeadline);
 }
 
 /** Every module's slug and status, paged, for the hold asked before the run writes one. */
@@ -205,7 +214,12 @@ const DIAGNOSTIC_TABLES = [
  * statement timeout every time it was tried, and ten runs per follow. A delete
  * that fails is a warning: the next follow prunes again.
  */
-async function pruneDiagnostics(supabase: Db, report: FollowReport, ownRun: string): Promise<void> {
+async function pruneDiagnostics(
+  supabase: Db,
+  report: FollowReport,
+  ownRun: string,
+  pastDeadline?: () => boolean,
+): Promise<void> {
   const [own, settled] = await Promise.all([
     supabase.from("module_detection_runs").select("started_at").eq("id", ownRun).maybeSingle(),
     supabase
@@ -240,7 +254,14 @@ async function pruneDiagnostics(supabase: Db, report: FollowReport, ownRun: stri
     return;
   }
   const ids = earlier.rows.map((r) => r.id).filter((id) => id !== keep && id !== ownRun);
-  for (const id of ids.slice(0, PRUNE_RUNS_PER_FOLLOW)) {
+  const due = ids.slice(0, PRUNE_RUNS_PER_FOLLOW);
+  for (const [i, id] of due.entries()) {
+    if (pastDeadline?.()) {
+      report.warnings.push(
+        `${due.length - i} earlier run(s) are left to the next settle's prune: this invocation was past ${PRUNE_START_BY_MS / 1000} s`,
+      );
+      return;
+    }
     for (const table of DIAGNOSTIC_TABLES) {
       const { error } = await supabase.from(table).delete().eq("detection_run_id", id);
       if (error) {
@@ -314,6 +335,8 @@ export async function followPrimeHead(
   deps: FollowDeps = FOLLOW_DEPS,
 ): Promise<FollowReport> {
   const report = emptyFollowReport();
+  const startedAt = deps.now();
+  const pastDeadline = () => deps.now() - startedAt > PRUNE_START_BY_MS;
 
   const head = await deps.readHead(supabase);
   if (!head.ok) {
@@ -338,7 +361,7 @@ export async function followPrimeHead(
     headSha: head.sha,
     runs,
     now: deps.now(),
-    windowMs: RUNNING_RUN_WINDOW_MS,
+    windowMs: FOLLOW_RUN_WINDOW_MS,
   });
   if (step.kind === "up_to_date" || step.kind === "held") {
     // Recorded when it settled or held; a tick that changes nothing records nothing.
@@ -358,18 +381,18 @@ export async function followPrimeHead(
   }
 
   const now = new Date(deps.now()).toISOString();
+  // Why each run this tick closed died, for the notice of a third failure.
+  const diedBecause = new Map<string, string>();
   for (const stale of step.stale) {
-    const why = await closeRun(
-      supabase,
-      stale.id,
-      "failed",
-      now,
-      hasDetected(stale)
-        ? "The run wrote its modules and was not settled before another detection followed it, or two hours passed"
-        : "The follow's invocation ended before it settled the catalogue at this run",
-    );
+    const because = hasDetected(stale)
+      ? "The run wrote its modules and was not settled before another detection followed it, or two hours passed"
+      : "The follow's invocation ended before it settled the catalogue at this run";
+    const why = await closeRun(supabase, stale.id, "failed", now, because);
     if (why) report.warnings.push(why);
-    else report.closedStale.push(stale.id);
+    else {
+      report.closedStale.push(stale.id);
+      diedBecause.set(stale.id, because);
+    }
   }
 
   if (step.kind === "settle") {
@@ -390,16 +413,23 @@ export async function followPrimeHead(
       commitSha: step.commitSha,
       detectedSlugs: null,
       afterHold: step.afterHold,
+      pastDeadline,
     });
     return report;
   }
 
   if (step.kind === "exhausted") {
+    // The newest try this tick closed is the failure the notice names: "failed
+    // three times in a row because it failed three times in a row" was all the
+    // operators were told on 29 Oct 2026.
+    const died = step.failed.find((r) => diedBecause.has(r.id));
     report.outcome = "exhausted";
-    report.commitSha = head.sha;
+    report.commitSha = died?.commit_sha ?? head.sha;
     report.attempt = step.failed.length;
-    report.runId = step.failed[0]?.id ?? null;
-    report.stoppedBecause = `the follow failed ${step.failed.length} times in a row`;
+    report.runId = died?.id ?? step.failed[0]?.id ?? null;
+    report.stoppedBecause =
+      (died && diedBecause.get(died.id)) ??
+      `the follow failed ${step.failed.length} times in a row`;
     // A try that died is closed now, by this tick, and recorded; where it was
     // the third failure in a row the operators are told, once. A tick that
     // only waits out the backoff records nothing.
@@ -449,7 +479,7 @@ export async function followPrimeHead(
     );
     if (closing) report.warnings.push(closing);
     if (!step.afterHold) await tellOperators(supabase, report);
-    await record(supabase, report, detection.runId);
+    await record(supabase, report, detection.runId, pastDeadline);
     return report;
   }
   if (!detection.ok) {
@@ -472,22 +502,32 @@ export async function followPrimeHead(
       }
       return report;
     }
-    await recordFailure(supabase, report, detection.runId || null);
+    await recordFailure(supabase, report, detection.runId || null, pastDeadline);
     return report;
   }
   if (!detection.commitSha) {
     report.stoppedBecause = "The detection run completed without saying which commit it read";
     const why = await closeRun(supabase, detection.runId, "failed", now, report.stoppedBecause);
     if (why) report.warnings.push(why);
-    await recordFailure(supabase, report, detection.runId);
+    await recordFailure(supabase, report, detection.runId, pastDeadline);
     return report;
   }
 
+  const elapsed = deps.now() - startedAt;
+  if (elapsed > SETTLE_START_BY_MS) {
+    // The run says it wrote every module it found (its tree hash), and a
+    // settle started now could be cut: a later tick settles it, without
+    // detecting again.
+    report.outcome = "detected";
+    report.stoppedBecause = `the run wrote its modules ${Math.round(elapsed / 1000)} s into this invocation, so a later tick settles it`;
+    return report;
+  }
   await settle(supabase, deps, report, {
     runId: detection.runId,
     commitSha: detection.commitSha,
     detectedSlugs: detection.detectedSlugs ?? [],
     afterHold: step.afterHold,
+    pastDeadline,
   });
   return report;
 }
@@ -503,6 +543,8 @@ async function settle(
     /** Every slug the run found, or null for a run an earlier invocation detected. */
     detectedSlugs: string[] | null;
     afterHold: boolean;
+    /** Whether the invocation is past the point a prune still starts. */
+    pastDeadline: () => boolean;
   },
 ): Promise<void> {
   const { runId, commitSha } = at;
@@ -511,7 +553,7 @@ async function settle(
     report.stoppedBecause = why;
     const closing = await closeRun(supabase, runId, "failed", now, why);
     if (closing) report.warnings.push(closing);
-    await recordFailure(supabase, report, runId);
+    await recordFailure(supabase, report, runId, at.pastDeadline);
   };
   // A run another tick closed as dead is no longer this follow's to write
   // through: it stops, writes nothing more, and records why.
@@ -546,7 +588,7 @@ async function settle(
     const closing = await closeRun(supabase, runId, FOLLOW_HELD, now, report.stoppedBecause);
     if (closing) report.warnings.push(closing);
     if (!at.afterHold) await tellOperators(supabase, report);
-    await record(supabase, report, runId);
+    await record(supabase, report, runId, at.pastDeadline);
     return;
   }
 
@@ -658,7 +700,7 @@ async function settle(
     report.warnings.push(closing);
   }
   report.outcome = "settled";
-  await record(supabase, report, runId);
+  await record(supabase, report, runId, at.pastDeadline);
 }
 
 const LATEST_COLUMNS =

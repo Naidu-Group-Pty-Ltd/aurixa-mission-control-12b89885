@@ -100,6 +100,31 @@ export const SETTLE_QUIET_MS = 10 * 60_000;
 /** How long a run that has written its modules stays the follow's to settle. Past it, the run died. */
 export const SETTLE_WINDOW_MS = 2 * 60 * 60_000;
 
+/**
+ * How far into its invocation a follow still settles the run it detected.
+ * The platform cut the follow's invocations of 29 Oct 2026 68 to 72 s in, and
+ * publishing the whole catalogue one entry at a time took 12 s of that (an
+ * entry every 87 ms; five at a time now). A settle that would start later is
+ * left to a later tick, which settles the run without detecting again.
+ */
+export const SETTLE_START_BY_MS = 40_000;
+
+/**
+ * How far into its invocation a follow still starts pruning an earlier run's
+ * diagnostics: a delete of a run's 17,662 artifacts is one statement, and the
+ * audit row is written after the prune, so a run left unpruned waits for the
+ * next settle rather than cost the record of this one.
+ */
+export const PRUNE_START_BY_MS = 50_000;
+
+/**
+ * How long a follow run that has not written its findings may still be
+ * running. Its invocation is cut about 70 s in, so one older than this died:
+ * the shared `RUNNING_RUN_WINDOW_MS` (30 minutes) is for a person's detection,
+ * and held a dead follow run's commit for two ticks on 29 Oct.
+ */
+export const FOLLOW_RUN_WINDOW_MS = 10 * 60_000;
+
 // ─── Which run is the follow's, and what it does next ───────────────────────
 
 /** A detection run, as the follow reads it. */
@@ -435,7 +460,15 @@ export function entryChange(
 
 // ─── What a follow reports ──────────────────────────────────────────────────
 
-export type FollowOutcome = "up_to_date" | "held" | "exhausted" | "settled" | "failed" | "skipped";
+export type FollowOutcome =
+  | "up_to_date"
+  | "held"
+  | "exhausted"
+  /** The run wrote its modules late in the invocation, and a later tick settles it. */
+  | "detected"
+  | "settled"
+  | "failed"
+  | "skipped";
 
 export type FollowReport = {
   outcome: FollowOutcome;
@@ -523,7 +556,8 @@ export function followAuditMetadata(report: FollowReport): Json {
  */
 export function stoppedNotice(report: FollowReport): NotificationInsert {
   const at = primeCommitLabel(report.commitSha) ?? "the prime's head";
-  const why = report.stoppedBecause ?? "no reason was recorded";
+  // A reason written as a sentence reads on after "because".
+  const why = (report.stoppedBecause ?? "no reason was recorded").replace(/^The /, "the ");
   const held = report.outcome === "held";
   return {
     kind: "library_follow_held",

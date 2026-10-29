@@ -18,6 +18,7 @@ import type { TextWant } from "./cascade/primeTextBatch.pure";
 import { CASCADE_MAX_FILE_BYTES } from "./cascade/syncExclusions.pure";
 import type { Octokit } from "@octokit/rest";
 import { validateModuleGlobs } from "@/lib/module-globs";
+import { mapWithConcurrencyOrThrow } from "@/lib/concurrency";
 import { parseFunctionConfig } from "./prime-backend.server";
 import {
   classifyBackendPath,
@@ -483,6 +484,22 @@ function unreadRefusal(what: string, unread: string[]): Error {
   );
 }
 
+/**
+ * How many of a run's database statements are in flight at once: five, as a
+ * Worker holds at most six connections open (`PRIME_TEXT_BATCH_CONCURRENCY`).
+ * The follow's invocations were cut 68 to 72 s in on 29 Oct 2026, and the
+ * third spent 25 of its seconds on statements sent one after another: 143
+ * module writes of two round trips each, the blob cache's 36 reads and
+ * refreshes, and 28 of its 36 artifact inserts before it was cut.
+ */
+const DB_CONCURRENCY = 5;
+
+function inChunks<T>(list: readonly T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
+  return out;
+}
+
 // ─── Cached blob reading ────────────────────────────────────────────
 
 /**
@@ -534,8 +551,7 @@ async function readBlobsCached<T>(args: {
   // ── Cache lookup (chunked; `in` has a practical URL length limit) ──
   const cacheHits = new Map<string, T>();
   const shas = capped.map((t) => t.sha);
-  for (let i = 0; i < shas.length; i += 200) {
-    const chunk = shas.slice(i, i + 200);
+  await mapWithConcurrencyOrThrow(inChunks(shas, 200), DB_CONCURRENCY, async (chunk) => {
     const { data } = await supabase
       .from("repo_blob_analysis")
       .select("blob_sha, analysis")
@@ -543,7 +559,7 @@ async function readBlobsCached<T>(args: {
     for (const row of (data ?? []) as Array<{ blob_sha: string; analysis: unknown }>) {
       cacheHits.set(row.blob_sha, row.analysis as T);
     }
-  }
+  });
 
   const misses: TextWant[] = [];
   for (const t of capped) {
@@ -581,23 +597,23 @@ async function readBlobsCached<T>(args: {
   });
 
   // ── Persist new analyses ──
-  for (let i = 0; i < toCache.length; i += 100) {
-    const chunk = toCache.slice(i, i + 100).map((r) => ({
+  await mapWithConcurrencyOrThrow(inChunks(toCache, 100), DB_CONCURRENCY, async (rows) => {
+    const chunk = rows.map((r) => ({
       ...r,
       analysis: JSON.parse(JSON.stringify(r.analysis)),
       last_seen_at: new Date().toISOString(),
     }));
     await supabase.from("repo_blob_analysis").upsert(chunk, { onConflict: "blob_sha" });
-  }
+  });
 
   // Refresh last_seen_at on cache hits so the pruner keeps live blobs.
   const hitShas = capped.filter((t) => cacheHits.has(t.sha)).map((t) => t.sha);
-  for (let i = 0; i < hitShas.length; i += 200) {
+  await mapWithConcurrencyOrThrow(inChunks(hitShas, 200), DB_CONCURRENCY, async (chunk) => {
     await supabase
       .from("repo_blob_analysis")
       .update({ last_seen_at: new Date().toISOString() })
-      .in("blob_sha", hitShas.slice(i, i + 200));
-  }
+      .in("blob_sha", chunk);
+  });
 
   return {
     results,
@@ -1476,9 +1492,9 @@ export async function runDetection(args: {
         target_file: e.target_file,
         import_type: e.import_type,
       }));
-      for (let i = 0; i < edgeRows.length; i += 500) {
-        await supabase.from("module_import_edges").insert(edgeRows.slice(i, i + 500));
-      }
+      await mapWithConcurrencyOrThrow(inChunks(edgeRows, 500), DB_CONCURRENCY, async (rows) => {
+        await supabase.from("module_import_edges").insert(rows);
+      });
     }
 
     // Which modules claim each migration — repo-wide infrastructure migrations
@@ -1530,7 +1546,13 @@ export async function runDetection(args: {
       }
     }
 
-    for (const m of persisted) {
+    // Five modules at a time (`DB_CONCURRENCY`), each its read then its write.
+    // A slug is a module's identity, so two of one slug would race to insert
+    // it: a run that found two writes one module at a time. A module that
+    // cannot be read or written stops the run as it did one at a time: no
+    // later module is started, and the ones in flight finish.
+    const distinctSlugs = new Set(persisted.map((m) => m.slug)).size === persisted.length;
+    await mapWithConcurrencyOrThrow(persisted, distinctSlugs ? DB_CONCURRENCY : 1, async (m) => {
       // A follow run reads who archived the module, and stops on a read that
       // failed: read as no module, it would insert a second one of the slug.
       const existingRead = config.follow
@@ -1665,7 +1687,7 @@ export async function runDetection(args: {
           if (created?.id) moduleIdBySlug.set(m.slug, created.id);
         }
       }
-    }
+    });
 
     // ── Per-artifact linkage rows ──
     // One row per (module, backend artifact) so the UI can answer both
@@ -1717,9 +1739,9 @@ export async function runDetection(args: {
         add("cron_job", m.backend.cronJobs, "scheduled by module's migrations");
       }
 
-      for (let i = 0; i < artifactRows.length; i += 500) {
-        await supabase.from("module_backend_artifacts").insert(artifactRows.slice(i, i + 500));
-      }
+      await mapWithConcurrencyOrThrow(inChunks(artifactRows, 500), DB_CONCURRENCY, async (rows) => {
+        await supabase.from("module_backend_artifacts").insert(rows);
+      });
     }
 
     // Drift alerts for orphans

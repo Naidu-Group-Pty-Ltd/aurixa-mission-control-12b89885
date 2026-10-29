@@ -23,6 +23,7 @@
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
+import { mapWithConcurrencyOrThrow } from "@/lib/concurrency";
 import {
   describeDbError,
   judgeApproval,
@@ -276,7 +277,11 @@ export async function publishModulesToLibrary(
  * policy.
  *
  * A module that cannot be published is refused by name, with its reason, and
- * the rest are written.
+ * the rest are written. Five modules at a time, each its version read, its
+ * insert and its supersede in that order: a Worker holds at most six
+ * connections open, and the follow's first invocations were cut about 70 s
+ * in, 23 entries into a publication that wrote one every 87 ms (29 Oct
+ * 2026). What it returns is in the order of `modules`, as it always was.
  */
 export async function writeLibraryEntries(
   supabase: Db,
@@ -288,16 +293,10 @@ export async function writeLibraryEntries(
     tagsFor?: (module: PublishableModule) => string[];
   },
 ): Promise<{ entries: PublishedEntry[]; refused: RefusedModule[]; warnings: string[] }> {
-  const entries: PublishedEntry[] = [];
-  const refused: RefusedModule[] = [];
-  const warnings: string[] = [];
-
-  for (const m of modules) {
+  type Outcome = { entry?: PublishedEntry; refused?: RefusedModule; warning?: string };
+  const write = async (m: PublishableModule): Promise<Outcome> => {
     const verdict = judgePublication(m, runs);
-    if (!verdict.ok) {
-      refused.push({ moduleId: m.id, slug: m.slug, reason: verdict.reason });
-      continue;
-    }
+    if (!verdict.ok) return { refused: { moduleId: m.id, slug: m.slug, reason: verdict.reason } };
 
     // The next version. A read that failed is not "no versions": numbering the
     // entry v1 would write a second v1 beside the first.
@@ -308,12 +307,13 @@ export async function writeLibraryEntries(
       .order("version", { ascending: false })
       .limit(1);
     if (versionError) {
-      refused.push({
-        moduleId: m.id,
-        slug: m.slug,
-        reason: `${m.name} (${m.slug}): could not read its published versions: ${describeDbError(versionError)}`,
-      });
-      continue;
+      return {
+        refused: {
+          moduleId: m.id,
+          slug: m.slug,
+          reason: `${m.name} (${m.slug}): could not read its published versions: ${describeDbError(versionError)}`,
+        },
+      };
     }
     const version = (latest?.[0]?.version ?? 0) + 1;
 
@@ -335,19 +335,19 @@ export async function writeLibraryEntries(
       // module_library_slug_version_key (20261028140000): a publication of the
       // same module that read the same last version wrote this number first.
       const raced = insertError?.code === "23505";
-      refused.push({
-        moduleId: m.id,
-        slug: m.slug,
-        reason: raced
-          ? `${m.name} (${m.slug}): another publication wrote v${version} first, so this one ` +
-            `wrote nothing; publish it again to number it after that one`
-          : `${m.name} (${m.slug}): the entry was not written: ${
-              insertError ? describeDbError(insertError) : "no row came back"
-            }`,
-      });
-      continue;
+      return {
+        refused: {
+          moduleId: m.id,
+          slug: m.slug,
+          reason: raced
+            ? `${m.name} (${m.slug}): another publication wrote v${version} first, so this one ` +
+              `wrote nothing; publish it again to number it after that one`
+            : `${m.name} (${m.slug}): the entry was not written: ${
+                insertError ? describeDbError(insertError) : "no row came back"
+              }`,
+        },
+      };
     }
-    entries.push(written);
 
     // Superseded only once the new entry exists. Flipping first, as this used
     // to, left a slug with no latest entry whenever the insert then failed.
@@ -360,13 +360,20 @@ export async function writeLibraryEntries(
       .eq("slug", m.slug)
       .eq("is_latest", true)
       .lt("version", version);
-    if (supersedeError) {
-      warnings.push(
-        `${m.slug} v${version} was published, but its earlier versions still read latest: ${supersedeError.message}`,
-      );
-    }
-  }
-  return { entries, refused, warnings };
+    return {
+      entry: written,
+      warning: supersedeError
+        ? `${m.slug} v${version} was published, but its earlier versions still read latest: ${supersedeError.message}`
+        : undefined,
+    };
+  };
+
+  const outcomes = await mapWithConcurrencyOrThrow([...modules], 5, write);
+  return {
+    entries: outcomes.flatMap((o) => (o.entry ? [o.entry] : [])),
+    refused: outcomes.flatMap((o) => (o.refused ? [o.refused] : [])),
+    warnings: outcomes.flatMap((o) => (o.warning ? [o.warning] : [])),
+  };
 }
 
 // ─── Deciding entries already published ─────────────────────────────────────

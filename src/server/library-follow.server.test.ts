@@ -85,7 +85,10 @@ import {
   FOLLOW_AUDIT_ACTION,
   FOLLOW_BACKOFF_MS,
   FOLLOW_SKIPPED,
+  FOLLOW_RUN_WINDOW_MS,
+  PRUNE_START_BY_MS,
   SETTLE_QUIET_MS,
+  SETTLE_START_BY_MS,
   SETTLE_WINDOW_MS,
 } from "./libraryFollow.pure";
 
@@ -568,6 +571,39 @@ describe("a follow that fails is tried again, three times at one commit", () => 
     expect(detections).toBe(3);
   });
 
+  it("names why the third try died, where a later tick closes it", async () => {
+    for (let i = 1; i < FOLLOW_ATTEMPTS; i++) await follow();
+    expect(heldNotices()).toEqual([]);
+    // The third try's invocation was cut before its run wrote its findings,
+    // as on 29 Oct 2026: the row still says running, and names no tree.
+    db.tables.module_detection_runs.push({
+      id: "r-cut",
+      status: "running",
+      commit_sha: COMMIT_2,
+      parameters: { follow: true },
+      tree_hash: null,
+      started_at: new Date(Date.now() + 1000).toISOString(),
+    });
+    prime.commit = COMMIT_3;
+    deps.now = () => Date.now() + FOLLOW_RUN_WINDOW_MS + 60_000;
+
+    const report = await follow();
+
+    expect(report).toMatchObject({
+      outcome: "exhausted",
+      attempt: FOLLOW_ATTEMPTS,
+      runId: "r-cut",
+      commitSha: COMMIT_2,
+      closedStale: ["r-cut"],
+    });
+    expect(heldNotices().map((n) => n.body)).toEqual([
+      "The module library failed to follow the prime 3 times in a row, most recently at " +
+        "prime@2b3c4d5 because the follow's invocation ended before it settled the catalogue " +
+        "at this run. It tries again every six hours until one follow settles.",
+    ]);
+    expect(detections).toBe(FOLLOW_ATTEMPTS - 1);
+  });
+
   it("fails, and is tried again, where the prime has no route at all", async () => {
     deps.detect = FOLLOW_DEPS.detect;
     prime.files = Object.fromEntries(
@@ -747,6 +783,50 @@ describe("a follow whose invocation ended once its run had written its modules",
         slug,
       ).toHaveLength(1);
     }
+  });
+
+  it("leaves the settle to a later tick when the run wrote its modules late in the invocation", async () => {
+    const base = Date.now();
+    let reads = 0;
+    // The invocation's first reading of the clock, then every one after it
+    // past the point a settle could still finish.
+    deps.now = () => (++reads === 1 ? base : base + SETTLE_START_BY_MS + 1_000);
+
+    const report = await follow();
+
+    expect(report.outcome).toBe("detected");
+    expect(report.stoppedBecause).toMatch(/wrote its modules \d+ s into this invocation/);
+    const [run] = followRuns();
+    expect(run).toMatchObject({ status: "running", commit_sha: COMMIT_1 });
+    expect(run.tree_hash).toEqual(expect.any(String));
+    expect(db.tables.module_library.filter((e) => e.approval_status === "approved")).toEqual([]);
+    expect(audits()).toEqual([]);
+
+    deps.now = later(SETTLE_QUIET_MS + 60_000);
+    const next = await follow();
+
+    expect(detections).toBe(1);
+    expect(next).toMatchObject({ outcome: "settled", resumed: true, runId: run.id });
+    expect(run.status).toBe("completed");
+  });
+
+  it("closes a run of its own that wrote nothing for ten minutes, as its invocation is long gone", async () => {
+    seed({
+      module_detection_runs: [
+        {
+          id: "r-cut",
+          status: "running",
+          commit_sha: COMMIT_1,
+          parameters: { follow: true },
+          started_at: new Date(Date.now() - FOLLOW_RUN_WINDOW_MS - 60_000).toISOString(),
+        },
+      ],
+    });
+
+    const report = await follow();
+
+    expect(report.closedStale).toEqual(["r-cut"]);
+    expect(report).toMatchObject({ outcome: "settled", attempt: 2 });
   });
 
   it("closes the run as a try where two hours passed without a settle, and detects again", async () => {
@@ -972,6 +1052,39 @@ describe("the follow keeps the diagnostics of the catalogue it settles, and of n
     expect((audits()[0].metadata as { pruned: string[] }).pruned.sort()).toEqual(
       [OLD_RUN, PERSON_RUN].sort(),
     );
+  });
+
+  it("leaves earlier runs to the next settle's prune once its invocation is late, and still records the settle", async () => {
+    // The clock reads early until the publication starts, then past the
+    // point a prune still starts.
+    const base = Date.now();
+    let offset = 0;
+    deps.now = () => base + offset;
+    const realFrom = db.from;
+    db.from = (table: string) => {
+      const builder = realFrom(table);
+      if (table === "module_library") {
+        const insert = builder.insert;
+        builder.insert = (...args: unknown[]) => {
+          offset = PRUNE_START_BY_MS + 1_000;
+          return insert(...args);
+        };
+      }
+      return builder;
+    };
+
+    const report = await follow();
+    db.from = realFrom;
+
+    expect(report.outcome).toBe("settled");
+    expect(report.pruned).toEqual([]);
+    expect(report.warnings).toEqual([
+      expect.stringMatching(/^2 earlier run\(s\) are left to the next settle's prune/),
+    ]);
+    expect(rowsOf(OLD_RUN)).toBe(6);
+    expect(rowsOf(PERSON_RUN)).toBe(6);
+    expect(audits()).toHaveLength(1);
+    expect(audits()[0].metadata).toMatchObject({ outcome: "settled", pruned: [] });
   });
 
   it("keeps the settled catalogue's diagnostics when it holds", async () => {
