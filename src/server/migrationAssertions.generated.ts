@@ -1305,4 +1305,18 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20261029130000",
     assertions: [{ kind: "column", table: "waitlist_leads", column: "stage3_cal_booking_uid" }],
   },
+  {
+    migration: "20261029135900_library_follow_held_kind.sql",
+    version: "20261029135900",
+    assertions: [{ kind: "enum", type: "notification_kind" }],
+  },
+  {
+    migration: "20261029140000_module_library_follows_the_prime.sql",
+    version: "20261029140000",
+    assertions: [
+      { kind: "column", table: "modules", column: "archived_by_follow_run_id" },
+      { kind: "column", table: "module_detection_runs", column: "diagnostics_pruned_at" },
+      { kind: "cron", jobname: "module-library-follow-15min" },
+    ],
+  },
 ];

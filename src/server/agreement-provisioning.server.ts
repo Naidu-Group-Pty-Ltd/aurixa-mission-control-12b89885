@@ -388,6 +388,8 @@ async function runProvisioning(
   // unfunctional" state this pipeline exists to prevent. The operator's retry
   // re-enters here idempotently.
   const { reconcileCloneEntitlements } = await import("./entitlement-modules.server");
+  // Which commit the catalogue was settled at, on the reconcile's audit row (D19).
+  const { catalogueSettledAt } = await import("./library-follow.server");
   const recon = await reconcileCloneEntitlements({
     supabase: supabaseAdmin,
     options: {
@@ -396,6 +398,7 @@ async function runProvisioning(
       fromPlanSlug: null,
       direction: "initial",
       userId,
+      catalogue: await catalogueSettledAt(supabaseAdmin),
     },
   });
   if (!recon.ok) {

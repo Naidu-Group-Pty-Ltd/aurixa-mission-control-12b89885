@@ -6,8 +6,8 @@
 // `module_drift_alerts` and `module_config_snapshots` — behind the slice of
 // the PostgREST builder that `libraryApproval.server.ts`,
 // `library-validation.server.ts`, `cascade/installedGlobs.server.ts`,
-// `library-reingest.server.ts` and `module-detection.server.ts` use, plus the
-// `has_role` RPC.
+// `library-reingest.server.ts`, `module-detection.server.ts` and
+// `library-follow.server.ts` use, plus the `has_role` RPC.
 //
 // It answers as the server does rather than replaying canned results:
 //
@@ -41,7 +41,10 @@
 //  - a filter treats NULL as SQL does: `eq`, `neq`, `in`, `lt` and `gt` never match it;
 //  - `maybeSingle` answers null for no row and PGRST116 for several, and
 //    `single` answers PGRST116 for anything but one;
-//  - `count: "exact"` counts the filtered rows before `range` or `limit`.
+//  - `count: "exact"` counts the filtered rows before `range` or `limit`;
+//  - an update of `modules.status` that does not write
+//    `archived_by_follow_run_id` clears it, as the trigger
+//    `modules_follow_mark_is_the_follows` (20261029140000) does.
 //
 // A failure is injected per table and operation (`module_library.select`,
 // `rpc.has_role`), as the error PostgREST passes through for a statement the
@@ -88,7 +91,11 @@ const TABLES = [
 ] as const;
 type Table = (typeof TABLES)[number];
 
-/** The columns each table carries in production (`types.ts`, 28 Oct 2026). */
+/**
+ * The columns each table carries in production (`types.ts`, 28 Oct 2026, and
+ * `modules.archived_by_follow_run_id` and
+ * `module_detection_runs.diagnostics_pruned_at` from 20261029140000).
+ */
 const COLUMNS: Record<Table, readonly string[]> = {
   modules: [
     "ai_confidence",
@@ -96,6 +103,7 @@ const COLUMNS: Record<Table, readonly string[]> = {
     "apply_on_install",
     "approved_at",
     "approved_by",
+    "archived_by_follow_run_id",
     "backend_file_globs",
     "backend_manifest",
     "clone_migration_sql",
@@ -140,6 +148,7 @@ const COLUMNS: Record<Table, readonly string[]> = {
     "database_object_count",
     "delta_mode",
     "dependency_count",
+    "diagnostics_pruned_at",
     "edge_function_count",
     "error_message",
     "file_count",
@@ -489,6 +498,24 @@ function defaultsFor(table: Table, now: string): Row {
     default:
       return { ...base, updated_at: now };
   }
+}
+
+/**
+ * The row an UPDATE leaves, BEFORE triggers included: production's
+ * `modules_follow_mark_is_the_follows` clears the follow's archive mark on a
+ * status change that does not write the mark to a new value.
+ */
+function updated(table: Table, old: Row, values: Row): Row {
+  const next = { ...old, ...structuredClone(values) };
+  if (
+    table === "modules" &&
+    "status" in values &&
+    (next.status ?? null) !== (old.status ?? null) &&
+    (next.archived_by_follow_run_id ?? null) === (old.archived_by_follow_run_id ?? null)
+  ) {
+    next.archived_by_follow_run_id = null;
+  }
+  return next;
 }
 
 const notNull = (table: Table, column: string): PgError => ({
@@ -866,15 +893,16 @@ function builder(db: LibraryFakeDb, table: Table, known: Set<string>): Builder {
         result = created;
       } else {
         result = rows().filter((r) => filters.every((f) => f(r)));
-        const after = (r: Row): Row => (result.includes(r) ? { ...r, ...(values as Row) } : r);
+        const after = (r: Row): Row => (result.includes(r) ? updated(table, r, values as Row) : r);
         for (const row of result) {
           const others = rows()
             .filter((r) => r !== row)
             .map(after);
-          const broken = violation(table, after(row), others) ?? unreferenced(db, table, after(row));
+          const broken =
+            violation(table, after(row), others) ?? unreferenced(db, table, after(row));
           if (broken) return { data: null, error: broken };
         }
-        for (const row of result) Object.assign(row, structuredClone(values as Row));
+        for (const row of result) Object.assign(row, updated(table, row, values as Row));
       }
       db.writes.push({ table, op, rows: result.map((r) => ({ ...r })) });
     }

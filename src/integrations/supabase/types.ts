@@ -10397,6 +10397,7 @@ export type Database = {
           created_at: string
           database_object_count: number
           delta_mode: boolean | null
+          diagnostics_pruned_at: string | null
           dependency_count: number | null
           edge_function_count: number
           error_message: string | null
@@ -10428,6 +10429,7 @@ export type Database = {
           created_at?: string
           database_object_count?: number
           delta_mode?: boolean | null
+          diagnostics_pruned_at?: string | null
           dependency_count?: number | null
           edge_function_count?: number
           error_message?: string | null
@@ -10459,6 +10461,7 @@ export type Database = {
           created_at?: string
           database_object_count?: number
           delta_mode?: boolean | null
+          diagnostics_pruned_at?: string | null
           dependency_count?: number | null
           edge_function_count?: number
           error_message?: string | null
@@ -10681,6 +10684,7 @@ export type Database = {
           apply_on_install: boolean
           approved_at: string | null
           approved_by: string | null
+          archived_by_follow_run_id: string | null
           backend_file_globs: string[]
           backend_manifest: Json
           clone_migration_sql: string | null
@@ -10722,6 +10726,7 @@ export type Database = {
           apply_on_install?: boolean
           approved_at?: string | null
           approved_by?: string | null
+          archived_by_follow_run_id?: string | null
           backend_file_globs?: string[]
           backend_manifest?: Json
           clone_migration_sql?: string | null
@@ -10763,6 +10768,7 @@ export type Database = {
           apply_on_install?: boolean
           approved_at?: string | null
           approved_by?: string | null
+          archived_by_follow_run_id?: string | null
           backend_file_globs?: string[]
           backend_manifest?: Json
           clone_migration_sql?: string | null
@@ -16953,6 +16959,7 @@ export type Database = {
         | "cascade_rejected"
         | "library_entry_approved"
         | "library_entry_rejected"
+        | "library_follow_held"
         | "tokens_alert"
         | "tokens_key_first_use"
         | "tokens_key_issued"
@@ -17460,6 +17467,7 @@ export const Constants = {
         "cascade_rejected",
         "library_entry_approved",
         "library_entry_rejected",
+        "library_follow_held",
         "tokens_alert",
         "tokens_key_first_use",
         "tokens_key_issued",

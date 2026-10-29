@@ -211,6 +211,13 @@ export type ReconcileOptions = {
   /** Compute and report the diff without writing anything. */
   dryRun?: boolean;
   userId?: string;
+  /**
+   * The follow run the catalogue was settled at when provisioning read it
+   * (`catalogueSettledAt`), recorded on the reconcile's audit row so a new
+   * clone says which prime commit its installs were resolved against. Null
+   * where no follow had settled it.
+   */
+  catalogue?: { runId: string; commitSha: string | null } | null;
 };
 
 /**
@@ -393,6 +400,12 @@ export async function reconcileCloneEntitlements(args: {
       contract_excluded: resolution.contractExcluded,
       contract_exclusions_unknown: resolution.unknownExclusions,
       contract_exclusions_shared: resolution.sharedModulesKept,
+      ...(options.catalogue !== undefined
+        ? {
+            catalogue_follow_run_id: options.catalogue?.runId ?? null,
+            catalogue_commit_sha: options.catalogue?.commitSha ?? null,
+          }
+        : {}),
     },
   });
 
