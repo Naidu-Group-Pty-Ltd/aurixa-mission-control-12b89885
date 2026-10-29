@@ -1168,9 +1168,15 @@ run's commit:
    (`writeLibraryEntries`). A score is not a difference. A latest entry that is
    not approved at a commit, as every entry before the follow is, is replaced
    whatever it says.
-5. Where the catalogue gained or lost a module, every clone's installs are
-   reconciled. The reconcile installs what each clone is newly entitled to and
-   removes nothing.
+
+The follow changes no clone: no clone row, install or pin. A reconcile
+resolves a clone's plan from its metering tenant, and on 29 Oct all four clones
+metered on `free` while Mission Control recorded `scale`, `scale`, `launch` and
+`scale` (D16: they stay on `free` until launch). A reconcile from the follow
+would have rewritten all four recorded plans to `free`, and plan-targeted
+notices and the payment gate read that record. Every clone is a mirror, which
+receives every file whatever its installs say, so the follow owes no clone
+anything. A contract test holds the follow to it.
 
 The run stays `running` until it is settled, so a reset or a detection a
 person starts meets it and stops. The follow does the same in turn: it waits
@@ -1182,7 +1188,7 @@ not.
 
 - **The breaker.** A run that finds no module, or would archive more than
   `max(10, a quarter of the live catalogue)`, is held before it writes a
-  module. Nothing is rewritten, approved, archived, published or reconciled.
+  module. Nothing is rewritten, approved, archived or published.
   Every operator is told (`library_follow_held`), and the follow waits for the
   prime to move. The first follow archives 14 of 135, inside the 34 it may.
 - **Three tries.** A follow that fails is tried again at the next tick, three
@@ -1211,7 +1217,7 @@ read back by effect:
 - 143 modules naming that run, 14 archived as the follow's, and none `proposed`;
 - one approved, latest entry per live module, at that commit, with no approver;
 - a `module_library.follow` audit row whose lists match;
-- a reconcile audit row per clone.
+- every clone's row and installs as they were before.
 
 A run that cannot finish on the runtime shows as three failed tries and one
 notice, and nothing it wrote is published.

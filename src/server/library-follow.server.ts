@@ -29,12 +29,10 @@ import {
   type DetectionRunCommit,
   type PublishableModule,
 } from "./libraryApproval.pure";
-import { reconcileCloneEntitlements, type ReconcileResult } from "./entitlement-modules.server";
 import {
   FOLLOW_ATTEMPTS,
   FOLLOW_AUDIT_ACTION,
   FOLLOW_HELD,
-  catalogueChanged,
   emptyFollowReport,
   entryChange,
   followAuditMetadata,
@@ -67,7 +65,6 @@ export type FollowDeps = {
   /** Who else is working on the catalogue (`catalogueCompetitor`). */
   competitor: (supabase: Db, own: { runId?: string }) => Promise<string | null>;
   detect: typeof runDetection;
-  reconcile: (supabase: Db, cloneId: string) => Promise<ReconcileResult>;
   now: () => number;
 };
 
@@ -98,7 +95,6 @@ export const FOLLOW_DEPS: FollowDeps = {
   readHead: readPrimeHead,
   competitor: catalogueCompetitor,
   detect: runDetection,
-  reconcile: (supabase, cloneId) => reconcileCloneEntitlements({ supabase, options: { cloneId } }),
   now: () => Date.now(),
 };
 
@@ -446,49 +442,6 @@ async function settle(
     modules: plan.publish,
   });
   if (!published.ok) return fail(published.error);
-
-  // ── Reconcile every clone where the catalogue gained or lost a module ──
-  if (catalogueChanged(plan)) {
-    const clonesRead = await readPaged<{ id: string }>((from, to) =>
-      supabase.from("clones").select("id").order("id", { ascending: true }).range(from, to),
-    );
-    if (!clonesRead.ok) {
-      report.warnings.push(
-        `The clones could not be read, so none was reconciled with the new catalogue: ${clonesRead.error}`,
-      );
-    } else {
-      for (const clone of clonesRead.rows) {
-        const result = await deps.reconcile(supabase, clone.id).catch(
-          (e): ReconcileResult => ({
-            ok: false,
-            error: e instanceof Error ? e.message : String(e),
-            cloneId: clone.id,
-            fromPlanSlug: null,
-            toPlanSlug: "",
-            direction: "manual",
-            installed: [],
-            revoked: [],
-            unchanged: 0,
-            entitlementKeys: [],
-            unmapped: [],
-            dryRun: false,
-          }),
-        );
-        if (result.ok) {
-          report.reconciled.push({
-            cloneId: clone.id,
-            installed: result.installed,
-            revoked: result.revoked,
-          });
-        } else {
-          report.notReconciled.push({
-            cloneId: clone.id,
-            reason: result.error ?? "the reconcile failed without saying why",
-          });
-        }
-      }
-    }
-  }
 
   const closing = await closeRun(supabase, runId, "completed", now, null);
   if (closing) {

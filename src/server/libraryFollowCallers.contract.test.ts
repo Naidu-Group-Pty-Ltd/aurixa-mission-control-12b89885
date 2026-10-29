@@ -88,6 +88,17 @@ describe("who writes an entry no person approved", () => {
   });
 });
 
+describe("the follow changes no clone", () => {
+  it("never reconciles, and never writes a clone, an install or a pin", () => {
+    // A reconcile resolves a clone's plan from its metering tenant, and every
+    // clone metered on `free` while Mission Control recorded its sold plan
+    // (29 Oct 2026): reconciling from the follow would rewrite those records.
+    const follow = source(FOLLOW);
+    expect(follow).not.toMatch(/reconcileCloneEntitlements|entitlement-modules\.server/);
+    expect(follow).not.toMatch(/\.from\("(clones|clone_modules|clone_library_pins)"\)/);
+  });
+});
+
 describe("a new clone says which commit its catalogue was at", () => {
   it("both provisioning paths reconcile with the catalogue's settled run", () => {
     for (const file of [

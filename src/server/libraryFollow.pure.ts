@@ -5,8 +5,9 @@
  * The owner asked on 29 Oct that the library update itself whenever the prime
  * changes, rather than waiting for an admin to reset and re-ingest it, so that
  * a clone provisioned at any time is reconciled against the catalogue as the
- * prime holds it. `library-follow.server.ts` does the reads and writes; this
- * module decides what they are.
+ * prime holds it (provisioning's own reconcile, `catalogueSettledAt`).
+ * `library-follow.server.ts` does the reads and writes; this module decides
+ * what they are.
  *
  * ## One run, at one commit, settled whole
  *
@@ -25,19 +26,29 @@
  *  - publishing an entry for each module whose entry would differ from its
  *    latest, or whose latest is not approved at a commit (every entry before
  *    the follow), so a push that changes nothing a clone receives publishes
- *    nothing;
- *  - reconciling every clone's installs where the catalogue gained or lost a
- *    module, installing what each is newly entitled to and removing nothing.
+ *    nothing.
  *
  * Then the run is `completed`, and the catalogue is at its commit.
+ *
+ * ## It changes no clone
+ *
+ * The follow writes the catalogue and the library, and no clone's row or
+ * installs. A reconcile resolves a clone's plan from its metering tenant, and
+ * on 29 Oct 2026 all four clones metered on `free` while Mission Control
+ * recorded `scale`, `scale`, `launch` and `scale` (D16: they stay on `free`
+ * until launch). Reconciling them would have rewritten each clone's recorded
+ * plan to `free`, which plan-targeted notices and the payment gate read. Every
+ * clone is a mirror, which receives every file whatever its installs say, so
+ * the follow owes a clone nothing: a new clone is reconciled when it is
+ * provisioned, against the catalogue the follow keeps at the prime's head.
  *
  * ## It stops for a person rather than archive the catalogue
  *
  * A run that found nothing, or that would archive more than a quarter of the
  * live catalogue, is `held`, and it is asked before the run writes a module
  * (`beforeWriting` in `module-detection.server.ts`): no module is rewritten,
- * nothing is approved, archived, published or reconciled, the operators are
- * told, and the follow does not try that commit again. The first follow
+ * nothing is approved, archived or published, the operators are told, and the
+ * follow does not try that commit again. The first follow
  * archives 14 of 135 (measured against prime@122b761, 29 Oct 2026), well
  * inside it.
  *
@@ -342,9 +353,6 @@ export type FollowReport = {
   published: Array<{ slug: string; version: number; change: EntryChange }>;
   unchanged: number;
   refused: Array<{ slug: string; reason: string }>;
-  reconciled: Array<{ cloneId: string; installed: string[]; revoked: string[] }>;
-  /** Clones not reconciled, and why: no billing plan is not a failure, and says so. */
-  notReconciled: Array<{ cloneId: string; reason: string }>;
   /** Why the follow stopped, held or failed. */
   stoppedBecause?: string;
   /** Follow runs that died before they settled, closed as failed. */
@@ -366,18 +374,9 @@ export function emptyFollowReport(outcome: FollowOutcome = "failed"): FollowRepo
     published: [],
     unchanged: 0,
     refused: [],
-    reconciled: [],
-    notReconciled: [],
     closedStale: [],
     warnings: [],
   };
-}
-
-/** Whether the settle changed which modules the catalogue holds, which is what moves an entitlement. */
-export function catalogueChanged(
-  plan: Pick<SettlePlan, "approve" | "revive" | "archive">,
-): boolean {
-  return plan.approve.length + plan.revive.length + plan.archive.length > 0;
 }
 
 /** The report, as the audit row records it: every list, cut at 200 so a row stays a row. */
@@ -397,8 +396,6 @@ export function followAuditMetadata(report: FollowReport): Json {
       published: cut(report.published),
       unchanged: report.unchanged,
       refused: cut(report.refused),
-      reconciled: cut(report.reconciled),
-      not_reconciled: cut(report.notReconciled),
       stopped_because: report.stoppedBecause ?? null,
       closed_stale: report.closedStale,
       warnings: cut(report.warnings),

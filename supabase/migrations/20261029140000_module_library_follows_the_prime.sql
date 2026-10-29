@@ -20,9 +20,9 @@
 -- prime's head and does nothing while the catalogue is settled at it. When the
 -- head has moved, it detects the catalogue at the head and settles it there:
 -- it approves what the run proposed, archives what the run no longer found,
--- publishes an entry for each module whose entry changed, approved at the
--- run's commit, and reconciles every clone's installs where the catalogue
--- gained or lost a module.
+-- and publishes an entry for each module whose entry changed, approved at the
+-- run's commit. It changes no clone: a new clone is reconciled when it is
+-- provisioned, against the catalogue the follow keeps at the prime's head.
 --
 -- `modules.archived_by_follow_run_id` is the follow run that archived a module
 -- because it no longer found it, and NULL for every module a person archived.

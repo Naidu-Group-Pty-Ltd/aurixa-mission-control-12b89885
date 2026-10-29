@@ -8,7 +8,6 @@ import {
   ARCHIVE_FLOOR,
   FOLLOW_ATTEMPTS,
   FOLLOW_HELD,
-  catalogueChanged,
   emptyFollowReport,
   entryChange,
   followAuditMetadata,
@@ -235,11 +234,6 @@ describe("settling the catalogue at a run", () => {
       detectedSlugs: ["kept"],
     });
     expect(none.held).toMatch(/found no module/);
-  });
-
-  it("says whether the catalogue gained or lost a module", () => {
-    expect(catalogueChanged(plan)).toBe(true);
-    expect(catalogueChanged({ approve: [], revive: [], archive: [] })).toBe(false);
   });
 });
 

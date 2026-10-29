@@ -510,10 +510,9 @@ export async function provisionCloneCore(
   if (data.planSlug) {
     try {
       const { reconcileCloneEntitlements } = await import("./entitlement-modules.server");
-      // The catalogue follows the prime (D19), and its audit row says at which
-      // commit it was when this clone's installs were resolved. The follow
-      // reconciles every clone again whenever the catalogue gains or loses a
-      // module, this one included.
+      // The catalogue follows the prime (D19), so this resolves the new
+      // clone's installs against the catalogue as the prime holds it, and the
+      // audit row says at which commit that was.
       const { catalogueSettledAt } = await import("./library-follow.server");
       const recon = await reconcileCloneEntitlements({
         supabase,

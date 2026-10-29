@@ -5,11 +5,13 @@
  * `followPrimeHead` runs whole: the head is read, and the catalogue detected,
  * by the real `readPrimeHead` and `runDetection` against a small prime served
  * by a GitHub that answers as GitHub does (GraphQL serves a blob's text by
- * id), and the real `catalogueCompetitor` decides who else is working. Only
- * the reconcile is stood in: it reads the price list, which the double does
- * not hold, and what it does to a clone is its own suite's
- * (`entitlement-modules.server.test.ts`). What the follow owes it is to be
- * asked, for every clone, exactly when the catalogue gained or lost a module.
+ * id), and the real `catalogueCompetitor` decides who else is working.
+ *
+ * The follow changes no clone: on 29 Oct 2026 every clone metered on `free`
+ * while Mission Control recorded its sold plan, so a reconcile from here
+ * would have rewritten all four recorded plans (`libraryFollow.pure.ts`).
+ * Every suite seeds clones and their installs, and the follow must leave both
+ * exactly as they were.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { gitBlobSha } from "./cascade/gitBlobSha.pure";
@@ -79,7 +81,6 @@ import {
 } from "./library-follow.server";
 import { DEFAULT_CONFIG, RUNNING_RUN_WINDOW_MS, runDetection } from "./module-detection.server";
 import { FOLLOW_ATTEMPTS, FOLLOW_AUDIT_ACTION } from "./libraryFollow.pure";
-import type { ReconcileResult } from "./entitlement-modules.server";
 
 function fakeGithub() {
   const shaOf = (path: string) => gitBlobSha(prime.files[path]);
@@ -168,29 +169,7 @@ const cloneRow = (id: string): Row => ({
 });
 
 let db: LibraryFakeDb;
-let reconciled: string[];
-let reconcileFails: Set<string>;
 let detections: number;
-
-const reconcile: FollowDeps["reconcile"] = async (_supabase, cloneId) => {
-  reconciled.push(cloneId);
-  const result: ReconcileResult = {
-    ok: !reconcileFails.has(cloneId),
-    cloneId,
-    fromPlanSlug: "growth",
-    toPlanSlug: "growth",
-    direction: "manual",
-    installed: [],
-    revoked: [],
-    unchanged: 0,
-    entitlementKeys: [],
-    unmapped: [],
-    dryRun: false,
-  };
-  if (!result.ok)
-    result.error = "Failed to install modules: canceling statement due to statement timeout";
-  return result;
-};
 
 let deps: FollowDeps;
 
@@ -204,7 +183,10 @@ function seed(extra: Partial<Record<string, Row[]>> = {}) {
         default_branch: "main",
       },
     ],
-    clones: [cloneRow(CLONE_A), cloneRow(CLONE_B)],
+    clones: [
+      { ...cloneRow(CLONE_A), entitled_plan_slug: "scale", entitled_module_slugs: ["clients"] },
+      { ...cloneRow(CLONE_B), entitled_plan_slug: "launch", entitled_module_slugs: [] },
+    ],
     module_detection_runs: [
       { id: OLD_RUN, status: "completed", commit_sha: null, started_at: "2026-07-31T23:13:41Z" },
     ],
@@ -218,8 +200,6 @@ beforeEach(() => {
   prime.commit = COMMIT_1;
   prime.branchFails = false;
   prime.octokit = fakeGithub();
-  reconciled = [];
-  reconcileFails = new Set();
   detections = 0;
   deps = {
     ...FOLLOW_DEPS,
@@ -227,7 +207,6 @@ beforeEach(() => {
       detections++;
       return FOLLOW_DEPS.detect(args);
     },
-    reconcile,
   };
   seed();
 });
@@ -322,11 +301,26 @@ describe("the first follow settles July's catalogue at the prime's head", () => 
     expect(db.tables.notifications.map((n) => n.kind)).toEqual(["library_entry_approved"]);
   });
 
-  it("reconciles every clone, because the catalogue gained and lost modules", async () => {
+  it("changes no clone, though the catalogue gained and lost modules", async () => {
+    seed({
+      modules: [oldModule("clients"), oldModule("index"), oldModule("gone")],
+      clone_modules: [
+        { id: "i1", clone_id: CLONE_A, module_id: "m-clients" },
+        { id: "i2", clone_id: CLONE_A, module_id: "m-gone" },
+      ],
+    });
+    const clonesBefore = structuredClone(db.tables.clones);
+    const installsBefore = structuredClone(db.tables.clone_modules);
+
     const report = await follow();
 
-    expect(reconciled.sort()).toEqual([CLONE_A, CLONE_B]);
-    expect(report.reconciled.map((r) => r.cloneId).sort()).toEqual([CLONE_A, CLONE_B]);
+    expect(report.outcome).toBe("settled");
+    expect(report.archived).toEqual(["gone"]);
+    expect(db.writes.filter((w) => w.table === "clones" || w.table === "clone_modules")).toEqual(
+      [],
+    );
+    expect(db.tables.clones).toEqual(clonesBefore);
+    expect(db.tables.clone_modules).toEqual(installsBefore);
   });
 
   it("records what it did on one audit row", async () => {
@@ -363,10 +357,9 @@ describe("the first follow settles July's catalogue at the prime's head", () => 
 describe("when the prime moves", () => {
   beforeEach(async () => {
     await follow();
-    reconciled = [];
   });
 
-  it("publishes nothing, and reconciles nobody, where nothing a clone receives changed", async () => {
+  it("publishes nothing where nothing a clone receives changed", async () => {
     prime.commit = COMMIT_2;
 
     const report = await follow();
@@ -377,7 +370,6 @@ describe("when the prime moves", () => {
     expect(report.unchanged).toBe(FOUND.length);
     expect(report.approved).toEqual([]);
     expect(report.archived).toEqual([]);
-    expect(reconciled).toEqual([]);
     expect(followRuns().map((r) => r.status)).toEqual(["completed", "completed"]);
     // Every module names the run at the new head, so the next change publishes from it.
     const latestRun = followRuns().find((r) => r.commit_sha === COMMIT_2);
@@ -398,7 +390,6 @@ describe("when the prime moves", () => {
     expect(latest).toMatchObject({ version: 2, source_commit_sha: COMMIT_2 });
     expect(entriesOf("clients")[0]).toMatchObject({ version: 1, is_latest: false });
     expect(latest?.file_paths).toContain("src/components/clients/ClientRow.tsx");
-    expect(reconciled).toEqual([]);
   });
 
   it("archives a route the prime dropped, and brings it back when it returns", async () => {
@@ -413,9 +404,7 @@ describe("when the prime moves", () => {
       status: "archived",
       archived_by_follow_run_id: droppedAt?.id,
     });
-    expect(reconciled.sort()).toEqual([CLONE_A, CLONE_B]);
 
-    reconciled = [];
     prime.commit = COMMIT_3;
     prime.files = { ...PRIME };
 
@@ -431,7 +420,9 @@ describe("when the prime moves", () => {
     expect(entriesOf("reports")).toEqual([
       expect.objectContaining({ version: 1, is_latest: true, source_commit_sha: COMMIT_1 }),
     ]);
-    expect(reconciled.sort()).toEqual([CLONE_A, CLONE_B]);
+    expect(db.writes.filter((w) => w.table === "clones" || w.table === "clone_modules")).toEqual(
+      [],
+    );
   });
 });
 
@@ -481,7 +472,6 @@ describe("the follow stops for a person rather than archive the catalogue", () =
     expect(db.writes.filter((w) => w.table === "modules")).toEqual([]);
     expect(db.tables.modules).toEqual(before);
     expect(db.tables.module_library).toEqual([]);
-    expect(reconciled).toEqual([]);
     const [run] = followRuns();
     expect(run.status).toBe("held");
     expect(run.error_message).toMatch(/would archive 12 of the 12/);
@@ -634,21 +624,6 @@ describe("what the follow could not read, it says", () => {
     expect(report.outcome).toBe("failed");
     expect(report.stoppedBecause).toMatch(/detection runs could not be read/);
     expect(detections).toBe(0);
-  });
-
-  it("names a clone it could not reconcile, and reconciles the rest", async () => {
-    reconcileFails = new Set([CLONE_B]);
-
-    const report = await follow();
-
-    expect(report.outcome).toBe("settled");
-    expect(report.reconciled.map((r) => r.cloneId)).toEqual([CLONE_A]);
-    expect(report.notReconciled).toEqual([
-      {
-        cloneId: CLONE_B,
-        reason: "Failed to install modules: canceling statement due to statement timeout",
-      },
-    ]);
   });
 });
 
