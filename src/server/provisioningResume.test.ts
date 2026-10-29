@@ -14,11 +14,15 @@ import {
   parseResumeMarker,
   pastDeadline,
 } from "./provisioningBudget";
-import { toReplaceableTriggerDdl } from "./schema-introspection.server";
+import { STAGE_SEQUENCE, toReplaceableTriggerDdl } from "./schema-introspection.server";
 import { SEED_ASSET_BUCKETS, planCloneSecrets } from "./backend-provisioning.server";
 import { declaredFunctionSlugsFromPaths } from "./prime-backend.server";
 import { classifyEdgeFunctionShortfall } from "./handoff-parity.server";
-import { scanIsCacheable, shouldSkipFunctionSource } from "./primeScanCache.pure";
+import {
+  passCanReachEdgeFunctions,
+  scanIsCacheable,
+  shouldSkipFunctionSource,
+} from "./primeScanCache.pure";
 import { stripComments } from "./sourceComments.pure";
 
 /**
@@ -60,8 +64,7 @@ const runner = () => read("src/lib/backend-provisioning.functions.ts");
  * distance a property of the code, so a comment can neither break the
  * assertion nor satisfy it.
  */
-const code = (source: string) =>
-  stripComments(source);
+const code = (source: string) => stripComments(source);
 const drift = () => read("src/server/fleet-drift.functions.ts");
 const retryHook = () => read("src/routes/hooks.backend-provisioning-retry.tsx");
 
@@ -281,7 +284,9 @@ describe("the pipeline is budgeted and resumable", () => {
     const src = introspection();
     const body = src.slice(src.indexOf("export async function replicateSchemaByIntrospection"));
     const gated = body.match(/enterStage\("/g) ?? [];
-    expect(gated.length).toBe(12);
+    // One gate per declared stage, counted from the list rather than restated:
+    // a stage added to one and not the other could never pause or resume.
+    expect(gated.length).toBe(STAGE_SEQUENCE.length);
     expect(body).toMatch(/if \(ranAStageThisPass\) pauseIfDue\(/);
   });
 
@@ -435,6 +440,7 @@ describe("the schema build remembers where it paused", () => {
        never be resumed at. */
     for (const stage of [
       "enums",
+      "domains",
       "sequences",
       "tables",
       "functions",
@@ -449,6 +455,25 @@ describe("the schema build remembers where it paused", () => {
     ]) {
       expect(src.slice(src.indexOf("STAGE_SEQUENCE"))).toContain(`"${stage}"`);
     }
+  });
+
+  it("domains are built after the enums they may sit on and before the tables typed by them", () => {
+    /* A domain is a column type. Without a stage for them the prime's first
+       one — `public.mh_principal_key` — failed 17 tables on every pass and 672
+       statements behind them, and the schema could never verify (29 Oct
+       2026, `tutorial-demo-orrimere-c158c7`). */
+    expect(STAGE_SEQUENCE.indexOf("enums")).toBeLessThan(STAGE_SEQUENCE.indexOf("domains"));
+    expect(STAGE_SEQUENCE.indexOf("domains")).toBeLessThan(STAGE_SEQUENCE.indexOf("tables"));
+    const src = introspection();
+    const enumsAt = src.indexOf('if (enterStage("enums"))');
+    const domainsAt = src.indexOf('if (enterStage("domains"))');
+    const tablesAt = src.indexOf('if (enterStage("tables"))');
+    expect(enumsAt).toBeGreaterThan(-1);
+    expect(domainsAt).toBeGreaterThan(enumsAt);
+    expect(tablesAt).toBeGreaterThan(domainsAt);
+    /* Reconciled like every other stage, so a finished domain stage is skipped
+       on resume rather than re-applied. */
+    expect(src).toMatch(/\n {2}domains: `select count\(\*\)::int as n from pg_type t/);
   });
 
   it("a carried stage is skipped, and the first stage run never pauses", () => {
@@ -609,7 +634,15 @@ describe("a resumed pass does not buy what it cannot use", () => {
     const snapAt = src.indexOf("await fetchPrimeBackendSnapshot(");
     expect(readAt).toBeGreaterThan(-1);
     expect(readAt).toBeLessThan(snapAt);
-    expect(src).toMatch(/includeFunctionSource: !resumingSchema/);
+    /* The fetch is bought only by a pass that can reach the edge functions —
+       one rule, decided from the row read above, before the snapshot. */
+    expect(src).toMatch(/includeFunctionSource: canReachEdgeFunctions && !skipFunctionSource/);
+    const ruleAt = src.indexOf("passCanReachEdgeFunctions({");
+    expect(ruleAt).toBeGreaterThan(readAt);
+    expect(ruleAt).toBeLessThan(snapAt);
+    expect(src.slice(ruleAt, ruleAt + 400)).toMatch(
+      /schemaVerifiedAt: existingRow\?\.schema_verified_at/,
+    );
     /* Read once. Two reads is how the second one drifts from the first. */
     expect(src.match(SELECT)?.length ?? 0).toBe(1);
     /* A failed read is not an absent row — it must not resolve to "not resuming",
@@ -634,6 +667,9 @@ describe("a resumed pass does not buy what it cannot use", () => {
     expect(branch).toMatch(/"",\n\s*\);/);
     /* And the pause is inside the guarded branch, ahead of any deploy. */
     expect(branch.indexOf("throw new BudgetPause(")).toBeGreaterThan(-1);
+    /* A pass that verified the schema on its way here carries neither bundles
+       nor the cached scan, and going on would sync secrets against nothing. */
+    expect(branch).toMatch(/snapshot\.secretNames\.length === 0\)/);
   });
 });
 
@@ -2188,6 +2224,57 @@ describe("a fixed cost in front of the first stage is a livelock", () => {
     const sql = readFileSync("supabase/migrations/20260904060000_prime_snapshot_scans.sql", "utf8");
     expect(sql).toContain("primary key (repo, git_sha)");
     expect(sql).not.toMatch(/primary key \([^)]*branch/);
+  });
+});
+
+describe("only a pass that can reach the edge functions fetches their source", () => {
+  /* Measured 29 Oct 2026 on `tutorial-demo-orrimere-c158c7`: every pass without
+     a resume marker fetched and scanned the prime's whole function tree (33 MB)
+     before its first stage, and five of six were killed by the runtime with a
+     bare HTTP 502 — while every resumed pass, which skipped the fetch, paused
+     cleanly. Three kills in a row failed the clone. */
+  const base = {
+    resumingSchema: false,
+    schemaStrategy: "introspection" as const,
+    projectRef: "fxqfhiiqdmzvsxbxvqcz",
+    schemaVerifiedAt: "2026-10-29T20:10:16Z",
+  };
+
+  it("fetches on a pass whose schema is verified — the one that deploys", () => {
+    expect(passCanReachEdgeFunctions(base)).toBe(true);
+  });
+
+  it("declines on a full pass over an unverified schema — it pauses or verifies first", () => {
+    expect(passCanReachEdgeFunctions({ ...base, schemaVerifiedAt: null })).toBe(false);
+  });
+
+  it("declines on the first pass, which has no project to have verified", () => {
+    expect(passCanReachEdgeFunctions({ ...base, projectRef: null, schemaVerifiedAt: null })).toBe(
+      false,
+    );
+    // A verification recorded against no project describes nothing.
+    expect(passCanReachEdgeFunctions({ ...base, projectRef: null })).toBe(false);
+  });
+
+  it("declines on a resumed pass whatever else holds", () => {
+    expect(passCanReachEdgeFunctions({ ...base, resumingSchema: true })).toBe(false);
+  });
+
+  it("keeps the old rule for the replay strategy, which never records a verification", () => {
+    expect(
+      passCanReachEdgeFunctions({
+        ...base,
+        schemaStrategy: "migration-replay",
+        schemaVerifiedAt: null,
+      }),
+    ).toBe(true);
+    expect(
+      passCanReachEdgeFunctions({
+        ...base,
+        schemaStrategy: "migration-replay",
+        resumingSchema: true,
+      }),
+    ).toBe(false);
   });
 });
 

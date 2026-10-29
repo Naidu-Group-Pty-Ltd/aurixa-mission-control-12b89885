@@ -2,9 +2,11 @@ import { useEffect, useState } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import {
   Database,
   RefreshCw,
+  RotateCcw,
   AlertTriangle,
   CheckCircle2,
   Loader2,
@@ -15,7 +17,10 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { useServerFn } from "@tanstack/react-start";
-import { getCloneBackendStatus } from "@/lib/backend-provisioning.functions";
+import {
+  getCloneBackendStatus,
+  retryBackendProvisioning,
+} from "@/lib/backend-provisioning.functions";
 import { getCloneMigrationStatus, syncCloneMigrations } from "@/server/migration-sync.functions";
 import { cn } from "@/lib/utils";
 
@@ -45,10 +50,14 @@ export function CloneBackendCard({ cloneId }: { cloneId: string }) {
   const [migration, setMigration] = useState<MigrationStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
+  const [retryEmail, setRetryEmail] = useState("");
+  const [retryPassword, setRetryPassword] = useState("");
+  const [retrying, setRetrying] = useState(false);
 
   const fetchBackendStatus = useServerFn(getCloneBackendStatus);
   const fetchMigrationStatus = useServerFn(getCloneMigrationStatus);
   const syncMigrations = useServerFn(syncCloneMigrations);
+  const requeueBackend = useServerFn(retryBackendProvisioning);
 
   const load = async () => {
     setLoading(true);
@@ -80,6 +89,12 @@ export function CloneBackendCard({ cloneId }: { cloneId: string }) {
     return () => clearInterval(interval);
   }, [backend?.status]);
 
+  // The retry form starts from the seed admin the row already names. Seeded
+  // once, so an operator who clears the field to type another is not undone.
+  useEffect(() => {
+    if (backend?.admin_email) setRetryEmail((current) => current || backend.admin_email!);
+  }, [backend?.admin_email]);
+
   const handleSync = async () => {
     setSyncing(true);
     try {
@@ -99,7 +114,40 @@ export function CloneBackendCard({ cloneId }: { cloneId: string }) {
     load();
   };
 
-  if (loading) {
+  // The remedy every terminal failure on this row names — "retry from the
+  // clone page" — and until this card offered it, nothing on the page could.
+  // The server re-checks that the row is `failed` and that the caller is an
+  // admin. The seed admin's password is asked for because the failed run
+  // cleared the queued one, and the clone's first sign-in is created with it.
+  const handleRetry = async () => {
+    setRetrying(true);
+    try {
+      const result = await requeueBackend({
+        data: {
+          cloneId,
+          adminEmail: retryEmail.trim(),
+          adminPassword: retryPassword,
+        },
+      });
+      if (result.ok) {
+        toast.success("Requeued — the background worker picks it up within a minute");
+        setRetryPassword("");
+      } else {
+        toast.error(result.error);
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Retry failed");
+    }
+    setRetrying(false);
+    load();
+  };
+
+  // The skeleton is for the FIRST read only. The card re-reads every five
+  // seconds while a run is in flight, and swapping the whole card for
+  // "Loading..." on each of those meant the stage it exists to show was on
+  // screen for a fraction of every interval — an operator watching a
+  // provision saw a spinner, not a pipeline.
+  if (loading && !backend) {
     return (
       <Card>
         <CardHeader>
@@ -179,6 +227,62 @@ export function CloneBackendCard({ cloneId }: { cloneId: string }) {
           <div className="border border-destructive/30 bg-destructive/5 p-3">
             <p className="text-xs text-destructive">{backend.error_message}</p>
           </div>
+        )}
+
+        {/* Retry — the only way back from `failed` */}
+        {backend.status === "failed" && (
+          <form
+            className="space-y-2 border-t pt-3"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void handleRetry();
+            }}
+          >
+            <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+              Retry provisioning
+            </span>
+            <p className="text-[11px] text-muted-foreground">
+              Re-queues this backend with fresh attempts.
+              {backend.supabase_project_ref
+                ? ` It resumes onto ${backend.supabase_project_ref}, so nothing already built is lost.`
+                : ""}{" "}
+              The seed admin is created with this password; it is held encrypted only until the run
+              finishes.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Input
+                type="email"
+                value={retryEmail}
+                onChange={(e) => setRetryEmail(e.target.value)}
+                placeholder="admin@client.com"
+                className="max-w-xs"
+                aria-label="Seed admin email"
+                autoComplete="off"
+              />
+              <Input
+                type="password"
+                value={retryPassword}
+                onChange={(e) => setRetryPassword(e.target.value)}
+                placeholder="Min 8 characters"
+                className="max-w-xs"
+                aria-label="Seed admin password"
+                autoComplete="new-password"
+              />
+              <Button
+                type="submit"
+                size="sm"
+                variant="outline"
+                disabled={retrying || !retryEmail.trim() || retryPassword.length < 8}
+              >
+                {retrying ? (
+                  <Loader2 className="mr-2 h-3 w-3 animate-spin" />
+                ) : (
+                  <RotateCcw className="mr-2 h-3 w-3" />
+                )}
+                Retry provisioning
+              </Button>
+            </div>
+          </form>
         )}
 
         {/* Admin info */}
@@ -448,7 +552,13 @@ export function CloneBackendCard({ cloneId }: { cloneId: string }) {
               </details>
             )}
 
-            {hasPending && (
+            {/*
+              Offered on a READY backend only, because that is the only state
+              the sync accepts. On a failed one it was the card's single
+              button, and pressing it answered "Backend is not ready (status:
+              failed)" — the failure blocking the one action on offer.
+            */}
+            {hasPending && backend.status === "ready" && (
               <Button
                 size="sm"
                 variant="outline"
