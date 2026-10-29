@@ -19,18 +19,34 @@
 // "not provided". A row of dashes reads as a broken template; an absent row
 // reads as what it is.
 
-/** The palette the applicant already sees, taken from the live Stage 1 email. */
+/**
+ * The Aurixa Systems website's palette and type, as the applicant emails use
+ * them (src/lib/leadEmailTemplates.pure.ts): navy panels with hairline borders,
+ * Playfair Display over Inter, gold monospace eyebrows.
+ */
 const INK = {
-  shell: "#061326",
-  hero: "#030b18",
-  border: "#173a5d",
-  rule: "#1b4268",
+  page: "#0a192f",
+  shell: "#041022",
+  hero: "#071a33",
+  panel: "#10243e",
+  border: "#283b52",
+  rule: "#1d2736",
   blue: "#0b74ad",
-  gold: "#dfb665",
-  text: "#dce8f5",
-  muted: "#8fa8c2",
+  gold: "#d7b35f",
+  goldRule: "#dfb665",
+  text: "#b6c0d4",
+  muted: "#9ca3b8",
   heading: "#ffffff",
 } as const;
+
+const SANS = "Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif";
+const SERIF = "'Playfair Display', Georgia, 'Times New Roman', serif";
+const MONO = "'SFMono-Regular', Menlo, Consolas, 'Liberation Mono', 'Courier New', monospace";
+const FONTS =
+  "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Playfair+Display:wght@400&display=swap";
+
+const eyebrow = (text: string, color: string = INK.gold) =>
+  `<div style="font-family:${MONO}; font-size:11px; line-height:17px; font-weight:700; letter-spacing:2.4px; text-transform:uppercase; color:${color}; margin:0 0 10px 0;">${escapeHtml(text)}</div>`;
 
 export type LeadStage = 1 | 2 | 3;
 export type StageAudience = "internal" | "applicant";
@@ -202,16 +218,16 @@ type Block =
 function renderBlockHtml(block: Block): string {
   switch (block.kind) {
     case "paragraph":
-      return `<p style="margin:0 0 16px 0; font-family:Arial,Helvetica,sans-serif; font-size:15px; line-height:24px; color:${INK.text};">${escapeHtml(block.text)}</p>`;
+      return `<p style="margin:0 0 16px 0; font-family:${SANS}; font-size:15px; line-height:25px; color:${INK.text};">${escapeHtml(block.text)}</p>`;
     case "rows": {
       if (block.rows.length === 0) return "";
       const cells = block.rows
         .map(
-          (row) =>
-            `<tr><td style="padding:7px 0; border-bottom:1px solid ${INK.rule}; font-family:Arial,Helvetica,sans-serif; font-size:11px; letter-spacing:0.7px; text-transform:uppercase; color:${INK.muted}; width:42%; vertical-align:top;">${escapeHtml(row.label)}</td><td style="padding:7px 0 7px 14px; border-bottom:1px solid ${INK.rule}; font-family:Arial,Helvetica,sans-serif; font-size:14px; line-height:21px; color:${INK.text}; vertical-align:top;">${escapeHtml(row.value)}</td></tr>`,
+          (row, i) =>
+            `<tr><td style="padding:11px 14px;${i ? ` border-top:1px solid ${INK.rule};` : ""} font-family:${MONO}; font-size:10px; line-height:16px; font-weight:700; letter-spacing:1.6px; text-transform:uppercase; color:${INK.muted}; width:40%; vertical-align:top;">${escapeHtml(row.label)}</td><td style="padding:10px 14px;${i ? ` border-top:1px solid ${INK.rule};` : ""} font-family:${SANS}; font-size:14px; line-height:21px; font-weight:500; color:${INK.heading}; vertical-align:top;">${escapeHtml(row.value)}</td></tr>`,
         )
         .join("");
-      return `<div style="margin:0 0 22px 0;"><div style="font-family:Arial,Helvetica,sans-serif; font-size:11px; letter-spacing:1.3px; text-transform:uppercase; color:${INK.gold}; margin:0 0 8px 0;">${escapeHtml(block.heading)}</div><table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" style="width:100%; border-collapse:collapse;">${cells}</table></div>`;
+      return `<div style="margin:0 0 24px 0;">${eyebrow(block.heading)}<table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" bgcolor="${INK.panel}" style="width:100%; border-collapse:collapse; background-color:${INK.panel}; border:1px solid ${INK.border};">${cells}</table></div>`;
     }
     case "prose": {
       if (!block.text.trim()) return "";
@@ -219,13 +235,13 @@ function renderBlockHtml(block: Block): string {
         .split(/\n{2,}/)
         .map(
           (para) =>
-            `<p style="margin:0 0 12px 0; font-family:Arial,Helvetica,sans-serif; font-size:14px; line-height:22px; color:${INK.text}; white-space:pre-wrap;">${para.replace(/\n/g, "<br>")}</p>`,
+            `<p style="margin:0 0 12px 0; font-family:${SANS}; font-size:14px; line-height:23px; color:${INK.text}; white-space:pre-wrap;">${para.replace(/\n/g, "<br>")}</p>`,
         )
         .join("");
-      return `<div style="margin:0 0 22px 0;"><div style="font-family:Arial,Helvetica,sans-serif; font-size:11px; letter-spacing:1.3px; text-transform:uppercase; color:${INK.gold}; margin:0 0 8px 0;">${escapeHtml(block.heading)}</div>${body}</div>`;
+      return `<div style="margin:0 0 24px 0;">${eyebrow(block.heading)}${body}</div>`;
     }
     case "cta":
-      return `<table role="presentation" border="0" cellspacing="0" cellpadding="0" style="margin:0 0 22px 0;"><tr><td bgcolor="${INK.blue}" style="background-color:${INK.blue}; padding:14px 26px;"><a href="${escapeHtml(block.href)}" style="font-family:Arial,Helvetica,sans-serif; font-size:14px; font-weight:bold; letter-spacing:0.4px; color:#ffffff; text-decoration:none; display:inline-block;">${escapeHtml(block.label)}</a></td></tr></table>`;
+      return `<table role="presentation" border="0" cellspacing="0" cellpadding="0" style="margin:4px 0 26px 0;"><tr><td bgcolor="#025966" style="background-color:#025966; background-image:linear-gradient(100deg,#052939 0%,#025966 60%,#29665c 100%); border:1px solid #0e6870; padding:15px 26px;"><a href="${escapeHtml(block.href)}" style="font-family:${SANS}; font-size:12px; font-weight:600; letter-spacing:2.4px; text-transform:uppercase; color:#ffffff; text-decoration:none; display:inline-block;">${escapeHtml(block.label)}&nbsp;&nbsp;&#8250;</a></td></tr></table>`;
   }
 }
 
@@ -262,28 +278,28 @@ function shell(input: {
 }): string {
   const body = input.blocks.map(renderBlockHtml).join("");
   return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="x-apple-disable-message-reformatting"><meta name="color-scheme" content="dark light"><title>${escapeHtml(input.title)}</title></head>
-<body style="margin:0; padding:0; background-color:#04101f;">
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="x-apple-disable-message-reformatting"><meta name="color-scheme" content="dark light"><title>${escapeHtml(input.title)}</title><!--[if !mso]><!--><link rel="stylesheet" href="${FONTS}"><!--<![endif]--></head>
+<body style="margin:0; padding:0; background-color:${INK.page};">
 <div style="display:none; max-height:0; overflow:hidden; mso-hide:all; color:transparent;">${escapeHtml(input.preheader)}</div>
-<table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" style="width:100%; background-color:#04101f;">
+<table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" bgcolor="${INK.page}" style="width:100%; background-color:${INK.page};">
 <tr><td align="center" style="padding:28px 12px;">
-<table role="presentation" width="640" border="0" cellspacing="0" cellpadding="0" bgcolor="${INK.shell}" style="width:640px; max-width:640px; background-color:${INK.shell}; border:1px solid ${INK.border};">
+<table role="presentation" width="600" border="0" cellspacing="0" cellpadding="0" bgcolor="${INK.shell}" style="width:600px; max-width:600px; background-color:${INK.shell}; border:1px solid ${INK.border};">
   <tr><td style="padding:0; font-size:0; line-height:0;">
     <table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0"><tr>
-      <td width="34%" height="4" bgcolor="${INK.blue}" style="width:34%; height:4px; font-size:0; line-height:0;">&nbsp;</td>
-      <td width="32%" height="4" bgcolor="${INK.gold}" style="width:32%; height:4px; font-size:0; line-height:0;">&nbsp;</td>
-      <td width="34%" height="4" bgcolor="${INK.blue}" style="width:34%; height:4px; font-size:0; line-height:0;">&nbsp;</td>
+      <td width="34%" height="2" bgcolor="${INK.blue}" style="width:34%; height:2px; font-size:0; line-height:0;">&nbsp;</td>
+      <td width="32%" height="2" bgcolor="${INK.goldRule}" style="width:32%; height:2px; font-size:0; line-height:0;">&nbsp;</td>
+      <td width="34%" height="2" bgcolor="${INK.blue}" style="width:34%; height:2px; font-size:0; line-height:0;">&nbsp;</td>
     </tr></table>
   </td></tr>
-  <tr><td bgcolor="${INK.hero}" style="padding:30px 34px 26px 34px; background-color:${INK.hero};">
-    <div style="font-family:Arial,Helvetica,sans-serif; font-size:13px; letter-spacing:3.4px; text-transform:uppercase; color:${INK.gold}; margin:0 0 14px 0;">Aurixa&nbsp;Systems</div>
-    <div style="font-family:Arial,Helvetica,sans-serif; font-size:11px; letter-spacing:1.6px; text-transform:uppercase; color:${INK.muted}; margin:0 0 8px 0;">${escapeHtml(input.eyebrow)}</div>
-    <div style="font-family:Arial,Helvetica,sans-serif; font-size:26px; line-height:33px; font-weight:bold; color:${INK.heading};">${escapeHtml(input.title)}</div>
+  <tr><td bgcolor="${INK.hero}" style="padding:28px 34px 26px 34px; background-color:${INK.hero}; background-image:linear-gradient(180deg,${INK.hero} 0%,${INK.shell} 100%); border-bottom:1px solid ${INK.rule};">
+    <div style="font-family:${SERIF}; font-size:15px; line-height:20px; letter-spacing:4px; text-transform:uppercase; color:${INK.goldRule}; margin:0 0 18px 0;">Aurixa&nbsp;Systems</div>
+    ${eyebrow(input.eyebrow, INK.muted)}
+    <div style="font-family:${SERIF}; font-size:27px; line-height:34px; font-weight:400; color:${INK.heading};">${escapeHtml(input.title)}</div>
   </td></tr>
   <tr><td style="padding:28px 34px 8px 34px;">${body}</td></tr>
   ${
     input.footnote
-      ? `<tr><td style="padding:0 34px 26px 34px; border-top:1px solid ${INK.rule};"><p style="margin:16px 0 0 0; font-family:Arial,Helvetica,sans-serif; font-size:12px; line-height:19px; color:${INK.muted};">${escapeHtml(input.footnote)}</p></td></tr>`
+      ? `<tr><td style="padding:0 34px 26px 34px; border-top:1px solid ${INK.rule};"><p style="margin:16px 0 0 0; font-family:${SANS}; font-size:12px; line-height:19px; color:${INK.muted};">${escapeHtml(input.footnote)}</p></td></tr>`
       : ""
   }
 </table>
