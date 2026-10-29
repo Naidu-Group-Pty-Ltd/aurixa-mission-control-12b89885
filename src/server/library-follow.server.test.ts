@@ -704,3 +704,177 @@ describe("the follow's detection, beside a person's", () => {
     expect(db.tables.modules.map((m) => m.slug)).toEqual(["clients"]);
   });
 });
+
+describe("the follow keeps the diagnostics of the catalogue it settles, and of nothing older", () => {
+  const PERSON_RUN = "31a7e000-0000-4000-8000-000000000003";
+  const DIED_RUN = "31a7e000-0000-4000-8000-000000000004";
+  const diagnostics = (runId: string, n = 2) => ({
+    module_backend_artifacts: Array.from({ length: n }, (_, i) => ({
+      id: `a-${runId.slice(-4)}-${i}`,
+      detection_run_id: runId,
+      module_id: "m-clients",
+      module_slug: "clients",
+      artifact_kind: "table",
+      identifier: `t${i}`,
+    })),
+    module_import_edges: Array.from({ length: n }, (_, i) => ({
+      id: `e-${runId.slice(-4)}-${i}`,
+      detection_run_id: runId,
+      source_file: `src/a${i}.ts`,
+      target_file: `src/b${i}.ts`,
+    })),
+    module_drift_alerts: Array.from({ length: n }, (_, i) => ({
+      id: `d-${runId.slice(-4)}-${i}`,
+      detection_run_id: runId,
+      alert_type: "orphan_file",
+    })),
+  });
+  const rowsOf = (runId: string) =>
+    (["module_backend_artifacts", "module_import_edges", "module_drift_alerts"] as const).reduce(
+      (n, t) => n + db.tables[t].filter((r) => r.detection_run_id === runId).length,
+      0,
+    );
+
+  beforeEach(() => {
+    const july = diagnostics(OLD_RUN);
+    const person = diagnostics(PERSON_RUN);
+    const died = diagnostics(DIED_RUN);
+    seed({
+      modules: [oldModule("clients")],
+      module_detection_runs: [
+        { id: OLD_RUN, status: "completed", commit_sha: null, started_at: "2026-07-31T23:13:41Z" },
+        {
+          id: PERSON_RUN,
+          status: "failed",
+          parameters: { strategy: "feature-first" },
+          started_at: "2026-08-02T10:00:00Z",
+        },
+        // A person's run that died still saying running, past the window.
+        {
+          id: DIED_RUN,
+          status: "running",
+          parameters: { strategy: "feature-first" },
+          started_at: "2026-08-03T10:00:00Z",
+        },
+      ],
+      module_backend_artifacts: [
+        ...july.module_backend_artifacts,
+        ...person.module_backend_artifacts,
+        ...died.module_backend_artifacts,
+      ],
+      module_import_edges: [
+        ...july.module_import_edges,
+        ...person.module_import_edges,
+        ...died.module_import_edges,
+      ],
+      module_drift_alerts: [
+        ...july.module_drift_alerts,
+        ...person.module_drift_alerts,
+        ...died.module_drift_alerts,
+      ],
+    });
+  });
+
+  it("prunes every earlier finished run's diagnostics once it settles, and keeps its own", async () => {
+    const report = await follow();
+    const [run] = followRuns();
+
+    expect(report.outcome).toBe("settled");
+    expect([...report.pruned].sort()).toEqual([OLD_RUN, PERSON_RUN].sort());
+    expect(rowsOf(OLD_RUN)).toBe(0);
+    expect(rowsOf(PERSON_RUN)).toBe(0);
+    expect(rowsOf(run.id)).toBeGreaterThan(0);
+    // A run still saying running keeps every row, and every run keeps its own row.
+    expect(rowsOf(DIED_RUN)).toBe(6);
+    expect(db.tables.module_detection_runs.map((r) => r.id)).toEqual(
+      expect.arrayContaining([OLD_RUN, PERSON_RUN, DIED_RUN, run.id]),
+    );
+    expect((audits()[0].metadata as { pruned: string[] }).pruned.sort()).toEqual(
+      [OLD_RUN, PERSON_RUN].sort(),
+    );
+  });
+
+  it("keeps the settled catalogue's diagnostics when it holds", async () => {
+    seed({
+      modules: Array.from({ length: 12 }, (_, i) => oldModule(`old-${i}`)),
+      module_detection_runs: [
+        { id: OLD_RUN, status: "completed", commit_sha: null, started_at: "2026-07-31T23:13:41Z" },
+        {
+          id: PERSON_RUN,
+          status: "failed",
+          parameters: { strategy: "feature-first" },
+          started_at: "2026-08-02T10:00:00Z",
+        },
+      ],
+      ...(() => {
+        const july = diagnostics(OLD_RUN);
+        const person = diagnostics(PERSON_RUN);
+        return {
+          module_backend_artifacts: [
+            ...july.module_backend_artifacts,
+            ...person.module_backend_artifacts,
+          ],
+          module_import_edges: [...july.module_import_edges, ...person.module_import_edges],
+          module_drift_alerts: [...july.module_drift_alerts, ...person.module_drift_alerts],
+        };
+      })(),
+    });
+
+    const report = await follow();
+
+    expect(report.outcome).toBe("held");
+    expect(report.pruned).toEqual([PERSON_RUN]);
+    expect(rowsOf(OLD_RUN)).toBe(6);
+    expect(rowsOf(PERSON_RUN)).toBe(0);
+  });
+
+  it("says so, and settles anyway, where a prune's delete fails", async () => {
+    deps.detect = async (args) => {
+      detections++;
+      const result = await FOLLOW_DEPS.detect(args);
+      db.failures.set("module_drift_alerts.delete", STATEMENT_TIMEOUT);
+      return result;
+    };
+
+    const report = await follow();
+
+    expect(report.outcome).toBe("settled");
+    expect(report.warnings).toEqual([
+      "Earlier runs' module_drift_alerts were not all pruned: canceling statement due to statement timeout",
+    ]);
+  });
+});
+
+describe("a module that changed while the follow settled is not approved under its run", () => {
+  it("leaves a module a person archived mid-settle archived, and fails the run", async () => {
+    const from = db.from.bind(db);
+    let flipped = false;
+    db.from = (table: string) => {
+      const builder = from(table);
+      if (table !== "modules") return builder;
+      const update = builder.update;
+      builder.update = (values: Row) => {
+        if (values.status === "approved" && !flipped) {
+          flipped = true;
+          const reports = db.tables.modules.find((m) => m.slug === "reports");
+          if (reports)
+            Object.assign(reports, { status: "archived", archived_by_follow_run_id: null });
+        }
+        return update(values);
+      };
+      return builder;
+    };
+
+    const report = await follow();
+
+    expect(report.outcome).toBe("failed");
+    expect(report.stoppedBecause).toMatch(
+      /because they changed while the follow settled: reports$/,
+    );
+    expect(moduleOf("reports")).toMatchObject({
+      status: "archived",
+      archived_by_follow_run_id: null,
+    });
+    expect(db.tables.module_library).toEqual([]);
+  });
+});

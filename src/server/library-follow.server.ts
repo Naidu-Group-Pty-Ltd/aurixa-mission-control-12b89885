@@ -121,8 +121,12 @@ async function readPaged<T>(
   }
 }
 
-/** The audit row a follow that did something, or could not, records. */
-async function record(supabase: Db, report: FollowReport): Promise<void> {
+/**
+ * The audit row a follow that did something, or could not, records. `ownRun`
+ * is the run this tick wrote, whose earlier runs' diagnostics it prunes first.
+ */
+async function record(supabase: Db, report: FollowReport, ownRun?: string | null): Promise<void> {
+  if (ownRun) await pruneDiagnostics(supabase, report, ownRun);
   const { error } = await supabase.from("audit_log").insert({
     action: FOLLOW_AUDIT_ACTION,
     entity_type: "module_detection_run",
@@ -146,7 +150,11 @@ async function tellOperators(supabase: Db, report: FollowReport): Promise<void> 
  * Record a follow that failed, and tell the operators where it was the last
  * of its tries at the head: the next tick waits for the prime to move.
  */
-async function recordFailure(supabase: Db, report: FollowReport): Promise<void> {
+async function recordFailure(
+  supabase: Db,
+  report: FollowReport,
+  ownRun?: string | null,
+): Promise<void> {
   report.outcome = "failed";
   if (
     report.attempt === FOLLOW_ATTEMPTS &&
@@ -155,7 +163,7 @@ async function recordFailure(supabase: Db, report: FollowReport): Promise<void> 
   ) {
     await tellOperators(supabase, report);
   }
-  await record(supabase, report);
+  await record(supabase, report, ownRun);
 }
 
 /** Every module's slug and status, paged, for the hold asked before the run writes one. */
@@ -169,6 +177,71 @@ async function readCatalogue(
       .order("id", { ascending: true })
       .range(from, to),
   );
+}
+
+/** The tables a detection run writes for diagnosis, which name the run. */
+const DIAGNOSTIC_TABLES = [
+  "module_backend_artifacts",
+  "module_import_edges",
+  "module_drift_alerts",
+] as const;
+
+/**
+ * Delete the diagnostics of every finished detection run that started before
+ * `ownRun`, but those of the run the catalogue is settled at (the newest
+ * completed one). A run leaves about 13,700 rows (July's three each left
+ * 2,000 import edges, 11,598 backend artifacts and 100 drift alerts, measured
+ * 29 Oct 2026), the Modules page reads a module's artifacts across every run,
+ * and the drift metrics count alerts across them, so a follow per prime merge
+ * would multiply both. A run's own row is kept, and so is a running run's
+ * every row. A delete that fails is a warning: the next follow prunes again.
+ */
+async function pruneDiagnostics(supabase: Db, report: FollowReport, ownRun: string): Promise<void> {
+  const [own, settled] = await Promise.all([
+    supabase.from("module_detection_runs").select("started_at").eq("id", ownRun).maybeSingle(),
+    supabase
+      .from("module_detection_runs")
+      .select("id")
+      .eq("status", "completed")
+      .order("started_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+  ]);
+  if (own.error || !own.data?.started_at || settled.error) {
+    const why = own.error ?? settled.error;
+    report.warnings.push(
+      `Earlier runs' diagnostics were not pruned: ${why ? describeDbError(why) : "this run's start was not found"}`,
+    );
+    return;
+  }
+  const startedAt = own.data.started_at;
+  const keep = settled.data?.id ?? null;
+  const earlier = await readPaged<{ id: string }>((from, to) =>
+    supabase
+      .from("module_detection_runs")
+      .select("id")
+      .lt("started_at", startedAt)
+      .neq("status", "running")
+      .order("started_at", { ascending: true })
+      .range(from, to),
+  );
+  if (!earlier.ok) {
+    report.warnings.push(`Earlier runs' diagnostics were not pruned: ${earlier.error}`);
+    return;
+  }
+  const ids = earlier.rows.map((r) => r.id).filter((id) => id !== keep && id !== ownRun);
+  for (const chunk of chunked(ids, ID_CHUNK)) {
+    for (const table of DIAGNOSTIC_TABLES) {
+      const { error } = await supabase.from(table).delete().in("detection_run_id", chunk);
+      if (error) {
+        report.warnings.push(
+          `Earlier runs' ${table} were not all pruned: ${describeDbError(error)}`,
+        );
+        return;
+      }
+    }
+    report.pruned.push(...chunk);
+  }
 }
 
 /** Close the follow's run, from `running` only: a run something else closed stays as it was closed. */
@@ -302,7 +375,7 @@ export async function followPrimeHead(
     );
     if (closing) report.warnings.push(closing);
     await tellOperators(supabase, report);
-    await record(supabase, report);
+    await record(supabase, report, detection.runId);
     return report;
   }
   if (!detection.ok) {
@@ -311,14 +384,14 @@ export async function followPrimeHead(
       report.outcome = "skipped";
       return report;
     }
-    await recordFailure(supabase, report);
+    await recordFailure(supabase, report, detection.runId || null);
     return report;
   }
   if (!detection.commitSha) {
     report.stoppedBecause = "The detection run completed without saying which commit it read";
     const why = await closeRun(supabase, detection.runId, "failed", now, report.stoppedBecause);
     if (why) report.warnings.push(why);
-    await recordFailure(supabase, report);
+    await recordFailure(supabase, report, detection.runId);
     return report;
   }
 
@@ -343,7 +416,7 @@ async function settle(
     report.stoppedBecause = why;
     const closing = await closeRun(supabase, runId, "failed", now, why);
     if (closing) report.warnings.push(closing);
-    await recordFailure(supabase, report);
+    await recordFailure(supabase, report, runId);
   };
 
   // ── The catalogue, as the run left it ──
@@ -361,43 +434,51 @@ async function settle(
     const closing = await closeRun(supabase, runId, FOLLOW_HELD, now, report.stoppedBecause);
     if (closing) report.warnings.push(closing);
     await tellOperators(supabase, report);
-    await record(supabase, report);
+    await record(supabase, report, runId);
     return;
   }
 
   // ── Approve what the run proposed, and bring back what it found again ──
-  // Compare-and-set on the run: a module another writer has reshaped since is
-  // not approved under this run's name.
-  const toApprove = [...plan.approve, ...plan.revive];
-  for (const ids of chunked(
-    toApprove.map((m) => m.id),
-    ID_CHUNK,
-  )) {
-    const { data, error } = await supabase
-      .from("modules")
-      .update({
-        status: "approved",
-        approved_by: null,
-        approved_at: now,
-        rejection_reason: null,
-        archived_by_follow_run_id: null,
-      })
-      .in("id", ids)
-      .eq("detection_run_id", runId)
-      .in("status", ["proposed", "archived"])
-      .select("id");
-    if (error)
-      return fail(`The modules the run found could not be approved: ${describeDbError(error)}`);
-    const landed = new Set(((data ?? []) as Array<{ id: string }>).map((r) => r.id));
-    const missed = ids.filter((id) => !landed.has(id));
-    if (missed.length > 0) {
-      return fail(
-        `${missed.length} module(s) the run found were not approved, because they changed while ` +
-          `the follow settled: ${toApprove
-            .filter((m) => missed.includes(m.id))
-            .map((m) => m.slug)
-            .join(", ")}`,
-      );
+  // Compare-and-set on the run and on the state the plan read: a module
+  // another writer reshaped, approved or archived since is not approved
+  // under this run's name. A person's archive is never undone here.
+  const passes = [
+    { modules: plan.approve, from: "proposed", followArchived: false },
+    { modules: plan.revive, from: "archived", followArchived: true },
+  ] as const;
+  for (const pass of passes) {
+    for (const ids of chunked(
+      pass.modules.map((m) => m.id),
+      ID_CHUNK,
+    )) {
+      let query = supabase
+        .from("modules")
+        .update({
+          status: "approved",
+          approved_by: null,
+          approved_at: now,
+          rejection_reason: null,
+          archived_by_follow_run_id: null,
+        })
+        .in("id", ids)
+        .eq("detection_run_id", runId)
+        .eq("status", pass.from);
+      if (pass.followArchived) query = query.not("archived_by_follow_run_id", "is", null);
+      const { data, error } = await query.select("id");
+      if (error) {
+        return fail(`The modules the run found could not be approved: ${describeDbError(error)}`);
+      }
+      const landed = new Set(((data ?? []) as Array<{ id: string }>).map((r) => r.id));
+      const missed = ids.filter((id) => !landed.has(id));
+      if (missed.length > 0) {
+        return fail(
+          `${missed.length} module(s) the run found were not approved, because they changed while ` +
+            `the follow settled: ${pass.modules
+              .filter((m) => missed.includes(m.id))
+              .map((m) => m.slug)
+              .join(", ")}`,
+        );
+      }
     }
   }
   report.approved = plan.approve.map((m) => m.slug).sort();
@@ -450,7 +531,7 @@ async function settle(
     report.warnings.push(closing);
   }
   report.outcome = "settled";
-  await record(supabase, report);
+  await record(supabase, report, runId);
 }
 
 const LATEST_COLUMNS =

@@ -357,6 +357,8 @@ export type FollowReport = {
   stoppedBecause?: string;
   /** Follow runs that died before they settled, closed as failed. */
   closedStale: string[];
+  /** Earlier runs whose diagnostics (edges, backend artifacts, drift alerts) were pruned. */
+  pruned: string[];
   warnings: string[];
 };
 
@@ -375,6 +377,7 @@ export function emptyFollowReport(outcome: FollowOutcome = "failed"): FollowRepo
     unchanged: 0,
     refused: [],
     closedStale: [],
+    pruned: [],
     warnings: [],
   };
 }
@@ -398,6 +401,7 @@ export function followAuditMetadata(report: FollowReport): Json {
       refused: cut(report.refused),
       stopped_because: report.stoppedBecause ?? null,
       closed_stale: report.closedStale,
+      pruned: cut(report.pruned),
       warnings: cut(report.warnings),
     }),
   );

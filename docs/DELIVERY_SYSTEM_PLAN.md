@@ -1184,6 +1184,13 @@ for either before it writes a run row. One audit row,
 `module_library.follow`, records each follow that did something or could
 not.
 
+A finished follow run prunes the diagnostics of every earlier finished run but
+the one the catalogue is settled at: their import edges, backend artifacts and
+drift alerts, not the runs' own rows. Each of July's three runs left 13,698 of
+them (2,000 edges, 11,598 artifacts and 100 alerts). The Modules page reads a
+module's artifacts across every run, and the drift metrics count alerts across
+them, so a follow per prime merge would multiply both.
+
 ### Where it stops for a person
 
 - **The breaker.** A run that finds no module, or would archive more than
@@ -1217,6 +1224,7 @@ read back by effect:
 - 143 modules naming that run, 14 archived as the follow's, and none `proposed`;
 - one approved, latest entry per live module, at that commit, with no approver;
 - a `module_library.follow` audit row whose lists match;
+- July's runs' 41,094 diagnostic rows pruned, and only the follow run's left;
 - every clone's row and installs as they were before.
 
 A run that cannot finish on the runtime shows as three failed tries and one
