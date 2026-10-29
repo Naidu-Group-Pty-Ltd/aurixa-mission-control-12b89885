@@ -10,7 +10,7 @@
       "transfer_to_human_mc",
       "end_call_tool"
     ],
-    "chars": 29745,
+    "chars": 30068,
     "file": "front_desk.md"
   },
   "review_booking": {
@@ -25,7 +25,7 @@
       "transfer_to_human_mc",
       "end_call_tool"
     ],
-    "chars": 28040,
+    "chars": 28363,
     "file": "review_booking.md"
   },
   "solutions": {
@@ -40,7 +40,7 @@
       "transfer_to_human_mc",
       "end_call_tool"
     ],
-    "chars": 29104,
+    "chars": 29427,
     "file": "solutions.md"
   },
   "support": {
@@ -54,7 +54,7 @@
       "transfer_to_human_mc",
       "end_call_tool"
     ],
-    "chars": 30671,
+    "chars": 30994,
     "file": "support.md"
   },
   "questionnaire": {
@@ -68,7 +68,7 @@
       "book_appointment",
       "end_call_tool"
     ],
-    "chars": 28084,
+    "chars": 28407,
     "file": "questionnaire.md"
   },
   "review_follow_up": {
@@ -82,7 +82,7 @@
       "book_appointment",
       "end_call_tool"
     ],
-    "chars": 27273,
+    "chars": 27596,
     "file": "review_follow_up.md"
   },
   "confirmation": {
@@ -96,7 +96,7 @@
       "book_appointment",
       "end_call_tool"
     ],
-    "chars": 26963,
+    "chars": 27286,
     "file": "confirmation.md"
   },
   "reminder": {
@@ -110,7 +110,7 @@
       "book_appointment",
       "end_call_tool"
     ],
-    "chars": 26436,
+    "chars": 26759,
     "file": "reminder.md"
   },
   "no_show": {
@@ -124,7 +124,7 @@
       "book_appointment",
       "end_call_tool"
     ],
-    "chars": 26539,
+    "chars": 26862,
     "file": "no_show.md"
   },
   "kickoff": {
@@ -138,7 +138,7 @@
       "book_appointment",
       "end_call_tool"
     ],
-    "chars": 26806,
+    "chars": 27129,
     "file": "kickoff.md"
   },
   "nurture": {
@@ -152,7 +152,7 @@
       "book_appointment",
       "end_call_tool"
     ],
-    "chars": 27135,
+    "chars": 27458,
     "file": "nurture.md"
   },
   "checkin": {
@@ -166,7 +166,7 @@
       "book_appointment",
       "end_call_tool"
     ],
-    "chars": 27191,
+    "chars": 27514,
     "file": "checkin.md"
   }
 }
