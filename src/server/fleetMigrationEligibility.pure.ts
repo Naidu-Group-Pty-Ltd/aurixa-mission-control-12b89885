@@ -22,20 +22,24 @@ import { chunkCursorFor } from "./chunkCursorStore.pure";
  * reported `processed 1 … excluded 2`, and two of three tenants silently
  * stopped receiving the prime's schema.
  *
- * ## The three questions, and only the third is about a schema
+ * ## The four questions, and only the last is about a schema
  *
  * 1. **Is there a project to talk to?** No project ref, nothing to advance.
  * 2. **Is the provisioning worker inside this backend right now?** Two writers
  *    on one schema is the fault this codebase keeps meeting; a row that is
  *    `pending` or in flight, or that a worker has claimed, is left alone. This
  *    is a fact about a JOB and it is the only place a job status belongs here.
- * 3. **Has a prime migration failed on this clone before?** The one genuine
+ * 3. **Has a provisioning run ever finished here?** Until one has, the schema
+ *    is the engine's to build and there is no frontier to advance from. Read
+ *    from `supabase_url`, which only a finished run writes.
+ * 4. **Has a prime migration failed on this clone before?** The one genuine
  *    reason to withhold, established only by this lane and recorded in
  *    `migration_blocked_at`, a column only this lane writes.
  *
- * A `failed` row that is NOT migration-blocked is a queue or provisioning
- * fault: nothing ran, nothing was judged about the schema, and excluding it
- * would be inventing a verdict this lane never reached.
+ * A `failed` row that is NOT migration-blocked, on a backend whose build
+ * finished, is a queue or provisioning fault: nothing ran, nothing was judged
+ * about the schema, and excluding it would be inventing a verdict this lane
+ * never reached.
  *
  * ## Why a pure module
  *
@@ -82,6 +86,8 @@ export type MigrationSkipReason =
   | "no_project"
   /** The provisioning worker is building or rebuilding this backend. */
   | "provisioning_in_flight"
+  /** No provisioning run has ever finished on this backend — its schema is still the engine's to build. */
+  | "provisioning_incomplete"
   /** A prime migration failed here. The only reason that is about the schema. */
   | "migration_blocked"
   /** The backend is administratively suspended. Not this lane's decision to override. */
@@ -93,11 +99,30 @@ export type MigrationEligibility =
 
 export type BackendFacts = {
   supabaseProjectRef: string | null;
+  /**
+   * `clone_backends.supabase_url` — written by the update that ends a
+   * SUCCESSFUL provisioning run and by nothing earlier, so it is the one fact
+   * that says a first build ever finished. The project ref is persisted the
+   * moment the project exists, which is long before.
+   */
+  supabaseUrl: string | null;
   status: string;
   workerStartedAt: string | null;
   migrationBlockedAt: string | null;
   migrationBlockedReason: string | null;
 };
+
+/**
+ * Whether a provisioning run has ever FINISHED on this backend.
+ *
+ * Read from `supabase_url`, which the update that ends a successful run
+ * writes and nothing earlier does. Every path that replays prime migrations
+ * onto a clone asks this one question, so the lane and the self-healing replay
+ * cannot come to disagree about whose schema an unfinished build is.
+ */
+export function firstBuildFinished(facts: Pick<BackendFacts, "supabaseUrl">): boolean {
+  return Boolean(facts.supabaseUrl);
+}
 
 export function migrationEligibility(facts: BackendFacts): MigrationEligibility {
   if (!facts.supabaseProjectRef) {
@@ -144,6 +169,35 @@ export function migrationEligibility(facts: BackendFacts): MigrationEligibility 
       detail:
         "This backend is suspended. Migrations are withheld while it is, and resume by itself " +
         "once it is reinstated — nothing here needs repairing.",
+    };
+  }
+
+  // A first build that never finished. Its schema is the provisioning
+  // engine's — built by introspection and recorded by the ledger stamp at the
+  // END of that build — so there is no frontier for this lane to advance
+  // from, and replaying the corpus from its first file onto a half-built
+  // schema is the two-writers fault in its plainest form.
+  //
+  // Measured 29 Oct 2026 on `tutorial-demo-orrimere-c158c7`, failed by the
+  // provisioning drain at 20:58 with no ledger yet: this lane took it at 21:00
+  // as a `failed` row with no block, replayed the corpus from
+  // `20250124160000`, and was refused at `20250912170521` ("relation
+  // investment_reports already exists"). After the next provisioning failure
+  // it discharged that block and replayed again at 23:00, overwriting the
+  // provisioning verdict with its own. Asked BEFORE the block, so a block
+  // written that way cannot be discharged into another replay.
+  //
+  // Not the September rule reversed. The two clones that rule protects had
+  // finished their builds — a `failed` REPAIR or queue fault on a healthy
+  // backend stays eligible, because its `supabase_url` is set.
+  if (!firstBuildFinished(facts)) {
+    return {
+      eligible: false,
+      reason: "provisioning_incomplete",
+      detail:
+        "No provisioning run has finished on this backend yet, so its schema is still being built " +
+        "by the provisioning engine. It joins the fleet sync when that build completes; retry " +
+        "provisioning from the clone page if it failed.",
     };
   }
 
