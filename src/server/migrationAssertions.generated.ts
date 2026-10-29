@@ -1300,4 +1300,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20261029120000",
     assertions: [{ kind: "column", table: "waitlist_leads", column: "stage3_cancelled_at" }],
   },
+  {
+    migration: "20261029130000_lead_stage3_cal_booking_uid.sql",
+    version: "20261029130000",
+    assertions: [{ kind: "column", table: "waitlist_leads", column: "stage3_cal_booking_uid" }],
+  },
 ];

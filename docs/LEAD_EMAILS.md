@@ -152,7 +152,7 @@ the Make scenario never read.
 | `Stage 3 Reached` (`Counts As Booked`) | a booking with a time, not cancelled, not a no-show |
 | `Stage 3 Invite Count` | as Make recorded it; Mission Control sends each email once (its ledger is unique per applicant and stage) |
 | `Confirmation Message ID` | Make's receipt (`stage3_confirmation_sent_at`); Mission Control's own send is its ledger row |
-| `Booking Status = "Cancelled"` | `stage3_cancelled_at` — set by the Cal.com webhook when a stage-three booking is cancelled, cleared when the website reports a new booking — or the status read as cancelled |
+| `Booking Status = "Cancelled"` | `stage3_cancelled_at` — set by the Cal.com webhook when a stage-three booking is cancelled, cleared when the website reports a new booking — or the status read as cancelled. The webhook finds the lead by `stage3_cal_booking_uid`, the Cal.com uid the website reported, else by the application reference; it never compares `stage3_booking_reference`, which the Airtable mirror rewrites with the base's own reference |
 | `Requested Start (UTC)` | `stage3_session_start` |
 
 **When it is asked.** When the email is raised, and again just before it goes —
@@ -230,3 +230,4 @@ the truth.
 | `src/server/leadStageEmailPolicy.pure.ts` | whether an email is owed — `applicantSenders` decides who sends |
 | `supabase/migrations/20261029100000_lead_email_templates.sql` | the three tables, `stage3_meeting_url`, the one-minute tick |
 | `supabase/migrations/20261029120000_lead_stage3_cancelled_at.sql` | `stage3_cancelled_at`, the cancellation the Stage 3 gate reads |
+| `supabase/migrations/20261029130000_lead_stage3_cal_booking_uid.sql` | `stage3_cal_booking_uid`, the Cal.com uid a cancellation is matched on |

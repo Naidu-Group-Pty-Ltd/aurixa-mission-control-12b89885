@@ -178,7 +178,9 @@ function lostRace(appointmentId: string): WebhookResponse {
  * The lead is found by the booking's Cal.com uid where the website reported
  * one, else by the application reference. A lead whose recorded booking is a
  * different one is left alone: cancelling an earlier booking says nothing
- * about the one that replaced it.
+ * about the one that replaced it. The uid is `stage3_cal_booking_uid`, never
+ * `stage3_booking_reference`: the Airtable mirror rewrites that one with the
+ * base's own reference, which no Cal.com uid would ever equal.
  */
 async function markStageThreeCancelled(
   event: CalcomWebhookEvent,
@@ -188,7 +190,7 @@ async function markStageThreeCancelled(
     const { data, error } = await supabaseAdmin
       .from("waitlist_leads")
       .select("id")
-      .eq("stage3_booking_reference", event.uid)
+      .eq("stage3_cal_booking_uid", event.uid)
       .limit(1);
     if (error) throw new Error(`lead lookup by booking failed: ${error.message}`);
     leadId = data?.[0]?.id ?? null;
@@ -197,13 +199,13 @@ async function markStageThreeCancelled(
   if (!leadId && reference) {
     const { data, error } = await supabaseAdmin
       .from("waitlist_leads")
-      .select("id, stage3_booking_reference")
+      .select("id, stage3_cal_booking_uid")
       .eq("application_id", reference)
       .order("created_at", { ascending: false })
       .limit(1);
     if (error) throw new Error(`lead lookup by reference failed: ${error.message}`);
     const lead = data?.[0];
-    if (lead?.stage3_booking_reference && lead.stage3_booking_reference !== event.uid) {
+    if (lead?.stage3_cal_booking_uid && lead.stage3_cal_booking_uid !== event.uid) {
       return "other_booking";
     }
     leadId = lead?.id ?? null;

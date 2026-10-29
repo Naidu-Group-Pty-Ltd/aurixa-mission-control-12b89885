@@ -205,6 +205,7 @@ describe("a cancellation", () => {
     const leadRow = (over: Row = {}): Row => ({
       id: "lead_1",
       application_id: "AX-7Q2M4L9XZ1",
+      stage3_cal_booking_uid: "bk_stage3",
       stage3_booking_reference: "bk_stage3",
       stage3_cancelled_at: null,
       created_at: "2026-09-29T00:00:00.000Z",
@@ -223,16 +224,41 @@ describe("a cancellation", () => {
 
     it("marks the lead found by its reference when the website did not record the booking", async () => {
       db.tables.crm_appointments = [];
-      db.tables.waitlist_leads = [leadRow({ stage3_booking_reference: null })];
+      db.tables.waitlist_leads = [
+        leadRow({ stage3_cal_booking_uid: null, stage3_booking_reference: null }),
+      ];
       const result = await deliver("BOOKING_CANCELLED", stageThree);
       expect(result.body).toMatchObject({ lead: "marked" });
+      expect(lead().stage3_cancelled_at).toEqual(expect.any(String));
+    });
+
+    it("is not misled by the reference the Airtable mirror wrote", async () => {
+      // The mirror rewrites stage3_booking_reference with Airtable's own
+      // Booking Reference; it never touches the uid, and the match ignores it.
+      db.tables.crm_appointments = [];
+      db.tables.waitlist_leads = [
+        leadRow({ stage3_booking_reference: "AX-7Q2M4L9XZ1 · 6 Aug 11:00 am" }),
+      ];
+      expect((await deliver("BOOKING_CANCELLED", stageThree)).body).toMatchObject({
+        lead: "marked",
+      });
+
+      db.tables.waitlist_leads = [
+        leadRow({
+          stage3_cal_booking_uid: null,
+          stage3_booking_reference: "AX-7Q2M4L9XZ1 · 6 Aug 11:00 am",
+        }),
+      ];
+      expect((await deliver("BOOKING_CANCELLED", stageThree)).body).toMatchObject({
+        lead: "marked",
+      });
       expect(lead().stage3_cancelled_at).toEqual(expect.any(String));
     });
 
     it("leaves a lead whose booking is a later one alone", async () => {
       // Cancelling the booking a reschedule replaced says nothing about the new one.
       db.tables.crm_appointments = [];
-      db.tables.waitlist_leads = [leadRow({ stage3_booking_reference: "bk_later" })];
+      db.tables.waitlist_leads = [leadRow({ stage3_cal_booking_uid: "bk_later" })];
       const result = await deliver("BOOKING_CANCELLED", stageThree);
       expect(result.body).toMatchObject({ lead: "other_booking" });
       expect(lead().stage3_cancelled_at).toBeNull();
@@ -242,7 +268,7 @@ describe("a cancellation", () => {
     it("says so when no lead matches", async () => {
       db.tables.crm_appointments = [];
       db.tables.waitlist_leads = [
-        leadRow({ application_id: "AX-0000000002", stage3_booking_reference: null }),
+        leadRow({ application_id: "AX-0000000002", stage3_cal_booking_uid: null }),
       ];
       const result = await deliver("BOOKING_CANCELLED", stageThree);
       expect(result.body).toMatchObject({ lead: "unmatched" });
