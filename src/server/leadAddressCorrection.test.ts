@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ADDRESS_CORRECTION_LIMIT,
   ADDRESS_CORRECTION_WINDOW_MS,
+  correctedAddressOf,
   decideAddressCorrection,
 } from "./leadAddressCorrection.pure";
 
@@ -25,14 +26,25 @@ const applied = (over: Record<string, unknown> = {}) => ({
   stage: 1,
   status: "new",
   created_at: minutesAgo(4),
+  submitted_at: minutesAgo(4),
   applicant_email_generation: 0,
-  metadata: { channel: "website" },
+  metadata: { channel: "website" } as Record<string, unknown>,
+  ...over,
+});
+
+// The corrected application, posted from the applying browser a minute later.
+const incoming = (
+  over: Partial<{ email: string; submittedAt: string | null; verified: boolean }> = {},
+) => ({
+  email: "jordan@firm.com",
+  submittedAt: minutesAgo(1),
+  verified: true,
   ...over,
 });
 
 describe("decideAddressCorrection", () => {
   it("re-addresses the application just made, to the next generation", () => {
-    expect(decideAddressCorrection(applied(), "jordan@firm.com", NOW)).toEqual({
+    expect(decideAddressCorrection(applied(), incoming(), NOW)).toEqual({
       kind: "correct",
       from: "jordan@firm.con",
       to: "jordan@firm.com",
@@ -41,8 +53,33 @@ describe("decideAddressCorrection", () => {
   });
 
   it("reads the same address in another case as the same application delivered twice", () => {
-    expect(decideAddressCorrection(applied(), " Jordan@Firm.con ", NOW)).toEqual({
+    expect(
+      decideAddressCorrection(applied(), incoming({ email: " Jordan@Firm.con " }), NOW),
+    ).toEqual({
       kind: "same_address",
+    });
+  });
+
+  it("reads a late copy of the application it corrected as that application, not a correction back", () => {
+    // The lead is at the corrected address; the original, mistyped, arrives late.
+    const corrected = applied({
+      email: "jordan@firm.com",
+      submitted_at: minutesAgo(1),
+      applicant_email_generation: 1,
+    });
+    expect(
+      decideAddressCorrection(
+        corrected,
+        incoming({ email: "jordan@firm.con", submittedAt: minutesAgo(4) }),
+        NOW,
+      ),
+    ).toEqual({ kind: "stale" });
+  });
+
+  it("refuses anybody but the browser that made the application", () => {
+    expect(decideAddressCorrection(applied(), incoming({ verified: false }), NOW)).toMatchObject({
+      kind: "refused",
+      reason: "unverified",
     });
   });
 
@@ -52,7 +89,7 @@ describe("decideAddressCorrection", () => {
       { stage: 2 },
       { stage3_booked_at: minutesAgo(1) },
     ]) {
-      expect(decideAddressCorrection(applied(over), "jordan@firm.com", NOW)).toMatchObject({
+      expect(decideAddressCorrection(applied(over), incoming(), NOW)).toMatchObject({
         kind: "refused",
         reason: "questionnaire_reached",
       });
@@ -61,28 +98,47 @@ describe("decideAddressCorrection", () => {
 
   it("refuses a declined application", () => {
     expect(
-      decideAddressCorrection(applied({ status: "disqualified" }), "jordan@firm.com", NOW),
-    ).toMatchObject({ kind: "refused", reason: "declined" });
+      decideAddressCorrection(applied({ status: "disqualified" }), incoming(), NOW),
+    ).toMatchObject({
+      kind: "refused",
+      reason: "declined",
+    });
   });
 
   it("refuses after the window, and without a creation time to measure it from", () => {
     const old = new Date(NOW - ADDRESS_CORRECTION_WINDOW_MS - 1).toISOString();
     expect(
-      decideAddressCorrection(applied({ created_at: old }), "jordan@firm.com", NOW),
+      decideAddressCorrection(applied({ created_at: old, submitted_at: old }), incoming(), NOW),
     ).toMatchObject({ kind: "refused", reason: "window_closed" });
-    expect(
-      decideAddressCorrection(applied({ created_at: null }), "jordan@firm.com", NOW),
-    ).toMatchObject({ kind: "refused", reason: "window_closed" });
+    expect(decideAddressCorrection(applied({ created_at: null }), incoming(), NOW)).toMatchObject({
+      kind: "refused",
+      reason: "window_closed",
+    });
   });
 
   it("refuses past the limit", () => {
     expect(
       decideAddressCorrection(
         applied({ applicant_email_generation: ADDRESS_CORRECTION_LIMIT }),
-        "jordan@firm.com",
+        incoming(),
         NOW,
       ),
     ).toMatchObject({ kind: "refused", reason: "too_many_corrections" });
+  });
+});
+
+describe("correctedAddressOf", () => {
+  it("is the address the lead was last corrected to, and nothing for a lead never corrected", () => {
+    expect(
+      correctedAddressOf({
+        email_corrections: [
+          { from: "a@x.con", to: "a@x.co", generation: 1 },
+          { from: "a@x.co", to: "a@x.com", generation: 2 },
+        ],
+      }),
+    ).toEqual({ email: "a@x.com", generation: 2 });
+    expect(correctedAddressOf({ channel: "website" })).toBeNull();
+    expect(correctedAddressOf(null)).toBeNull();
   });
 });
 
@@ -92,10 +148,13 @@ type Op = { table: string; action: string; values?: unknown; filters: unknown[][
 
 const db = vi.hoisted(() => ({
   lead: null as Record<string, unknown> | null,
+  // The lead as later reads find it: a correction that lost a race reads again.
+  laterLeads: [] as Record<string, unknown>[],
   readError: null as { message: string } | null,
   updateError: null as { message: string; code?: string } | null,
-  // How many rows the lead update matched: 0 is a correction that lost a race.
-  updatedRows: 1,
+  // How many rows each lead update matches, in turn: 0 is a correction that
+  // lost a race. Past the list, 1.
+  updatedRows: [] as number[],
   superseded: [] as { id: string }[],
   revoked: [] as { id: string }[],
   revokeError: null as { message: string } | null,
@@ -115,12 +174,19 @@ vi.mock("@/integrations/supabase/client.server", () => {
         return chain;
       };
     }
-    chain.maybeSingle = async () => ({ data: db.lead, error: db.readError });
+    chain.maybeSingle = async () => {
+      const read = db.lead;
+      if (db.laterLeads.length) db.lead = db.laterLeads.shift()!;
+      return { data: read, error: db.readError };
+    };
     chain.select = async () => {
       if (table === "waitlist_leads")
         return db.updateError
           ? { data: null, error: db.updateError }
-          : { data: Array.from({ length: db.updatedRows }, () => ({ id: "lead-1" })), error: null };
+          : {
+              data: Array.from({ length: db.updatedRows.shift() ?? 1 }, () => ({ id: "lead-1" })),
+              error: null,
+            };
       if (table === "lead_stage_emails") return { data: db.superseded, error: null };
       return db.revokeError
         ? { data: null, error: db.revokeError }
@@ -142,7 +208,21 @@ vi.mock("@/server/audit.server", () => ({
   notifyOperators: async (notice: Record<string, unknown>) => void db.notices.push(notice),
 }));
 
-const { resolveStageOneConflict } = await import("./lead-address-correction.server");
+const { CORRECTION_TOKEN_KEY, mintCorrectionToken, resolveStageOneConflict } =
+  await import("./lead-address-correction.server");
+const TOKEN = mintCorrectionToken();
+// A lead as Mission Control holds it: its 201 handed the browser TOKEN.
+const held = (over: Record<string, unknown> = {}) =>
+  applied({ metadata: { channel: "website", [CORRECTION_TOKEN_KEY]: TOKEN.sha256 }, ...over });
+const resolve = (lead: ReturnType<typeof corrected>, over: Record<string, unknown> = {}) =>
+  resolveStageOneConflict({
+    lead,
+    channel: "website",
+    correctionToken: TOKEN.token,
+    trusted: false,
+    now: NOW,
+    ...over,
+  });
 
 const corrected = (over: Record<string, unknown> = {}) =>
   ({
@@ -179,10 +259,11 @@ const op = (table: string, action = "update") =>
   db.ops.find((o) => o.table === table && o.action === action);
 
 beforeEach(() => {
-  db.lead = applied();
+  db.lead = held();
+  db.laterLeads = [];
   db.readError = null;
   db.updateError = null;
-  db.updatedRows = 1;
+  db.updatedRows = [];
   db.superseded = [{ id: "row-a" }];
   db.revoked = [{ id: "link-a" }];
   db.revokeError = null;
@@ -193,11 +274,7 @@ beforeEach(() => {
 
 describe("resolveStageOneConflict", () => {
   it("re-addresses the lead, settles the waiting email, closes the old link, and says so", async () => {
-    const result = await resolveStageOneConflict({
-      lead: corrected(),
-      channel: "website",
-      now: NOW,
-    });
+    const result = await resolve(corrected());
     expect(result).toEqual({
       kind: "corrected",
       leadId: "lead-1",
@@ -247,23 +324,15 @@ describe("resolveStageOneConflict", () => {
   });
 
   it("answers the same application delivered twice as a duplicate, and writes nothing", async () => {
-    const result = await resolveStageOneConflict({
-      lead: corrected({ email: "jordan@firm.con" }),
-      channel: "website",
-      now: NOW,
-    });
+    const result = await resolve(corrected({ email: "jordan@firm.con" }));
     expect(result).toEqual({ kind: "duplicate", leadId: "lead-1" });
     expect(db.ops.filter((o) => o.action === "update")).toHaveLength(0);
     expect(db.notices).toHaveLength(0);
   });
 
   it("refuses a correction it may not make, writes nothing, and tells the team where to reach them", async () => {
-    db.lead = applied({ stage2_completed_at: minutesAgo(1), stage: 2 });
-    const result = await resolveStageOneConflict({
-      lead: corrected(),
-      channel: "website",
-      now: NOW,
-    });
+    db.lead = held({ stage2_completed_at: minutesAgo(1), stage: 2 });
+    const result = await resolve(corrected());
     expect(result).toEqual({ kind: "refused", leadId: "lead-1", reason: "questionnaire_reached" });
     expect(db.ops.filter((o) => o.action === "update")).toHaveLength(0);
     expect(db.audits[0]).toMatchObject({ action: "lead.address_correction_refused" });
@@ -276,33 +345,98 @@ describe("resolveStageOneConflict", () => {
 
   it("never answers duplicate for a lead it could not read", async () => {
     db.readError = { message: "57014 statement timeout" };
-    const result = await resolveStageOneConflict({
-      lead: corrected(),
-      channel: "website",
-      now: NOW,
-    });
+    const result = await resolve(corrected());
     expect(result).toEqual({ kind: "unavailable", error: "57014 statement timeout" });
   });
 
-  it("is a duplicate when a racing correction moved the lead first", async () => {
-    db.updatedRows = 0;
-    const result = await resolveStageOneConflict({
-      lead: corrected(),
-      channel: "website",
-      now: NOW,
+  it("decides again when a racing correction moved the lead first", async () => {
+    // The other correction won, to another address; this one is newer still.
+    db.updatedRows = [0, 1];
+    db.laterLeads = [
+      held({ email: "jordan@firm.co", submitted_at: minutesAgo(1), applicant_email_generation: 1 }),
+    ];
+    const result = await resolve(corrected());
+    expect(result).toMatchObject({
+      kind: "corrected",
+      from: "jordan@firm.co",
+      to: "jordan@firm.com",
+      generation: 2,
     });
-    expect(result).toEqual({ kind: "duplicate", leadId: "lead-1" });
+    const updates = db.ops.filter((o) => o.table === "waitlist_leads" && o.action === "update");
+    expect(
+      updates.map((u) => u.filters.find((f) => f[1] === "applicant_email_generation")),
+    ).toEqual([
+      ["eq", "applicant_email_generation", 0],
+      ["eq", "applicant_email_generation", 1],
+    ]);
+  });
+
+  it("is a duplicate when the racing correction that won was to the same address", async () => {
+    db.updatedRows = [0];
+    db.laterLeads = [
+      held({
+        email: "jordan@firm.com",
+        submitted_at: minutesAgo(0),
+        applicant_email_generation: 1,
+      }),
+    ];
+    expect(await resolve(corrected())).toEqual({ kind: "duplicate", leadId: "lead-1" });
     expect(op("lead_stage_emails")).toBeUndefined();
-    expect(db.notices).toHaveLength(0);
+  });
+
+  it("refuses, quietly, a correction from anybody but the applying browser", async () => {
+    for (const correctionToken of [null, "not-the-token", mintCorrectionToken().token]) {
+      db.ops = [];
+      db.audits = [];
+      db.notices = [];
+      const result = await resolve(corrected(), { correctionToken });
+      expect(result).toEqual({ kind: "refused", leadId: "lead-1", reason: "unverified" });
+      expect(db.ops.filter((o) => o.action === "update")).toHaveLength(0);
+      expect(db.audits).toEqual([
+        expect.objectContaining({
+          action: "lead.address_correction_refused",
+          metadata: expect.objectContaining({ reason: "unverified" }),
+        }),
+      ]);
+      // A notice per attempt would be a notice anybody holding a reference could raise.
+      expect(db.notices).toHaveLength(0);
+    }
+  });
+
+  it("takes the funnel's own secret-bearing delivery without a token", async () => {
+    db.lead = applied();
+    const result = await resolve(corrected(), { correctionToken: null, trusted: true });
+    expect(result).toMatchObject({ kind: "corrected", generation: 1 });
+  });
+
+  it("answers a late copy of the application it corrected as a duplicate, and writes nothing", async () => {
+    db.lead = held({
+      email: "jordan@firm.com",
+      submitted_at: minutesAgo(1),
+      applicant_email_generation: 1,
+    });
+    const result = await resolve(
+      corrected({ email: "jordan@firm.con", submitted_at: minutesAgo(4) }),
+      {
+        correctionToken: null,
+        trusted: true,
+      },
+    );
+    expect(result).toEqual({ kind: "duplicate", leadId: "lead-1" });
+    expect(db.ops.filter((o) => o.action === "update")).toHaveLength(0);
+  });
+
+  it("keeps the token on the lead, so the same browser can correct again", async () => {
+    await resolve(corrected());
+    const lead = op("waitlist_leads")!;
+    expect((lead.values as { metadata: Record<string, unknown> }).metadata).toMatchObject({
+      [CORRECTION_TOKEN_KEY]: TOKEN.sha256,
+    });
   });
 
   it("says in the notice when the old link could not be closed, rather than that it was", async () => {
     db.revokeError = { message: "57014 statement timeout" };
-    const result = await resolveStageOneConflict({
-      lead: corrected(),
-      channel: "website",
-      now: NOW,
-    });
+    const result = await resolve(corrected());
     expect(result).toMatchObject({ kind: "corrected", linksRevoked: 0 });
     expect(db.notices[0]).toMatchObject({ severity: "warning" });
     expect(String(db.notices[0]?.body)).toContain("could NOT be closed");

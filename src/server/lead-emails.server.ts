@@ -635,22 +635,30 @@ export async function mintQuestionnaireLink(input: {
  * correction re-addresses the lead first and closes the lead's links second,
  * so either it closed the link just minted (it ran after the mint) or this
  * read sees the new generation (it ran before): there is no order in which a
- * live link reaches the old address. A read that fails cannot say, and the
- * email goes as it was going to — the correction's own close still applies.
+ * live link reaches the old address.
+ *
+ * A read that fails cannot say which, and the link it would mail may be the
+ * one that outlived the close — so it is closed and the email waits a tick.
+ * The one exception is the ledger before `20261029170200`: no generation
+ * column, so no correction can have happened, and the email goes.
  */
-async function supersededSince(lead: LeadRow, tokenSha256: string): Promise<boolean> {
+async function addressStillCurrent(
+  lead: LeadRow,
+  tokenSha256: string,
+): Promise<"current" | "superseded" | "unknown"> {
   const { data, error } = await supabaseAdmin
     .from("waitlist_leads")
     .select("id, applicant_email_generation")
     .eq("id", lead.id)
     .maybeSingle();
-  if (error || !data || addressGeneration(data) === addressGeneration(lead)) return false;
+  if (error && (error.code === "PGRST204" || error.code === "42703")) return "current";
+  if (!error && data && addressGeneration(data) === addressGeneration(lead)) return "current";
   const { error: closeError } = await supabaseAdmin
     .from("lead_questionnaire_links")
     .update({ expires_at: new Date().toISOString() })
     .eq("token_sha256", tokenSha256);
-  if (closeError) console.error("[lead-emails] superseded link not closed:", closeError.message);
-  return true;
+  if (closeError) console.error("[lead-emails] unsent link not closed:", closeError.message);
+  return error || !data ? "unknown" : "superseded";
 }
 
 export type QuestionnaireApplicant = {
@@ -804,8 +812,10 @@ export async function composeApplicantEmail(input: {
     });
     if (!minted.ok)
       return { ok: false, error: `the questionnaire link could not be minted: ${minted.error}` };
-    if (await supersededSince(lead, minted.tokenSha256)) {
-      return { ok: false, error: SUPERSEDED_REASON, superseded: true };
+    const address = await addressStillCurrent(lead, minted.tokenSha256);
+    if (address === "superseded") return { ok: false, error: SUPERSEDED_REASON, superseded: true };
+    if (address === "unknown") {
+      return { ok: false, error: "could not confirm the address is still the applicant's" };
     }
     questionnaireUrl = minted.url;
     questionnaireExpiresAt = minted.expiresAt;

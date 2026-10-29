@@ -22,7 +22,13 @@ alter table public.lead_stage_emails
 create unique index if not exists lead_stage_emails_obligation_generation_key
   on public.lead_stage_emails (lead_id, stage, audience, generation);
 
-drop index if exists public.lead_stage_emails_obligation_key;
+-- The old key, (lead_id, stage, audience), STAYS in this migration. The code
+-- running when this applies writes `on conflict (lead_id, stage, audience)`,
+-- and this migration applies on merge while that code is live until the next
+-- publish: dropping the index here would fail every stage email it raises in
+-- between. It is dropped by its own migration once the code that writes the
+-- new key is published. Until then a corrected address's email (generation 1)
+-- collides with the old key and waits; the sweep raises it after the drop.
 
 comment on column public.waitlist_leads.applicant_email_generation is
   'Which address the applicant emails are for: 0 the address applied under, one more for each correction the applicant made. Set by /api/public/leads/capture.';

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mapRecord, rowFor } from "./airtable-sync.server";
+import { mapRecord, overCorrection, rowFor } from "./airtable-sync.server";
 
 /**
  * A row from the Airtable "Aurixa Waitlist" table, in the shape the connector
@@ -192,5 +192,38 @@ describe("rowFor — merging a child over its parent", () => {
     // did we last read all of this", and keeping it holds the backstop rather
     // than resetting it.
     expect("enrichment_synced_at" in failed).toBe(false);
+  });
+});
+
+describe("overCorrection — a lead whose applicant corrected their address", () => {
+  const mirrored = {
+    email: "jordan@firm.con",
+    first_name: "Jordan",
+    metadata: { channel: "airtable_mirror", airtable_record_id: "rec1" },
+  };
+
+  it("keeps the corrected address and the lead's record of it; Airtable still holds the typo", () => {
+    const existing = {
+      channel: "website",
+      correction_token_sha256: "f".repeat(64),
+      email_corrections: [{ from: "jordan@firm.con", to: "jordan@firm.com", generation: 1 }],
+    };
+    const { write, owed } = overCorrection(existing, mirrored, { ...mirrored, stage: 2 });
+    expect(write.email).toBe("jordan@firm.com");
+    expect(write.metadata).toMatchObject({
+      channel: "airtable_mirror",
+      airtable_record_id: "rec1",
+      correction_token_sha256: "f".repeat(64),
+      email_corrections: existing.email_corrections,
+    });
+    // The emails the mirror finds owed are for the corrected address.
+    expect(owed).toMatchObject({ email: "jordan@firm.com", applicant_email_generation: 1 });
+  });
+
+  it("writes a lead never corrected exactly as before", () => {
+    const row = { ...mirrored, stage: 1 };
+    const { write, owed } = overCorrection({ channel: "website" }, mirrored, row);
+    expect(write).toBe(mirrored);
+    expect(owed).toBe(row);
   });
 });

@@ -16,11 +16,18 @@
  *   - it is audited and the team is told, from and to.
  *
  * The caller then raises the stage emails as for any new application.
+ *
+ * Only the browser that made the application may correct it: the 201 that
+ * accepted it carried a one-time token (`mintCorrectionToken`), whose hash is
+ * kept on the lead, and the correction presents it. The reference alone is
+ * printed in the email that went to the mistyped address.
  */
+import crypto from "node:crypto";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import type { Json } from "@/integrations/supabase/types";
 import { dedupeKeyFor, type ParsedLead } from "@/server/lead-capture.server";
 import { notifyOperators, writeAuditLog } from "@/server/audit.server";
+import { timingSafeEqualStr } from "@/server/cron-auth.server";
 import {
   decideAddressCorrection,
   REFUSAL_TEXT,
@@ -46,6 +53,23 @@ export type StageOneConflict =
   /** Mission Control could not tell which, or could not write it. Never "duplicate". */
   | { kind: "unavailable"; error: string };
 
+const sha256 = (value: string) => crypto.createHash("sha256").update(value).digest("hex");
+
+/** Where the correction token's hash is kept: the lead's own metadata. */
+export const CORRECTION_TOKEN_KEY = "correction_token_sha256";
+
+/** The token the applying browser is handed, and the hash the lead keeps. */
+export function mintCorrectionToken(): { token: string; sha256: string } {
+  const token = crypto.randomBytes(24).toString("base64url");
+  return { token, sha256: sha256(token) };
+}
+
+function presentsToken(metadata: unknown, token: string | null): boolean {
+  const stored = (metadata as Record<string, unknown> | null)?.[CORRECTION_TOKEN_KEY];
+  if (typeof stored !== "string" || !token || token.length > 128) return false;
+  return timingSafeEqualStr(sha256(token), stored);
+}
+
 const minutesBetween = (from: string | null | undefined, to: number) => {
   const at = Date.parse(from ?? "");
   return Number.isFinite(at) ? Math.max(0, Math.round((to - at) / 60_000)) : null;
@@ -54,8 +78,33 @@ const minutesBetween = (from: string | null | undefined, to: number) => {
 export async function resolveStageOneConflict(input: {
   lead: ParsedLead;
   channel: string;
+  /** What the website sent back of the token its 201 carried. */
+  correctionToken: string | null;
+  /** A request carrying LEAD_CAPTURE_SECRET speaks for the funnel itself. */
+  trusted: boolean;
   now?: number;
 }): Promise<StageOneConflict> {
+  // Two corrections racing each other: the one whose update lost is decided
+  // again against the lead as the winner left it, rather than told it landed.
+  const first = await attemptResolution(input);
+  return first.kind === "raced" ? normalise(await attemptResolution(input)) : first;
+}
+
+const normalise = (result: StageOneConflict | { kind: "raced"; leadId: string }) =>
+  result.kind === "raced"
+    ? ({
+        kind: "unavailable",
+        error: "the lead changed twice while this correction was read",
+      } as const)
+    : result;
+
+async function attemptResolution(input: {
+  lead: ParsedLead;
+  channel: string;
+  correctionToken: string | null;
+  trusted: boolean;
+  now?: number;
+}): Promise<StageOneConflict | { kind: "raced"; leadId: string }> {
   const { lead, channel } = input;
   const now = input.now ?? Date.now();
   // Without a reference the conflict was the dedupe key: the same submission.
@@ -71,10 +120,34 @@ export async function resolveStageOneConflict(input: {
   if (readError) return { kind: "unavailable", error: readError.message };
   if (!existing) return { kind: "duplicate", leadId: null };
 
-  const decision = decideAddressCorrection(existing, lead.email, now);
-  if (decision.kind === "same_address") return { kind: "duplicate", leadId: existing.id };
+  const decision = decideAddressCorrection(
+    existing,
+    {
+      email: lead.email,
+      submittedAt: lead.submitted_at,
+      verified: input.trusted || presentsToken(existing.metadata, input.correctionToken),
+    },
+    now,
+  );
+  if (decision.kind === "same_address" || decision.kind === "stale") {
+    return { kind: "duplicate", leadId: existing.id };
+  }
 
   const who = `${existing.application_id} (${[existing.first_name, existing.last_name].filter(Boolean).join(" ")}${existing.entity_name ? `, ${existing.entity_name}` : ""})`;
+
+  if (decision.kind === "refused" && decision.reason === "unverified") {
+    // Somebody holding the reference, not the applicant's browser: recorded,
+    // and nothing else. The team is not told — a notice per attempt is a
+    // notice anybody could raise — and the route rate limits the attempts.
+    await writeAuditLog({
+      actorUserId: null,
+      action: "lead.address_correction_refused",
+      entityType: "waitlist_lead",
+      entityId: existing.id,
+      metadata: { application_id: existing.application_id, reason: decision.reason, channel },
+    });
+    return { kind: "refused", leadId: existing.id, reason: decision.reason };
+  }
 
   if (decision.kind === "refused") {
     await writeAuditLog({
@@ -130,11 +203,11 @@ export async function resolveStageOneConflict(input: {
     })
     .eq("id", existing.id)
     // The generation read above: two corrections racing each other cannot
-    // both move the lead on, and the one that lost is answered as a duplicate.
+    // both move the lead on. The one that lost is decided again.
     .eq("applicant_email_generation", decision.generation - 1)
     .select("id");
   if (updateError) return { kind: "unavailable", error: updateError.message };
-  if (!updated?.length) return { kind: "duplicate", leadId: existing.id };
+  if (!updated?.length) return { kind: "raced", leadId: existing.id };
 
   // Only a WAITING email is settled here. One the dispatcher holds right now
   // finishes and says where it went; if it is re-claimed later, the dispatcher

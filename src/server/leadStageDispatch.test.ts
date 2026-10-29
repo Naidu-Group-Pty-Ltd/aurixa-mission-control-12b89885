@@ -38,6 +38,7 @@ const state = vi.hoisted(() => ({
   // What a re-read of the lead says once a link is minted: a correction can
   // land between the batch read and the send.
   leadNow: null as Record<string, unknown> | null,
+  leadNowError: null as { message: string; code?: string } | null,
   linksClosed: [] as { patch: Record<string, unknown>; token: string }[],
 }));
 
@@ -71,10 +72,13 @@ vi.mock("@/integrations/supabase/client.server", () => ({
           select: () => ({
             // The re-read after a Stage 1 link is minted.
             eq: () => ({
-              maybeSingle: async () => ({
-                data: { id: "lead-1", ...state.leadOver, ...(state.leadNow ?? {}) },
-                error: null,
-              }),
+              maybeSingle: async () =>
+                state.leadNowError
+                  ? { data: null, error: state.leadNowError }
+                  : {
+                      data: { id: "lead-1", ...state.leadOver, ...(state.leadNow ?? {}) },
+                      error: null,
+                    },
             }),
             // The sweep reads one window per column: .gte(col, since).order().limit()
             gte: (column: string) => ({
@@ -240,6 +244,7 @@ beforeEach(() => {
   state.links = [];
   state.leadOver = {};
   state.leadNow = null;
+  state.leadNowError = null;
   state.linksClosed = [];
   process.env.MICROSOFT_MAILBOX_EMAIL = "hello@aurixasystems.com.au";
   process.env.LEAD_STAGE_INTERNAL_RECIPIENTS = TEAM.join(",");
@@ -769,6 +774,30 @@ describe("an applicant who corrected their address (docs/LEAD_EMAILS.md)", () =>
     expect(result).toMatchObject({ sent: 0, skipped: 1 });
   });
 
+  it("holds the email, and closes its link, when the re-read cannot say", async () => {
+    state.settingsRow = OWNED;
+    state.claimed = [
+      row({ audience: "applicant", recipients: ["jordan@firm.com.au"], generation: 0 }),
+    ];
+    state.leadNowError = { message: "57014 statement timeout" };
+    await dispatchStageEmails();
+    expect(state.sent).toHaveLength(0);
+    expect(state.linksClosed).toHaveLength(1);
+    expect(patch()).toMatchObject({ status: "pending", claimed_at: null });
+  });
+
+  it("sends when the re-read finds no generation column — no correction can have happened", async () => {
+    state.settingsRow = OWNED;
+    state.claimed = [row({ audience: "applicant", recipients: ["jordan@firm.com.au"] })];
+    state.leadNowError = {
+      code: "42703",
+      message: "column applicant_email_generation does not exist",
+    };
+    await dispatchStageEmails();
+    expect(state.sent).toHaveLength(1);
+    expect(state.linksClosed).toHaveLength(0);
+  });
+
   it("sends the email for the current address", async () => {
     state.leadOver = { applicant_email_generation: 1, email: "jordan@firm.com" };
     state.claimed = [
@@ -790,6 +819,25 @@ describe("an applicant who corrected their address (docs/LEAD_EMAILS.md)", () =>
     ]);
     expect(state.upserts[1]?.every((r) => !("generation" in r))).toBe(true);
     expect(result.queued).toBe(2);
+  });
+
+  it("writes the batch again without a corrected address's email while the old key still stands", async () => {
+    // Until the old key's own migration drops it, a generation 1 row beside a
+    // generation 0 one violates (lead_id, stage, audience): the whole batch
+    // fails, and the team alert in it must not fail with it.
+    state.settingsRow = OWNED;
+    state.upsertErrors = [{ code: "23505", message: "lead_stage_emails_obligation_key" }];
+    const result = await enqueueStageEmails({
+      leadId: "lead-1",
+      lead: fresh({ applicant_email_generation: 1 }),
+      trigger: "ingest",
+    });
+    expect(state.upsertTargets).toEqual([
+      "lead_id,stage,audience,generation",
+      "lead_id,stage,audience,generation",
+    ]);
+    expect(state.upserts[1]?.map((r) => [r.audience, r.generation])).toEqual([["internal", 0]]);
+    expect(result.queued).toBe(1);
   });
 
   it("does not raise a corrected address's email under the old key, where it would collide", async () => {

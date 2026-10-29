@@ -12,7 +12,12 @@ import {
   type ParsedStageUpdate,
 } from "@/server/lead-capture.server";
 import { enqueueStageEmails } from "@/server/lead-stage-emails.server";
-import { resolveStageOneConflict } from "@/server/lead-address-correction.server";
+import {
+  CORRECTION_TOKEN_KEY,
+  mintCorrectionToken,
+  resolveStageOneConflict,
+} from "@/server/lead-address-correction.server";
+import { checkPublicRateLimit } from "@/server/token-rate-limit.server";
 
 /**
  * POST /api/public/leads/capture
@@ -325,7 +330,12 @@ export const Route = createFileRoute("/api/public/leads/capture")({
         };
 
         return submission.stage === 1
-          ? captureStageOne(submission.lead, requestMetadata, channel, origin)
+          ? captureStageOne(submission.lead, requestMetadata, channel, origin, {
+              trusted,
+              ip,
+              correctionToken:
+                typeof payload.correctionToken === "string" ? payload.correctionToken : null,
+            })
           : advanceStage(submission.update, requestMetadata, channel, origin);
       },
     },
@@ -363,16 +373,27 @@ async function raiseStageEmails(leadId: string, fallback?: Record<string, unknow
   }
 }
 
+type ConflictContext = { trusted: boolean; ip: string | null; correctionToken: string | null };
+
 async function captureStageOne(
   lead: ParsedLead,
   requestMetadata: JsonRecord,
   channel: Channel,
   origin: string | null,
+  conflict: ConflictContext,
 ): Promise<Response> {
   const dedupe_key = dedupeKeyFor(lead, 1);
+  // Handed to the browser that made the application, and nobody else: it is
+  // what lets that browser correct the address (lead-address-correction.server.ts).
+  const correction = mintCorrectionToken();
   const { data: inserted, error } = await supabaseAdmin
     .from("waitlist_leads")
-    .insert({ ...lead, stage: 1, dedupe_key, metadata: requestMetadata })
+    .insert({
+      ...lead,
+      stage: 1,
+      dedupe_key,
+      metadata: { ...requestMetadata, [CORRECTION_TOKEN_KEY]: correction.sha256 },
+    })
     .select("id")
     .single();
 
@@ -382,7 +403,7 @@ async function captureStageOne(
     // mistyped, from the website's confirmation screen, which posts the
     // corrected application under the same reference
     // (src/server/lead-address-correction.server.ts).
-    if (error.code === "23505") return answerStageOneConflict(lead, channel, origin);
+    if (error.code === "23505") return answerStageOneConflict(lead, channel, origin, conflict);
     console.error("waitlist_leads insert failed", error);
     return json({ ok: false, error: "storage_failed" }, 500, origin);
   }
@@ -391,15 +412,43 @@ async function captureStageOne(
   await fanOutLeadCaptured(inserted.id, lead, channel, typeof offer === "string" ? offer : null);
   await raiseStageEmails(inserted.id, { ...lead, stage: 1 });
 
-  return json({ ok: true, lead_id: inserted.id, stage: 1, duplicate: false }, 201, origin);
+  return json(
+    {
+      ok: true,
+      lead_id: inserted.id,
+      stage: 1,
+      duplicate: false,
+      correction_token: correction.token,
+    },
+    201,
+    origin,
+  );
 }
+
+// A conflict inserts no row, so the insert-counting limits above never see
+// it; a reference posted again and again is limited here, per address.
+const CONFLICTS_PER_MINUTE = 10;
 
 async function answerStageOneConflict(
   lead: ParsedLead,
   channel: Channel,
   origin: string | null,
+  context: ConflictContext,
 ): Promise<Response> {
-  const conflict = await resolveStageOneConflict({ lead, channel });
+  if (!context.trusted) {
+    const rl = await checkPublicRateLimit(
+      "leads:stage1-conflict",
+      context.ip ?? "unknown",
+      CONFLICTS_PER_MINUTE,
+    );
+    if (!rl.ok) return json({ ok: false, error: "rate_limited" }, 429, origin);
+  }
+  const conflict = await resolveStageOneConflict({
+    lead,
+    channel,
+    correctionToken: context.correctionToken,
+    trusted: context.trusted,
+  });
   switch (conflict.kind) {
     case "duplicate":
       return json(

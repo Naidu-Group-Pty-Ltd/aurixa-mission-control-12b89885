@@ -158,8 +158,8 @@ See `docs/LEAD_EMAILS.md`.
 `email_campaign_recipients` already uses:
 
 - `UNIQUE (lead_id, stage, audience)` **is** the "never twice" rule. Not a
-  boolean somebody has to remember to set. Since `20261029170200` the key
-  carries `generation` too: an applicant who corrects a mistyped address is
+  boolean somebody has to remember to set. Since `20261029170200`, and the
+  old key's own migration that follows it, the key carries `generation` too: an applicant who corrects a mistyped address is
   owed the email once more, at the address they meant, and never twice there
   ([`LEAD_EMAILS.md`](./LEAD_EMAILS.md#address-corrections)). Team alerts are
   always generation 0, so the rule for them is unchanged.

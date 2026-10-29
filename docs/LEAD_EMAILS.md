@@ -184,18 +184,34 @@ Now a Stage 1 post whose reference is already held is read by
 
 | The post | Answer | What happens |
 | --- | --- | --- |
-| the same address (by `emailKey`) | `200 { ok, duplicate: true }` | nothing — the same application, delivered again |
+| the same address (by `emailKey`), or one older than the application on record | `200 { ok, duplicate: true }` | nothing — the same application delivered again, or a late copy of the one a correction replaced |
 | a different address, accepted | `200 { ok, corrected: true }` | the lead is re-addressed and its Stage 1 email is owed again |
-| a different address, refused | `409 { ok: false, error: "correction_refused", reason }` | nothing changes; the team is told, with the address the applicant gave |
+| a different address, refused | `409 { ok: false, error: "correction_refused", reason }` | nothing changes; the team is told, with the address the applicant gave — unless the refusal is `unverified` |
+| more than 10 a minute from one address | `429 rate_limited` | nothing is read |
 | the lead could not be read or written | `503 storage_failed` | the website asks the applicant to try again — never `duplicate` |
 
+**Only the browser that made the application may correct it.** The reference
+is not a secret: it is printed in the Stage 1 email, which went to the
+mistyped address. So the `201` that accepts an application carries a one-time
+`correction_token`; the lead keeps only its SHA-256
+(`metadata.correction_token_sha256`), and the website (`src/lib/leads.ts`
+`submitApplication`) keeps the token in memory and sends it back as
+`correctionToken` with a correction. A post without it, or with another, is
+refused `unverified`: audited, and nothing else — a notice per attempt would be
+a notice anybody holding a reference could raise. A request carrying
+`LEAD_CAPTURE_SECRET` speaks for the funnel and needs no token. A conflict
+writes no row, so the insert-counting limits never see it; conflicts are
+limited per address instead.
+
 **Accepted only while it can be nothing else** (`decideAddressCorrection`,
-`src/server/leadAddressCorrection.pure.ts`): the application was made within
-the last **24 hours**, the applicant has not reached the questionnaire (after
-that the address has been used to identify them), the lead is not declined,
-and it has been corrected fewer than **3** times. Refusals are
-`window_closed`, `questionnaire_reached`, `declined` and
-`too_many_corrections`.
+`src/server/leadAddressCorrection.pure.ts`): the post is newer than the
+application on record (the website stamps `submittedAt` on every submission,
+so a late copy of the original is never mistaken for a correction back to it),
+the application was made within the last **24 hours**, the applicant has not
+reached the questionnaire (after that the address has been used to identify
+them), the lead is not declined, and it has been corrected fewer than **3**
+times. Refusals are `unverified`, `window_closed`, `questionnaire_reached`,
+`declined` and `too_many_corrections`.
 
 **A correction**:
 
@@ -203,31 +219,47 @@ and it has been corrected fewer than **3** times. Refusals are
   stay as they were — and appends `{ from, to, at, channel, generation }` to
   `metadata.email_corrections`;
 - moves the lead to the next **address generation**
-  (`waitlist_leads.applicant_email_generation`), guarded on the one it read, so
-  two racing corrections cannot both land. Applicant emails are recorded per
-  generation (`lead_stage_emails.generation`, unique with lead, stage and
-  audience), so the Stage 1 email is owed again at the new address, beside the
-  row that says where the first one went. Team alerts are about the lead, not
-  the address: always generation 0, never raised twice;
+  (`waitlist_leads.applicant_email_generation`), guarded on the one it read.
+  Two corrections racing each other cannot both land: the one whose update
+  lost is decided again against the lead as the winner left it. Applicant
+  emails are recorded per generation (`lead_stage_emails.generation`, unique
+  with lead, stage and audience), so the Stage 1 email is owed again at the new
+  address, beside the row that says where the first one went. Team alerts are
+  about the lead, not the address: always generation 0, never raised twice;
+- is Mission Control's to send at Stage 1 whoever sends Stage 1: Make never
+  hears of the correction, and the receipt the backstop would read
+  (`stage1_email_message_id`) is for the email that went to the typo;
 - settles an applicant email still **waiting** for the old address `skipped`,
   "superseded: the applicant corrected their address". One claimed later is
   settled the same way at send, where the dispatcher compares the row's
   generation with the lead's. One the dispatcher is composing at that very
   moment re-reads the lead's generation after minting its questionnaire link:
   the correction re-addresses the lead before it closes the links, so either
-  the close catches the new link or the re-read sees the correction, and the
-  old address never receives a link that opens;
+  the close catches the new link or the re-read sees the correction. A re-read
+  that fails closes the link and the email waits a tick, so the old address
+  never receives a link that opens;
 - closes every questionnaire link minted for the old address (`expires_at` set
   to now): it was mailed to somebody who is not the applicant. "Continue with
   your Application ID" works with the corrected address;
+- survives the Airtable mirror, which never hears of it: for a corrected lead
+  the mirror keeps the corrected address and merges its metadata over the
+  lead's rather than replacing it (`overCorrection`,
+  `src/server/airtable-sync.server.ts`);
 - is audited (`lead.address_corrected`, from and to) and every operator is told
   (`lead_address_corrected`). A refusal is audited
-  (`lead.address_correction_refused`) and told as a warning
-  (`lead_address_correction_refused`).
+  (`lead.address_correction_refused`) and, unless `unverified`, told as a
+  warning (`lead_address_correction_refused`).
 
-Before `20261029170200` applies, the ledger is written under the old key and
-every row is generation 0 (`recordObligations`): the stage emails keep going,
-and a corrected address is not owed again until the migration lands.
+**The ledger key moves in two steps.** `20261029170200` adds the generation and
+the new unique key beside the old one, (lead_id, stage, audience), because it
+applies on merge while the code that writes the old key is still live until the
+next publish; dropping it there would fail every stage email raised in between.
+Until a later migration drops the old key, a corrected address's email
+collides with it, and `recordObligations` writes the batch again without it,
+so the team alert in the same batch still goes. The sweep raises the corrected
+email once the old key is gone. Before `20261029170200` applies at all, the
+ledger is written under the old key with every row generation 0, and a
+correction answers `503`: there is no generation to move to.
 
 ## The send gates
 

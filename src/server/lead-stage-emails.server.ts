@@ -224,34 +224,49 @@ async function enqueueWith(input: EnqueueInput, loaded: LoadedPolicy): Promise<E
   return out;
 }
 
-/**
- * The ledger write, keyed by (lead, stage, audience, generation).
- *
- * Before `20261029170200` applies the ledger has neither the column nor the
- * index (PostgREST answers `PGRST204` for the column, Postgres `42P10` for a
- * conflict target no unique index matches), and a deployment whose migration
- * queue has halted would otherwise raise no stage email at all. There, every
- * row is generation 0 and the old key is the whole rule, so it is written
- * under the old key; a corrected address is simply not owed again until the
- * migration lands.
- */
 type Recorded = {
   data: { id: string; status: string }[] | null;
   error: { message: string; code?: string } | null;
 };
 
+/**
+ * The ledger write, keyed by (lead, stage, audience, generation).
+ *
+ * Two states of the ledger are met on the way there, and neither may stop a
+ * stage email:
+ *
+ *  - before `20261029170200` applies the ledger has neither the column nor
+ *    the index (PostgREST answers `PGRST204` for the column, Postgres `42P10`
+ *    for a conflict target no unique index matches), and a deployment whose
+ *    migration queue has halted would otherwise raise nothing. Every row is
+ *    written under the old key, without the generation;
+ *  - until the old key's own migration drops it, (lead_id, stage, audience) is
+ *    still unique, so a corrected address's email (generation 1 beside a
+ *    generation 0 row) violates it (`23505`) and fails the whole batch. The
+ *    batch is written again without those rows, which wait for the sweep.
+ *
+ * Either way a corrected address is simply not owed again until the ledger
+ * can hold it. Nothing that was owed before this change goes unraised.
+ */
 async function recordObligations(rows: LedgerInsert[]): Promise<Recorded> {
   const write = async (values: LedgerInsert[], onConflict: string): Promise<Recorded> => {
+    if (values.length === 0) return { data: [], error: null };
     const { data, error } = await supabaseAdmin
       .from("lead_stage_emails")
       .upsert(values, { onConflict, ignoreDuplicates: true })
       .select("id, status");
     return { data, error };
   };
+  const current = rows.filter((row) => !row.generation);
   const first = await write(rows, "lead_id,stage,audience,generation");
+  if (first.error?.code === "23505" && current.length < rows.length) {
+    return write(current, "lead_id,stage,audience,generation");
+  }
   if (first.error?.code !== "PGRST204" && first.error?.code !== "42P10") return first;
-  const current = rows.filter((row) => !row.generation).map(({ generation: _g, ...row }) => row);
-  return current.length ? write(current, "lead_id,stage,audience") : { data: [], error: null };
+  return write(
+    current.map(({ generation: _g, ...row }) => row),
+    "lead_id,stage,audience",
+  );
 }
 
 export type DispatchResult = {

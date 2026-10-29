@@ -73,6 +73,7 @@ export {
   type RecipientSource,
 } from "@/lib/email/recipientList.pure";
 import { heldReason, sendGate, type GateSubject } from "@/lib/leadEmailGates.pure";
+import { addressGeneration } from "@/server/leadAddressCorrection.pure";
 
 export type LeadStage = 1 | 2 | 3;
 export type StageAudience = "internal" | "applicant";
@@ -236,6 +237,8 @@ export type StageEmailSubject = GateSubject & {
    * receipt into evidence about the workflow rather than about the mirror.
    */
   enrichment_synced_at?: string | null;
+  /** Which address the applicant emails are for; above 0 after a correction. */
+  applicant_email_generation?: number | null;
 };
 
 export type StageDecision =
@@ -317,6 +320,10 @@ export function decideApplicant(
 
   const owned = policy.applicantSenders[stage] === "mission_control";
   if (owned || policy.applicantMode === "always") return { verdict: "send" };
+  // An applicant who corrected their address is owed Stage 1 at it, and only
+  // Mission Control can send that: the correction never reaches Make, and the
+  // receipt the backstop would read is for the email that went to the typo.
+  if (stage === 1 && addressGeneration(lead) > 0) return { verdict: "send" };
 
   // ── auto: the backstop ──────────────────────────────────────────────────
   const evidence = applicantEmailEvidence(lead, stage, policy.applicantGraceMs, now);

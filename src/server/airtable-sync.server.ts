@@ -44,6 +44,7 @@
 // `crm.fit`, and it reads `stage2_answers` — which this now fills.
 import crypto from "crypto";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
+import type { Json } from "@/integrations/supabase/types";
 import {
   cleanLeadText,
   normaliseApplicationId,
@@ -65,6 +66,7 @@ import {
   type Stage3Enrichment,
 } from "@/server/airtableLeadMapping.pure";
 import { enqueueStageEmails } from "@/server/lead-stage-emails.server";
+import { correctedAddressOf } from "@/server/leadAddressCorrection.pure";
 
 const AIRTABLE_BASE_ID = "apptyShYE0yzL4IGB";
 const GATEWAY_URL = "https://connector-gateway.lovable.dev/airtable";
@@ -395,7 +397,7 @@ async function findExisting(mapped: MappedRecord, dedupeKey: string | null) {
     if (!value) continue;
     const { data } = await supabaseAdmin
       .from("waitlist_leads")
-      .select("id, stage, status")
+      .select("id, stage, status, metadata")
       .eq(column, value)
       .maybeSingle();
     if (data) return data;
@@ -516,15 +518,16 @@ export async function syncAirtableWaitlist(): Promise<AirtableSyncResult> {
           // operator's own triage decision and `source`/`page` describe how the
           // lead first reached us — neither is Airtable's to overwrite.
           const { source: _source, page: _page, ...mirrored } = row;
+          const { write, owed } = overCorrection(existing.metadata, mirrored, row);
           const { error } = await supabaseAdmin
             .from("waitlist_leads")
             // Never walk the journey backwards: a rollup that has not caught
             // up yet must not un-book a review we already recorded.
-            .update({ ...mirrored, stage: Math.max(Number(existing.stage ?? 1), row.stage) })
+            .update({ ...write, stage: Math.max(Number(existing.stage ?? 1), row.stage) })
             .eq("id", existing.id);
           if (error) throw error;
           out.updated += 1;
-          out.emails_queued += await queueQuietly(existing.id, row);
+          out.emails_queued += await queueQuietly(existing.id, owed);
           continue;
         }
 
@@ -585,6 +588,33 @@ function latestStage2(candidates: Stage2Enrichment[]): Stage2Enrichment | null {
  * call from a backfill: a historical lead gets its obligations suppressed by
  * the backstop window inside the enqueue, not by this caller remembering to.
  */
+/**
+ * The mirror's write over a lead whose applicant corrected their address in
+ * Mission Control. Airtable never hears of a correction, so its record is
+ * still at the mistyped address: written as it stands, it would put the typo
+ * back and erase the lead's own record of the change. The mirror keeps the
+ * corrected address and merges its metadata over the lead's; the emails it
+ * finds owed are for the corrected address, at its generation
+ * (docs/LEAD_EMAILS.md, "Address corrections"). A lead never corrected is
+ * written exactly as before.
+ */
+export function overCorrection<W extends { metadata: Record<string, Json> }, R extends object>(
+  existingMetadata: unknown,
+  write: W,
+  row: R,
+): { write: W; owed: Record<string, unknown> } {
+  const corrected = correctedAddressOf(existingMetadata);
+  if (!corrected) return { write, owed: row as Record<string, unknown> };
+  return {
+    write: {
+      ...write,
+      email: corrected.email,
+      metadata: { ...((existingMetadata as Record<string, Json> | null) ?? {}), ...write.metadata },
+    },
+    owed: { ...row, email: corrected.email, applicant_email_generation: corrected.generation },
+  };
+}
+
 async function queueQuietly(leadId: string, row: Record<string, unknown>): Promise<number> {
   try {
     const result = await enqueueStageEmails({

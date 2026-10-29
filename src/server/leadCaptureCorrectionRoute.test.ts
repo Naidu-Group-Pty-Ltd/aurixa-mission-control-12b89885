@@ -8,28 +8,58 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const h = vi.hoisted(() => ({
   conflict: { kind: "duplicate", leadId: null } as Record<string, unknown>,
+  conflictInput: null as Record<string, unknown> | null,
   enqueued: [] as string[],
+  // A first application lands; one under a held reference conflicts.
+  held: true,
+  inserted: [] as Record<string, unknown>[],
+  limited: false,
 }));
 
 vi.mock("@/integrations/supabase/client.server", () => ({
   supabaseAdmin: {
     from: () => ({
-      insert: () => ({
+      insert: (row: Record<string, unknown>) => ({
         select: () => ({
-          single: async () => ({
-            data: null,
-            error: { code: "23505", message: "duplicate key value violates unique constraint" },
-          }),
+          single: async () => {
+            h.inserted.push(row);
+            return h.held
+              ? {
+                  data: null,
+                  error: {
+                    code: "23505",
+                    message: "duplicate key value violates unique constraint",
+                  },
+                }
+              : { data: { id: "lead-new" }, error: null };
+          },
         }),
       }),
-      select: () => ({
-        eq: () => ({ maybeSingle: async () => ({ data: { id: "lead-1" }, error: null }) }),
-      }),
+      select: () => {
+        // The insert-counting rate limits: nothing counted.
+        const counted = { count: 0, error: null };
+        const window = {
+          contains: async () => counted,
+          then: (resolve: (v: unknown) => void) => resolve(counted),
+        };
+        return {
+          eq: () => ({ maybeSingle: async () => ({ data: { id: "lead-1" }, error: null }) }),
+          gte: () => window,
+        };
+      },
     }),
   },
 }));
 vi.mock("@/server/lead-address-correction.server", () => ({
-  resolveStageOneConflict: async () => h.conflict,
+  CORRECTION_TOKEN_KEY: "correction_token_sha256",
+  mintCorrectionToken: () => ({ token: "tok_for_the_browser", sha256: "a".repeat(64) }),
+  resolveStageOneConflict: async (input: Record<string, unknown>) => {
+    h.conflictInput = input;
+    return h.conflict;
+  },
+}));
+vi.mock("@/server/token-rate-limit.server", () => ({
+  checkPublicRateLimit: async () => (h.limited ? { ok: false } : { ok: true }),
 }));
 vi.mock("@/server/lead-stage-emails.server", () => ({
   enqueueStageEmails: async ({ leadId }: { leadId: string }) => {
@@ -42,14 +72,17 @@ process.env.LEAD_CAPTURE_SECRET = "test-secret";
 const { Route } = await import("@/routes/api.public.leads.capture");
 
 type Handler = (ctx: { request: Request }) => Promise<Response>;
-const post = async () => {
+const post = async (extra: Record<string, unknown> = {}, trusted = true) => {
   const handlers = (Route.options as unknown as { server: { handlers: { POST: Handler } } }).server
     .handlers;
   const response = await handlers.POST({
     request: new Request("https://mission-control.test/api/public/leads/capture", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-lead-capture-secret": "test-secret" },
+      headers: trusted
+        ? { "Content-Type": "application/json", "x-lead-capture-secret": "test-secret" }
+        : { "Content-Type": "application/json", Origin: "https://www.aurixasystems.com.au" },
       body: JSON.stringify({
+        ...extra,
         applicationId: "AX-F86555B04D",
         directiveFirstName: "Jordan",
         directiveLastName: "Lee",
@@ -66,6 +99,26 @@ const post = async () => {
 
 beforeEach(() => {
   h.enqueued = [];
+  h.held = true;
+  h.inserted = [];
+  h.conflictInput = null;
+  h.limited = false;
+});
+
+describe("POST /api/public/leads/capture — a new application", () => {
+  it("hands the applying browser a correction token, and keeps only its hash", async () => {
+    h.held = false;
+    const { status, body } = await post();
+    expect(status).toBe(201);
+    expect(body).toMatchObject({
+      ok: true,
+      lead_id: "lead-new",
+      correction_token: "tok_for_the_browser",
+    });
+    const metadata = h.inserted[0]?.metadata as Record<string, unknown>;
+    expect(metadata.correction_token_sha256).toBe("a".repeat(64));
+    expect(JSON.stringify(h.inserted)).not.toContain("tok_for_the_browser");
+  });
 });
 
 describe("POST /api/public/leads/capture — a reference already held", () => {
@@ -94,6 +147,24 @@ describe("POST /api/public/leads/capture — a reference already held", () => {
       body: { ok: false, error: "correction_refused", reason: "questionnaire_reached" },
     });
     expect(h.enqueued).toEqual([]);
+  });
+
+  it("passes on the token the browser sent back, and whether the request is the funnel's own", async () => {
+    h.conflict = { kind: "duplicate", leadId: "lead-1" };
+    await post({ correctionToken: "tok_for_the_browser" });
+    expect(h.conflictInput).toMatchObject({
+      correctionToken: "tok_for_the_browser",
+      trusted: true,
+    });
+  });
+
+  it("limits how often a browser may post a reference it holds", async () => {
+    h.limited = true;
+    expect(await post({}, false)).toEqual({
+      status: 429,
+      body: { ok: false, error: "rate_limited" },
+    });
+    expect(h.conflictInput).toBeNull();
   });
 
   it("answers a conflict it could not resolve as unavailable, never as a duplicate", async () => {

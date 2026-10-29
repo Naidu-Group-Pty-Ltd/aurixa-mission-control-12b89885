@@ -515,6 +515,20 @@ describe("withSendingMailbox — the mailbox Email → Lead emails chose", () =>
   });
 });
 
+describe("decideApplicant — an applicant who corrected their address", () => {
+  it("is sent Stage 1 by Mission Control, even while Make sends Stage 1 and left its receipt", () => {
+    // Make never hears of the correction, and its receipt is for the typo.
+    const corrected = lead({
+      applicant_email_generation: 1,
+      stage1_email_message_id: "make-receipt-for-the-typo",
+    });
+    expect(decideApplicant(corrected, 1, policy(), NOW)).toEqual({ verdict: "send" });
+    expect(
+      decideApplicant(lead({ stage1_email_message_id: "receipt" }), 1, policy(), NOW).verdict,
+    ).toBe("skip");
+  });
+});
+
 describe("withTeamAlerts — the list and stages set on Email → Lead emails", () => {
   const TEAM = [
     "admin@aurixasystems.com.au",
