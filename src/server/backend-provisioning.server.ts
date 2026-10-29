@@ -6277,6 +6277,13 @@ export async function provisionCloneBackend(
   // running. Both conservative readings pause — an empty declared list is
   // "not established" rather than "the prime has none", and a project whose
   // function list cannot be read counts as holding nothing.
+  //
+  // A third cause arrives here with no secret names: a full pass that started
+  // on an unverified schema declines the source (`passCanReachEdgeFunctions`),
+  // and if it verifies the schema on the way it reaches this guard holding
+  // neither bundles nor the cached scan. Going on would sync the clone's
+  // secrets against an empty list, so it pauses like the first cause — and
+  // the pass after it reads the verification and takes the snapshot.
   let edgeFunctions: EdgeFunctionDeployResult[];
   if (snapshot.functionSourceOmitted) {
     const declared = snapshot.declaredFunctionSlugs;
@@ -6284,7 +6291,7 @@ export async function provisionCloneBackend(
       await listProjectEdgeFunctionSlugs(projectRef).catch(() => [] as string[]),
     );
     const notYetDeployed = declared.filter((slug) => !liveSlugs.has(slug));
-    if (declared.length === 0 || notYetDeployed.length > 0) {
+    if (declared.length === 0 || notYetDeployed.length > 0 || snapshot.secretNames.length === 0) {
       throw new BudgetPause(
         "the edge functions need the prime's source, which this pass did not fetch — taking a full snapshot next tick",
         "",

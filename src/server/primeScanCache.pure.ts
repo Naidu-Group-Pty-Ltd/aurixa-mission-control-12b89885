@@ -51,6 +51,43 @@ export function shouldSkipFunctionSource(input: SkipFunctionSourceInput): boolea
 }
 
 /**
+ * Whether this pass can reach the edge-function stage at all — and so whether
+ * the prime's function source is worth fetching on it.
+ *
+ * A pass that builds the schema by introspection reaches the edge functions
+ * only once the schema is VERIFIED: a resumed pass ends `partial`, and a full
+ * pass either pauses inside the build or finishes it, records
+ * `schema_verified_at`, and then meets the omitted-source guard in front of
+ * the deploys, which pauses with an empty marker. The pass after that reads
+ * the verification, so it is the one that fetches — the condition moves, so
+ * the guard cannot livelock the way the first version of it did.
+ *
+ * Until now only the RESUMED half of that was honoured, and the full pass paid
+ * for the source it could not use. Measured 29 Oct 2026 on
+ * `tutorial-demo-orrimere-c158c7`: the prime's function tree had grown to 33
+ * MB, every pass without a resume marker fetched and scanned all of it before
+ * its first stage, and five of six such passes were killed by the runtime
+ * (HTTP 502, no response body) while every resumed pass around them paused
+ * cleanly with HTTP 200. Three kills in a row exhausted the job's attempts and
+ * failed a clone whose schema was still converging.
+ *
+ * The legacy replay strategy never records a verification, so it keeps the
+ * old rule: only a resumed pass is known not to need the source.
+ */
+export function passCanReachEdgeFunctions(input: {
+  resumingSchema: boolean;
+  schemaStrategy: "introspection" | "migration-replay";
+  /** The project an earlier pass created, or null on the first pass. */
+  projectRef: string | null;
+  /** `clone_backends.schema_verified_at`, or null when no pass has verified it. */
+  schemaVerifiedAt: string | null;
+}): boolean {
+  if (input.resumingSchema) return false;
+  if (input.schemaStrategy === "migration-replay") return true;
+  return Boolean(input.projectRef) && Boolean(input.schemaVerifiedAt);
+}
+
+/**
  * Whether a snapshot's scan may be written to the cache.
  *
  * Only completeness matters, and only one flag reports it. `functionSourceOmitted`

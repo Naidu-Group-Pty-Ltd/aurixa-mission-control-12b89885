@@ -8,9 +8,10 @@
  * on migration #1 and burns a Supabase project slot each time.
  *
  * This module instead reads the prime's live `pg_catalog`, generates DDL, and
- * applies it to the clone in dependency order — enum types → sequences →
- * tables → functions → constraints → indexes → views → matviews → triggers →
- * RLS → policies — reconciling every stage against the prime afterwards.
+ * applies it to the clone in dependency order — enum types → domains →
+ * sequences → tables → functions → constraints → indexes → views → matviews →
+ * triggers → RLS → policies — reconciling every stage against the prime
+ * afterwards.
  *
  * Invariants:
  *  - Never move a row. Every source query is read-only against pg_catalog /
@@ -70,6 +71,7 @@ export const MAX_FUNCTION_PASSES = 5;
  */
 export const STAGE_SEQUENCE: readonly StageName[] = [
   "enums",
+  "domains",
   "sequences",
   "tables",
   "functions",
@@ -85,6 +87,7 @@ export const STAGE_SEQUENCE: readonly StageName[] = [
 
 export type StageName =
   | "enums"
+  | "domains"
   | "sequences"
   | "tables"
   | "functions"
@@ -330,6 +333,83 @@ export function buildEnumDdl(schema: string, typeName: string, labels: readonly 
   return `do $$ begin create type ${quoteIdent(schema)}.${quoteIdent(typeName)} as enum (${values}); exception when duplicate_object then null; end $$`;
 }
 
+/** A domain's CHECK, as `pg_get_constraintdef` renders it. */
+export type DomainCheck = { name: string; def: string };
+
+/**
+ * A DOMAIN — the base type plus whatever makes it more than an alias: its
+ * collation, its default, its named CHECKs and its NOT NULL.
+ *
+ * `create domain` has no `if not exists`, so it takes the enums' guard on
+ * `duplicate_object`. The block is quoted with a tag of its own rather than
+ * `$$`, because a CHECK is arbitrary SQL and may carry `$$` itself — and a tag
+ * the body happens to contain is stepped past rather than risked.
+ *
+ * `NOT VALID` is dropped from a CHECK because CREATE DOMAIN refuses it: it is
+ * a property of `alter domain … add constraint`, saying the rows that existed
+ * then were never checked. A domain being created has no such rows.
+ */
+export function buildDomainDdl(
+  schema: string,
+  name: string,
+  baseType: string,
+  opts: {
+    notNull: boolean;
+    default: string | null;
+    /** Already quoted, schema-qualified. Null when the domain keeps its base type's. */
+    collation: string | null;
+    checks: readonly DomainCheck[];
+  },
+): string {
+  const body = [
+    `create domain ${quoteIdent(schema)}.${quoteIdent(name)} as ${baseType}`,
+    ...(opts.collation ? [`collate ${opts.collation}`] : []),
+    ...(opts.default != null ? [`default ${opts.default}`] : []),
+    ...opts.checks.map(
+      (c) => `constraint ${quoteIdent(c.name)} ${c.def.replace(/\s+not\s+valid\s*$/i, "")}`,
+    ),
+    ...(opts.notNull ? ["not null"] : []),
+  ].join(" ");
+  let tag = "$aurixa_domain$";
+  for (let i = 1; body.includes(tag); i++) tag = `$aurixa_domain_${i}$`;
+  return `do ${tag} begin ${body}; exception when duplicate_object then null; end ${tag}`;
+}
+
+/**
+ * The CHECK list `Q.domains` aggregates, however the Management API hands a
+ * jsonb column back — as parsed JSON or as its text.
+ *
+ * A list it cannot read THROWS rather than reading as "no checks". The count
+ * that reconciles this stage cannot see a CHECK, so a domain created without
+ * one would pass every later test while accepting values the prime refuses —
+ * and the pass that fails loudly here is retried; the weakened clone is not.
+ */
+export function parseDomainChecks(value: unknown): DomainCheck[] {
+  let list: unknown = value;
+  if (typeof value === "string") {
+    try {
+      list = JSON.parse(value);
+    } catch {
+      throw new Error(`Domain CHECK list is not JSON: ${value.slice(0, 120)}`);
+    }
+  }
+  if (!Array.isArray(list)) {
+    throw new Error(`Domain CHECK list is not an array: ${str(list).slice(0, 120)}`);
+  }
+  return list.map((c) => {
+    const check = {
+      name: str((c as { name?: unknown })?.name),
+      def: str((c as { def?: unknown })?.def),
+    };
+    if (!check.name || !check.def) {
+      throw new Error(
+        `Domain CHECK without a name or definition: ${JSON.stringify(c).slice(0, 120)}`,
+      );
+    }
+    return check;
+  });
+}
+
 export type ColumnDef = {
   name: string;
   type: string;
@@ -439,11 +519,7 @@ export function buildViewDdl(schema: string, name: string, def: string, options:
  * Measured 6 Sep 2026 on all three clones: the prime's `aml` schema carries
  * `service_role=U/postgres` and every clone carried nothing at all.
  */
-export function buildSchemaGrantDdl(
-  schema: string,
-  grantee: string,
-  privilege: string,
-): string {
+export function buildSchemaGrantDdl(schema: string, grantee: string, privilege: string): string {
   return `grant ${privilege.toLowerCase()} on schema ${quoteIdent(schema)} to ${quoteIdent(grantee)}`;
 }
 
@@ -616,6 +692,33 @@ const Q = {
           join pg_enum e on e.enumtypid = t.oid
           where t.typtype = 'e' and n.nspname in (${SCHEMA_LIST})
           group by 1, 2 order by 1, 2`,
+
+  /*
+    `typdefault` is the default's text, which CREATE DOMAIN takes as written.
+    A collation is named only where it DIFFERS from the base type's, because
+    that is the only case the domain declared one. CHECKs only: a domain's NOT
+    NULL is `typnotnull`, and on Postgres 17 it also appears in pg_constraint
+    as contype 'n', which would otherwise be written twice.
+  */
+  domains: `select n.nspname as schema, t.typname as name,
+              format_type(t.typbasetype, t.typtypmod) as base_type,
+              t.typnotnull as not_null,
+              t.typdefault as default_expr,
+              (select quote_ident(cn.nspname) || '.' || quote_ident(co.collname)
+                 from pg_collation co
+                 join pg_namespace cn on cn.oid = co.collnamespace
+                where co.oid = t.typcollation
+                  and t.typcollation <> (select bt.typcollation from pg_type bt where bt.oid = t.typbasetype)
+              ) as collation,
+              coalesce((select jsonb_agg(jsonb_build_object('name', c.conname, 'def', pg_get_constraintdef(c.oid))
+                                         order by c.conname)
+                          from pg_constraint c
+                         where c.contypid = t.oid and c.contype = 'c'), '[]'::jsonb) as checks
+            from pg_type t
+            join pg_namespace n on n.oid = t.typnamespace
+            left join pg_depend d on d.objid = t.oid and d.deptype = 'e'
+            where t.typtype = 'd' and n.nspname in (${SCHEMA_LIST}) and d.objid is null
+            order by 1, 2`,
 
   sequences: `select n.nspname as schema, c.relname as name
               from pg_class c join pg_namespace n on n.oid = c.relnamespace
@@ -831,6 +934,7 @@ function cloneOnlyBodiesQuery(signatures: readonly string[]): string {
 /** Count queries used for reconciliation — run identically on both sides. */
 const COUNTS: Record<StageName, string> = {
   enums: `select count(distinct t.oid)::int as n from pg_type t join pg_namespace n on n.oid = t.typnamespace where t.typtype='e' and n.nspname in (${SCHEMA_LIST})`,
+  domains: `select count(*)::int as n from pg_type t join pg_namespace n on n.oid = t.typnamespace left join pg_depend d on d.objid = t.oid and d.deptype = 'e' where t.typtype='d' and n.nspname in (${SCHEMA_LIST}) and d.objid is null`,
   sequences: `select count(*)::int as n from pg_class c join pg_namespace n on n.oid=c.relnamespace where c.relkind='S' and n.nspname in (${SCHEMA_LIST})`,
   tables: `select count(*)::int as n from pg_class c join pg_namespace n on n.oid=c.relnamespace where c.relkind='r' and n.nspname in (${SCHEMA_LIST})`,
   functions: `select count(*)::int as n from pg_proc p join pg_namespace n on n.oid=p.pronamespace left join pg_depend d on d.objid=p.oid and d.deptype='e' where n.nspname in (${SCHEMA_LIST}) and p.prokind in ('f','p') and d.objid is null`,
@@ -1289,6 +1393,39 @@ export async function replicateSchemaByIntrospection(
     );
   }
 
+  // 1b. domains — after the enums one may be built on, before the tables
+  // whose columns are typed by one.
+  //
+  // There was no stage for them, and nothing failed until the prime first
+  // declared one. Measured 29 Oct 2026 on `tutorial-demo-orrimere-c158c7`, the
+  // first clone provisioned since the Message Hub foundation added
+  // `public.mh_principal_key` (a text domain with a format CHECK): 17 tables
+  // failed on `type "mh_principal_key" does not exist`, and behind them 211
+  // columns, 70 functions, 178 constraints, 24 matview indexes, 50 triggers,
+  // 17 RLS and 53 grant statements — 689 failures from one absence. The
+  // tables stage could never reconcile, so the schema could never verify and
+  // no pass could ever reach the edge functions.
+  if (enterStage("domains")) {
+    await say("Replicating domain types...");
+    stages.push(
+      await stageOrSkip(
+        "domains",
+        async () => {
+          const domainRows = await query(primeRef, Q.domains);
+          return domainRows.map((r) =>
+            buildDomainDdl(str(r.schema), str(r.name), str(r.base_type), {
+              notNull: r.not_null === true || r.not_null === "true",
+              default: r.default_expr == null ? null : str(r.default_expr),
+              collation: r.collation == null ? null : str(r.collation),
+              checks: parseDomainChecks(r.checks),
+            }),
+          );
+        },
+        60,
+      ),
+    );
+  }
+
   // 2. sequences
   if (enterStage("sequences")) {
     await say("Replicating sequences...");
@@ -1617,9 +1754,9 @@ export async function replicateSchemaByIntrospection(
           // Keyed by SCHEMA and name: an index name is unique only within its
           // schema, and this set decides both what to skip and what to drop.
           const heldIdx = new Set(
-            (await query(cloneRef, Q.indexes).catch(() => [] as Array<Record<string, unknown>>)).map(
-              (r) => `${str(r.schema)}.${str(r.indexname)}`,
-            ),
+            (
+              await query(cloneRef, Q.indexes).catch(() => [] as Array<Record<string, unknown>>)
+            ).map((r) => `${str(r.schema)}.${str(r.indexname)}`),
           );
           idxStmts = filterCreatableIndexes(
             idxRows

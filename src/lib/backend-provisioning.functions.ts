@@ -147,11 +147,27 @@ async function runBackendProvisioning(
       );
     }
 
+    const {
+      passCanReachEdgeFunctions,
+      shouldSkipFunctionSource,
+      scanIsCacheable,
+      withoutPrimeOnlyFunctions,
+    } = await import(/* @vite-ignore */ "@/lib/_server-shims/primeScanCache.pure");
+    // Only a pass that can reach the edge-function stage has any use for the
+    // prime's function source — see `passCanReachEdgeFunctions`, which records
+    // what buying it on every full schema pass cost.
+    const canReachEdgeFunctions = passCanReachEdgeFunctions({
+      resumingSchema,
+      schemaStrategy: input.schemaStrategy ?? "introspection",
+      projectRef: existingRow?.supabase_project_ref ?? null,
+      schemaVerifiedAt: existingRow?.schema_verified_at ?? null,
+    });
+
     // What the clone already has. Asked of the TARGET, never of a diary — the
     // same rule the schema stages follow. Cheap (one Supabase call) and it is
     // what makes each pass's GitHub fetch smaller than the last.
     const liveFunctionSlugs =
-      !resumingSchema && existingRow?.supabase_project_ref
+      canReachEdgeFunctions && existingRow?.supabase_project_ref
         ? await listProjectEdgeFunctionSlugs(existingRow.supabase_project_ref).catch(() => [])
         : [];
 
@@ -193,9 +209,6 @@ async function runBackendProvisioning(
     const cachedSecretNames = Array.isArray(cachedScan?.secret_names)
       ? (cachedScan.secret_names as string[])
       : null;
-    const { shouldSkipFunctionSource, scanIsCacheable, withoutPrimeOnlyFunctions } = await import(
-      /* @vite-ignore */ "@/lib/_server-shims/primeScanCache.pure"
-    );
     // Read through the rule the tree walk applies: a row scanned before the
     // prime kept its own feature back still names it. See
     // `withoutPrimeOnlyFunctions`.
@@ -213,12 +226,14 @@ async function runBackendProvisioning(
     // file LIST alone. See fetchPrimeBackendSnapshot's opts doc.
     const rawSnapshot = await fetchPrimeBackendSnapshot(octokit, source, {
       includeMigrationSql: (input.schemaStrategy ?? "introspection") === "migration-replay",
-      // A resumed schema pass cannot reach the edge-function stage — it
-      // reports `partial` and the pipeline pauses to verify from the first
-      // stage next tick — so its bundle source would be fetched, decoded,
-      // scanned and discarded. That fetch is what exhausts the GitHub App
-      // installation's hourly quota when a long build resumes every minute.
-      includeFunctionSource: !resumingSchema && !skipFunctionSource,
+      // A pass that is still building the schema cannot reach the
+      // edge-function stage — a resumed pass reports `partial`, and a full
+      // one meets the omitted-source guard after it verifies — so its bundle
+      // source would be fetched, decoded, scanned and discarded. That fetch is
+      // what exhausts the GitHub App installation's hourly quota when a long
+      // build resumes every minute, and what the runtime kills a full pass
+      // for once the prime's function tree outgrows the worker.
+      includeFunctionSource: canReachEdgeFunctions && !skipFunctionSource,
       // Do not pay for bundles the target already holds. The deploy step has
       // always skipped live functions — but only AFTER the snapshot had
       // fetched every one of them, so the work was bought and discarded on

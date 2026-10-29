@@ -13,6 +13,8 @@ import {
   filterCreatableIndexes,
   isConstraintBacked,
   buildEnumDdl,
+  buildDomainDdl,
+  parseDomainChecks,
   buildCreateTableDdl,
   buildPolicyDdl,
   parsePgArray,
@@ -233,6 +235,70 @@ describe("DDL builders", () => {
     const sql = buildEnumDdl("public", "app_role", ["admin", "it's"]);
     expect(sql).toContain(`create type "public"."app_role" as enum ('admin', 'it''s')`);
     expect(sql).toContain("duplicate_object");
+  });
+
+  it("builds an idempotent domain carrying its named CHECK — the prime's own, verbatim", () => {
+    // `public.mh_principal_key` as the prime's catalog reported it on 29 Oct
+    // 2026. Its CHECK holds a `$`, which is why the block has a tag of its own.
+    const sql = buildDomainDdl("public", "mh_principal_key", "text", {
+      notNull: false,
+      default: null,
+      collation: null,
+      checks: [
+        {
+          name: "mh_principal_key_check",
+          def: "CHECK ((VALUE ~ '^(staff|client|finance|solicitor|accountant|builder|mission_control):[A-Za-z0-9_.@-]{1,128}$'::text))",
+        },
+      ],
+    });
+    expect(sql).toBe(
+      `do $aurixa_domain$ begin create domain "public"."mh_principal_key" as text ` +
+        `constraint "mh_principal_key_check" CHECK ((VALUE ~ '^(staff|client|finance|solicitor|accountant|builder|mission_control):[A-Za-z0-9_.@-]{1,128}$'::text)); ` +
+        `exception when duplicate_object then null; end $aurixa_domain$`,
+    );
+  });
+
+  it("writes collation, default, every CHECK and NOT NULL in the order CREATE DOMAIN takes them", () => {
+    const sql = buildDomainDdl("aml", "risk_band", "character varying(16)", {
+      notNull: true,
+      default: "'low'::character varying",
+      collation: `pg_catalog."C"`,
+      checks: [
+        { name: "a_check", def: "CHECK (((VALUE)::text <> ''::text))" },
+        { name: "b_check", def: "CHECK ((length((VALUE)::text) < 17)) NOT VALID" },
+      ],
+    });
+    expect(sql).toContain(
+      `create domain "aml"."risk_band" as character varying(16) collate pg_catalog."C" ` +
+        `default 'low'::character varying constraint "a_check" CHECK (((VALUE)::text <> ''::text)) ` +
+        `constraint "b_check" CHECK ((length((VALUE)::text) < 17)) not null;`,
+    );
+    // CREATE DOMAIN refuses NOT VALID; a domain being created has no rows.
+    expect(sql).not.toMatch(/not valid/i);
+  });
+
+  it("steps its quoting tag past one the domain's own SQL happens to carry", () => {
+    const sql = buildDomainDdl("public", "odd", "text", {
+      notNull: false,
+      default: null,
+      collation: null,
+      checks: [{ name: "odd_check", def: "CHECK ((VALUE <> '$aurixa_domain$'::text))" }],
+    });
+    expect(sql.startsWith("do $aurixa_domain_1$ begin ")).toBe(true);
+    expect(sql.endsWith(" end $aurixa_domain_1$")).toBe(true);
+  });
+
+  it("reads the CHECK list as parsed JSON or as its text, and refuses one it cannot read", () => {
+    const checks = [{ name: "c", def: "CHECK ((VALUE <> ''::text))" }];
+    expect(parseDomainChecks(checks)).toEqual(checks);
+    expect(parseDomainChecks(JSON.stringify(checks))).toEqual(checks);
+    expect(parseDomainChecks([])).toEqual([]);
+    // Unreadable is not "no checks": the count cannot see a missing CHECK, so
+    // reading it as none would build a domain that accepts what the prime
+    // refuses and report it reconciled.
+    expect(() => parseDomainChecks("not json")).toThrow(/not JSON/);
+    expect(() => parseDomainChecks({ name: "c" })).toThrow(/not an array/);
+    expect(() => parseDomainChecks([{ name: "c" }])).toThrow(/without a name or definition/);
   });
 
   it("builds a create-table statement with defaults and not-null", () => {
