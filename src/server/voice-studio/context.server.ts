@@ -91,7 +91,7 @@ export async function gatherTargetContext(project: Project): Promise<string | nu
       .eq("id", leadId)
       .maybeSingle();
     if (error) throw new Error(`the lead could not be read: ${error.message}`);
-    if (lead) sections["Free trial application and questionnaire"] = buildLeadSubject(lead);
+    if (lead) sections["Priority access application and questionnaire"] = buildLeadSubject(lead);
   }
 
   if (leadId || accountId) {

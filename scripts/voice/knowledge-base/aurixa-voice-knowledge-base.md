@@ -41,7 +41,7 @@ The honest summary: less assembly, fewer handover gaps, and a firm that can take
 
 ### Is Aurixa a product I can sign up for online?
 
-Not instantly, but there is a free trial: every new firm starts with a 14-day free trial of its own workspace. The way in is a short application on the website, then a readiness questionnaire and a strategic review with the team, because each firm's workspace is provisioned and configured for it rather than handed over as a generic account. The 14 days start the day that workspace goes live. The structure is there so the team can recommend the right setup rather than sell the wrong one.
+No. There is no self-serve signup and no public free trial. Access runs through a structured priority access programme - a short application, a readiness questionnaire, and a strategic review with the team - because each firm's workspace is provisioned and configured for it rather than handed over as a generic account. The structure is there so the team can recommend the right setup rather than sell the wrong one.
 
 ### Who is the platform for?
 
@@ -177,7 +177,7 @@ Ask back: "Is there a point later in the year when this would make more sense to
 
 ### "Can I just try it first?"
 
-Yes. Every new firm starts with a 14-day free trial of its own workspace, set up for it rather than a generic account, so it sees the platform against its own situation rather than a demo. The way in is the short application on the website; the team reviews it, and the trial begins the day the workspace goes live. The plan can be activated at any time during the trial.
+There is no self-serve free trial, because each firm's workspace is set up for it rather than handed over as a generic account. What can be arranged is a sandbox with sample data, and the strategic review is where that is agreed - so the firm sees the platform against its own situation rather than a generic demo.
 
 ### "Why do I have to apply? Can't I just buy it?"
 
@@ -375,7 +375,7 @@ That is the Enterprise conversation: scoped and quoted rather than listed, and a
 
 ### Is there a free trial?
 
-Yes: 14 days, on the firm's own workspace. It starts the day the workspace goes live, after the application and the strategic review, and the plan can be activated at any time during it. An agent never promises a longer trial; any other length is the team's to offer.
+There is no self-serve free trial. A sandbox environment with sample data can be arranged, and the strategic review is where that is agreed.
 
 ## 9. Add-on modules
 
@@ -463,11 +463,11 @@ Credits meter the AI work the platform does, principally report generation. The 
 
 Report generation is what credits pay for, so running out stops new generations rather than locking the workspace. A top-up pack restores it immediately. A caller who is repeatedly running out is usually on the wrong tier for their volume, and that is worth raising with the team rather than solving with packs.
 
-## 11. How access works - the free trial application
+## 11. How access works - the priority access pathway
 
-Access is by application, in three stages, and every new firm then starts with a 14-day free trial of its own workspace. Applying does not guarantee a workspace: the Aurixa team reviews every application before one is provisioned. There is no paid queue priority: Aurixa does not accept payment to move an application up the list.
+Access is by application, in three stages. Joining the waitlist does not guarantee platform access, and there is no paid queue priority: Aurixa does not accept payment to move an application up the list.
 
-### Stage 1 - what is the free trial application?
+### Stage 1 - what is the Priority Access Application?
 
 - Completed on the website at aurixasystems.com.au/contact. It takes about 60 to 90 seconds.
 - It asks for name, work email, mobile number, organisation name, role, organisation type, approximate annual client or transaction volume, current bottlenecks, and the areas the organisation most wants to improve.
@@ -637,7 +637,7 @@ No. An agent never states, implies or guesses the outcome of an application, and
 These are the claims that would be wrong even where a caller pushes for them, and they hold whatever else this document says.
 
 - That an application is approved, accepted or allocated, or that access is guaranteed - including implying it by talking about next steps as though the decision were made.
-- That applying guarantees a workspace or a trial, or that payment can move an application up the list.
+- That the waitlist guarantees access, or that payment can move an application up it.
 - A price that is not in this document, a discount, a negotiated term, or an enterprise figure - enterprise is scoped and quoted, so there is nothing to quote.
 - A fix time, a resolution time, or a specific person who will call back. The published response targets are the only timings.
 - A booking as confirmed. A booking made on a call is a request, and the team confirms it by email.
