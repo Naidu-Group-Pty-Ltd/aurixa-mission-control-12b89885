@@ -729,7 +729,7 @@ describe("the follow keeps the diagnostics of the catalogue it settles, and of n
       alert_type: "orphan_file",
     })),
   });
-  const rowsOf = (runId: string) =>
+  const rowsOf = (runId: unknown) =>
     (["module_backend_artifacts", "module_import_edges", "module_drift_alerts"] as const).reduce(
       (n, t) => n + db.tables[t].filter((r) => r.detection_run_id === runId).length,
       0,

@@ -442,29 +442,43 @@ async function settle(
   // Compare-and-set on the run and on the state the plan read: a module
   // another writer reshaped, approved or archived since is not approved
   // under this run's name. A person's archive is never undone here.
-  const passes = [
-    { modules: plan.approve, from: "proposed", followArchived: false },
-    { modules: plan.revive, from: "archived", followArchived: true },
-  ] as const;
-  for (const pass of passes) {
+  const approval = {
+    status: "approved",
+    approved_by: null,
+    approved_at: now,
+    rejection_reason: null,
+    archived_by_follow_run_id: null,
+  } as const;
+  const approveProposed = async (ids: string[]) => {
+    const { data, error } = await supabase
+      .from("modules")
+      .update(approval)
+      .in("id", ids)
+      .eq("detection_run_id", runId)
+      .eq("status", "proposed")
+      .select("id");
+    return { data, error };
+  };
+  const reviveFollowArchived = async (ids: string[]) => {
+    const { data, error } = await supabase
+      .from("modules")
+      .update(approval)
+      .in("id", ids)
+      .eq("detection_run_id", runId)
+      .eq("status", "archived")
+      .not("archived_by_follow_run_id", "is", null)
+      .select("id");
+    return { data, error };
+  };
+  for (const pass of [
+    { modules: plan.approve, write: approveProposed },
+    { modules: plan.revive, write: reviveFollowArchived },
+  ]) {
     for (const ids of chunked(
       pass.modules.map((m) => m.id),
       ID_CHUNK,
     )) {
-      let query = supabase
-        .from("modules")
-        .update({
-          status: "approved",
-          approved_by: null,
-          approved_at: now,
-          rejection_reason: null,
-          archived_by_follow_run_id: null,
-        })
-        .in("id", ids)
-        .eq("detection_run_id", runId)
-        .eq("status", pass.from);
-      if (pass.followArchived) query = query.not("archived_by_follow_run_id", "is", null);
-      const { data, error } = await query.select("id");
+      const { data, error } = await pass.write(ids);
       if (error) {
         return fail(`The modules the run found could not be approved: ${describeDbError(error)}`);
       }
