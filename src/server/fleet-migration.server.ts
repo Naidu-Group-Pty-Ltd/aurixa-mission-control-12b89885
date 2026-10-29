@@ -1103,7 +1103,7 @@ export async function runFleetMigrationSync(
   const { data: allBackends, error: excludedErr } = await supabase
     .from("clone_backends")
     .select(
-      "clone_id, supabase_project_ref, migration_version, status, worker_started_at, migration_heartbeat_at, migration_blocked_at, migration_blocked_reason, chunk_cursor",
+      "clone_id, supabase_project_ref, supabase_url, migration_version, status, worker_started_at, migration_heartbeat_at, migration_blocked_at, migration_blocked_reason, chunk_cursor",
     );
   if (excludedErr) {
     return { ...EMPTY, error: `Could not read clone backends: ${excludedErr.message}` };
@@ -1113,6 +1113,7 @@ export async function runFleetMigrationSync(
     row: b,
     verdict: migrationEligibility({
       supabaseProjectRef: b.supabase_project_ref,
+      supabaseUrl: b.supabase_url,
       status: b.status,
       workerStartedAt: b.worker_started_at,
       migrationBlockedAt: b.migration_blocked_at,

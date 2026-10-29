@@ -64,7 +64,10 @@ import { ledgerChangedSlugs, ledgerCurrentSlugs } from "@/server/edgeBundleLedge
 import { freshnessOf } from "@/server/projectFunctionCopies.pure";
 import { planUpstreamDeferral, UPSTREAM_DEFERRAL_KEY } from "@/server/upstreamRefusal.pure";
 import { functionsRevisionOfSuccess } from "@/server/functionsBaseline.pure";
-import { MIGRATION_CLAIMABLE_STATUSES } from "@/server/fleetMigrationEligibility.pure";
+import {
+  MIGRATION_CLAIMABLE_STATUSES,
+  firstBuildFinished,
+} from "@/server/fleetMigrationEligibility.pure";
 
 function secretsCleanFromVerification(verification: Json | null | undefined): boolean {
   if (verification && typeof verification === "object" && !Array.isArray(verification)) {
@@ -1265,7 +1268,7 @@ async function executeSqlMigration(
 
   const { data: backend, error: backendErr } = await admin
     .from("clone_backends")
-    .select("supabase_project_ref, status")
+    .select("supabase_project_ref, supabase_url, status")
     .eq("clone_id", run.clone_id)
     .maybeSingle();
   // A read that FAILED is not a clone with no backend — skipping it would
@@ -1278,6 +1281,16 @@ async function executeSqlMigration(
       completed_at: new Date().toISOString(),
     });
     return { status: "skipped" };
+  }
+  // A first build that never finished is the provisioning engine's schema, not
+  // a clone due a migration — the fleet lane's own rule (see
+  // `firstBuildFinished`). Waiting costs no attempt; the run proceeds once
+  // the build completes and stamps the ledger it would otherwise replay over.
+  if (!firstBuildFinished({ supabaseUrl: backend.supabase_url })) {
+    return waitForClaim(
+      run,
+      "the backend's first build has not finished — the provisioning engine's, not this lane's",
+    );
   }
 
   const { resolvePrimeSource } = await import("@/server/prime-backend.server");

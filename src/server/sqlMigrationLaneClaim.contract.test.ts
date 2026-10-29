@@ -82,8 +82,8 @@ describe("the lane takes the fleet lane's claim, in the fleet lane's way", () =>
     expect(gate).toBeGreaterThan(-1);
     expect(gate).toBeLessThan(claimAt);
     // The same list the fleet lane claims and reclaims by, never a copy.
-    expect(healing).toContain(
-      'import { MIGRATION_CLAIMABLE_STATUSES } from "@/server/fleetMigrationEligibility.pure"',
+    expect(healing).toMatch(
+      /import \{[^}]*\bMIGRATION_CLAIMABLE_STATUSES\b[^}]*\} from "@\/server\/fleetMigrationEligibility\.pure"/,
     );
     expect(fleet).toContain("[...MIGRATION_CLAIMABLE_STATUSES]");
   });
