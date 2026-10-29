@@ -15,6 +15,12 @@
 // Sub-modules are kept as structured data rather than folded into the module
 // name, so the card can nest them instead of rendering one unreadable
 // parenthetical eighteen items long.
+//
+// The sheet predates some of what the prime builds. Quantitative Reports,
+// Templates and Auto Report Generation (Launch) and the four pages under
+// Agreements (Scale) were added on 29 Oct 2026, each where the prime already
+// opens it, so placing those modules on a tier states what a workspace on it
+// has rather than changing it.
 
 export type FeatureItem = { name: string; subs?: string[] };
 export type FeatureGroup = { heading: string; items: FeatureItem[] };
@@ -37,6 +43,7 @@ export const TIER_FEATURES: Record<string, TierFeatures> = {
         items: [
           { name: "Reports" },
           { name: "Generated Reports", subs: ["Investment"] },
+          { name: "Quantitative Reports" },
           { name: "Cash Flow Analysis", subs: ["10 Year Cash Flow"] },
           { name: "Report Requests" },
         ],
@@ -84,6 +91,8 @@ export const TIER_FEATURES: Record<string, TierFeatures> = {
           { name: "Settings" },
           { name: "User Management" },
           { name: "Branding" },
+          { name: "Templates" },
+          { name: "Auto Report Generation" },
           { name: "Error Logs" },
           { name: "Activity Logs" },
           { name: "Client Portal" },
@@ -147,7 +156,18 @@ export const TIER_FEATURES: Record<string, TierFeatures> = {
       },
       {
         heading: "Operations",
-        items: [{ name: "Agreements" }, { name: "Marketing" }],
+        items: [
+          {
+            name: "Agreements",
+            subs: [
+              "Agreement Templates",
+              "Partner Referrals",
+              "Loan Writer Undertakings",
+              "Partner Compliance",
+            ],
+          },
+          { name: "Marketing" },
+        ],
       },
       {
         heading: "Administration",

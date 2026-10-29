@@ -25,6 +25,29 @@ measured against the live Mission Control database on 2026-08-28.
 > rehearsal (`DELIVERY_SYSTEM_PLAN.md`, W1 and D7). Where this runbook
 > describes a module cascade for a new clone, read it as history.
 
+> **29 Oct 2026: every library module has a place on the price list.**
+>
+> The library follow settled the catalogue at prime@83a3218 (run `7e505791`,
+> 22:34 UTC): 143 approved modules, 22 of them new since July. Measured with
+> `module-mapping.ts` against those 143, **105 resolved on no plan at all** —
+> a Scale clone's recorded entitlement named 32 modules, Launch's 22. Most were
+> the pieces detection splits a feature into: `backend-*` workers no route
+> reaches, operator consoles, public share pages, sub-pages.
+>
+> Each is now placed with the module whose feature it serves, as the prime
+> gates it (`MODULE_COMPANIONS`), or recorded as not sold and why
+> (`NOT_SOLD_MODULES`: two test files detection read as routes, and NPC's own
+> GoHighLevel migration tooling). Launch resolves 91 modules, Growth 92, Scale
+> 117, and every plan with every add-on 135; the other eight are the unsold
+> ones. See [Placement](#placement). The Pricing page names any module the
+> follow brings in that nothing places (`unplacedModules`).
+>
+> The same day the owner made the **Accountant Portal** an add-on in no tier,
+> sold as the Solicitor Portal is, with its **price undecided**: its Stripe
+> product (`prod_VX6f7zMP6x6zyo`) carries an A$1 placeholder price that nothing
+> quotes or charges, and until it is priced a workspace has it by an operator's
+> grant only (`priceUndecided`, `isModuleGrantable`).
+
 > **D18: a contract's exclusions are price-list slugs, and they reach the
 > clone.**
 >
@@ -79,6 +102,42 @@ surfaced for an operator, never guessed.
 counterpart; bind it via the pricing map panel's override when its
 implementation lands. That it reads as *unmapped* rather than silently
 resolving to nothing is the design working.
+
+## Placement
+
+The join above runs from the price list to the library. Placement runs the
+other way: every library module has exactly one place, and a test against the
+library as production held it (`liveLibrary.fixture.ts`, 143 modules at
+prime@83a3218) fails if one has none or two.
+
+| place | where it is recorded | resolves on |
+| --- | --- | --- |
+| the shell | `ALWAYS_INSTALLED` | every plan |
+| a tier's feature | `TIER_FEATURES`, mirrored on the website's pricing page, via `TIER_FEATURE_ALIASES` where the names differ | that tier and above |
+| a priced module | `aurixa-catalog.ts`, via `PRICED_MODULE_ALIASES` | the tiers that include it, or its purchase |
+| a companion | `MODULE_COMPANIONS`: the module whose feature it serves | wherever that module is |
+| not sold | `NOT_SOLD_MODULES`, with the reason | no plan |
+
+**A companion goes where its anchor goes.** `resolveEntitledModules` adds every
+companion of a module it installs, transitively, and `libraryModulesOf` does
+the same, so a contract exclusion withholds an anchor's companions with it:
+excluding `aml-ctf` withholds `aml`, `backend-aml` and `backend-didit`. A
+companion whose anchor is not in the catalogue installs nothing.
+
+**A place writes down the prime's decision; it never makes a commercial one.**
+Each companion sits where the prime's route guard or server check already opens
+it. The Portfolio Analysis Review page is gated by `client.review`, so it rides
+Clients; Partner Referrals, Loan Writer Undertakings and Partner Compliance are
+gated by `agreements`; Workflow Playground by `integrations`. Three modules
+the sheet predates are now tier features, each where the prime opens it:
+Quantitative Reports, Templates and Auto Report Generation on Launch. A paid
+page under Clients (Borrowing Capacity, Lenders) is installed with Clients and
+shut by its entitlement key, as the paid client tabs are.
+
+**A new module is named, never left on no plan.** The library follows the
+prime by itself (D19). A feature merged there arrives with no place, and
+`unplacedModules` lists it on the Pricing page (`getModuleMap`) until it is
+placed. A failed library read says so rather than reporting nothing unplaced.
 
 ## What "installing a module" actually does
 
@@ -240,6 +299,8 @@ A failed read never fails the balance call. The derivation is
 | guardrail | where |
 | --- | --- |
 | Unmapped is surfaced, never guessed | `module-mapping.ts` (`unmapped` outcome), pricing map panel |
+| Every library module has one place, and a new one is named | `MODULE_COMPANIONS`, `NOT_SOLD_MODULES`, `unplacedModules` (pricing map panel); the placement tests against `liveLibrary.fixture.ts` |
+| An undecided price is never quoted, sold or recorded as charged | `priceUndecided` (out of `PURCHASABLE_MODULES`, grantable by `isModuleGrantable`), `presentAddonRow` on every catalogue read, `grantAddon` records no amount |
 | Clone secret writes can never reach the prime | `cloneSecretTarget.pure.ts` — ref is a return value, not an argument |
 | Identity secrets generated per clone, never copied | `planCloneSecrets` (`generated` class) |
 | Clone repo re-targeted off the prime before handover | `clone-repo-retarget.server.ts` |
