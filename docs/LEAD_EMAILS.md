@@ -28,9 +28,9 @@ scheduler opens. Only the email modules leave.
   campaign composer's own. A blank mailbox is the tenant's default: under an
   added tenant, its own default mailbox; under the deployment's tenant,
   `LEAD_STAGE_EMAIL_MAILBOX`, else `MICROSOFT_MAILBOX_EMAIL`. The reply-to is
-  also what `{{support_email}}` says. The team's notification sends from the
-  same mailbox and, while no `LEAD_STAGE_INTERNAL_RECIPIENTS` list is set,
-  goes to it.
+  also what `{{support_email}}` says. The team's alert sends from the same
+  mailbox and, while no team alert list is set (below, or
+  `LEAD_STAGE_INTERNAL_RECIPIENTS`), goes to it.
 
   **On production** (set 29 Oct 2026): the *Aurixa Systems* tenant,
   `admin@aurixasystems.com.au`, sender name *Aurixa Systems*, replies to
@@ -39,6 +39,8 @@ scheduler opens. Only the email modules leave.
   blank would send Aurixa's applicants mail from another company's address.
   The same mailbox sends Mission Control's warmup mail through the same
   tenant, which is the standing proof that it can send.
+- **Team alerts** — who on the team is emailed when a lead moves, and at
+  which stages. See [Team alerts](#team-alerts).
 - **Who sends it** — per stage. See [Handing a stage over](#handing-a-stage-over).
 - **The editor** — every section of the email: subject and inbox line, header,
   message, next-step card, main button, security note, details, next steps,
@@ -61,9 +63,9 @@ scheduler opens. Only the email modules leave.
 - **Recent applicant emails** — the ledger's applicant rows: sent, waiting,
   skipped with the reason.
 
-Reading is for operators. Every change — copy, identity, sender, a test — is
-for administrators, is audited (`lead_emails.*`), and a sender change notifies
-every operator.
+Reading is for operators. Every change — copy, identity, sender, team alerts,
+a test — is for administrators, is audited (`lead_emails.*`), and a sender or
+team alert change notifies every operator.
 
 ## Handing a stage over
 
@@ -132,6 +134,138 @@ backstops the stage.
   submission reached Mission Control with no email (refused as
   `invalid_email`). Mission Control's link names the application and holds a
   256-bit token it can check.
+
+## Team alerts
+
+The team's own email about a lead — an application arriving, a questionnaire
+completed, a review booked — is separate from the applicant's. It goes to the
+list on **Team alerts**, at the stages switched on there, from the mailbox
+under *Sent as*.
+
+- **The list** is one address per line, or separated by commas or semicolons.
+  Each entry is read the way the sender reads it (`resolveInternalRecipients`):
+  spaces trimmed, `Name <addr>` and `mailto:` unwrapped, a repeat sent once.
+  A list with **one** entry that is not an address is refused whole, naming
+  it — Graph refuses a whole message for one bad recipient, so a typo saved
+  would silence the alert for everybody on the list. At most 25 people.
+- **The stages** are three switches. A stage switched off records a terminal
+  `skipped` row for each lead that reaches it while it is off: switching it
+  back on does not announce those leads. It is the same rule as
+  `LEAD_STAGE_INTERNAL_STAGES` (see the cutover runbook,
+  [`lead-stage-email-cutover.md`](./lead-stage-email-cutover.md)).
+- **The console wins, field by field.** A saved list replaces
+  `LEAD_STAGE_INTERNAL_RECIPIENTS`; saved stages replace
+  `LEAD_STAGE_INTERNAL_STAGES`. Clearing the list hands the answer back to the
+  environment, else to the sending mailbox alone, and the panel says which.
+  The sending mailbox never displaces a saved list (`withTeamAlerts`, then
+  `withSendingMailbox`, in `loadPolicy`).
+- **At send**, an alert goes to the list as it stands then, not as it stood
+  when the lead was raised; the row notes when the two differed.
+- **When the settings cannot be read**, no alert is raised that tick, for the
+  same reason no applicant email is: raised then, it would go to the
+  environment's list at stages the console may have switched off, and the
+  ledger keeps the first raise. The sweep raises it once the settings answer.
+- Saving is for administrators, audited as `lead_emails.team_alerts_set` with
+  the list and stages it replaced, and every operator is told
+  (`lead_email_team_alerts_changed`).
+
+## Address corrections
+
+The website's confirmation screen says where the Stage 1 email went and offers
+**"Not the right email address? Correct it"**. The corrected application is
+posted to `/api/public/leads/capture` under the **same** application reference,
+so the applicant is not entered twice. Mission Control used to answer that
+post `duplicate` and change nothing: the acknowledgement and the questionnaire
+link stayed with the mistyped address, and the applicant was never sent them
+at the one they meant.
+
+Now a Stage 1 post whose reference is already held is read by
+`resolveStageOneConflict` (`src/server/lead-address-correction.server.ts`):
+
+| The post | Answer | What happens |
+| --- | --- | --- |
+| the same address (by `emailKey`), or one older than the application on record | `200 { ok, duplicate: true }` | nothing — the same application delivered again, or a late copy of the one a correction replaced |
+| a different address, accepted | `200 { ok, corrected: true }` | the lead is re-addressed and its Stage 1 email is owed again |
+| a different address, refused | `409 { ok: false, error: "correction_refused", reason }` | nothing changes; the team is told, with the address the applicant gave — unless the refusal is `unverified` |
+| more than 10 a minute from one address | `429 rate_limited` | nothing is read |
+| the lead could not be read or written | `503 storage_failed` | the website asks the applicant to try again — never `duplicate` |
+
+**Only the browser that made the application may correct it.** The reference
+is not a secret: it is printed in the Stage 1 email, which went to the
+mistyped address. So the website (`src/lib/leads.ts` `submitApplication`)
+generates a correction token in the browser and sends it, as
+`correctionToken`, with every submission of the application, the first
+included; the lead keeps only its SHA-256 (`metadata.correction_token_sha256`,
+`correctionTokenFor`). Generated by the browser rather than handed back, it
+survives a retry whose first post landed but whose answer never arrived. A
+browser that sent none is handed one in the `201` (`correction_token`). A post
+without it, or with another, is
+refused `unverified`: audited, and nothing else — a notice per attempt would be
+a notice anybody holding a reference could raise. A request carrying
+`LEAD_CAPTURE_SECRET` speaks for the funnel and needs no token. A conflict
+writes no row, so the insert-counting limits never see it; conflicts are
+limited per address instead.
+
+**Accepted only while it can be nothing else** (`decideAddressCorrection`,
+`src/server/leadAddressCorrection.pure.ts`): the post is newer than the
+application on record (the website stamps `submittedAt` on every submission,
+so a late copy of the original is never mistaken for a correction back to it),
+the application was made within the last **24 hours**, the applicant has not
+reached the questionnaire (after that the address has been used to identify
+them), the lead is not declined, and it has been corrected fewer than **3**
+times. Refusals are `unverified`, `window_closed`, `questionnaire_reached`,
+`declined` and `too_many_corrections`.
+
+**A correction**:
+
+- writes the Stage 1 answers as sent now — `source`, `page` and the reference
+  stay as they were — and appends `{ from, to, at, submitted_at, channel,
+  generation }` to `metadata.email_corrections`;
+- moves the lead to the next **address generation**
+  (`waitlist_leads.applicant_email_generation`), guarded on the one it read.
+  Two corrections racing each other cannot both land: the one whose update
+  lost is decided again against the lead as the winner left it. Applicant
+  emails are recorded per generation (`lead_stage_emails.generation`, unique
+  with lead, stage and audience), so the Stage 1 email is owed again at the new
+  address, beside the row that says where the first one went. Team alerts are
+  about the lead, not the address: always generation 0, never raised twice;
+- is Mission Control's to send at Stage 1 whoever sends Stage 1: Make never
+  hears of the correction, and the receipt the backstop would read
+  (`stage1_email_message_id`) is for the email that went to the typo;
+- settles an applicant email still **waiting** for the old address `skipped`,
+  "superseded: the applicant corrected their address". One claimed later is
+  settled the same way at send, where the dispatcher compares the row's
+  generation with the lead's. One the dispatcher is composing at that very
+  moment re-reads the lead's generation after minting its questionnaire link:
+  the correction re-addresses the lead before it closes the links, so either
+  the close catches the new link or the re-read sees the correction. A re-read
+  that fails closes the link and the email waits a tick, so the old address
+  never receives a link that opens;
+- closes every questionnaire link minted for the old address (`expires_at` set
+  to now): it was mailed to somebody who is not the applicant. "Continue with
+  your Application ID" works with the corrected address;
+- survives the Airtable mirror, which never hears of it: for a corrected lead
+  the mirror keeps the corrected address and the corrected submission's time
+  (so a late copy of an earlier correction stays stale) and merges its
+  metadata over the lead's rather than replacing it, and for every lead it
+  keeps the keys only
+  Mission Control writes — the token's hash and the corrections
+  (`overCorrection`, `src/server/airtable-sync.server.ts`);
+- is audited (`lead.address_corrected`, from and to) and every operator is told
+  (`lead_address_corrected`). A refusal is audited
+  (`lead.address_correction_refused`) and, unless `unverified`, told as a
+  warning (`lead_address_correction_refused`).
+
+**The ledger key moves in two steps.** `20261029170200` adds the generation and
+the new unique key beside the old one, (lead_id, stage, audience), because it
+applies on merge while the code that writes the old key is still live until the
+next publish; dropping it there would fail every stage email raised in between.
+Until a later migration drops the old key, a corrected address's email
+collides with it, and `recordObligations` writes the batch again without it,
+so the team alert in the same batch still goes. The sweep raises the corrected
+email once the old key is gone. Before `20261029170200` applies at all, the
+ledger is written under the old key with every row generation 0, and a
+correction answers `503`: there is no generation to move to.
 
 ## The send gates
 
@@ -214,6 +348,7 @@ Minted by Mission Control at send time, for every Stage 1 email it sends:
 | Setting | Where | What |
 | --- | --- | --- |
 | Who sends each stage, the identity | Email → Lead emails | `lead_email_settings`, one row |
+| Who receives the team alerts, and at which stages | Email → Lead emails | `lead_email_settings.internal_recipients`, `internal_stages`. Unset: `LEAD_STAGE_INTERNAL_RECIPIENTS`, `LEAD_STAGE_INTERNAL_STAGES` |
 | The copy | Email → Lead emails | `lead_email_templates`, one row per edited stage |
 | `AURIXA_WEBSITE_URL` | environment | the website's origin for the links. Unset: the origin of `AURIXA_QUESTIONNAIRE_URL`, else `https://www.aurixasystems.com.au` |
 | `AURIXA_REVIEW_BOOKING_URL` | environment | the scheduler, if not `/schedule-strategic-review` on the website |
@@ -242,3 +377,8 @@ the truth.
 | `supabase/migrations/20261029100000_lead_email_templates.sql` | the three tables, `stage3_meeting_url`, the one-minute tick |
 | `supabase/migrations/20261029120000_lead_stage3_cancelled_at.sql` | `stage3_cancelled_at`, the cancellation the Stage 3 gate reads |
 | `supabase/migrations/20261029130000_lead_stage3_cal_booking_uid.sql` | `stage3_cal_booking_uid`, the Cal.com uid a cancellation is matched on |
+| `src/server/leadAddressCorrection.pure.ts` | whether a re-posted application is an address correction |
+| `src/server/lead-address-correction.server.ts` | the correction: the lead, the ledger, the links, the record |
+| `supabase/migrations/20261029170000_lead_email_notice_kinds.sql` | the team alert and address correction notice kinds |
+| `supabase/migrations/20261029170100_lead_email_team_alerts.sql` | `internal_recipients`, `internal_stages` — the team alerts |
+| `supabase/migrations/20261029170200_lead_email_generations.sql` | `applicant_email_generation`, `lead_stage_emails.generation` and the ledger's key |

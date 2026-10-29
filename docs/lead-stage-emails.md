@@ -158,7 +158,11 @@ See `docs/LEAD_EMAILS.md`.
 `email_campaign_recipients` already uses:
 
 - `UNIQUE (lead_id, stage, audience)` **is** the "never twice" rule. Not a
-  boolean somebody has to remember to set.
+  boolean somebody has to remember to set. Since `20261029170200`, and the
+  old key's own migration that follows it, the key carries `generation` too: an applicant who corrects a mistyped address is
+  owed the email once more, at the address they meant, and never twice there
+  ([`LEAD_EMAILS.md`](./LEAD_EMAILS.md#address-corrections)). Team alerts are
+  always generation 0, so the rule for them is unchanged.
 - Enqueue writes an **obligation**; dispatch claims it with a lease and records
   the outcome. A throttle returns the row to `pending`; `unconfirmed` is
   terminal and never auto-retried.
@@ -271,8 +275,10 @@ Graph refuses the whole message for it.
 ## Configuration
 
 Every switch is documented in `.env.example` under *Lead stage emails*. All of
-it is optional: unset, `LEAD_STAGE_INTERNAL_RECIPIENTS` falls back to
-`MICROSOFT_MAILBOX_EMAIL`, and with no Graph credentials at all the dispatcher
+it is optional. Who receives the team's alert, and at which stages, is set on
+**Email → Lead emails → Team alerts** ([`LEAD_EMAILS.md`](./LEAD_EMAILS.md#team-alerts)),
+which overrides `LEAD_STAGE_INTERNAL_RECIPIENTS` and `LEAD_STAGE_INTERNAL_STAGES`
+field by field; with neither set, the list falls back to the sending mailbox, and with no Graph credentials at all the dispatcher
 records `skipped` rows saying so rather than failing.
 
 **The tick reports its own readiness.** Three facts decide whether this mailer

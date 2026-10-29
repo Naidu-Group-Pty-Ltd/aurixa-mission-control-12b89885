@@ -994,13 +994,46 @@ export function renderLeadEmail(
 
 // ── The layout ──────────────────────────────────────────────────────────────
 //
-// Make's HTML, as a function. Kept table-based with inline styles and the
-// Outlook VML buttons, because that is what renders the same in Outlook,
-// Gmail and Apple Mail — which is why it was built that way.
+// The Aurixa Systems website's design, as an email: its navy surfaces, the
+// hairline-bordered square panels of its forms and scheduler, Playfair Display
+// headings over Inter, gold monospace eyebrows, and its two calls to action —
+// the teal gradient of "Start your free trial" and the gold-outlined button of
+// the scheduler. Every value is read off the website (src/index.css and the
+// pages it styles in aurixa-systems), not chosen here.
+//
+// Kept table-based with inline styles and Outlook VML buttons, because that is
+// what renders the same in Outlook, Gmail and Apple Mail. The webfonts load
+// where a client allows (Apple Mail, iOS); everywhere else the stacks fall back
+// to Georgia and Helvetica, which keep the same contrast of serif over sans.
 
-const SANS = "Arial, Helvetica, sans-serif";
-const SERIF = "Georgia, 'Times New Roman', serif";
-const STRONG = "color:#f4f8fc;";
+const SANS = "Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif";
+const SERIF = "'Playfair Display', Georgia, 'Times New Roman', serif";
+const MONO = "'SFMono-Regular', Menlo, Consolas, 'Liberation Mono', 'Courier New', monospace";
+const STRONG = "color:#ffffff; font-weight:600;";
+
+/** The website's palette (aurixa-systems src/index.css, and its pages as drawn). */
+const COLOR = {
+  page: "#0a192f", // --color-marketing-page
+  card: "#041022", // the scheduler's panel
+  panel: "#10243e", // the application form's panel
+  panelLine: "#283b52",
+  recessed: "#030b17", // an input
+  line: "#1d2736", // a divider
+  heading: "#ffffff",
+  text: "#b6c0d4",
+  label: "#9ca3b8",
+  faint: "#6f7d93",
+  gold: "#d7b35f", // eyebrows
+  goldChip: "#c89b3c", // --color-prism-magenta, the site's gold
+  goldLight: "#f5d17a", // --color-prism-gold
+  goldLine: "#816831", // the scheduler button's border
+  blue: "#0b74ad", // the scheduler panel's top line
+  cyan: "#00a8b5", // --color-prism-cyan
+  cyanSoft: "#5edde8",
+} as const;
+
+const FONTS =
+  "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Playfair+Display:ital,wght@0,400;0,500;1,400&display=swap";
 
 type Layout = {
   title: string;
@@ -1033,7 +1066,7 @@ const attr = (value: string) => escapeHtml(value);
 
 const CSS = `
     :root { color-scheme: light; supported-color-schemes: light; }
-    html, body { margin: 0 !important; padding: 0 !important; width: 100% !important; min-width: 100% !important; background-color: transparent; }
+    html, body { margin: 0 !important; padding: 0 !important; width: 100% !important; min-width: 100% !important; background-color: ${COLOR.page}; }
     * { -ms-text-size-adjust: 100%; -webkit-text-size-adjust: 100%; }
     table, td { border-collapse: collapse !important; mso-table-lspace: 0pt !important; mso-table-rspace: 0pt !important; }
     table { border-spacing: 0 !important; }
@@ -1041,110 +1074,119 @@ const CSS = `
     a { text-decoration: none; }
     a[x-apple-data-detectors], .unstyle-auto-detected-links a, .aBn { color: inherit !important; text-decoration: none !important; border-bottom: 0 !important; cursor: default !important; }
     .preheader { display: none !important; visibility: hidden; opacity: 0; color: transparent; height: 0; width: 0; overflow: hidden; mso-hide: all; }
-    @media only screen and (max-width: 680px) {
+    @media only screen and (max-width: 640px) {
       .email-shell { width: 100% !important; max-width: 100% !important; }
-      .outer-pad { padding: 12px 7px !important; }
+      .outer-pad { padding: 0 !important; }
       .mobile-pad { padding-left: 22px !important; padding-right: 22px !important; }
-      .hero-pad { padding-top: 30px !important; padding-bottom: 38px !important; }
+      .hero-pad { padding-top: 26px !important; padding-bottom: 32px !important; }
       .brand-meta { display: none !important; }
-      .brand-logo-cell { text-align: center !important; }
-      .brand-logo { width: 148px !important; max-width: 148px !important; height: auto !important; margin: 0 auto !important; }
+      .brand-logo { width: 190px !important; max-width: 190px !important; height: auto !important; }
       .cta-primary-table, .cta-secondary-table { width: 100% !important; max-width: 100% !important; }
-      .hero-title { font-size: 36px !important; line-height: 42px !important; letter-spacing: -0.5px !important; }
+      .hero-title { font-size: 32px !important; line-height: 38px !important; }
       .hero-subtitle { font-size: 15px !important; line-height: 24px !important; }
       .next-step-index, .next-step-content { display: block !important; width: 100% !important; box-sizing: border-box !important; }
       .next-step-index { padding: 22px 22px 0 22px !important; }
-      .next-step-content { padding: 15px 22px 24px 22px !important; }
-      .meta-column { display: block !important; width: 100% !important; box-sizing: border-box !important; border-right: 0 !important; border-bottom: 1px solid #1b4268 !important; }
+      .next-step-content { padding: 12px 22px 22px 22px !important; }
+      .meta-column { display: block !important; width: 100% !important; box-sizing: border-box !important; border-right: 0 !important; border-bottom: 1px solid ${COLOR.line} !important; }
       .meta-column-last { border-bottom: 0 !important; }
-      .cta-mobile { display: block !important; width: auto !important; min-width: 0 !important; padding: 18px 16px !important; font-size: 14px !important; line-height: 20px !important; }
-      .cta-secondary-mobile { display: block !important; width: auto !important; min-width: 0 !important; padding: 13px 16px !important; font-size: 13px !important; line-height: 19px !important; }
+      .cta-mobile { display: block !important; width: auto !important; min-width: 0 !important; padding: 17px 14px !important; }
+      .cta-secondary-mobile { display: block !important; width: auto !important; min-width: 0 !important; padding: 14px 14px !important; }
       .detail-label, .detail-value { display: block !important; width: 100% !important; box-sizing: border-box !important; text-align: left !important; }
-      .detail-label { padding-bottom: 3px !important; }
+      .detail-label { padding-bottom: 2px !important; }
       .detail-value { padding-top: 0 !important; }
-      .step-column { display: block !important; width: 100% !important; box-sizing: border-box !important; padding-left: 0 !important; padding-right: 0 !important; padding-bottom: 14px !important; }
+      .step-column { display: block !important; width: 100% !important; box-sizing: border-box !important; padding-left: 0 !important; padding-right: 0 !important; padding-bottom: 12px !important; }
       .footer-right { display: none !important; }
     }`;
 
-const spacer = (px: number) => `<div style="height:${px}px; line-height:${px}px;">&nbsp;</div>`;
+const spacer = (px: number) =>
+  `<div style="height:${px}px; line-height:${px}px; font-size:1px;">&nbsp;</div>`;
 const row = (inner: string, style: string, extra = "") =>
-  `<tr><td bgcolor="#061326"${extra} class="mobile-pad" style="${style} background-color:#061326;">${inner}</td></tr>`;
+  `<tr><td bgcolor="${COLOR.card}"${extra} class="mobile-pad" style="${style} background-color:${COLOR.card};">${inner}</td></tr>`;
+
+/** An application reference reads as one, in the website's monospace gold. */
+const isReference = (value: string) => /^AX-[A-Z0-9]{10}$/.test(value.trim());
+const valueStyle = (value: string) =>
+  isReference(value)
+    ? `font-family:${MONO}; font-size:14px; line-height:21px; font-weight:600; letter-spacing:0.6px; color:${COLOR.goldLight};`
+    : `font-family:${SANS}; font-size:14px; line-height:21px; font-weight:500; color:${COLOR.heading};`;
+
+/** A gold monospace label, the website's eyebrow: "STAGE 03 · STRATEGIC REVIEW". */
+const eyebrowText = (text: string, color: string = COLOR.gold, size = 11) =>
+  `<div style="font-family:${MONO}; font-size:${size}px; line-height:${size + 6}px; font-weight:700; letter-spacing:2.4px; text-transform:uppercase; color:${color};">${text}</div>`;
+
+/** A hairline across the panel, with the gold-then-blue tick the website rules end in. */
+const hairline = () =>
+  `<table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0"><tr><td height="1" bgcolor="${COLOR.line}" style="height:1px; background-color:${COLOR.line}; font-size:0; line-height:0;">&nbsp;</td><td width="56" height="1" bgcolor="${COLOR.gold}" style="width:56px; height:1px; background-color:${COLOR.gold}; font-size:0; line-height:0;">&nbsp;</td><td width="28" height="1" bgcolor="${COLOR.blue}" style="width:28px; height:1px; background-color:${COLOR.blue}; font-size:0; line-height:0;">&nbsp;</td></tr></table>`;
 
 function cardBlock(card: NonNullable<Layout["card"]>): string {
   const facts = card.facts
     .map((fact, i) => {
       const last = i === card.facts.length - 1;
       const width = (100 / card.facts.length).toFixed(2);
-      return `<td width="${width}%" valign="top" class="meta-column${last ? " meta-column-last" : ""}" style="width:${width}%; padding:15px 14px;${last ? "" : " border-right:1px solid #1b4268;"}"><div style="font-family:${SANS}; font-size:10px; line-height:14px; font-weight:800; letter-spacing:1.1px; color:#dfb665;">${fact.label}</div><div style="padding-top:5px; font-family:${SANS}; font-size:14px; line-height:20px; font-weight:700; color:#f4f8fc;">${fact.value}</div></td>`;
+      return `<td width="${width}%" valign="top" class="meta-column${last ? " meta-column-last" : ""}" style="width:${width}%; padding:14px 16px;${last ? "" : ` border-right:1px solid ${COLOR.line};`}">${eyebrowText(fact.label, COLOR.label, 10)}<div style="padding-top:6px; ${valueStyle(fact.value)}">${fact.value}</div></td>`;
     })
     .join("");
   return row(
-    `<table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" bgcolor="#0a1e37" style="width:100%; background-color:#0a1e37; border:1px solid #1e4b73; border-radius:14px; overflow:hidden; box-shadow:0 12px 30px rgba(0,0,0,0.18);">
+    `<table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" bgcolor="${COLOR.panel}" style="width:100%; background-color:${COLOR.panel}; border:1px solid ${COLOR.panelLine};">
 <tr>
-<td width="92" valign="top" class="next-step-index" style="width:92px; padding:27px 0 26px 24px;">${
+<td width="76" valign="top" class="next-step-index" style="width:76px; padding:26px 0 24px 26px;">${
       card.index
-        ? `<table role="presentation" width="54" height="54" border="0" cellspacing="0" cellpadding="0" style="width:54px; height:54px;"><tr><td align="center" valign="middle" bgcolor="#051328" style="width:54px; height:54px; background-color:#051328; border:1px solid #28618d; border-radius:50%; font-family:${SERIF}; font-size:21px; line-height:54px; font-weight:700; color:#e4bd6d; box-shadow:0 0 18px rgba(35,184,255,0.13);">${card.index}</td></tr></table>`
+        ? `<div style="font-family:${SERIF}; font-size:34px; line-height:36px; font-style:italic; font-weight:400; color:${COLOR.gold};">${card.index}</div>`
         : "&nbsp;"
     }</td>
-<td valign="top" class="next-step-content" style="padding:26px 24px 25px 14px;">${
-      card.label
-        ? `<div style="font-family:${SANS}; font-size:10px; line-height:15px; font-weight:800; letter-spacing:1.75px; color:#e0b864;">${card.label}</div>${spacer(7)}`
-        : ""
-    }<div style="font-family:${SERIF}; font-size:24px; line-height:31px; font-weight:700; color:#f4f8fc;">${card.title}</div>${
+<td valign="top" class="next-step-content" style="padding:26px 26px 24px 8px;">${
+      card.label ? `${eyebrowText(card.label)}${spacer(9)}` : ""
+    }<div style="font-family:${SERIF}; font-size:23px; line-height:30px; font-weight:400; color:${COLOR.heading};">${card.title}</div>${
       card.text
-        ? `${spacer(9)}<div style="font-family:${SANS}; font-size:14px; line-height:23px; color:#aec3d9;">${card.text}</div>`
+        ? `${spacer(9)}<div style="font-family:${SANS}; font-size:14px; line-height:23px; color:${COLOR.text};">${card.text}</div>`
         : ""
     }</td>
 </tr>${
       card.facts.length
-        ? `<tr><td colspan="2" style="padding:0 22px 22px 22px;"><table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" bgcolor="#07182d" style="width:100%; background-color:#07182d; border:1px solid #1b4268; border-radius:10px; overflow:hidden;"><tr>${facts}</tr></table></td></tr>`
+        ? `<tr><td colspan="2" style="padding:0 20px 20px 20px;"><table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" bgcolor="${COLOR.recessed}" style="width:100%; background-color:${COLOR.recessed}; border:1px solid ${COLOR.line};"><tr>${facts}</tr></table></td></tr>`
         : ""
     }
 </table>`,
-    "padding:29px 42px 0 42px;",
+    "padding:30px 44px 0 44px;",
   );
 }
 
+/** The website's primary call to action: the teal gradient of "Start your free trial". */
 function primaryBlock(primary: NonNullable<Layout["primary"]>): string {
   const href = attr(primary.url);
-  return `<tr><td bgcolor="#061326" align="center" class="mobile-pad" style="padding:34px 42px 12px 42px; background-color:#061326;">
-<table role="presentation" width="520" border="0" cellspacing="0" cellpadding="0" class="cta-primary-table" style="width:520px; max-width:520px;"><tr><td align="center">
-<!--[if mso]><v:roundrect href="${href}" style="height:64px; v-text-anchor:middle; width:500px;" arcsize="18%" strokeweight="2px" strokecolor="#68dcff" fillcolor="#f2c86b"><v:shadow on="t" color="#0b4f75" opacity="28%" offset="0px,4px"/><w:anchorlock/><center style="font-family:${SANS}; font-size:15px; font-weight:800; letter-spacing:0.15px; color:#071426;">${primary.label} &#8594;</center></v:roundrect><![endif]-->
-<!--[if !mso]><!-- --><table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" bgcolor="#68dcff" style="width:100%; background-color:#68dcff; border-radius:14px; box-shadow:0 0 0 4px rgba(35,184,255,0.08), 0 14px 36px rgba(35,184,255,0.26), 0 10px 24px rgba(211,154,47,0.28);"><tr><td align="center" bgcolor="#f2c86b" style="background-color:#f2c86b; border:2px solid #68dcff; border-radius:14px;"><a href="${href}" target="_blank" role="button" aria-label="${attr(primary.plain)}" class="cta-mobile" style="display:block; padding:20px 26px; font-family:${SANS}; font-size:15px; line-height:20px; font-weight:800; letter-spacing:0.15px; color:#071426; text-align:center; text-decoration:none;">${primary.label}&nbsp;&nbsp;&#8594;</a></td></tr></table><!--<![endif]-->
+  return `<tr><td bgcolor="${COLOR.card}" align="center" class="mobile-pad" style="padding:34px 44px 14px 44px; background-color:${COLOR.card};">
+<table role="presentation" width="512" border="0" cellspacing="0" cellpadding="0" class="cta-primary-table" style="width:512px; max-width:512px;"><tr><td align="center">
+<!--[if mso]><v:rect href="${href}" style="height:58px; v-text-anchor:middle; width:512px;" strokeweight="1px" strokecolor="#0e6870" fillcolor="#025966"><w:anchorlock/><center style="font-family:Arial, sans-serif; font-size:13px; font-weight:bold; letter-spacing:2px; color:#ffffff;">${primary.label} &#8250;</center></v:rect><![endif]-->
+<!--[if !mso]><!-- --><table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" bgcolor="#025966" style="width:100%; background-color:#025966; background-image:linear-gradient(100deg,#052939 0%,#025966 55%,#29665c 82%,#6d6332 100%); border:1px solid #0e6870; box-shadow:0 10px 30px rgba(0,168,181,0.16);"><tr><td align="center"><a href="${href}" target="_blank" role="button" aria-label="${attr(primary.plain)}" class="cta-mobile" style="display:block; padding:19px 24px; font-family:${SANS}; font-size:12px; line-height:18px; font-weight:600; letter-spacing:2.6px; text-transform:uppercase; color:#ffffff; text-align:center; text-decoration:none;">${primary.label}&nbsp;&nbsp;&#8250;</a></td></tr></table><!--<![endif]-->
 </td></tr></table></td></tr>`;
 }
 
 function noteBlock(note: NonNullable<Layout["note"]>, afterPrimary: boolean): string {
-  return `<tr><td bgcolor="#061326" align="center" class="mobile-pad" style="padding:${afterPrimary ? 0 : 30}px 42px 32px 42px; background-color:#061326;">${
-    note.tagline
-      ? `<div style="font-family:${SANS}; font-size:11px; line-height:18px; font-weight:700; letter-spacing:0.55px; color:#7bcdf7;">${note.tagline}</div>`
-      : ""
+  return `<tr><td bgcolor="${COLOR.card}" align="center" class="mobile-pad" style="padding:${afterPrimary ? 4 : 30}px 44px 32px 44px; background-color:${COLOR.card}; text-align:center;">${
+    note.tagline ? eyebrowText(note.tagline, COLOR.cyanSoft, 10) : ""
   }${
     note.text
-      ? `<div style="padding-top:6px; font-family:${SANS}; font-size:12px; line-height:19px; color:#819bb6;">${note.text}</div>`
+      ? `<div style="padding-top:8px; font-family:${SANS}; font-size:12px; line-height:19px; color:${COLOR.label};">${note.text}</div>`
       : ""
   }${
     note.fallback
-      ? `<div style="padding-top:9px; font-family:${SANS}; font-size:12px; line-height:19px; color:#819bb6;">${note.fallback.prompt} <a href="${attr(note.fallback.url)}" target="_blank" style="font-weight:800; color:#e3bd6d; text-decoration:underline;">${note.fallback.label}</a></div>`
+      ? `<div style="padding-top:9px; font-family:${SANS}; font-size:12px; line-height:19px; color:${COLOR.label};">${note.fallback.prompt} <a href="${attr(note.fallback.url)}" target="_blank" style="font-weight:600; color:${COLOR.goldLight}; text-decoration:underline;">${note.fallback.label}</a></div>`
       : ""
   }</td></tr>`;
 }
 
 function divider(): string {
-  return row(
-    `<table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0"><tr><td height="1" bgcolor="#173a5d" style="height:1px; background-color:#173a5d; font-size:0; line-height:0;">&nbsp;</td></tr></table>`,
-    "padding:0 42px;",
-  );
+  return row(hairline(), "padding:0 44px;");
 }
 
 function sectionHeading(label: string, title: string, top: number): string {
   return row(
-    `${
-      label
-        ? `<div style="font-family:${SANS}; font-size:10px; line-height:15px; font-weight:800; letter-spacing:1.85px; color:#dfb665;">${label}</div>${spacer(10)}`
+    `${label ? `${eyebrowText(label)}${spacer(10)}` : ""}${
+      title
+        ? `<div style="font-family:${SERIF}; font-size:25px; line-height:32px; font-weight:400; color:${COLOR.heading};">${title}</div>`
         : ""
-    }${title ? `<div style="font-family:${SERIF}; font-size:24px; line-height:31px; font-weight:700; color:#f4f8fc;">${title}</div>` : ""}`,
-    `padding:${top}px 42px 0 42px;`,
+    }`,
+    `padding:${top}px 44px 0 44px;`,
   );
 }
 
@@ -1152,98 +1194,103 @@ function detailsBlock(details: NonNullable<Layout["details"]>): string {
   const rows = details.rows
     .map((entry, i) => {
       const last = i === details.rows.length - 1;
-      const border = last ? "" : " border-bottom:1px solid #1b4268;";
-      return `<tr><td width="39%" class="detail-label" style="width:39%; padding:17px 18px;${border} font-family:${SANS}; font-size:11px; line-height:18px; font-weight:800; letter-spacing:0.75px; color:#8ea9c4;">${entry.label}</td><td width="61%" align="right" class="detail-value" style="width:61%; padding:17px 18px;${border} font-family:${SANS}; font-size:14px; line-height:21px; font-weight:700; color:#f4f8fc; word-break:break-word;">${entry.value}</td></tr>`;
+      const border = last ? "" : ` border-bottom:1px solid ${COLOR.line};`;
+      return `<tr><td width="40%" class="detail-label" style="width:40%; padding:16px 18px;${border}">${eyebrowText(entry.label, COLOR.label, 10)}</td><td width="60%" align="right" class="detail-value" style="width:60%; padding:16px 18px;${border} ${valueStyle(entry.value)} word-break:break-word;">${entry.value}</td></tr>`;
     })
     .join("");
   return [
-    sectionHeading(details.label, details.title, 31),
+    sectionHeading(details.label, details.title, 32),
     row(
-      `<table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" bgcolor="#091c34" style="width:100%; background-color:#091c34; border:1px solid #1b4268; border-radius:12px; overflow:hidden;">${rows}</table>`,
-      "padding:18px 42px 0 42px;",
+      `<table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" bgcolor="${COLOR.recessed}" style="width:100%; background-color:${COLOR.recessed}; border:1px solid ${COLOR.panelLine};">${rows}</table>`,
+      "padding:18px 44px 0 44px;",
     ),
     details.note
       ? row(
-          `<div style="font-family:${SANS}; font-size:12px; line-height:19px; color:#839db7;">${details.note.prompt}${
+          `<div style="font-family:${SANS}; font-size:12px; line-height:19px; color:${COLOR.label};">${details.note.prompt}${
             details.note.link
-              ? ` <a href="${attr(details.note.link.url)}" target="_blank" style="font-weight:800; color:#e3bd6d; text-decoration:underline;">${details.note.link.label}</a>`
+              ? ` <a href="${attr(details.note.link.url)}" target="_blank" style="font-weight:600; color:${COLOR.goldLight}; text-decoration:underline;">${details.note.link.label}</a>`
               : ""
           }</div>`,
-          "padding:15px 42px 0 42px;",
+          "padding:14px 44px 0 44px;",
         )
       : "",
   ].join("\n");
 }
 
 function stepsBlock(steps: NonNullable<Layout["steps"]>): string {
-  const accents = ["#28bfff", "#dfb665", "#28bfff", "#dfb665"];
+  const accents = [COLOR.cyan, COLOR.gold, COLOR.cyan, COLOR.gold];
   const width = (100 / steps.items.length).toFixed(2);
   const columns = steps.items
     .map((step, i) => {
       const pad =
         i === 0
-          ? "padding-right:8px;"
+          ? "padding-right:7px;"
           : i === steps.items.length - 1
-            ? "padding-left:8px;"
+            ? "padding-left:7px;"
             : "padding-left:4px; padding-right:4px;";
-      return `<td width="${width}%" valign="top" class="step-column" style="width:${width}%; ${pad}"><table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" bgcolor="#091c34" style="width:100%; background-color:#091c34; border:1px solid #1a4167; border-radius:11px;"><tr><td style="padding:18px 16px 19px 16px;"><div style="font-family:${SERIF}; font-size:18px; line-height:23px; font-weight:700; color:#e0b864;">${String(i + 1).padStart(2, "0")}</div><div style="padding-top:8px; font-family:${SANS}; font-size:13px; line-height:20px; font-weight:800; color:#f4f8fc;">${step.title}</div>${
+      return `<td width="${width}%" valign="top" class="step-column" style="width:${width}%; ${pad}"><table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" bgcolor="${COLOR.panel}" style="width:100%; background-color:${COLOR.panel}; border:1px solid ${COLOR.panelLine};"><tr><td height="2" bgcolor="${accents[i]}" style="height:2px; background-color:${accents[i]}; font-size:0; line-height:0;">&nbsp;</td></tr><tr><td style="padding:16px 16px 18px 16px;"><div style="font-family:${MONO}; font-size:11px; line-height:16px; font-weight:700; letter-spacing:2px; color:${COLOR.gold};">${String(i + 1).padStart(2, "0")}</div><div style="padding-top:8px; font-family:${SERIF}; font-size:17px; line-height:22px; font-weight:400; color:${COLOR.heading};">${step.title}</div>${
         step.text
-          ? `<div style="padding-top:5px; font-family:${SANS}; font-size:12px; line-height:19px; color:#96adc4;">${step.text}</div>`
+          ? `<div style="padding-top:6px; font-family:${SANS}; font-size:12px; line-height:19px; color:${COLOR.text};">${step.text}</div>`
           : ""
-      }<div style="padding-top:15px;"><table role="presentation" width="36" border="0" cellspacing="0" cellpadding="0"><tr><td height="2" bgcolor="${accents[i]}" style="width:36px; height:2px; background-color:${accents[i]}; font-size:0; line-height:0;">&nbsp;</td></tr></table></div></td></tr></table></td>`;
+      }</td></tr></table></td>`;
     })
     .join("");
   return [
-    sectionHeading(steps.label, steps.title, 37),
+    sectionHeading(steps.label, steps.title, 36),
     row(
       `<table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0"><tr>${columns}</tr></table>`,
-      "padding:20px 42px 0 42px;",
+      "padding:20px 44px 0 44px;",
     ),
     steps.closing
       ? row(
-          `<div style="font-family:${SANS}; font-size:14px; line-height:24px; color:#aec3d8;">${steps.closing}</div>`,
-          "padding:25px 42px 0 42px;",
+          `<div style="font-family:${SANS}; font-size:14px; line-height:24px; color:${COLOR.text};">${steps.closing}</div>`,
+          "padding:24px 44px 0 44px;",
         )
       : "",
   ].join("\n");
 }
 
+/** The scheduler's button: dark, gold-bordered, a gold monospace label. */
 function secondaryBlock(secondary: NonNullable<Layout["secondary"]>): string {
   const href = attr(secondary.url);
   return row(
-    `<table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" bgcolor="#030b18" style="width:100%; background-color:#030b18; border:1px solid #173f65; border-left:3px solid #28bfff; border-radius:12px; box-shadow:0 10px 26px rgba(0,0,0,0.16);"><tr><td align="center" style="padding:20px 20px 21px 20px;">${
+    `<table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" bgcolor="${COLOR.panel}" style="width:100%; background-color:${COLOR.panel}; border:1px solid ${COLOR.panelLine};"><tr><td align="center" style="padding:22px 22px 24px 22px;">${
       secondary.prompt
-        ? `<div style="font-family:${SANS}; font-size:12px; line-height:19px; color:#a9bed3; text-align:center;">${secondary.prompt}</div>${spacer(14)}`
+        ? `<div style="font-family:${SANS}; font-size:13px; line-height:20px; color:${COLOR.text}; text-align:center;">${secondary.prompt}</div>${spacer(14)}`
         : ""
-    }<table role="presentation" width="340" border="0" cellspacing="0" cellpadding="0" class="cta-secondary-table" style="width:340px; max-width:340px;"><tr><td align="center">
-<!--[if mso]><v:roundrect href="${href}" style="height:48px; v-text-anchor:middle; width:330px;" arcsize="18%" strokeweight="1.5px" strokecolor="#28bfff" fillcolor="#07182d"><w:anchorlock/><center style="font-family:${SANS}; font-size:13px; font-weight:800; letter-spacing:0.2px; color:#f2c86b;">${secondary.label} &#8594;</center></v:roundrect><![endif]-->
-<!--[if !mso]><!-- --><table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" bgcolor="#07182d" style="width:100%; background-color:#07182d; border:1.5px solid #28bfff; border-radius:10px; box-shadow:0 8px 24px rgba(35,184,255,0.14);"><tr><td align="center"><a href="${href}" target="_blank" role="button" aria-label="${attr(secondary.plain)}" class="cta-secondary-mobile" style="display:block; padding:14px 18px; font-family:${SANS}; font-size:13px; line-height:19px; font-weight:800; letter-spacing:0.2px; color:#f2c86b; text-align:center; text-decoration:none;">${secondary.label}&nbsp;&nbsp;&#8594;</a></td></tr></table><!--<![endif]-->
+    }<table role="presentation" width="360" border="0" cellspacing="0" cellpadding="0" class="cta-secondary-table" style="width:360px; max-width:360px;"><tr><td align="center">
+<!--[if mso]><v:rect href="${href}" style="height:46px; v-text-anchor:middle; width:360px;" strokeweight="1px" strokecolor="${COLOR.goldLine}" fillcolor="#171d21"><w:anchorlock/><center style="font-family:'Courier New', monospace; font-size:12px; font-weight:bold; letter-spacing:2px; color:${COLOR.goldLight};">${secondary.label} &#8250;</center></v:rect><![endif]-->
+<!--[if !mso]><!-- --><table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" bgcolor="#171d21" style="width:100%; background-color:#171d21; border:1px solid ${COLOR.goldLine};"><tr><td align="center"><a href="${href}" target="_blank" role="button" aria-label="${attr(secondary.plain)}" class="cta-secondary-mobile" style="display:block; padding:14px 18px; font-family:${MONO}; font-size:11px; line-height:17px; font-weight:700; letter-spacing:2.2px; text-transform:uppercase; color:${COLOR.goldLight}; text-align:center; text-decoration:none;">${secondary.label}&nbsp;&nbsp;&#8250;</a></td></tr></table><!--<![endif]-->
 </td></tr></table></td></tr></table>`,
-    "padding:30px 42px 39px 42px;",
+    "padding:32px 44px 40px 44px;",
   );
 }
+
+/** The lockup, as an email can draw it (aurixa-systems public/brand/email). */
+export const EMAIL_LOCKUP_URL =
+  "https://www.aurixasystems.com.au/brand/email/aurixa-lockup-480.png";
 
 function brandedLayout(l: Layout): string {
   const body: string[] = [];
   body.push(
     row(
-      `${l.greeting ? `<div style="font-family:${SANS}; font-size:18px; line-height:29px; font-weight:700; color:#f4f8fc;">${l.greeting}</div>` : ""}${l.paragraphs
+      `${l.greeting ? `<div style="font-family:${SERIF}; font-size:21px; line-height:29px; font-weight:400; color:${COLOR.heading};">${l.greeting}</div>` : ""}${l.paragraphs
         .map(
           (para, i) =>
-            `${i === 0 ? (l.greeting ? spacer(18) : "") : spacer(14)}<div style="font-family:${SANS}; font-size:15px; line-height:25px; color:#b9cce0;">${para}</div>`,
+            `${i === 0 ? (l.greeting ? spacer(16) : "") : spacer(14)}<div style="font-family:${SANS}; font-size:15px; line-height:26px; color:${COLOR.text};">${para}</div>`,
         )
         .join("")}`,
-      "padding:39px 42px 0 42px;",
+      "padding:32px 44px 0 44px;",
     ),
   );
   if (l.card) body.push(cardBlock(l.card));
   if (l.primary) body.push(primaryBlock(l.primary));
   if (l.note) body.push(noteBlock(l.note, Boolean(l.primary)));
-  if (!l.note) body.push(row(spacer(32), "padding:0 42px;"));
+  if (!l.note) body.push(row(spacer(32), "padding:0 44px;"));
   if (l.details || l.steps) body.push(divider());
   if (l.details) body.push(detailsBlock(l.details));
   if (l.steps) body.push(stepsBlock(l.steps));
-  body.push(l.secondary ? secondaryBlock(l.secondary) : row(spacer(39), "padding:0 42px;"));
+  body.push(l.secondary ? secondaryBlock(l.secondary) : row(spacer(40), "padding:0 44px;"));
 
   return `<!doctype html>
 <html lang="en" xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word">
@@ -1256,42 +1303,39 @@ function brandedLayout(l: Layout): string {
 <meta name="supported-color-schemes" content="light">
 <title>${l.title}</title>
 <!--[if mso]><xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch><o:AllowPNG/></o:OfficeDocumentSettings></xml><![endif]-->
+<!--[if !mso]><!--><link rel="stylesheet" href="${FONTS}"><!--<![endif]-->
 <style>${CSS}
 </style>
-<!--[if mso]><style>body, table, td, div, p, a, span { font-family: ${SANS} !important; }</style><![endif]-->
+<!--[if mso]><style>body, table, td, div, p, a, span { font-family: Arial, sans-serif !important; }</style><![endif]-->
 </head>
-<body style="margin:0; padding:0; background-color:transparent;">
+<body style="margin:0; padding:0; background-color:${COLOR.page};">
 <div class="preheader">${l.preheader}</div>
 <div style="display:none; max-height:0; overflow:hidden; mso-hide:all;">${"&nbsp;&zwnj;".repeat(13)}</div>
-<table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" style="width:100%; background-color:transparent;"><tr><td align="center" class="outer-pad" style="padding:38px 14px; background-color:transparent;">
-<table role="presentation" width="640" border="0" cellspacing="0" cellpadding="0" class="email-shell" bgcolor="#061326" style="width:640px; max-width:640px; background-color:#061326; border:1px solid #173a5d; border-radius:20px; overflow:hidden; box-shadow:0 24px 70px rgba(2,8,18,0.34), 0 0 0 1px rgba(35,184,255,0.05);">
-<tr><td style="padding:0; font-size:0; line-height:0;"><table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0"><tr><td width="34%" height="5" bgcolor="#0b74ad" style="width:34%; height:5px; background-color:#0b74ad; font-size:0; line-height:0;">&nbsp;</td><td width="32%" height="5" bgcolor="#dfb665" style="width:32%; height:5px; background-color:#dfb665; font-size:0; line-height:0;">&nbsp;</td><td width="34%" height="5" bgcolor="#0b74ad" style="width:34%; height:5px; background-color:#0b74ad; font-size:0; line-height:0;">&nbsp;</td></tr></table></td></tr>
-<tr><td bgcolor="#030b18" class="mobile-pad hero-pad" style="padding:36px 42px 50px 42px; background-color:#030b18; background-image:radial-gradient(circle at 84% 8%, rgba(35,184,255,0.18) 0%, rgba(35,184,255,0) 34%), linear-gradient(135deg,#030b18 0%,#07182e 62%,#092440 100%);">
-<table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0"><tr><td valign="middle" class="brand-logo-cell"><img src="https://www.aurixasystems.com.au/brand/aurixa-systems-logo-source.jpg" width="180" height="180" class="brand-logo" alt="Aurixa Systems" style="display:block; width:180px; max-width:180px; height:auto; margin:0; border:0px solid #dcb566; border-radius:18px; background-color:#030b18; box-shadow:0 0 0 4px rgba(35,184,255,0.06), 0 0 34px rgba(35,184,255,0.24);"></td>${
+<table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" bgcolor="${COLOR.page}" style="width:100%; background-color:${COLOR.page};"><tr><td align="center" class="outer-pad" style="padding:36px 14px; background-color:${COLOR.page};">
+<table role="presentation" width="600" border="0" cellspacing="0" cellpadding="0" class="email-shell" bgcolor="${COLOR.card}" style="width:600px; max-width:600px; background-color:${COLOR.card}; border:1px solid ${COLOR.panelLine};">
+<tr><td style="padding:0; font-size:0; line-height:0;"><table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0"><tr><td width="34%" height="2" bgcolor="${COLOR.blue}" style="width:34%; height:2px; background-color:${COLOR.blue}; font-size:0; line-height:0;">&nbsp;</td><td width="32%" height="2" bgcolor="#dfb665" style="width:32%; height:2px; background-color:#dfb665; font-size:0; line-height:0;">&nbsp;</td><td width="34%" height="2" bgcolor="${COLOR.blue}" style="width:34%; height:2px; background-color:${COLOR.blue}; font-size:0; line-height:0;">&nbsp;</td></tr></table></td></tr>
+<tr><td bgcolor="${COLOR.card}" class="mobile-pad hero-pad" style="padding:30px 44px 40px 44px; background-color:${COLOR.card}; background-image:radial-gradient(ellipse at 88% 0%, rgba(0,168,181,0.13) 0%, rgba(0,168,181,0) 46%), linear-gradient(180deg,#071a33 0%,${COLOR.card} 100%);">
+<table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0"><tr><td valign="middle"><img src="${EMAIL_LOCKUP_URL}" width="220" height="70" class="brand-logo" alt="Aurixa Systems" style="display:block; width:220px; max-width:220px; height:auto; border:0;"></td>${
     l.badge
-      ? `<td align="right" valign="middle" class="brand-meta"><table role="presentation" border="0" cellspacing="0" cellpadding="0"><tr><td style="padding:8px 12px; border:1px solid #2b5f8d; border-radius:999px; background-color:#07162a; font-family:${SANS}; font-size:10px; line-height:14px; font-weight:800; letter-spacing:1.25px; color:#f1cf82; box-shadow:0 0 16px rgba(35,184,255,0.09);">${l.badge}</td></tr></table></td>`
+      ? `<td align="right" valign="middle" class="brand-meta"><table role="presentation" border="0" cellspacing="0" cellpadding="0"><tr><td style="padding:6px 10px; border:1px solid rgba(200,155,60,0.4); background-color:rgba(200,155,60,0.1); font-family:${MONO}; font-size:10px; line-height:14px; font-weight:700; letter-spacing:1.8px; text-transform:uppercase; color:${COLOR.goldChip};">${l.badge}</td></tr></table></td>`
       : ""
   }</tr></table>
-${spacer(28)}${
-    l.eyebrow
-      ? `<table role="presentation" border="0" cellspacing="0" cellpadding="0"><tr><td width="8" height="8" bgcolor="#28bfff" style="width:8px; height:8px; background-color:#28bfff; border-radius:50%; box-shadow:0 0 12px rgba(40,191,255,0.75); font-size:0; line-height:0;">&nbsp;</td><td width="11" style="width:11px; font-size:0; line-height:0;">&nbsp;</td><td style="font-family:${SANS}; font-size:11px; line-height:16px; font-weight:800; letter-spacing:2.15px; color:#e0ba69;">${l.eyebrow}</td></tr></table>${spacer(13)}`
-      : ""
-  }<div class="hero-title" style="font-family:${SERIF}; font-size:43px; line-height:50px; font-weight:700; letter-spacing:-0.8px; color:#f6f9fd;">${l.heading}</div>${
+${spacer(34)}${l.eyebrow ? `${eyebrowText(l.eyebrow)}${spacer(14)}` : ""}<div class="hero-title" style="font-family:${SERIF}; font-size:40px; line-height:46px; font-weight:400; letter-spacing:-0.6px; color:${COLOR.heading};">${l.heading}</div>${
     l.intro
-      ? `${spacer(15)}<div class="hero-subtitle" style="max-width:510px; font-family:${SANS}; font-size:16px; line-height:26px; color:#b8cbe0;">${l.intro}</div>`
+      ? `${spacer(16)}<div class="hero-subtitle" style="max-width:500px; font-family:${SANS}; font-size:16px; line-height:27px; color:${COLOR.text};">${l.intro}</div>`
       : ""
-  }${spacer(30)}<table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0"><tr><td height="1" bgcolor="#173d61" style="height:1px; background-color:#173d61; font-size:0; line-height:0;">&nbsp;</td><td width="78" height="1" bgcolor="#dfb665" style="width:78px; height:1px; background-color:#dfb665; font-size:0; line-height:0;">&nbsp;</td><td width="48" height="1" bgcolor="#28bfff" style="width:48px; height:1px; background-color:#28bfff; font-size:0; line-height:0;">&nbsp;</td></tr></table>
+  }${spacer(30)}${hairline()}
 </td></tr>
 ${body.join("\n")}
-<tr><td bgcolor="#030a15" class="mobile-pad" style="padding:25px 42px; background-color:#030a15; border-top:1px solid #214a70;"><table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0"><tr><td valign="middle"><div style="font-family:${SANS}; font-size:11px; line-height:18px; color:#8fa8c1;"><strong style="font-size:12px; letter-spacing:0.2px; color:#f2d28d;">Aurixa Systems</strong>${l.footer.tagline ? `<br>${l.footer.tagline}` : ""}</div></td>${
+<tr><td bgcolor="${COLOR.recessed}" class="mobile-pad" style="padding:24px 44px; background-color:${COLOR.recessed}; border-top:1px solid ${COLOR.line};"><table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0"><tr><td valign="middle"><div style="font-family:${SERIF}; font-size:15px; line-height:20px; font-weight:400; color:${COLOR.heading};">Aurixa Systems</div>${l.footer.tagline ? `<div style="padding-top:3px; font-family:${SANS}; font-size:12px; line-height:18px; color:${COLOR.label};">${l.footer.tagline}</div>` : ""}</td>${
     l.footer.badge
-      ? `<td align="right" valign="middle" class="footer-right"><div style="font-family:${SANS}; font-size:9px; line-height:14px; font-weight:800; letter-spacing:1.35px; color:#5fbfec;">${l.footer.badge}</div></td>`
+      ? `<td align="right" valign="middle" class="footer-right" style="white-space:nowrap;">${eyebrowText(l.footer.badge, COLOR.cyanSoft, 9)}</td>`
       : ""
   }</tr></table></td></tr>
 </table>
 ${
   l.footer.compliance
-    ? `<table role="presentation" width="640" border="0" cellspacing="0" cellpadding="0" class="email-shell" style="width:640px; max-width:640px;"><tr><td align="center" style="padding:18px 24px 0 24px; font-family:${SANS}; font-size:10px; line-height:17px; color:#617e9a;">${l.footer.compliance}</td></tr></table>`
+    ? `<table role="presentation" width="600" border="0" cellspacing="0" cellpadding="0" class="email-shell" style="width:600px; max-width:600px;"><tr><td align="center" class="mobile-pad" style="padding:18px 24px 0 24px; font-family:${SANS}; font-size:11px; line-height:17px; color:${COLOR.faint};">${l.footer.compliance}</td></tr></table>`
     : ""
 }
 </td></tr></table>

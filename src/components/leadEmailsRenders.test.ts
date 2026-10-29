@@ -60,6 +60,7 @@ vi.mock("@/server/lead-emails.functions", () => {
     saveLeadEmailTemplateFn: fn,
     sendLeadEmailTestFn: fn,
     setLeadEmailSenderFn: fn,
+    setLeadEmailTeamAlertsFn: fn,
   };
 });
 vi.mock("@/components/email/tenant-select", async () => {
@@ -106,6 +107,7 @@ const overview = (over: Record<string, unknown> = {}) => ({
   error: null,
   settings: {
     senders: { 1: "make", 2: "make", 3: "make" },
+    teamAlerts: { recipients: null, stages: null },
     tenantId: null,
     fromMailbox: "trials@aurixasystems.com.au",
     fromName: "Aurixa Systems",
@@ -124,6 +126,14 @@ const overview = (over: Record<string, unknown> = {}) => ({
   envMailbox: "hello@aurixasystems.com.au",
   applicantMode: "auto",
   applicantStages: [1, 2, 3],
+  teamAlerts: {
+    recipients: ["trials@aurixasystems.com.au"],
+    source: "mailbox_fallback",
+    stages: [1, 2, 3],
+    dropped: [],
+    env: { recipients: [], stages: [1, 2, 3] },
+    limit: 25,
+  },
   recent: [],
   ...over,
 });
@@ -181,6 +191,67 @@ describe("Email → Lead emails", () => {
     expect(html).toContain("Send Stage 2 Invite");
     expect(html).toContain("Applicant already reached Stage 2");
     expect(html).toContain("The lead is Disqualified on the Leads page.");
+  });
+
+  it("says only the sending mailbox hears about a lead while no team list is set", () => {
+    const html = show(overview());
+    expect(html).toContain("team alerts");
+    expect(html).toContain("goes to trials@aurixasystems.com.au only");
+    expect(html).toContain("only the sending mailbox (trials@aurixasystems.com.au) is told");
+    expect(html).toContain("Save team alerts");
+    for (const s of LEAD_STAGES) expect(html).toContain(`id="lead-team-alert-${s}"`);
+  });
+
+  it("shows the saved list and the stages it is on for", () => {
+    const team = ["admin@aurixasystems.com.au", "rugesh@aurixasystems.com.au"];
+    const html = show(
+      overview({
+        settings: { ...overview().settings, teamAlerts: { recipients: team, stages: [1, 3] } },
+        teamAlerts: {
+          recipients: team,
+          source: "configured",
+          stages: [1, 3],
+          dropped: [],
+          env: { recipients: [], stages: [1, 2, 3] },
+          limit: 25,
+        },
+      }),
+    );
+    expect(html).toContain("goes to 2 people");
+    expect(html).toContain("admin@aurixasystems.com.au\nrugesh@aurixasystems.com.au");
+    const stageSwitch = (s: number) =>
+      new RegExp(`<button[^>]*id="lead-team-alert-${s}"[^>]*>`).exec(html)?.[0] ?? "";
+    expect(stageSwitch(1)).toContain('aria-checked="true"');
+    expect(stageSwitch(2)).toContain('aria-checked="false"');
+    expect(stageSwitch(3)).toContain('aria-checked="true"');
+    expect(html).not.toContain("only the sending mailbox");
+  });
+
+  it("names the deployment's list while the console has none, and what it left off", () => {
+    const html = show(
+      overview({
+        teamAlerts: {
+          recipients: ["a@x.com"],
+          source: "configured",
+          stages: [1, 2, 3],
+          dropped: [
+            { value: "Rugesh Naidu", reason: "not an address this deployment can send to" },
+          ],
+          env: { recipients: ["a@x.com"], stages: [1, 2, 3] },
+          limit: 25,
+        },
+      }),
+    );
+    expect(html).toContain("LEAD_STAGE_INTERNAL_RECIPIENTS</code> decides");
+    expect(html).toContain("&quot;Rugesh Naidu&quot; (not an address this deployment can send to)");
+  });
+
+  it("does not offer to save the team alerts to somebody who is not an administrator", () => {
+    h.isAdmin = false;
+    const html = show(overview());
+    expect(html).toContain("team alerts");
+    expect(html).not.toContain("Save team alerts");
+    expect(/<textarea[^>]*id="lead-team-alerts"[^>]*>/.exec(html)?.[0]).toContain("disabled");
   });
 
   it("offers the hand-back once Mission Control sends a stage", () => {

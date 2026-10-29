@@ -91,7 +91,13 @@ import {
   saveLeadEmailTemplateFn,
   sendLeadEmailTestFn,
   setLeadEmailSenderFn,
+  setLeadEmailTeamAlertsFn,
 } from "@/server/lead-emails.functions";
+import {
+  addressList,
+  REPEATED_ADDRESS,
+  resolveInternalRecipients,
+} from "@/lib/email/recipientList.pure";
 
 export const Route = createFileRoute("/email/lead-emails")({
   errorComponent: RouteError,
@@ -225,6 +231,14 @@ function LeadEmailsPage() {
 
       <IdentityPanel
         key={data.settings?.updatedAt ?? "unsaved"}
+        overview={data}
+        canEdit={canEdit}
+      />
+
+      <TeamAlertsPanel
+        // Re-read only when the saved alerts change, so saving the identity
+        // above does not discard a list being typed here.
+        key={JSON.stringify(data.settings?.teamAlerts ?? null)}
         overview={data}
         canEdit={canEdit}
       />
@@ -414,10 +428,9 @@ function IdentityPanel({ overview, canEdit }: { overview: Overview; canEdit: boo
           <p className="label-mono">sent as</p>
           <p className="mt-1 text-sm text-muted-foreground">
             The tenant and mailbox every applicant email sends from, for all three stages, and where
-            a reply goes. The team's own notification sends from it too and, while no{" "}
-            <code>LEAD_STAGE_INTERNAL_RECIPIENTS</code> list is set, goes to it. A blank mailbox is
-            the tenant's default — for the deployment's own tenant,{" "}
-            {overview.envMailbox ? <code>{overview.envMailbox}</code> : "none is set"}.
+            a reply goes. The team's own alert sends from it too and, while no team alert list is
+            set below, goes to it. A blank mailbox is the tenant's default — for the deployment's
+            own tenant, {overview.envMailbox ? <code>{overview.envMailbox}</code> : "none is set"}.
           </p>
         </div>
         {identity &&
@@ -489,6 +502,218 @@ function IdentityPanel({ overview, canEdit }: { overview: Overview; canEdit: boo
         <div className="flex justify-end">
           <Button onClick={() => save.mutate()} disabled={!dirty || save.isPending}>
             <Save className="mr-2 h-4 w-4" /> Save sending identity
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Who hears about a lead ──────────────────────────────────────────────────
+
+/** When each stage's team alert goes, in the words of what just happened. */
+const ALERT_MOMENT: Record<LeadStage, string> = {
+  1: "an application arrives",
+  2: "an applicant completes the questionnaire",
+  3: "an applicant books their strategic review",
+};
+
+const sortedStages = (stages: readonly LeadStage[]) => [...stages].sort().join(",");
+
+function TeamAlertsPanel({ overview, canEdit }: { overview: Overview; canEdit: boolean }) {
+  const qc = useQueryClient();
+  const confirm = useConfirm();
+  const alerts = overview.teamAlerts;
+  const saved = overview.settings?.teamAlerts ?? { recipients: null, stages: null };
+  const savedList = (saved.recipients ?? []).join("\n");
+  // The stages in force: the console's, else the deployment's.
+  const savedStages = (saved.stages ?? alerts.env.stages) as LeadStage[];
+  const [list, setList] = useState(savedList);
+  const [stages, setStages] = useState<LeadStage[]>(savedStages);
+
+  // Read the way the sender reads it, so what is refused here is exactly what
+  // the save would refuse.
+  const reading = useMemo(() => resolveInternalRecipients(addressList(list), null), [list]);
+  const refused = reading.dropped.filter((d) => d.reason !== REPEATED_ADDRESS);
+  const repeated = reading.dropped.length - refused.length;
+  const count = reading.recipients.length;
+  const over = count > alerts.limit;
+  const dirty = list.trim() !== savedList || sortedStages(stages) !== sortedStages(savedStages);
+
+  const save = useMutation({
+    mutationFn: () => setLeadEmailTeamAlertsFn({ data: { recipients: addressList(list), stages } }),
+    onSuccess: (result) => {
+      if (!result.ok) {
+        toast.error("The team alerts were not saved", { description: result.error });
+        return;
+      }
+      const n = result.recipients.length;
+      toast.success(
+        n ? `Team alerts go to ${n} ${n === 1 ? "person" : "people"}` : "Team alert list cleared",
+      );
+      void qc.invalidateQueries({ queryKey: QUERY_KEY });
+    },
+    onError: (error: Error) => toast.error(error.message),
+  });
+
+  const submit = async () => {
+    if (stages.length === 0) {
+      const ok = await confirm({
+        title: "Switch every team alert off?",
+        description:
+          "With no stage chosen, nobody on the team is emailed about a lead at any stage. The applicant's own emails are not affected.",
+        confirmText: "Switch them off",
+        destructive: true,
+      });
+      if (!ok) return;
+    } else if (count === 0 && saved.recipients) {
+      const ok = await confirm({
+        title: "Clear the team alert list?",
+        description:
+          alerts.env.recipients.length > 0
+            ? `The deployment's own list (LEAD_STAGE_INTERNAL_RECIPIENTS: ${alerts.env.recipients.join(", ")}) is told instead.`
+            : "Only the sending mailbox is told about a lead until a list is saved here again.",
+        confirmText: "Clear the list",
+        destructive: true,
+      });
+      if (!ok) return;
+    }
+    save.mutate();
+  };
+
+  const inForce =
+    alerts.source === "configured"
+      ? {
+          tone: "text-success",
+          label: `goes to ${alerts.recipients.length} ${alerts.recipients.length === 1 ? "person" : "people"}`,
+        }
+      : alerts.source === "mailbox_fallback"
+        ? { tone: "text-warning", label: `goes to ${alerts.recipients[0]} only` }
+        : { tone: "text-destructive", label: "goes to nobody" };
+
+  return (
+    <div
+      className={cn(
+        "glass spine space-y-4 p-5",
+        alerts.source === "configured" && alerts.stages.length
+          ? "spine-ok"
+          : alerts.source === "none" || alerts.stages.length === 0
+            ? "spine-bad"
+            : "spine-warn",
+      )}
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="max-w-3xl">
+          <p className="label-mono">team alerts</p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Who on the team is emailed when a lead moves — separate from the applicant's email, and
+            sent from the mailbox above. Every address is read the way the sender reads it, and a
+            list with one address Mission Control cannot send to is not saved: Microsoft Graph
+            refuses a whole message for one bad recipient, so one typo would silence the alert for
+            everybody on it.
+          </p>
+        </div>
+        <Badge variant="outline" className={cn("font-mono text-[10px]", inForce.tone)}>
+          {alerts.stages.length ? inForce.label : "switched off"}
+        </Badge>
+      </div>
+
+      {saved.recipients === null && (
+        <p className="text-sm text-muted-foreground">
+          {alerts.env.recipients.length > 0 ? (
+            <>
+              No list is saved here, so the deployment's <code>LEAD_STAGE_INTERNAL_RECIPIENTS</code>{" "}
+              decides: {alerts.env.recipients.join(", ")}. A list saved here replaces it.
+            </>
+          ) : alerts.source === "mailbox_fallback" ? (
+            <>
+              No list is set, so only the sending mailbox ({alerts.recipients[0]}) is told about a
+              lead.
+            </>
+          ) : (
+            <>No list is set and there is no sending mailbox to fall back on, so nobody is told.</>
+          )}
+        </p>
+      )}
+      {saved.recipients === null && alerts.dropped.length > 0 && (
+        <p className="text-sm text-destructive">
+          Left off the deployment's list:{" "}
+          {alerts.dropped.map((d) => `"${d.value}" (${d.reason})`).join("; ")}.
+        </p>
+      )}
+
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,22rem)]">
+        <div className="space-y-2">
+          <Label htmlFor="lead-team-alerts">Recipients</Label>
+          <Textarea
+            id="lead-team-alerts"
+            value={list}
+            rows={6}
+            disabled={!canEdit}
+            spellCheck={false}
+            autoComplete="off"
+            className="font-mono text-xs"
+            onChange={(event) => setList(event.target.value)}
+            placeholder={"admin@aurixasystems.com.au\nrugesh@aurixasystems.com.au"}
+          />
+          <p className="font-mono text-[10px] text-muted-foreground">
+            One per line, or separated by commas. {count} {count === 1 ? "address" : "addresses"}
+            {repeated > 0 ? ` · ${repeated} repeated, sent once` : ""} · at most {alerts.limit}.
+          </p>
+          {refused.length > 0 && (
+            <p className="text-sm text-destructive">
+              Not an address Mission Control can send to:{" "}
+              {refused.map((d) => `"${d.value}"`).join(", ")}.
+            </p>
+          )}
+          {over && (
+            <p className="text-sm text-destructive">
+              At most {alerts.limit} people can receive the team alerts.
+            </p>
+          )}
+        </div>
+        <fieldset className="space-y-3">
+          <legend className="text-sm font-medium">Send an alert when</legend>
+          {LEAD_STAGES.map((s) => (
+            <div key={s} className="flex items-start justify-between gap-3">
+              <Label htmlFor={`lead-team-alert-${s}`} className="font-normal leading-snug">
+                <span className="label-mono">stage {s}</span>
+                <span className="mt-0.5 block text-sm text-muted-foreground">
+                  {ALERT_MOMENT[s]} ({STAGE_NAMES[s]})
+                </span>
+              </Label>
+              <Switch
+                id={`lead-team-alert-${s}`}
+                checked={stages.includes(s)}
+                disabled={!canEdit}
+                onCheckedChange={(on) =>
+                  setStages((current) =>
+                    on ? [...new Set([...current, s])] : current.filter((x) => x !== s),
+                  )
+                }
+              />
+            </div>
+          ))}
+          <p className="font-mono text-[10px] text-muted-foreground">
+            A lead that reaches a stage while it is off is not announced when it is switched back
+            on.
+          </p>
+          {saved.stages === null && (
+            <p className="font-mono text-[10px] text-muted-foreground">
+              The deployment's choice until saved here
+              {alerts.env.stages.length < 3 ? " (LEAD_STAGE_INTERNAL_STAGES)" : ""}.
+            </p>
+          )}
+        </fieldset>
+      </div>
+
+      {canEdit && (
+        <div className="flex justify-end">
+          <Button
+            onClick={() => void submit()}
+            disabled={!dirty || save.isPending || refused.length > 0 || over}
+          >
+            <Save className="mr-2 h-4 w-4" /> Save team alerts
           </Button>
         </div>
       )}

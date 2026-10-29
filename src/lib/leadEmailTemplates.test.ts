@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_LEAD_EMAIL_TEMPLATES,
+  EMAIL_LOCKUP_URL,
   LEAD_STAGES,
   leadEmailContext,
   mergeFieldsFor,
@@ -115,6 +116,20 @@ describe("the default templates", () => {
 });
 
 describe("rendering", () => {
+  it("draws the lockup the website serves for email, not the image that answered 404", () => {
+    // /brand/aurixa-systems-logo-source.jpg is not on the site (404 on 29 Oct
+    // 2026), and its own lockup is WebP, which Outlook does not draw.
+    expect(EMAIL_LOCKUP_URL).toBe(
+      "https://www.aurixasystems.com.au/brand/email/aurixa-lockup-480.png",
+    );
+    for (const stage of LEAD_STAGES) {
+      const { html } = renderLeadEmail(DEFAULT_LEAD_EMAIL_TEMPLATES[stage], sampleContext(stage));
+      expect(html).toContain(`src="${EMAIL_LOCKUP_URL}"`);
+      expect(html).toContain('alt="Aurixa Systems"');
+      expect(html).not.toContain("aurixa-systems-logo-source");
+    }
+  });
+
   it("escapes the applicant's own values, and the template's own words", () => {
     const rendered = renderLeadEmail(
       DEFAULT_LEAD_EMAIL_TEMPLATES[1],
@@ -127,7 +142,7 @@ describe("rendering", () => {
 
   it("reads **bold** from the template, never from a value", () => {
     expect(renderInline("Hello **{{name}}**", { name: "Ada" })).toBe(
-      'Hello <strong style="color:#f4f8fc;">Ada</strong>',
+      'Hello <strong style="color:#ffffff; font-weight:600;">Ada</strong>',
     );
     expect(renderInline("Hello {{name}}", { name: "**Ada**" })).toBe("Hello **Ada**");
     expect(renderInline("an ** unmatched mark", {})).toBe("an ** unmatched mark");

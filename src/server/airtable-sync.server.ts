@@ -44,6 +44,7 @@
 // `crm.fit`, and it reads `stage2_answers` — which this now fills.
 import crypto from "crypto";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
+import type { Json } from "@/integrations/supabase/types";
 import {
   cleanLeadText,
   normaliseApplicationId,
@@ -65,6 +66,10 @@ import {
   type Stage3Enrichment,
 } from "@/server/airtableLeadMapping.pure";
 import { enqueueStageEmails } from "@/server/lead-stage-emails.server";
+import {
+  correctedAddressOf,
+  MISSION_CONTROL_METADATA_KEYS,
+} from "@/server/leadAddressCorrection.pure";
 
 const AIRTABLE_BASE_ID = "apptyShYE0yzL4IGB";
 const GATEWAY_URL = "https://connector-gateway.lovable.dev/airtable";
@@ -395,7 +400,7 @@ async function findExisting(mapped: MappedRecord, dedupeKey: string | null) {
     if (!value) continue;
     const { data } = await supabaseAdmin
       .from("waitlist_leads")
-      .select("id, stage, status")
+      .select("id, stage, status, metadata")
       .eq(column, value)
       .maybeSingle();
     if (data) return data;
@@ -516,15 +521,16 @@ export async function syncAirtableWaitlist(): Promise<AirtableSyncResult> {
           // operator's own triage decision and `source`/`page` describe how the
           // lead first reached us — neither is Airtable's to overwrite.
           const { source: _source, page: _page, ...mirrored } = row;
+          const { write, owed } = overCorrection(existing.metadata, mirrored, row);
           const { error } = await supabaseAdmin
             .from("waitlist_leads")
             // Never walk the journey backwards: a rollup that has not caught
             // up yet must not un-book a review we already recorded.
-            .update({ ...mirrored, stage: Math.max(Number(existing.stage ?? 1), row.stage) })
+            .update({ ...write, stage: Math.max(Number(existing.stage ?? 1), row.stage) })
             .eq("id", existing.id);
           if (error) throw error;
           out.updated += 1;
-          out.emails_queued += await queueQuietly(existing.id, row);
+          out.emails_queued += await queueQuietly(existing.id, owed);
           continue;
         }
 
@@ -585,6 +591,54 @@ function latestStage2(candidates: Stage2Enrichment[]): Stage2Enrichment | null {
  * call from a backfill: a historical lead gets its obligations suppressed by
  * the backstop window inside the enqueue, not by this caller remembering to.
  */
+/**
+ * The mirror's write over a lead Mission Control has written its own facts on
+ * (docs/LEAD_EMAILS.md, "Address corrections").
+ *
+ * The mirror replaces a lead's metadata with Airtable's. The keys only Mission
+ * Control writes are kept whatever else is replaced: without the correction
+ * token's hash, the applying browser could no longer correct its address.
+ *
+ * And Airtable never hears of a correction, so for a corrected lead its record
+ * is still at the mistyped address: written as it stands, it would put the
+ * typo back. The mirror keeps the corrected address and the corrected
+ * submission's time, merges its metadata over the lead's, and the emails it
+ * finds owed are for the corrected address, at its generation.
+ */
+export function overCorrection<W extends { metadata: Record<string, Json> }, R extends object>(
+  existingMetadata: unknown,
+  write: W,
+  row: R,
+): { write: W; owed: Record<string, unknown> } {
+  const existing = (existingMetadata as Record<string, Json> | null) ?? {};
+  const corrected = correctedAddressOf(existingMetadata);
+  if (corrected) {
+    return {
+      write: {
+        ...write,
+        email: corrected.email,
+        // The corrected submission's own time: Airtable's is the original's,
+        // and with it a late copy of an earlier correction would read as newer.
+        ...(corrected.submittedAt ? { submitted_at: corrected.submittedAt } : {}),
+        metadata: { ...existing, ...write.metadata },
+      },
+      owed: { ...row, email: corrected.email, applicant_email_generation: corrected.generation },
+    };
+  }
+  const kept = MISSION_CONTROL_METADATA_KEYS.filter((key) => key in existing);
+  if (kept.length === 0) return { write, owed: row as Record<string, unknown> };
+  return {
+    write: {
+      ...write,
+      metadata: {
+        ...write.metadata,
+        ...Object.fromEntries(kept.map((key) => [key, existing[key]])),
+      },
+    },
+    owed: row as Record<string, unknown>,
+  };
+}
+
 async function queueQuietly(leadId: string, row: Record<string, unknown>): Promise<number> {
   try {
     const result = await enqueueStageEmails({

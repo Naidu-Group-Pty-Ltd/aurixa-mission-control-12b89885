@@ -1324,4 +1324,25 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20261029160000",
     assertions: [{ kind: "cron", jobname: "module-library-follow-15min" }],
   },
+  {
+    migration: "20261029170000_lead_email_notice_kinds.sql",
+    version: "20261029170000",
+    assertions: [{ kind: "enum", type: "notification_kind" }],
+  },
+  {
+    migration: "20261029170100_lead_email_team_alerts.sql",
+    version: "20261029170100",
+    assertions: [
+      { kind: "column", table: "lead_email_settings", column: "internal_recipients" },
+      { kind: "column", table: "lead_email_settings", column: "internal_stages" },
+    ],
+  },
+  {
+    migration: "20261029170200_lead_email_generations.sql",
+    version: "20261029170200",
+    assertions: [
+      { kind: "column", table: "lead_stage_emails", column: "generation" },
+      { kind: "column", table: "waitlist_leads", column: "applicant_email_generation" },
+    ],
+  },
 ];
