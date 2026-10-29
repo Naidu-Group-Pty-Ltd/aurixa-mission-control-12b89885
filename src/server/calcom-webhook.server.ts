@@ -39,6 +39,7 @@ import {
   type CalcomWebhookEvent,
 } from "@/server/calcom.pure";
 import { STAGE3_BOOKING_SOURCE } from "@/server/strategicReview.pure";
+import { normaliseApplicationId } from "@/server/lead-capture.server";
 
 export type WebhookResponse = { status: number; body: Record<string, unknown> };
 
@@ -168,6 +169,54 @@ function lostRace(appointmentId: string): WebhookResponse {
   return ok({ appointment_id: appointmentId, already: "changed_concurrently" });
 }
 
+/**
+ * Marks the applicant's strategic review cancelled on their lead, so the
+ * Stage 3 confirmation's send gate holds it — Airtable's `Send Booking
+ * Confirmation` read `Booking Status = Cancelled` for the same purpose
+ * (docs/LEAD_EMAILS.md, "The send gates").
+ *
+ * The lead is found by the booking's Cal.com uid where the website reported
+ * one, else by the application reference. A lead whose recorded booking is a
+ * different one is left alone: cancelling an earlier booking says nothing
+ * about the one that replaced it.
+ */
+async function markStageThreeCancelled(
+  event: CalcomWebhookEvent,
+): Promise<"marked" | "unmatched" | "other_booking"> {
+  let leadId: string | null = null;
+  if (event.uid) {
+    const { data, error } = await supabaseAdmin
+      .from("waitlist_leads")
+      .select("id")
+      .eq("stage3_booking_reference", event.uid)
+      .limit(1);
+    if (error) throw new Error(`lead lookup by booking failed: ${error.message}`);
+    leadId = data?.[0]?.id ?? null;
+  }
+  const reference = normaliseApplicationId(event.metadata.applicationId);
+  if (!leadId && reference) {
+    const { data, error } = await supabaseAdmin
+      .from("waitlist_leads")
+      .select("id, stage3_booking_reference")
+      .eq("application_id", reference)
+      .order("created_at", { ascending: false })
+      .limit(1);
+    if (error) throw new Error(`lead lookup by reference failed: ${error.message}`);
+    const lead = data?.[0];
+    if (lead?.stage3_booking_reference && lead.stage3_booking_reference !== event.uid) {
+      return "other_booking";
+    }
+    leadId = lead?.id ?? null;
+  }
+  if (!leadId) return "unmatched";
+  const { error } = await supabaseAdmin
+    .from("waitlist_leads")
+    .update({ stage3_cancelled_at: new Date().toISOString() })
+    .eq("id", leadId);
+  if (error) throw new Error(`cancellation mark failed: ${error.message}`);
+  return "marked";
+}
+
 async function applyCancellation(event: CalcomWebhookEvent): Promise<WebhookResponse> {
   if (event.supersededByReschedule) {
     // The old half of a reschedule. The RESCHEDULED delivery carries the move.
@@ -201,6 +250,18 @@ async function applyCancellation(event: CalcomWebhookEvent): Promise<WebhookResp
     return ok({ appointment_id: row.id, applied: "canceled", consequences });
   }
   if (isStageThree(event)) {
+    // A failed mark is said in the notice, not turned into a 500: Cal.com's
+    // retry would only repeat it, and the operators can act on the lead.
+    let marked: Awaited<ReturnType<typeof markStageThreeCancelled>> | "failed";
+    try {
+      marked = await markStageThreeCancelled(event);
+    } catch (err) {
+      console.error(
+        "[calcom-webhook] stage three cancellation mark failed:",
+        (err as Error).message,
+      );
+      marked = "failed";
+    }
     await notifyOperators({
       kind: "lead_stage_three",
       severity: "warning",
@@ -208,11 +269,22 @@ async function applyCancellation(event: CalcomWebhookEvent): Promise<WebhookResp
       body:
         `${event.start ? `${spokenSlot(new Date(event.start))} (Sydney time)` : "The review"} was ` +
         `cancelled in Cal.com${event.cancellationReason ? ` — "${event.cancellationReason.slice(0, 300)}"` : ""}. ` +
+        (marked === "marked"
+          ? "Mission Control has marked the lead's review cancelled, so no confirmation is sent for it. "
+          : marked === "other_booking"
+            ? "The lead has a later booking, which stays as it is. "
+            : marked === "unmatched"
+              ? "No lead matches this booking, so nothing in Mission Control was marked. "
+              : "Mission Control could not mark the lead's review cancelled — check the lead before its confirmation goes. ") +
         "Its Strategic Review Bookings record in Airtable still shows the booking.",
       url: "/leads",
-      metadata: { calcom_uid: event.uid, application_id: event.metadata.applicationId ?? null },
+      metadata: {
+        calcom_uid: event.uid,
+        application_id: event.metadata.applicationId ?? null,
+        lead_marked: marked,
+      },
     });
-    return ok({ applied: "stage3_notice" });
+    return ok({ applied: "stage3_notice", lead: marked });
   }
   return noteOutsideCrm(event, "cancelled");
 }

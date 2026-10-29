@@ -57,6 +57,7 @@
 // and there is no undo on that.
 
 import { emailKey, unwrapAddress } from "@/lib/email/emailAddress.pure";
+import { heldReason, sendGate, type GateSubject } from "@/lib/leadEmailGates.pure";
 
 export type LeadStage = 1 | 2 | 3;
 export type StageAudience = "internal" | "applicant";
@@ -293,7 +294,7 @@ export function readPolicy(env: StageEmailEnv): StageEmailPolicy {
 }
 
 /** The lead fields the decision reads. Deliberately a narrow surface. */
-export type StageEmailSubject = {
+export type StageEmailSubject = GateSubject & {
   stage?: number | null;
   created_at?: string | null;
   submitted_at?: string | null;
@@ -385,21 +386,14 @@ export function decideApplicant(
     return { verdict: "skip", reason: `applicant email is switched off for stage ${stage}` };
   }
 
+  // The send gate holds whoever sends — Make filtered on the same rule, so a
+  // backstop that ignored it would send the email Make deliberately held.
+  // Terminal, as Make's filter was: the email for this stage is not sent.
+  const gate = sendGate(lead, stage);
+  if (!gate.send) return { verdict: "skip", reason: heldReason(gate.reason) };
+
   const owned = policy.applicantSenders[stage] === "mission_control";
-  if (owned || policy.applicantMode === "always") {
-    // Make's Stage 1 email went only while `Send Stage 2 Invite` read SEND,
-    // which it stops doing once a questionnaire is in: an invitation to a
-    // questionnaire the applicant has already completed is the wrong email.
-    // Reached when the sync or the sweep finds a lead whose application never
-    // reached us on its own — by then they may be a stage further on.
-    if (stage === 1 && lead.stage2_completed_at) {
-      return {
-        verdict: "skip",
-        reason: "the applicant had already completed the questionnaire",
-      };
-    }
-    return { verdict: "send" };
-  }
+  if (owned || policy.applicantMode === "always") return { verdict: "send" };
 
   // ── auto: the backstop ──────────────────────────────────────────────────
   const evidence = applicantEmailEvidence(lead, stage, policy.applicantGraceMs, now);

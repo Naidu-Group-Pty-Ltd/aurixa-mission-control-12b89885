@@ -857,7 +857,11 @@ function LeadRow({
           )}
           <ConvertLeadButton lead={lead} />
           <Select value={lead.status} onValueChange={(v) => onStatusChange(v as LeadStatus)}>
-            <SelectTrigger className="h-8 w-[130px] text-xs">
+            <SelectTrigger
+              className="h-8 w-[130px] text-xs"
+              // Airtable's Declined: the send gates hold this applicant's emails.
+              title="Disqualified holds this applicant's emails (Email → Lead emails, send gate)"
+            >
               <SelectValue />
             </SelectTrigger>
             <SelectContent>

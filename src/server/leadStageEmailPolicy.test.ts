@@ -8,6 +8,7 @@ import {
   nextStepUrlFor,
   readPolicy,
   resolveInternalRecipients,
+  withApplicantSenders,
   stageOccurredAt,
   withSendingMailbox,
   type StageEmailEnv,
@@ -27,6 +28,9 @@ function policy(env: StageEmailEnv = {}) {
 // row that cannot exist, and testing against it measures the fixture.
 const lead = (over: Partial<StageEmailSubject> = {}): StageEmailSubject => ({
   email: "applicant@firm.com.au",
+  // The website has issued one with every application since August, and the
+  // send gates hold a lead without one (leadEmailGates.pure.ts).
+  application_id: "AX-0000000001",
   created_at: minutesAgo(5),
   submitted_at: minutesAgo(5),
   enrichment_synced_at: minutesAgo(1),
@@ -146,8 +150,9 @@ describe("applicantEmailEvidence", () => {
   const GRACE = 45 * 60_000;
 
   it("reads the workflow's own receipt at the two stages that leave one", () => {
-    expect(applicantEmailEvidence(lead({ stage1_email_message_id: "AAMk..." }), 1, GRACE, NOW))
-      .toEqual({ sent: true });
+    expect(
+      applicantEmailEvidence(lead({ stage1_email_message_id: "AAMk..." }), 1, GRACE, NOW),
+    ).toEqual({ sent: true });
     expect(
       applicantEmailEvidence(lead({ stage3_confirmation_sent_at: hoursAgo(1) }), 3, GRACE, NOW),
     ).toEqual({ sent: true });
@@ -158,8 +163,9 @@ describe("applicantEmailEvidence", () => {
     // produces two `Questionnaire Received` emails four minutes apart. And the
     // reason matters as much as the value: this not-knowing is PERMANENT, so
     // the caller is entitled to record it and stop asking.
-    expect(applicantEmailEvidence(lead({ stage2_completed_at: hoursAgo(1) }), 2, GRACE, NOW))
-      .toEqual({ sent: null, why: "no_receipt_is_written" });
+    expect(
+      applicantEmailEvidence(lead({ stage2_completed_at: hoursAgo(1) }), 2, GRACE, NOW),
+    ).toEqual({ sent: null, why: "no_receipt_is_written" });
   });
 
   it("calls a missing receipt `false` only once the mirror has looked since", () => {
@@ -350,12 +356,10 @@ describe("decideApplicant — the backstop", () => {
   });
 
   it("backstops Stage 3 on the same evidence rule", () => {
-    const acknowledged = lead({
-      stage3_booked_at: hoursAgo(6),
-      stage3_confirmation_sent_at: hoursAgo(6),
-    });
-    const unacknowledged = lead({ stage3_booked_at: hoursAgo(6) });
-    const unread = lead({ stage3_booked_at: hoursAgo(6), enrichment_synced_at: null });
+    const booking = { stage3_booked_at: hoursAgo(6), stage3_session_start: hoursAgo(-48) };
+    const acknowledged = lead({ ...booking, stage3_confirmation_sent_at: hoursAgo(6) });
+    const unacknowledged = lead(booking);
+    const unread = lead({ ...booking, enrichment_synced_at: null });
     expect(decideApplicant(acknowledged, 3, settled, NOW).verdict).toBe("skip");
     expect(decideApplicant(unacknowledged, 3, settled, NOW).verdict).toBe("send");
     expect(decideApplicant(unread, 3, settled, NOW).verdict).toBe("none");
@@ -507,5 +511,57 @@ describe("withSendingMailbox — the mailbox Email → Lead emails chose", () =>
     expect(withSendingMailbox(base, null)).toBe(base);
     expect(withSendingMailbox(base, "  ")).toBe(base);
     expect(withSendingMailbox(base, "not an address")).toBe(base);
+  });
+});
+
+describe("decideApplicant — the send gates (Airtable's formulas, leadEmailGates.pure.ts)", () => {
+  const owned = withApplicantSenders(policy(), {
+    1: "mission_control",
+    2: "mission_control",
+    3: "mission_control",
+  });
+
+  it("holds a declined applicant's email, whoever sends it", () => {
+    const declined = lead({ status: "disqualified" });
+    expect(decideApplicant(declined, 1, owned, NOW)).toEqual({
+      verdict: "skip",
+      reason: "held by the send gate: Application declined",
+    });
+    // The backstop holds it too: Make's filter would have.
+    const backstop = lead({
+      status: "disqualified",
+      created_at: hoursAgo(6),
+      submitted_at: hoursAgo(6),
+    });
+    expect(decideApplicant(backstop, 1, policy(), NOW)).toEqual({
+      verdict: "skip",
+      reason: "held by the send gate: Application declined",
+    });
+  });
+
+  it("does not invite an applicant to a questionnaire they have finished", () => {
+    expect(decideApplicant(lead({ stage2_completed_at: minutesAgo(1) }), 1, owned, NOW)).toEqual({
+      verdict: "skip",
+      reason: "held by the send gate: Applicant already reached Stage 2",
+    });
+  });
+
+  it("holds a cancelled booking's confirmation", () => {
+    const cancelled = lead({
+      stage3_booked_at: minutesAgo(2),
+      stage3_session_start: hoursAgo(-48),
+      stage3_cancelled_at: minutesAgo(1),
+    });
+    expect(decideApplicant(cancelled, 3, owned, NOW)).toEqual({
+      verdict: "skip",
+      reason: "held by the send gate: Booking cancelled",
+    });
+  });
+
+  it("sends what the gate lets through", () => {
+    expect(decideApplicant(lead(), 1, owned, NOW)).toEqual({ verdict: "send" });
+    expect(decideApplicant(lead({ stage2_completed_at: minutesAgo(1) }), 2, owned, NOW)).toEqual({
+      verdict: "send",
+    });
   });
 });

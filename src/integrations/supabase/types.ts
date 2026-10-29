@@ -15702,6 +15702,7 @@ export type Database = {
           stage3_booked_at: string | null
           stage3_booking_reference: string | null
           stage3_booking_url: string | null
+          stage3_cancelled_at: string | null
           stage3_confirmation_sent_at: string | null
           stage3_duration_minutes: number | null
           stage3_host_local_time: string | null
@@ -15788,6 +15789,7 @@ export type Database = {
           stage3_booked_at?: string | null
           stage3_booking_reference?: string | null
           stage3_booking_url?: string | null
+          stage3_cancelled_at?: string | null
           stage3_confirmation_sent_at?: string | null
           stage3_duration_minutes?: number | null
           stage3_host_local_time?: string | null
@@ -15874,6 +15876,7 @@ export type Database = {
           stage3_booked_at?: string | null
           stage3_booking_reference?: string | null
           stage3_booking_url?: string | null
+          stage3_cancelled_at?: string | null
           stage3_confirmation_sent_at?: string | null
           stage3_duration_minutes?: number | null
           stage3_host_local_time?: string | null

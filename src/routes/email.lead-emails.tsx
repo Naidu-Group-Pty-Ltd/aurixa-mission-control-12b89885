@@ -81,6 +81,7 @@ import {
   type LeadEmailTemplate,
   type LeadStage,
 } from "@/lib/leadEmailTemplates.pure";
+import { GATE_RULES } from "@/lib/leadEmailGates.pure";
 import {
   getLeadEmailsFn,
   listPreviewLeadsFn,
@@ -634,6 +635,30 @@ function SenderPanel({
             </Dialog>
           ))}
       </div>
+      <SendGate stage={stage} />
+    </div>
+  );
+}
+
+/** The send gate, as the dispatcher applies it — Airtable's formula, recreated. */
+function SendGate({ stage }: { stage: LeadStage }) {
+  const gate = GATE_RULES[stage];
+  return (
+    <div className="mt-4 border-t border-border/40 pt-4">
+      <p className="label-mono">send gate</p>
+      <p className="mt-1 text-sm text-muted-foreground">
+        The email is held — and recorded with the reason — when the first of these is true, asked
+        when it is raised and again just before it goes. It is Airtable's{" "}
+        <code>{gate.airtable}</code> formula, recreated, and it applies whoever sends.
+      </p>
+      <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm">
+        {gate.holds.map((hold) => (
+          <li key={hold.reason}>
+            <span className="font-medium">{hold.reason}</span>
+            <span className="text-muted-foreground"> — {hold.when}</span>
+          </li>
+        ))}
+      </ol>
     </div>
   );
 }
