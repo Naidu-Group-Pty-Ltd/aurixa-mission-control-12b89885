@@ -361,9 +361,9 @@ Past 30 seats it becomes an Enterprise conversation. The right plan is worked ou
 
 ### What does each plan include?
 
-- Launch includes Overview, Calendar, Reports, Generated Reports (Investment), Cash Flow Analysis (10 Year Cash Flow), Report Requests, Clients, Client Tracker, Reminders, Checklist, Game Plan, User Guide, Billing & Usage, Settings, User Management, Branding, Error Logs, Activity Logs, Client Portal and AML/CTF Compliance.
+- Launch includes Overview, Calendar, Reports, Generated Reports (Investment), Quantitative Reports, Cash Flow Analysis (10 Year Cash Flow), Report Requests, Clients, Client Tracker, Reminders, Checklist, Game Plan, User Guide, Billing & Usage, Settings, User Management, Branding, Templates, Auto Report Generation, Error Logs, Activity Logs, Client Portal and AML/CTF Compliance.
 - Growth includes everything in Launch, plus Generated Reports (Comparisons), Cash Flow Analysis (Comparisons), Clients (Deals) and Deal Pipeline.
-- Scale includes everything in Growth, plus Market Updates, Commercial / Industrial, Opportunity Marketplace, Clients (Send To Finance, Portfolio Analysis, Send Portfolio To Client, Send Agreement, Conversations, Appointments, Finance Messages, Borrowing Capacity and AI), Agreements, Marketing, Model Hub, Finance Portal and API Usage.
+- Scale includes everything in Growth, plus Market Updates, Commercial / Industrial, Opportunity Marketplace, Clients (Send To Finance, Portfolio Analysis, Send Portfolio To Client, Send Agreement, Conversations, Appointments, Finance Messages, Borrowing Capacity and AI), Agreements (Agreement Templates, Partner Referrals, Loan Writer Undertakings and Partner Compliance), Marketing, Model Hub, Finance Portal and API Usage.
 
 ### Why does each plan have two prices?
 
@@ -421,6 +421,7 @@ Each module is its own monthly subscription in Australian dollars including GST,
 - Integrations - A$199 a month. Subject to the client integrating their own APIs.
 - API Usage - A$199 a month. Included at no extra cost on Scale.
 - Solicitor Portal - A$299 a month. Partner hand-off portal. A portal fee buys that portal's own scope and never grants AML/CTF.
+- Accountant Portal - an add-on whose price has not been set yet; the team enables it on request. Partner hand-off portal for the client's accountant. A portal fee buys that portal's own scope and never grants AML/CTF.
 - Builder / Developer Portal - A$699 a month. Sold directly by the team rather than through a checkout. Sold separately, not as a tier add-on. A portal fee buys that portal's own scope and never grants AML/CTF.
 
 ### AI Assistant

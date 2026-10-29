@@ -151,6 +151,12 @@ function moduleBullet(m) {
   // yet available" is a fact; saying a number the catalog calls historical is
   // a quote nobody approved.
   if (m.comingSoon) return `${m.name} — not yet available for purchase, and not priced.`;
+  // Nor is a module whose price is undecided: its figure is the placeholder a
+  // Stripe price had to be created at, and spoken aloud it is a quote.
+  if (m.priceUndecided) {
+    const note = m.note ? ` ${m.note}` : "";
+    return `${m.name} — an add-on whose price has not been set yet; the team enables it on request.${note}`;
+  }
   const price = `${money(m.monthlyInclGstCents)} a month`;
   const included = m.includedIn.length
     ? ` Included at no extra cost on ${listOf(m.includedIn.map(tierName))}.`
