@@ -1,0 +1,14 @@
+-- @asserts none:drops an index, creates no object
+--
+-- The ledger's old key goes, now that the code writing the new one is live
+-- (docs/LEAD_EMAILS.md, "Address corrections").
+--
+-- 20261029170200 added (lead_id, stage, audience, generation) BESIDE the old
+-- (lead_id, stage, audience), because it applied on merge while the code that
+-- wrote `on conflict (lead_id, stage, audience)` was still published: dropping
+-- the old key there would have failed every stage email raised before the
+-- publish. With both in place a corrected address's email (generation 1 beside
+-- a generation 0 row) collides with the old key, and `recordObligations`
+-- writes its batch again without it. From here it is owed, and the sweep
+-- raises any that waited.
+drop index if exists public.lead_stage_emails_obligation_key;

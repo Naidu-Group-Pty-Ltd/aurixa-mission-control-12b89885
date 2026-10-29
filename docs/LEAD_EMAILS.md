@@ -260,7 +260,7 @@ times. Refusals are `unverified`, `window_closed`, `questionnaire_reached`,
 the new unique key beside the old one, (lead_id, stage, audience), because it
 applies on merge while the code that writes the old key is still live until the
 next publish; dropping it there would fail every stage email raised in between.
-Until a later migration drops the old key, a corrected address's email
+Until `20261029180000` drops the old key, after the publish, a corrected address's email
 collides with it, and `recordObligations` writes the batch again without it,
 so the team alert in the same batch still goes. The sweep raises the corrected
 email once the old key is gone. Before `20261029170200` applies at all, the
@@ -381,4 +381,5 @@ the truth.
 | `src/server/lead-address-correction.server.ts` | the correction: the lead, the ledger, the links, the record |
 | `supabase/migrations/20261029170000_lead_email_notice_kinds.sql` | the team alert and address correction notice kinds |
 | `supabase/migrations/20261029170100_lead_email_team_alerts.sql` | `internal_recipients`, `internal_stages` — the team alerts |
-| `supabase/migrations/20261029170200_lead_email_generations.sql` | `applicant_email_generation`, `lead_stage_emails.generation` and the ledger's key |
+| `supabase/migrations/20261029170200_lead_email_generations.sql` | `applicant_email_generation`, `lead_stage_emails.generation` and the ledger's new key |
+| `supabase/migrations/20261029180000_lead_stage_emails_drop_obligation_key.sql` | drops the ledger's old key, once the code writing the new one is live |
