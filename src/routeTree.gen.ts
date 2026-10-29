@@ -64,6 +64,7 @@ import { Route as CrmFitRouteImport } from './routes/crm.fit'
 import { Route as CrmJourneyRouteImport } from './routes/crm.journey'
 import { Route as CrmTicketsRouteImport } from './routes/crm.tickets'
 import { Route as EmailIndexRouteImport } from './routes/email.index'
+import { Route as EmailLeadEmailsRouteImport } from './routes/email.lead-emails'
 import { Route as EmailSuppressionsRouteImport } from './routes/email.suppressions'
 import { Route as EmailWarmupRouteImport } from './routes/email.warmup'
 import { Route as FleetDeploymentsRouteImport } from './routes/fleet.deployments'
@@ -214,6 +215,7 @@ import { Route as ApiPublicStorefrontFeedbackRouteImport } from './routes/api.pu
 import { Route as ApiPublicStorefrontHandoffRouteImport } from './routes/api.public.storefront.handoff'
 import { Route as ApiPublicStorefrontIdentityRouteImport } from './routes/api.public.storefront.identity'
 import { Route as ApiPublicStorefrontPlanChangeRouteImport } from './routes/api.public.storefront.plan-change'
+import { Route as ApiPublicStorefrontQuestionnaireAccessRouteImport } from './routes/api.public.storefront.questionnaire-access'
 import { Route as ApiPublicStorefrontSessionRouteImport } from './routes/api.public.storefront.session'
 import { Route as ApiPublicStorefrontSetupRouteImport } from './routes/api.public.storefront.setup'
 import { Route as ApiPublicStorefrontStrategicReviewRouteImport } from './routes/api.public.storefront.strategic-review'
@@ -521,6 +523,11 @@ const CrmTicketsRoute = CrmTicketsRouteImport.update({
 const EmailIndexRoute = EmailIndexRouteImport.update({
   id: '/email/',
   path: '/email/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const EmailLeadEmailsRoute = EmailLeadEmailsRouteImport.update({
+  id: '/email/lead-emails',
+  path: '/email/lead-emails',
   getParentRoute: () => rootRouteImport,
 } as any)
 const EmailSuppressionsRoute = EmailSuppressionsRouteImport.update({
@@ -1321,6 +1328,12 @@ const ApiPublicStorefrontPlanChangeRoute =
     path: '/api/public/storefront/plan-change',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicStorefrontQuestionnaireAccessRoute =
+  ApiPublicStorefrontQuestionnaireAccessRouteImport.update({
+    id: '/api/public/storefront/questionnaire-access',
+    path: '/api/public/storefront/questionnaire-access',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicStorefrontSessionRoute =
   ApiPublicStorefrontSessionRouteImport.update({
     id: '/api/public/storefront/session',
@@ -1551,6 +1564,7 @@ export interface FileRoutesByFullPath {
   '/crm/fit': typeof CrmFitRoute
   '/crm/journey': typeof CrmJourneyRoute
   '/crm/tickets': typeof CrmTicketsRoute
+  '/email/lead-emails': typeof EmailLeadEmailsRoute
   '/email/suppressions': typeof EmailSuppressionsRoute
   '/email/warmup': typeof EmailWarmupRoute
   '/fleet/deployments': typeof FleetDeploymentsRoute
@@ -1704,6 +1718,7 @@ export interface FileRoutesByFullPath {
   '/api/public/storefront/handoff': typeof ApiPublicStorefrontHandoffRoute
   '/api/public/storefront/identity': typeof ApiPublicStorefrontIdentityRoute
   '/api/public/storefront/plan-change': typeof ApiPublicStorefrontPlanChangeRoute
+  '/api/public/storefront/questionnaire-access': typeof ApiPublicStorefrontQuestionnaireAccessRoute
   '/api/public/storefront/session': typeof ApiPublicStorefrontSessionRoute
   '/api/public/storefront/setup': typeof ApiPublicStorefrontSetupRoute
   '/api/public/storefront/strategic-review': typeof ApiPublicStorefrontStrategicReviewRoute
@@ -1787,6 +1802,7 @@ export interface FileRoutesByTo {
   '/crm/fit': typeof CrmFitRoute
   '/crm/journey': typeof CrmJourneyRoute
   '/crm/tickets': typeof CrmTicketsRoute
+  '/email/lead-emails': typeof EmailLeadEmailsRoute
   '/email/suppressions': typeof EmailSuppressionsRoute
   '/email/warmup': typeof EmailWarmupRoute
   '/fleet/deployments': typeof FleetDeploymentsRoute
@@ -1940,6 +1956,7 @@ export interface FileRoutesByTo {
   '/api/public/storefront/handoff': typeof ApiPublicStorefrontHandoffRoute
   '/api/public/storefront/identity': typeof ApiPublicStorefrontIdentityRoute
   '/api/public/storefront/plan-change': typeof ApiPublicStorefrontPlanChangeRoute
+  '/api/public/storefront/questionnaire-access': typeof ApiPublicStorefrontQuestionnaireAccessRoute
   '/api/public/storefront/session': typeof ApiPublicStorefrontSessionRoute
   '/api/public/storefront/setup': typeof ApiPublicStorefrontSetupRoute
   '/api/public/storefront/strategic-review': typeof ApiPublicStorefrontStrategicReviewRoute
@@ -2026,6 +2043,7 @@ export interface FileRoutesById {
   '/crm/fit': typeof CrmFitRoute
   '/crm/journey': typeof CrmJourneyRoute
   '/crm/tickets': typeof CrmTicketsRoute
+  '/email/lead-emails': typeof EmailLeadEmailsRoute
   '/email/suppressions': typeof EmailSuppressionsRoute
   '/email/warmup': typeof EmailWarmupRoute
   '/fleet/deployments': typeof FleetDeploymentsRoute
@@ -2179,6 +2197,7 @@ export interface FileRoutesById {
   '/api/public/storefront/handoff': typeof ApiPublicStorefrontHandoffRoute
   '/api/public/storefront/identity': typeof ApiPublicStorefrontIdentityRoute
   '/api/public/storefront/plan-change': typeof ApiPublicStorefrontPlanChangeRoute
+  '/api/public/storefront/questionnaire-access': typeof ApiPublicStorefrontQuestionnaireAccessRoute
   '/api/public/storefront/session': typeof ApiPublicStorefrontSessionRoute
   '/api/public/storefront/setup': typeof ApiPublicStorefrontSetupRoute
   '/api/public/storefront/strategic-review': typeof ApiPublicStorefrontStrategicReviewRoute
@@ -2266,6 +2285,7 @@ export interface FileRouteTypes {
     | '/crm/fit'
     | '/crm/journey'
     | '/crm/tickets'
+    | '/email/lead-emails'
     | '/email/suppressions'
     | '/email/warmup'
     | '/fleet/deployments'
@@ -2419,6 +2439,7 @@ export interface FileRouteTypes {
     | '/api/public/storefront/handoff'
     | '/api/public/storefront/identity'
     | '/api/public/storefront/plan-change'
+    | '/api/public/storefront/questionnaire-access'
     | '/api/public/storefront/session'
     | '/api/public/storefront/setup'
     | '/api/public/storefront/strategic-review'
@@ -2502,6 +2523,7 @@ export interface FileRouteTypes {
     | '/crm/fit'
     | '/crm/journey'
     | '/crm/tickets'
+    | '/email/lead-emails'
     | '/email/suppressions'
     | '/email/warmup'
     | '/fleet/deployments'
@@ -2655,6 +2677,7 @@ export interface FileRouteTypes {
     | '/api/public/storefront/handoff'
     | '/api/public/storefront/identity'
     | '/api/public/storefront/plan-change'
+    | '/api/public/storefront/questionnaire-access'
     | '/api/public/storefront/session'
     | '/api/public/storefront/setup'
     | '/api/public/storefront/strategic-review'
@@ -2740,6 +2763,7 @@ export interface FileRouteTypes {
     | '/crm/fit'
     | '/crm/journey'
     | '/crm/tickets'
+    | '/email/lead-emails'
     | '/email/suppressions'
     | '/email/warmup'
     | '/fleet/deployments'
@@ -2893,6 +2917,7 @@ export interface FileRouteTypes {
     | '/api/public/storefront/handoff'
     | '/api/public/storefront/identity'
     | '/api/public/storefront/plan-change'
+    | '/api/public/storefront/questionnaire-access'
     | '/api/public/storefront/session'
     | '/api/public/storefront/setup'
     | '/api/public/storefront/strategic-review'
@@ -2978,6 +3003,7 @@ export interface RootRouteChildren {
   CrmFitRoute: typeof CrmFitRoute
   CrmJourneyRoute: typeof CrmJourneyRoute
   CrmTicketsRoute: typeof CrmTicketsRoute
+  EmailLeadEmailsRoute: typeof EmailLeadEmailsRoute
   EmailSuppressionsRoute: typeof EmailSuppressionsRoute
   EmailWarmupRoute: typeof EmailWarmupRoute
   FleetDeploymentsRoute: typeof FleetDeploymentsRoute
@@ -3104,6 +3130,7 @@ export interface RootRouteChildren {
   ApiPublicStorefrontHandoffRoute: typeof ApiPublicStorefrontHandoffRoute
   ApiPublicStorefrontIdentityRoute: typeof ApiPublicStorefrontIdentityRoute
   ApiPublicStorefrontPlanChangeRoute: typeof ApiPublicStorefrontPlanChangeRoute
+  ApiPublicStorefrontQuestionnaireAccessRoute: typeof ApiPublicStorefrontQuestionnaireAccessRoute
   ApiPublicStorefrontSessionRoute: typeof ApiPublicStorefrontSessionRoute
   ApiPublicStorefrontSetupRoute: typeof ApiPublicStorefrontSetupRoute
   ApiPublicStorefrontStrategicReviewRoute: typeof ApiPublicStorefrontStrategicReviewRoute
@@ -3518,6 +3545,13 @@ declare module '@tanstack/react-router' {
       path: '/email'
       fullPath: '/email/'
       preLoaderRoute: typeof EmailIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/email/lead-emails': {
+      id: '/email/lead-emails'
+      path: '/email/lead-emails'
+      fullPath: '/email/lead-emails'
+      preLoaderRoute: typeof EmailLeadEmailsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/email/suppressions': {
@@ -4570,6 +4604,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicStorefrontPlanChangeRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/storefront/questionnaire-access': {
+      id: '/api/public/storefront/questionnaire-access'
+      path: '/api/public/storefront/questionnaire-access'
+      fullPath: '/api/public/storefront/questionnaire-access'
+      preLoaderRoute: typeof ApiPublicStorefrontQuestionnaireAccessRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/storefront/session': {
       id: '/api/public/storefront/session'
       path: '/api/public/storefront/session'
@@ -5000,6 +5041,7 @@ const rootRouteChildren: RootRouteChildren = {
   CrmFitRoute: CrmFitRoute,
   CrmJourneyRoute: CrmJourneyRoute,
   CrmTicketsRoute: CrmTicketsRoute,
+  EmailLeadEmailsRoute: EmailLeadEmailsRoute,
   EmailSuppressionsRoute: EmailSuppressionsRoute,
   EmailWarmupRoute: EmailWarmupRoute,
   FleetDeploymentsRoute: FleetDeploymentsRoute,
@@ -5129,6 +5171,8 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicStorefrontHandoffRoute: ApiPublicStorefrontHandoffRoute,
   ApiPublicStorefrontIdentityRoute: ApiPublicStorefrontIdentityRoute,
   ApiPublicStorefrontPlanChangeRoute: ApiPublicStorefrontPlanChangeRoute,
+  ApiPublicStorefrontQuestionnaireAccessRoute:
+    ApiPublicStorefrontQuestionnaireAccessRoute,
   ApiPublicStorefrontSessionRoute: ApiPublicStorefrontSessionRoute,
   ApiPublicStorefrontSetupRoute: ApiPublicStorefrontSetupRoute,
   ApiPublicStorefrontStrategicReviewRoute:

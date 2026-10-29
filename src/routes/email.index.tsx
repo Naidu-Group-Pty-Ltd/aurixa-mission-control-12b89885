@@ -12,6 +12,7 @@ import {
   Flame,
   Info,
   Mail,
+  MailCheck,
   Plus,
   ShieldOff,
   Trash2,
@@ -158,6 +159,12 @@ function EmailCampaignsPage() {
               <Link to="/email/warmup">
                 <Flame className="mr-2 h-4 w-4" />
                 Warmup
+              </Link>
+            </Button>
+            <Button variant="outline" asChild>
+              <Link to="/email/lead-emails">
+                <MailCheck className="mr-2 h-4 w-4" />
+                Lead emails
               </Link>
             </Button>
             <Button variant="outline" asChild>
