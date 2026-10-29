@@ -25,9 +25,20 @@ scheduler opens. Only the email modules leave.
   or edited, and anything to fix.
 - **Sent as** — the Microsoft tenant, the mailbox, the sender name and the
   reply-to, for all three stages. The tenant and mailbox pickers are the
-  campaign composer's own. Blank means the deployment's: the default Graph
-  credentials and `LEAD_STAGE_EMAIL_MAILBOX`, else `MICROSOFT_MAILBOX_EMAIL`.
-  The reply-to is also what `{{support_email}}` says.
+  campaign composer's own. A blank mailbox is the tenant's default: under an
+  added tenant, its own default mailbox; under the deployment's tenant,
+  `LEAD_STAGE_EMAIL_MAILBOX`, else `MICROSOFT_MAILBOX_EMAIL`. The reply-to is
+  also what `{{support_email}}` says. The team's notification sends from the
+  same mailbox and, while no `LEAD_STAGE_INTERNAL_RECIPIENTS` list is set,
+  goes to it.
+
+  **On production** (set 29 Oct 2026): the *Aurixa Systems* tenant,
+  `admin@aurixasystems.com.au`, sender name *Aurixa Systems*, replies to
+  `admin@aurixasystems.com.au`. The deployment's own tenant is not Aurixa's —
+  its campaigns send from npcservices.com.au mailboxes — so leaving "Sent as"
+  blank would send Aurixa's applicants mail from another company's address.
+  The same mailbox sends Mission Control's warmup mail through the same
+  tenant, which is the standing proof that it can send.
 - **Who sends it** — per stage. See [Handing a stage over](#handing-a-stage-over).
 - **The editor** — every section of the email: subject and inbox line, header,
   message, next-step card, main button, security note, details, next steps,
