@@ -114,7 +114,9 @@ export function LibraryReingestDialog({ onDone }: { onDone: () => void }) {
           <DialogTitle>Reset and re-ingest the module library</DialogTitle>
           <DialogDescription>
             Deletes every module and library entry, then rebuilds the catalogue from a fresh
-            detection run against the prime repo.
+            detection run against the prime repo. The library already follows the prime by itself:
+            every fifteen minutes it settles the catalogue at the prime&apos;s newest commit. Reset
+            only to start over.
           </DialogDescription>
         </DialogHeader>
 
