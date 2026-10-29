@@ -56,6 +56,7 @@
 
 import type { SecretClass } from "./prime-backend.server";
 import { crmLineSecretRefusal } from "./crmLineFeatures.pure";
+import { primeOnlyRefusal } from "./primeOnlySecrets.pure";
 
 /** What will happen to one authorised name on one push. */
 export type ForwardOutcome =
@@ -132,6 +133,21 @@ export function classRefusalFor(secretClass: SecretClass): string | undefined {
 }
 
 /**
+ * The class refusal for one name, in that name's own words where it has them.
+ *
+ * `prime_only` covers two kinds of credential (`primeOnlySecrets.pure.ts`):
+ * Supabase management tokens, which the class text describes, and Mission
+ * Control's own control-plane secrets, which it does not. An operator reading
+ * "administrative control over Supabase projects" beside the Vapi key would be
+ * told the wrong reason for a right refusal.
+ */
+export function refusalFor(name: string, secretClass: SecretClass): string | undefined {
+  const refusal = classRefusalFor(secretClass);
+  if (!refusal) return undefined;
+  return secretClass === "prime_only" ? (primeOnlyRefusal(name) ?? refusal) : refusal;
+}
+
+/**
  * Decide what a push does with one authorised name.
  *
  * The order is the guarantee: class first, so no arrangement of rows can
@@ -142,7 +158,7 @@ export function classRefusalFor(secretClass: SecretClass): string | undefined {
  * at all.
  */
 export function decideForward(facts: ForwardFacts): ForwardOutcome {
-  const classRefusal = classRefusalFor(facts.secretClass);
+  const classRefusal = refusalFor(facts.name, facts.secretClass);
   if (classRefusal) return { act: "refuse", name: facts.name, why: classRefusal };
 
   const lineRefusal = crmLineSecretRefusal(facts.name, facts.crmMode);
@@ -370,7 +386,7 @@ export type FleetForwardFacts = {
  * because Mission Control's own environment changed.
  */
 export function decideFleetForward(facts: FleetForwardFacts): FleetForwardOutcome {
-  const classRefusal = classRefusalFor(facts.secretClass);
+  const classRefusal = refusalFor(facts.name, facts.secretClass);
   if (classRefusal) return { act: "refuse", name: facts.name, why: classRefusal };
 
   // Ahead of fleet policy, for the reason it is ahead of it per clone: a

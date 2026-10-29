@@ -1350,4 +1350,11 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20261029180000",
     assertions: [{ kind: "none", reason: "drops an index, creates no object" }],
   },
+  {
+    migration: "20261029230000_control_plane_secrets_not_forwarded.sql",
+    version: "20261029230000",
+    assertions: [
+      { kind: "none", reason: "updates two prime_secret_forwards rows, creates no object" },
+    ],
+  },
 ];

@@ -108,8 +108,38 @@ this clone.
 The stamp can never undo the removal: the credential is gone before it runs,
 and a failure is logged rather than thrown.
 
+## Mission Control's own control-plane secrets (29 Oct 2026)
+
+The class has a second member list, `CONTROL_PLANE_SECRETS`, for credentials
+that are not Supabase tokens and are refused for the same reason: whoever
+holds one acts on every tenant at once, and no narrower copy can be minted for
+a clone. Each carries its own reason, which is what an operator reads on a
+refused forward (`refusalFor`) and on a refused Integrations save.
+
+- **`GITHUB_WEBHOOK_SECRET`** — Mission Control's GitHub webhook signing
+  secret. `/hooks/github` trusts anything signed with it as GitHub's own, and
+  those requests start cascade work. Nothing a clone runs reads it.
+- **`VAPI_API_KEY`** — Aurixa's organisation-wide Vapi key, which reaches every
+  tenant's assistants, numbers, calls and recordings and the prime's. Each
+  clone's own Vapi organisation is held by Mission Control
+  (`cloneVapiCustody.pure.ts`), and the owner's rule is that a tenant never
+  gets into it.
+
+Both were fleet rows marked `inherit` and sat `inherited` on all five clones
+(key audit S1 and S2). Since this change they are refused by class on both
+forward paths and by the Integrations broker, provisioning records them
+`withheld` instead of inheriting them — its fleet values are read from every
+row marked `inherit` without asking the class, so a `prime_only` name there
+used to rest on its data row alone — and this sweep removes them from every
+clone. `20261029230000` sets their fleet rows to `inherit = false` so the
+forwarding page says the same. The GitHub secret still has to be rotated at
+GitHub and in Mission Control's environment: removing a copy does not un-leak
+it.
+
 ## What is deliberately not covered
 
 Ordinary vendor keys, including one a tenant sets to supersede a forwarded
 fleet key. Superseding is the product, and a sweep that took those away would
-be protecting the wrong side.
+be protecting the wrong side. The Didit webhook secret is the fleet's one
+Didit application and stays forwarded until the owner decides how Didit's
+callbacks are routed (decision D3).
