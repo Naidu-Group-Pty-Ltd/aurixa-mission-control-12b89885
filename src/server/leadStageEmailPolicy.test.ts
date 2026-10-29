@@ -9,6 +9,7 @@ import {
   readPolicy,
   resolveInternalRecipients,
   stageOccurredAt,
+  withSendingMailbox,
   type StageEmailEnv,
   type StageEmailSubject,
 } from "./leadStageEmailPolicy.pure";
@@ -474,5 +475,37 @@ describe("resolveInternalRecipients — who the team notification reaches", () =
     expect(configured.internalRecipientsDropped).toHaveLength(1);
     expect(configured.internalRecipients).toEqual(["a@x.com"]);
     expect(policy().internalRecipientSource).toBe("mailbox_fallback");
+  });
+});
+
+describe("withSendingMailbox — the mailbox Email → Lead emails chose", () => {
+  it("becomes the sending mailbox, and the fallback recipient when no list is set", () => {
+    const chosen = withSendingMailbox(policy(), "admin@aurixasystems.com.au");
+    expect(chosen.mailbox).toBe("admin@aurixasystems.com.au");
+    expect(chosen.internalRecipients).toEqual(["admin@aurixasystems.com.au"]);
+    expect(chosen.internalRecipientSource).toBe("mailbox_fallback");
+  });
+
+  it("gives a deployment with no mailbox of its own one to tell", () => {
+    const none = readPolicy({});
+    expect(none.internalRecipientSource).toBe("none");
+    const chosen = withSendingMailbox(none, "admin@aurixasystems.com.au");
+    expect(chosen.internalRecipients).toEqual(["admin@aurixasystems.com.au"]);
+    expect(chosen.internalRecipientSource).toBe("mailbox_fallback");
+  });
+
+  it("leaves a configured recipient list alone — that is the team's answer", () => {
+    const configured = policy({ LEAD_STAGE_INTERNAL_RECIPIENTS: "a@x.com, b@x.com" });
+    const chosen = withSendingMailbox(configured, "admin@aurixasystems.com.au");
+    expect(chosen.mailbox).toBe("admin@aurixasystems.com.au");
+    expect(chosen.internalRecipients).toEqual(["a@x.com", "b@x.com"]);
+    expect(chosen.internalRecipientSource).toBe("configured");
+  });
+
+  it("changes nothing without a mailbox that is an address", () => {
+    const base = policy();
+    expect(withSendingMailbox(base, null)).toBe(base);
+    expect(withSendingMailbox(base, "  ")).toBe(base);
+    expect(withSendingMailbox(base, "not an address")).toBe(base);
   });
 });

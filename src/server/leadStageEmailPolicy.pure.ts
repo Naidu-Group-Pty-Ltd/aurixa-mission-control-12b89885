@@ -593,3 +593,31 @@ export function withApplicantSenders(
   }
   return { ...policy, applicantSenders: next };
 }
+
+/**
+ * The policy with the mailbox the emails actually send from.
+ *
+ * `readPolicy` takes the sending mailbox from the environment, which is the
+ * deployment's own tenant. Email → Lead emails can choose another — Aurixa's
+ * own tenant and mailbox rather than whatever this deployment's campaigns send
+ * from. When it does, that is the sending mailbox everywhere the policy names
+ * one: the ledger's `mailbox`, and the team notification's fallback recipient
+ * when no `LEAD_STAGE_INTERNAL_RECIPIENTS` list is set ("only the sending
+ * mailbox was told" has to be true of the mailbox that sent). A configured
+ * list is the team's answer and is left alone.
+ */
+export function withSendingMailbox(
+  policy: StageEmailPolicy,
+  mailbox: string | null | undefined,
+): StageEmailPolicy {
+  const chosen = (mailbox ?? "").trim();
+  if (!chosen || !emailKey(chosen)) return policy;
+  if (policy.internalRecipientSource === "configured") return { ...policy, mailbox: chosen };
+  const fallback = resolveInternalRecipients([], chosen);
+  return {
+    ...policy,
+    mailbox: chosen,
+    internalRecipients: fallback.recipients,
+    internalRecipientSource: fallback.source,
+  };
+}
