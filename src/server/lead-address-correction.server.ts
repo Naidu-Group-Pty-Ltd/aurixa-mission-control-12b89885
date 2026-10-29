@@ -210,7 +210,16 @@ async function attemptResolution(input: {
         ...previous,
         email_corrections: [
           ...history,
-          { from: decision.from, to: decision.to, at, channel, generation: decision.generation },
+          {
+            from: decision.from,
+            to: decision.to,
+            at,
+            // The submission it was, so a reader that rewrites the lead (the
+            // Airtable mirror) can keep later copies of earlier ones stale.
+            submitted_at: lead.submitted_at,
+            channel,
+            generation: decision.generation,
+          },
         ],
       },
     })

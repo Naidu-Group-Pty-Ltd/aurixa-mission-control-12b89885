@@ -206,10 +206,24 @@ describe("overCorrection — a lead whose applicant corrected their address", ()
     const existing = {
       channel: "website",
       correction_token_sha256: "f".repeat(64),
-      email_corrections: [{ from: "jordan@firm.con", to: "jordan@firm.com", generation: 1 }],
+      email_corrections: [
+        {
+          from: "jordan@firm.con",
+          to: "jordan@firm.com",
+          generation: 1,
+          submitted_at: "2026-10-29T06:05:00.000Z",
+        },
+      ],
     };
-    const { write, owed } = overCorrection(existing, mirrored, { ...mirrored, stage: 2 });
+    const { write, owed } = overCorrection(
+      existing,
+      { ...mirrored, submitted_at: "2026-10-29T06:00:00.000Z" },
+      { ...mirrored, stage: 2 },
+    );
     expect(write.email).toBe("jordan@firm.com");
+    // Airtable's time is the original's; kept, a late copy of an earlier
+    // correction would read as newer than the one on record.
+    expect(write.submitted_at).toBe("2026-10-29T06:05:00.000Z");
     expect(write.metadata).toMatchObject({
       channel: "airtable_mirror",
       airtable_record_id: "rec1",

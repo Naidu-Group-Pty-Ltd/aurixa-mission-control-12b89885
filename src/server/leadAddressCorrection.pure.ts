@@ -145,12 +145,17 @@ export function decideAddressCorrection(
  */
 export function correctedAddressOf(
   metadata: unknown,
-): { email: string; generation: number } | null {
+): { email: string; generation: number; submittedAt: string | null } | null {
   const history = (metadata as { email_corrections?: unknown } | null)?.email_corrections;
   if (!Array.isArray(history) || history.length === 0) return null;
-  const last = history[history.length - 1] as { to?: unknown; generation?: unknown };
+  const last = history[history.length - 1] as {
+    to?: unknown;
+    generation?: unknown;
+    submitted_at?: unknown;
+  };
   const email = typeof last?.to === "string" ? last.to.trim() : "";
   const generation = Number(last?.generation);
   if (!email || !Number.isInteger(generation) || generation < 1) return null;
-  return { email, generation };
+  const submittedAt = typeof last.submitted_at === "string" ? last.submitted_at : null;
+  return { email, generation, submittedAt };
 }

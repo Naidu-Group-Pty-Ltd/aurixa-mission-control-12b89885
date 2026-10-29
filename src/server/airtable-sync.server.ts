@@ -601,9 +601,9 @@ function latestStage2(candidates: Stage2Enrichment[]): Stage2Enrichment | null {
  *
  * And Airtable never hears of a correction, so for a corrected lead its record
  * is still at the mistyped address: written as it stands, it would put the
- * typo back. The mirror keeps the corrected address and merges its metadata
- * over the lead's, and the emails it finds owed are for the corrected address,
- * at its generation.
+ * typo back. The mirror keeps the corrected address and the corrected
+ * submission's time, merges its metadata over the lead's, and the emails it
+ * finds owed are for the corrected address, at its generation.
  */
 export function overCorrection<W extends { metadata: Record<string, Json> }, R extends object>(
   existingMetadata: unknown,
@@ -614,7 +614,14 @@ export function overCorrection<W extends { metadata: Record<string, Json> }, R e
   const corrected = correctedAddressOf(existingMetadata);
   if (corrected) {
     return {
-      write: { ...write, email: corrected.email, metadata: { ...existing, ...write.metadata } },
+      write: {
+        ...write,
+        email: corrected.email,
+        // The corrected submission's own time: Airtable's is the original's,
+        // and with it a late copy of an earlier correction would read as newer.
+        ...(corrected.submittedAt ? { submitted_at: corrected.submittedAt } : {}),
+        metadata: { ...existing, ...write.metadata },
+      },
       owed: { ...row, email: corrected.email, applicant_email_generation: corrected.generation },
     };
   }

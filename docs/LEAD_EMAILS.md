@@ -219,8 +219,8 @@ times. Refusals are `unverified`, `window_closed`, `questionnaire_reached`,
 **A correction**:
 
 - writes the Stage 1 answers as sent now — `source`, `page` and the reference
-  stay as they were — and appends `{ from, to, at, channel, generation }` to
-  `metadata.email_corrections`;
+  stay as they were — and appends `{ from, to, at, submitted_at, channel,
+  generation }` to `metadata.email_corrections`;
 - moves the lead to the next **address generation**
   (`waitlist_leads.applicant_email_generation`), guarded on the one it read.
   Two corrections racing each other cannot both land: the one whose update
@@ -245,8 +245,10 @@ times. Refusals are `unverified`, `window_closed`, `questionnaire_reached`,
   to now): it was mailed to somebody who is not the applicant. "Continue with
   your Application ID" works with the corrected address;
 - survives the Airtable mirror, which never hears of it: for a corrected lead
-  the mirror keeps the corrected address and merges its metadata over the
-  lead's rather than replacing it, and for every lead it keeps the keys only
+  the mirror keeps the corrected address and the corrected submission's time
+  (so a late copy of an earlier correction stays stale) and merges its
+  metadata over the lead's rather than replacing it, and for every lead it
+  keeps the keys only
   Mission Control writes — the token's hash and the corrections
   (`overCorrection`, `src/server/airtable-sync.server.ts`);
 - is audited (`lead.address_corrected`, from and to) and every operator is told

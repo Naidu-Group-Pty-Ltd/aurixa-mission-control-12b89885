@@ -136,7 +136,7 @@ describe("correctedAddressOf", () => {
           { from: "a@x.co", to: "a@x.com", generation: 2 },
         ],
       }),
-    ).toEqual({ email: "a@x.com", generation: 2 });
+    ).toEqual({ email: "a@x.com", generation: 2, submittedAt: null });
     expect(correctedAddressOf({ channel: "website" })).toBeNull();
     expect(correctedAddressOf(null)).toBeNull();
   });
@@ -320,7 +320,14 @@ describe("resolveStageOneConflict", () => {
     expect(lead.values).not.toHaveProperty("application_id");
     expect((lead.values as { metadata: Record<string, unknown> }).metadata).toMatchObject({
       channel: "website",
-      email_corrections: [{ from: "jordan@firm.con", to: "jordan@firm.com", generation: 1 }],
+      email_corrections: [
+        {
+          from: "jordan@firm.con",
+          to: "jordan@firm.com",
+          generation: 1,
+          submitted_at: corrected().submitted_at,
+        },
+      ],
     });
     // Guarded on the generation it read: two racing corrections cannot both land.
     expect(lead.filters).toContainEqual(["eq", "applicant_email_generation", 0]);
