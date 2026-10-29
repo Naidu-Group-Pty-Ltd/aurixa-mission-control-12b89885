@@ -105,7 +105,11 @@ export type CloneSecretStatus =
   | "missing"
   | "failed"
   | "authorised_no_value"
-  | "withheld";
+  | "withheld"
+  /** A key minted for this clone on Aurixa's account: Aurixa's money. */
+  | "minted"
+  /** A short-lived token in Aurixa's organisation: Aurixa's money. */
+  | "federated";
 
 /**
  * The piggyback rule, in one place.
@@ -115,6 +119,18 @@ export type CloneSecretStatus =
  * landed) and neither is billable — but they are distinct on the dashboard,
  * because `unknown_secret` at volume means the reporter is sending a name the
  * provisioner does not know, which is a bug to fix, not spend to collect.
+ *
+ * ## A mirror of the SQL, in the SQL's order
+ *
+ * `record_api_usage_event` is what rates money, and this has no runtime
+ * caller: it is the rule written where a test can hold it. So it follows the
+ * function step for step — the route from `resolve_api_key_billability`, the
+ * broker's assertion over it, then `not_billable`, `error_call` and
+ * `absorbed` in that order. Until 29 Oct 2026 it differed in two ways the
+ * tests could not see: it rated `minted` and `federated` as `no_key` (the SQL
+ * bills both as `inherited`), and it called only a failed call on OUR
+ * credential `error_call`, where the SQL calls every failed call that
+ * (key audit A1).
  */
 export function resolveBillingReason(args: {
   cloneId: string | null;
@@ -147,31 +163,44 @@ export function resolveBillingReason(args: {
   rateAbsorbed?: boolean;
 }): BillingReason {
   if (!args.rateExists) return "rate_missing";
+  let reason = routeReason(args.cloneId, args.secretStatus);
+  // The broker's own assertion, for a clone only — the SQL's
+  // `IF _brokered AND _clone_id IS NOT NULL`.
+  if (args.brokered === true && args.cloneId !== null) reason = "brokered";
   if (!args.rateIsBillable) return "not_billable";
+  // Every failed call, whoever's credential it was on: we do not charge for
+  // nothing delivered. (The SQL then records its vendor cost too, a tenant's
+  // own key included — `recordsVendorCost("error_call")`.)
+  if (args.callStatus === "error") return "error_call";
+  if (args.rateAbsorbed === true && (reason === "inherited" || reason === "brokered")) {
+    return "absorbed";
+  }
+  return reason;
+}
+
+/** `resolve_api_key_billability`: whose credential a clone's call ran on. */
+function routeReason(cloneId: string | null, status: CloneSecretStatus | null): BillingReason {
   // A tenant with no clone is the prime itself — our project, our key.
-  if (args.cloneId === null) return "no_key";
-  // Only a call that actually succeeded on our credential reaches a charge.
-  // Asked BEFORE the route, so a failed brokered call is `error_call` exactly
-  // as a failed inherited one is — we do not charge for nothing delivered,
-  // whichever side of the broker the credential sat on.
-  const spentOurs =
-    args.brokered === true || args.secretStatus === "withheld" || args.secretStatus === "inherited";
-  if (spentOurs && args.callStatus === "error") return "error_call";
-  // Asked after `error_call` and before the two charging reasons, exactly as
-  // the SQL orders it — `record_api_usage_event` and this function are two
-  // implementations of one rule and a difference in order is a difference in
-  // answer.
-  if (args.rateAbsorbed === true && spentOurs) return "absorbed";
-  if (args.brokered === true) return "brokered";
-  if (args.secretStatus === null) return "unknown_secret";
-  if (args.secretStatus === "set") return "byok";
-  // The clone was deliberately stripped of the forwarded key, which is
-  // precisely the state in which the CALL travels instead of the credential.
-  // Before the broker this fell through to `no_key` and was right; after it,
-  // it is the one status that guarantees the prime paid.
-  if (args.secretStatus === "withheld") return "brokered";
-  if (args.secretStatus !== "inherited") return "no_key";
-  return "inherited";
+  if (cloneId === null) return "no_key";
+  if (status === null) return "unknown_secret";
+  switch (status) {
+    // Aurixa's money every way: forwarded from the prime, minted for this
+    // clone on Aurixa's account, or a token in Aurixa's organisation.
+    case "inherited":
+    case "minted":
+    case "federated":
+      return "inherited";
+    case "set":
+      return "byok";
+    // Deliberately taken off this clone, so a call it makes is one Mission
+    // Control made for it, on our credential.
+    case "withheld":
+      return "brokered";
+    // `missing`, `failed` and `authorised_no_value`: no working credential on
+    // either side of the broker.
+    default:
+      return "no_key";
+  }
 }
 
 /**

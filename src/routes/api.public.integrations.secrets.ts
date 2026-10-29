@@ -35,10 +35,12 @@ import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { resolveCloneApiKey } from "@/server/clone-api-keys.server";
 import { checkRateLimit } from "@/server/token-rate-limit.server";
 import {
+  integrationLedgerStatus,
   planIntegrationSecretWrite,
   refusalHeaders,
   relayHeaders,
   withCrmLineRefusals,
+  type IntegrationLedgerStatus,
 } from "@/server/integrationSecretBroker.pure";
 
 /** A refusal this endpoint makes, marked as ours. */
@@ -180,22 +182,68 @@ export const Route = createFileRoute("/api/public/integrations/secrets")({
 
         /*
          * The ledger is what the clone page reads, so a secret written here
-         * and not recorded is a divergence with no signal anywhere. The status
-         * is `set`: the tenant supplied this value, so it is neither
-         * `inherited` (forwarded from the prime) nor `withheld`. That
-         * distinction is what stops a tenant's own key being billed to the
-         * prime — see `apiUsageBilling.pure.ts` on the clone side. A value the
-         * project already held is recorded as held without moving its set
-         * time (`secretLedger.pure.ts`).
+         * and not recorded is a divergence with no signal anywhere. It is also
+         * what decides whose money each call on the key spends: `set` rates
+         * `byok`, charged at nothing. So the status is decided per name
+         * (`integrationLedgerStatus`): a save that changed nothing keeps a
+         * platform-paid record, the platform's own value is `inherited`, and
+         * only a key the tenant brought is `set`. A value the project already
+         * held is recorded as held without moving its set time
+         * (`secretLedger.pure.ts`).
          */
         const { recordSecretLedger } = await import("@/server/secretLedger.server");
-        const ledgerErr = await recordSecretLedger(supabaseAdmin, {
-          cloneId: target.cloneId,
-          names,
-          result: res,
-          status: "set",
-          now: new Date().toISOString(),
-        });
+        const now = new Date().toISOString();
+        let ledgerErr: string | null = null;
+        if (!res.ok) {
+          ledgerErr = await recordSecretLedger(supabaseAdmin, {
+            cloneId: target.cloneId,
+            names,
+            result: res,
+            status: "set",
+            now,
+          });
+        } else {
+          const { isPlatformValue } = await import("@/server/platformSecretValue.server");
+          // Unreadable is not "no rows": an unchanged name then keeps its row.
+          const prior = await supabaseAdmin
+            .from("clone_backend_secrets")
+            .select("name, status")
+            .eq("clone_id", target.cloneId)
+            .in("name", names);
+          const existing = prior.error
+            ? null
+            : new Map(
+                (prior.data ?? []).map((r) => [r.name as string, (r.status as string) ?? null]),
+              );
+          const sent = new Set(res.written);
+          const held = new Set(res.unchanged);
+          const byStatus = new Map<IntegrationLedgerStatus, string[]>();
+          for (const { name, value } of linePlan.write) {
+            if (!sent.has(name) && !held.has(name)) continue;
+            const status = integrationLedgerStatus({
+              unchanged: held.has(name),
+              existing: existing === null ? undefined : (existing.get(name) ?? null),
+              isPlatformValue: isPlatformValue(name, value),
+            });
+            if (status === null) continue;
+            byStatus.set(status, [...(byStatus.get(status) ?? []), name]);
+          }
+          for (const [status, group] of byStatus) {
+            const inGroup = new Set(group);
+            const err = await recordSecretLedger(supabaseAdmin, {
+              cloneId: target.cloneId,
+              names: group,
+              result: {
+                ok: true,
+                written: res.written.filter((n) => inGroup.has(n)),
+                unchanged: res.unchanged.filter((n) => inGroup.has(n)),
+              },
+              status,
+              now,
+            });
+            ledgerErr ??= err;
+          }
+        }
         if (ledgerErr) {
           console.error("[integrations.secrets] secrets written but ledger not updated", {
             cloneId: target.cloneId,

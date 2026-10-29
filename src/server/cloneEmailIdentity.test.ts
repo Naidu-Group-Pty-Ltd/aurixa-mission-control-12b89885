@@ -1180,7 +1180,9 @@ describe("identityLedgerFromListing", () => {
     ["RESEND_FROM_EMAIL", { status: "missing", last_error: "" }],
   ]);
 
-  it("says set, at the identity's write, for both names the project lists", () => {
+  it("says minted for the key and set for the address, at the identity's write", () => {
+    // The key is minted on Aurixa's Resend account, so it is Aurixa's money;
+    // recorded `set` it rated as the tenant's own and every email was free.
     const plan = identityLedgerFromListing({
       identity,
       listed: new Set(["RESEND_API_KEY", "RESEND_FROM_EMAIL", "SUPABASE_URL"]),
@@ -1190,7 +1192,7 @@ describe("identityLedgerFromListing", () => {
     expect(plan.writes).toEqual([
       {
         name: "RESEND_API_KEY",
-        status: "set",
+        status: "minted",
         last_set_at: identity.key_written_at,
         last_error: null,
       },
@@ -1208,11 +1210,27 @@ describe("identityLedgerFromListing", () => {
       identity,
       listed: new Set(["RESEND_API_KEY", "RESEND_FROM_EMAIL"]),
       ledger: new Map([
-        ["RESEND_API_KEY", { status: "set", last_error: null }],
+        ["RESEND_API_KEY", { status: "minted", last_error: null }],
         ["RESEND_FROM_EMAIL", { status: "set", last_error: null }],
       ]),
     });
     expect(plan).toEqual({ writes: [], absent: [] });
+  });
+
+  it("corrects a key recorded set to minted, once, and leaves the address", () => {
+    // What every clone with an identity held on 29 Oct 2026 (key audit R3).
+    // The hourly audit is what puts it right, so no data migration is needed.
+    const plan = identityLedgerFromListing({
+      identity,
+      listed: new Set(["RESEND_API_KEY", "RESEND_FROM_EMAIL"]),
+      ledger: new Map([
+        ["RESEND_API_KEY", { status: "set", last_error: null }],
+        ["RESEND_FROM_EMAIL", { status: "set", last_error: null }],
+      ]),
+    });
+    expect(plan.writes).toEqual([
+      { name: "RESEND_API_KEY", status: "minted", last_set_at: identity.key_written_at, last_error: null },
+    ]);
   });
 
   it("says missing, with the remedy, for a name the project does not list", () => {
@@ -1252,7 +1270,7 @@ describe("identityLedgerFromListing", () => {
       ledger: new Map(),
     });
     expect(plan.writes.map((w) => [w.name, w.status])).toEqual([
-      ["RESEND_API_KEY", "set"],
+      ["RESEND_API_KEY", "minted"],
       ["RESEND_FROM_EMAIL", "set"],
     ]);
   });

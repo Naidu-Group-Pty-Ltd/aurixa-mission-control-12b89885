@@ -1,15 +1,17 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import {
   FORBIDDEN_TENANT_PREFIXES,
   FORBIDDEN_TENANT_SECRETS,
   MAX_SECRETS_PER_WRITE,
   MAX_SECRET_VALUE_LENGTH,
+  integrationLedgerStatus,
   planIntegrationSecretWrite,
   refusalHeaders,
   relayHeaders,
   tenantSecretRefusal,
 } from "./integrationSecretBroker.pure";
+import { isPlatformValue } from "./platformSecretValue.server";
 import { CLONE_API_SCOPES, DEFAULT_SCOPES } from "@/lib/clone-api-scopes";
 
 /**
@@ -238,5 +240,83 @@ describe("the scope, and the endpoint that requires it", () => {
     // route by which a key could write the prime's environment.
     const route = readFileSync("src/routes/api.public.integrations.secrets.ts", "utf8");
     expect(route).toContain("not_a_clone_key");
+  });
+});
+
+describe("whose money a written key spends (key audit R3)", () => {
+  const facts = (over: Partial<Parameters<typeof integrationLedgerStatus>[0]>) => ({
+    unchanged: false,
+    existing: null,
+    isPlatformValue: false,
+    ...over,
+  });
+
+  it("keeps a platform-paid record when the save changed nothing", () => {
+    // The page re-posting what the project already holds re-stamped these
+    // `set`, which rates `byok` and stops the recharge for good.
+    for (const existing of ["inherited", "minted", "federated"]) {
+      expect(integrationLedgerStatus(facts({ unchanged: true, existing })), existing).toBe(
+        existing,
+      );
+    }
+  });
+
+  it("leaves an unchanged name alone when its record could not be read", () => {
+    expect(integrationLedgerStatus(facts({ unchanged: true, existing: undefined }))).toBeNull();
+    expect(
+      integrationLedgerStatus(
+        facts({ unchanged: true, existing: undefined, isPlatformValue: true }),
+      ),
+    ).toBeNull();
+  });
+
+  it("records the platform's own value as inherited, sent or already held", () => {
+    expect(integrationLedgerStatus(facts({ isPlatformValue: true }))).toBe("inherited");
+    expect(integrationLedgerStatus(facts({ isPlatformValue: true, existing: "set" }))).toBe(
+      "inherited",
+    );
+    // A re-save corrects the old blanket `set` it was given.
+    expect(
+      integrationLedgerStatus(facts({ unchanged: true, existing: "set", isPlatformValue: true })),
+    ).toBe("inherited");
+  });
+
+  it("records a key the tenant brought as theirs, superseding a minted or forwarded one", () => {
+    // Superseding is the product: the platform stops being charged for it.
+    for (const existing of [null, "inherited", "minted", "missing", "authorised_no_value", "set"]) {
+      expect(integrationLedgerStatus(facts({ existing })), String(existing)).toBe("set");
+    }
+    expect(integrationLedgerStatus(facts({ unchanged: true, existing: "set" }))).toBe("set");
+    expect(integrationLedgerStatus(facts({ unchanged: true, existing: null }))).toBe("set");
+  });
+
+  it("the endpoint decides per name and no longer stamps every write set", () => {
+    const route = readFileSync(
+      new URL("../routes/api.public.integrations.secrets.ts", import.meta.url),
+      "utf8",
+    );
+    expect(route).toContain("integrationLedgerStatus({");
+    expect(route).toContain("isPlatformValue(name, value)");
+    // The one blanket `set` left is the failed write, which records every name `failed`.
+    expect(route.match(/status: "set",/g) ?? []).toHaveLength(1);
+    expect(route).toMatch(/if \(!res\.ok\) \{\s*ledgerErr = await recordSecretLedger/);
+  });
+});
+
+describe("isPlatformValue", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("is Mission Control's own value for the name, and nothing else", () => {
+    vi.stubEnv("FIRECRAWL_API_KEY", "fc-platform-value");
+    expect(isPlatformValue("FIRECRAWL_API_KEY", "fc-platform-value")).toBe(true);
+    expect(isPlatformValue("FIRECRAWL_API_KEY", "  fc-platform-value  ")).toBe(true);
+    expect(isPlatformValue("FIRECRAWL_API_KEY", "fc-the-tenants-own")).toBe(false);
+    expect(isPlatformValue("OTHER_NAME", "fc-platform-value")).toBe(false);
+  });
+
+  it("is never true when Mission Control holds no value, or nothing was sent", () => {
+    vi.stubEnv("GAMMA_API_KEY", "");
+    expect(isPlatformValue("GAMMA_API_KEY", "")).toBe(false);
+    expect(isPlatformValue("GAMMA_API_KEY", "anything")).toBe(false);
   });
 });

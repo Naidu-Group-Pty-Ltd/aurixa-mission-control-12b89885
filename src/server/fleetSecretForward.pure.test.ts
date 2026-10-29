@@ -269,10 +269,12 @@ describe("the class boundary is one implementation", () => {
     // Two copies of the security boundary is invisible from outside: both
     // paths keep working and only one of them refuses a signing key.
     expect(src).toMatch(/export function classRefusalFor/);
-    const uses = [...src.matchAll(/classRefusalFor\(/g)].length;
-    expect(uses, "both decideForward and decideFleetForward must call it").toBeGreaterThanOrEqual(
-      3,
-    );
+    // Both decisions ask `refusalFor`, which asks `classRefusalFor` and only
+    // words a `prime_only` refusal by its name (`primeOnlySecrets.pure.ts`).
+    expect(src).toMatch(/export function refusalFor\(name: string, secretClass: SecretClass\)/);
+    const uses = [...src.matchAll(/= refusalFor\(facts\.name, facts\.secretClass\)/g)].length;
+    expect(uses, "both decideForward and decideFleetForward must call it").toBe(2);
+    expect(src.match(/classRefusalFor\(/g) ?? []).toHaveLength(2);
     expect(src.match(/CLASS_REFUSAL\[/g) ?? []).toHaveLength(1);
   });
 });

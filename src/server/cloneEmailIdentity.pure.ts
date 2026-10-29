@@ -1021,10 +1021,30 @@ export const IDENTITY_SECRET_ABSENT_NOTE =
 
 export type IdentityLedgerWrite = {
   name: (typeof IDENTITY_SECRET_NAMES)[number];
-  status: "set" | "missing";
+  status: "minted" | "set" | "missing";
   last_set_at: string | null;
   last_error: string | null;
 };
+
+/**
+ * What the ledger records a name another step wrote as, once the project holds it.
+ *
+ * The clone's Resend key is minted on Aurixa's own Resend account, scoped to
+ * the clone's domain, so every email it sends is Aurixa's money: `minted`,
+ * which `resolve_api_key_billability` reads as `inherited`, the same as the
+ * per-clone model keys. Until 29 Oct 2026 it was recorded `set`, the status a
+ * tenant's own key has, so every email on a minted key rated `byok` and was
+ * charged at nothing (key audit R3: `set` on all four clones that had one).
+ * Whether email is then billed or absorbed is a property of its rate row
+ * (`api_provider_rates.absorbed`), never of this record.
+ *
+ * Everything else written this way is `set`: the sender address is
+ * configuration, and the Turnstile pair is the clone's own widget, which no
+ * vendor bills per use.
+ */
+export function settledLedgerStatus(name: string): "minted" | "set" {
+  return name === CLONE_RESEND_SECRET ? "minted" : "set";
+}
 
 /**
  * What `clone_backend_secrets` should say about a finished identity's two
@@ -1067,8 +1087,9 @@ export function identityLedgerFromListing(input: {
   for (const name of IDENTITY_SECRET_NAMES) {
     const row = input.ledger.get(name);
     if (input.listed.has(name)) {
-      if (row?.status !== "set") {
-        writes.push({ name, status: "set", last_set_at: writtenAt[name], last_error: null });
+      const status = settledLedgerStatus(name);
+      if (row?.status !== status) {
+        writes.push({ name, status, last_set_at: writtenAt[name], last_error: null });
       }
       continue;
     }
@@ -1091,7 +1112,8 @@ export function identityLedgerFromListing(input: {
  * Map a provisioning shell status onto the operator ledger's vocabulary.
  *
  * `clone_backend_secrets.status` is CHECK-constrained to
- * `missing | set | failed | inherited | authorised_no_value | withheld`,
+ * `missing | set | failed | inherited | authorised_no_value | withheld |
+ * minted | federated`,
  * while the planner also says
  * `generated`, `derived`, `skipped_platform` and `skipped_deployment_config`.
  * The provisioning ledger upsert used to write the planner's words straight
@@ -1103,10 +1125,19 @@ export function identityLedgerFromListing(input: {
  */
 export function ledgerStatusForShell(
   status: SecretShellStatus,
-): "missing" | "set" | "failed" | "inherited" | "authorised_no_value" | "withheld" | null {
+):
+  | "missing"
+  | "set"
+  | "minted"
+  | "failed"
+  | "inherited"
+  | "authorised_no_value"
+  | "withheld"
+  | null {
   switch (status) {
     case "missing":
     case "set":
+    case "minted":
     case "failed":
     case "inherited":
       return status;

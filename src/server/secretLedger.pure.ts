@@ -50,8 +50,13 @@ export type SecretLedgerInput = {
    */
   names: readonly string[];
   result: SecretWriteResult;
-  /** What a name the project holds is recorded as: Mission Control's own value, or the prime's. */
-  status: "set" | "inherited";
+  /**
+   * What a name the project holds is recorded as: a value Mission Control set
+   * for this clone or the tenant's own (`set`), the platform's forwarded value
+   * (`inherited`), or a credential minted or federated for this clone on
+   * Aurixa's account — the record an unchanged Integrations save keeps.
+   */
+  status: "set" | "inherited" | "minted" | "federated";
   /** Who set a SENT name. Omitted, the column is not written at all. */
   setBy?: string | null;
   now: string;
