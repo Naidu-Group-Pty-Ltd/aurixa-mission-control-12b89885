@@ -23,11 +23,23 @@ const state = vi.hoisted(() => ({
   // The batch lead read can FAIL, and a double that cannot express that
   // cannot reach the branch where failing is confused with being absent.
   leadReadError: null as { message: string } | null,
+  // Email → Lead emails: who sends each stage, the copy, the minted links.
+  settingsRow: null as Record<string, unknown> | null,
+  settingsError: null as { message: string; code?: string } | null,
+  templateRows: [] as Record<string, unknown>[],
+  templatesError: null as { message: string; code?: string } | null,
+  links: [] as Record<string, unknown>[],
 }));
 
 vi.mock("@/server/graph-client", () => ({
   isGraphConfigured: () => true,
   defaultMailbox: () => "hello@aurixasystems.com.au",
+  defaultGraphConfig: () => ({
+    tenantId: "tenant",
+    clientId: "client",
+    clientSecret: "secret",
+    mailbox: "hello@aurixasystems.com.au",
+  }),
   sendMail: async (mailbox: string, message: Record<string, unknown>) => {
     state.sent.push({ mailbox, message });
     return state.outcome;
@@ -74,6 +86,28 @@ vi.mock("@/integrations/supabase/client.server", () => ({
               error: state.leadReadError,
             }),
           }),
+        };
+      }
+      if (table === "lead_email_settings") {
+        return {
+          select: () => ({
+            eq: () => ({
+              maybeSingle: async () => ({ data: state.settingsRow, error: state.settingsError }),
+            }),
+          }),
+        };
+      }
+      if (table === "lead_email_templates") {
+        return {
+          select: async () => ({ data: state.templateRows, error: state.templatesError }),
+        };
+      }
+      if (table === "lead_questionnaire_links") {
+        return {
+          insert: async (link: Record<string, unknown>) => {
+            state.links.push(link);
+            return { error: null };
+          },
         };
       }
       if (table === "email_suppressions") {
@@ -167,6 +201,11 @@ beforeEach(() => {
   state.suppressionQueries = [];
   state.sweepWindows = {};
   state.sweepErrors = {};
+  state.settingsRow = null;
+  state.settingsError = null;
+  state.templateRows = [];
+  state.templatesError = null;
+  state.links = [];
   process.env.MICROSOFT_MAILBOX_EMAIL = "hello@aurixasystems.com.au";
   process.env.LEAD_STAGE_INTERNAL_RECIPIENTS = TEAM.join(",");
   delete process.env.LEAD_STAGE_INTERNAL_STAGES;
@@ -599,5 +638,170 @@ describe("the register is asked about the addresses that will be sent to", () =>
     await dispatchStageEmails();
     expect(wire()).toEqual(TEAM);
     expect(state.notices).toHaveLength(0);
+  });
+});
+
+describe("Mission Control sends the applicant's own email (Email → Lead emails)", () => {
+  const SETTINGS = {
+    id: true,
+    stage1_sender: "mission_control",
+    stage2_sender: "mission_control",
+    stage3_sender: "make",
+    tenant_id: null,
+    from_mailbox: "trials@aurixasystems.com.au",
+    from_name: "Aurixa Systems",
+    reply_to: "admin@aurixasystems.com.au",
+    updated_at: "2026-10-29T00:00:00.000Z",
+    updated_by: null,
+  };
+  const applicantRow = (stage: number) =>
+    row({ audience: "applicant", stage, recipients: ["applicant@example.com"] });
+  const html = () =>
+    String((state.sent[0]?.message.body as { content?: string } | undefined)?.content ?? "");
+
+  it("sends Stage 1 with a questionnaire link it minted, keeping only the token's hash", async () => {
+    state.settingsRow = SETTINGS;
+    state.claimed = [applicantRow(1)];
+    const result = await dispatchStageEmails();
+
+    expect(result).toMatchObject({ claimed: 1, sent: 1 });
+    expect(state.sent[0]?.mailbox).toBe("trials@aurixasystems.com.au");
+    expect(state.sent[0]?.message.subject).toBe(
+      "Application received — your Aurixa Systems free trial",
+    );
+    expect(state.links).toHaveLength(1);
+    const stored = String(state.links[0]?.token_sha256);
+    expect(stored).toMatch(/^[0-9a-f]{64}$/);
+
+    const link = /href="(https:\/\/[^"]+\/questionnaire\?[^"]+)"/.exec(html())?.[1];
+    expect(link).toBeDefined();
+    const url = new URL(link!.replace(/&amp;/g, "&"));
+    expect(url.searchParams.get("ref")).toBe("AX-0000000001");
+    const token = url.searchParams.get("token") ?? "";
+    expect(token.length).toBeGreaterThan(30);
+    // The email carries the token; the database never does.
+    expect(stored).not.toBe(token);
+    expect(JSON.stringify(state.links)).not.toContain(token);
+  });
+
+  it("sends as the identity chosen on the console", async () => {
+    state.settingsRow = SETTINGS;
+    state.claimed = [applicantRow(2)];
+    await dispatchStageEmails();
+    expect(state.sent[0]?.message.replyTo).toEqual([
+      { emailAddress: { address: "admin@aurixasystems.com.au" } },
+    ]);
+    expect(state.sent[0]?.message.from).toEqual({
+      emailAddress: { address: "trials@aurixasystems.com.au", name: "Aurixa Systems" },
+    });
+  });
+
+  it("sends the copy an operator saved, not the default", async () => {
+    state.settingsRow = SETTINGS;
+    state.templateRows = [
+      {
+        stage: 2,
+        subject: "Thanks {{first_name}}, we have your answers",
+        content: {},
+        updated_at: "2026-10-29T00:00:00.000Z",
+        updated_by: null,
+      },
+    ];
+    state.claimed = [applicantRow(2)];
+    await dispatchStageEmails();
+    expect(state.sent[0]?.message.subject).toBe("Thanks Ada, we have your answers");
+  });
+
+  it("holds the applicant's email a tick when the copy cannot be read", async () => {
+    state.settingsRow = SETTINGS;
+    state.templatesError = { message: "57014 statement timeout" };
+    state.claimed = [applicantRow(2)];
+    await dispatchStageEmails();
+    expect(state.sent).toHaveLength(0);
+    expect(patch()).toMatchObject({ status: "pending", claimed_at: null });
+  });
+
+  it("claims nothing when it cannot tell who sends", async () => {
+    // Neither guess is safe: Make for a stage whose module is off writes a
+    // terminal skip; Mission Control for one still on Make sends a duplicate.
+    state.settingsError = { message: "57014 statement timeout" };
+    state.claimed = [applicantRow(1)];
+    const result = await dispatchStageEmails();
+    expect(result.claimed).toBe(0);
+    expect(state.sent).toHaveLength(0);
+    expect(result.note).toContain("could not be read");
+  });
+
+  describe("raising the obligation", () => {
+    const lead = (over: Record<string, unknown> = {}) => ({
+      id: "lead-1",
+      email: "applicant@example.com",
+      created_at: new Date(Date.now() - 60_000).toISOString(),
+      submitted_at: new Date(Date.now() - 60_000).toISOString(),
+      enrichment_synced_at: null,
+      ...over,
+    });
+    const applicant = (stage: number) =>
+      state.upserts.flat().find((r) => r.audience === "applicant" && r.stage === stage);
+
+    it("raises a stage Mission Control owns at once — there is no Make to wait for", async () => {
+      state.settingsRow = SETTINGS;
+      await enqueueStageEmails({ leadId: "lead-1", lead: lead(), trigger: "ingest" });
+      expect(applicant(1)?.status).toBe("pending");
+    });
+
+    it("still waits out the grace period for a stage left on Make", async () => {
+      state.settingsRow = { ...SETTINGS, stage1_sender: "make" };
+      await enqueueStageEmails({ leadId: "lead-1", lead: lead(), trigger: "ingest" });
+      expect(applicant(1)).toBeUndefined();
+    });
+
+    it("decides nothing for the applicant when the settings cannot be read", async () => {
+      state.settingsError = { message: "57014 statement timeout" };
+      await enqueueStageEmails({
+        leadId: "lead-1",
+        lead: lead({ stage2_completed_at: new Date().toISOString() }),
+        trigger: "ingest",
+      });
+      expect(applicant(1)).toBeUndefined();
+      expect(applicant(2)).toBeUndefined();
+      // The team's own notification does not depend on who sends the applicant's.
+      expect(state.upserts.flat().some((r) => r.audience === "internal")).toBe(true);
+    });
+
+    it("does not invite an applicant to a questionnaire they have finished", async () => {
+      state.settingsRow = SETTINGS;
+      await enqueueStageEmails({
+        leadId: "lead-1",
+        lead: lead({ stage2_completed_at: new Date().toISOString() }),
+        trigger: "ingest",
+      });
+      expect(applicant(1)?.status).toBe("skipped");
+      expect(applicant(2)?.status).toBe("pending");
+    });
+
+    it("reads the settings once for the whole sweep", async () => {
+      state.settingsRow = SETTINGS;
+      const reads = { n: 0 };
+      const original = state.settingsRow;
+      Object.defineProperty(state, "settingsRow", {
+        configurable: true,
+        get: () => {
+          reads.n += 1;
+          return original;
+        },
+        set: () => {},
+      });
+      state.sweepWindows = {
+        created_at: [lead({ id: "a" }), lead({ id: "b" }), lead({ id: "c" })],
+      };
+      await sweepMissingStageEmails();
+      Object.defineProperty(state, "settingsRow", {
+        configurable: true,
+        writable: true,
+        value: null,
+      });
+      expect(reads.n).toBe(1);
+    });
   });
 });

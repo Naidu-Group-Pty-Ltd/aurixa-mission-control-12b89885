@@ -20,19 +20,24 @@
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import type { Database } from "@/integrations/supabase/types";
 import { emailKey } from "@/lib/email/emailAddress.pure";
-import {
-  defaultMailbox,
-  isGraphConfigured,
-  sendMail,
-  type GraphMessage,
-} from "@/server/graph-client";
+import { isGraphConfigured, sendMail, type GraphMessage } from "@/server/graph-client";
 import { notifyOperators } from "@/server/audit.server";
 import { composeStageEmail, type StageEmailLead } from "@/server/leadStageEmail.pure";
+import type { LeadEmailTemplate } from "@/lib/leadEmailTemplates.pure";
+import {
+  applicantMessage,
+  composeApplicantEmail,
+  sendingIdentity,
+  settingsForSending,
+  templatesForSending,
+  type LeadEmailSettings,
+} from "@/server/lead-emails.server";
 import {
   decideApplicant,
   decideInternal,
   nextStepUrlFor,
   readPolicy,
+  withApplicantSenders,
   type ApplicantMode,
   type DroppedRecipient,
   type LeadStage,
@@ -52,6 +57,31 @@ const DISPATCH_BATCH = 15;
 
 function policy(): StageEmailPolicy {
   return readPolicy(process.env as Record<string, string | undefined>);
+}
+
+type LoadedPolicy = {
+  policy: StageEmailPolicy;
+  /** Null when Email → Lead emails could not be read this tick. */
+  settings: LeadEmailSettings | null;
+};
+
+/**
+ * The deployment's policy with each stage's sender applied — who sends the
+ * applicant email is recorded on Email → Lead emails, not in the environment.
+ *
+ * An unreadable settings row is NOT read as "every stage on Make". For a stage
+ * already handed to Mission Control, Make's module is off, and the backstop's
+ * answer for Stage 2 — which leaves no receipt — is a terminal `skip`: one
+ * failed read would have unacknowledged that applicant for good. So no
+ * applicant decision is made without the settings; the sweep raises it on a
+ * later tick.
+ */
+async function loadPolicy(): Promise<LoadedPolicy> {
+  const settings = await settingsForSending();
+  return {
+    policy: settings ? withApplicantSenders(policy(), settings.senders) : policy(),
+    settings,
+  };
 }
 
 export type EnqueueResult = {
@@ -82,14 +112,20 @@ export type EnqueueInput = {
  * exists for: was this person told?
  */
 export async function enqueueStageEmails(input: EnqueueInput): Promise<EnqueueResult> {
+  return enqueueWith(input, await loadPolicy());
+}
+
+async function enqueueWith(input: EnqueueInput, loaded: LoadedPolicy): Promise<EnqueueResult> {
   const out: EnqueueResult = { queued: 0, skipped: 0, existing: 0 };
-  const p = policy();
+  const p = loaded.policy;
   const now = Date.now();
   const lead = input.lead as StageEmailLead & Record<string, unknown>;
 
   const rows: LedgerInsert[] = [];
   for (const stage of STAGES) {
     for (const audience of AUDIENCES) {
+      // Who sends it is unknown this tick — see `loadPolicy`.
+      if (audience === "applicant" && !loaded.settings) continue;
       const decision =
         audience === "internal"
           ? decideInternal(lead, stage, p, now)
@@ -218,9 +254,18 @@ export type DispatchReadiness = {
  * caller rather than reporting as "nothing to do".
  */
 export async function dispatchStageEmails(limit = DISPATCH_BATCH): Promise<DispatchResult> {
-  const p = policy();
-  const graph = isGraphConfigured();
-  const mailbox = p.mailbox ?? defaultMailbox();
+  const { policy: p, settings } = await loadPolicy();
+  // The tenant and mailbox chosen on Email → Lead emails, else the deployment's.
+  // Unreadable, nothing is claimed: sending from the deployment's mailbox
+  // instead of the one chosen is a different sender, not a fallback.
+  const identity = settings
+    ? await sendingIdentity(settings, p.mailbox)
+    : ({
+        ok: false,
+        error: "Email → Lead emails could not be read; nothing was sent this tick.",
+      } as const);
+  const graph = identity.ok || isGraphConfigured();
+  const mailbox = identity.ok ? identity.mailbox : null;
 
   const out: DispatchResult = {
     claimed: 0,
@@ -240,14 +285,12 @@ export async function dispatchStageEmails(limit = DISPATCH_BATCH): Promise<Dispa
     },
   };
 
-  if (!graph) {
-    out.note = "Microsoft Graph is not configured on this deployment";
+  if (!identity.ok) {
+    out.note = identity.error;
     return out;
   }
-  if (!mailbox) {
-    out.note = "no sending mailbox is configured";
-    return out;
-  }
+  // Read once a tick, and only if an applicant email is in the batch.
+  let templates: Record<LeadStage, LeadEmailTemplate> | null | undefined;
 
   const { data: claimed, error } = await supabaseAdmin.rpc("claim_lead_stage_emails", {
     _limit: limit,
@@ -392,27 +435,67 @@ export async function dispatchStageEmails(limit = DISPATCH_BATCH): Promise<Dispa
     }
 
     const stage = clampStage(row.stage);
-    const composed = composeStageEmail({
-      lead: lead as StageEmailLead,
-      stage,
-      audience: row.audience,
-      consoleUrl: p.consoleUrl,
-      nextStepUrl: nextStepUrlFor(stage, p),
-    });
+    let composed: { subject: string };
+    let message: GraphMessage;
 
-    const message: GraphMessage = {
-      subject: composed.subject,
-      body: { contentType: "HTML", content: composed.html },
-      toRecipients: sendable.map((address) => ({ emailAddress: { address } })),
-      // An internal email answers to the applicant: hitting reply on "new
-      // application" should reach the person who applied, which is the act the
-      // email exists to prompt.
-      ...(row.audience === "internal" && lead.email
-        ? { replyTo: [{ emailAddress: { address: String(lead.email) } }] }
-        : {}),
-    };
+    if (row.audience === "applicant") {
+      // Composed from the lead as it stands now. An applicant who finished the
+      // questionnaire before this went is not invited to start it — Make's own
+      // send stopped the same way, on `Send Stage 2 Invite`.
+      if (stage === 1 && lead.stage2_completed_at) {
+        await settle(row.id, {
+          status: "skipped",
+          reason: "the applicant completed the questionnaire before this email went",
+        });
+        out.skipped += 1;
+        continue;
+      }
+      if (templates === undefined) templates = await templatesForSending();
+      if (!templates) {
+        await settle(row.id, {
+          status: "pending",
+          claimed_at: null,
+          last_error: "the lead email templates could not be read",
+        });
+        out.skipped += 1;
+        continue;
+      }
+      const built = await composeApplicantEmail({
+        lead,
+        stage,
+        template: templates[stage],
+        supportEmail: identity.supportEmail,
+      });
+      if (!built.ok) {
+        // Nothing left: a link that could not be minted is a database fault
+        // the next tick can recover from, so the row goes back to pending.
+        await settle(row.id, { status: "pending", claimed_at: null, last_error: built.error });
+        out.skipped += 1;
+        continue;
+      }
+      composed = built.rendered;
+      message = applicantMessage(built.rendered, sendable, identity);
+    } else {
+      const internal = composeStageEmail({
+        lead: lead as StageEmailLead,
+        stage,
+        audience: row.audience,
+        consoleUrl: p.consoleUrl,
+        nextStepUrl: nextStepUrlFor(stage, p),
+      });
+      composed = internal;
+      message = {
+        subject: internal.subject,
+        body: { contentType: "HTML", content: internal.html },
+        toRecipients: sendable.map((address) => ({ emailAddress: { address } })),
+        // An internal email answers to the applicant: hitting reply on "new
+        // application" should reach the person who applied, which is the act
+        // the email exists to prompt.
+        ...(lead.email ? { replyTo: [{ emailAddress: { address: String(lead.email) } }] } : {}),
+      };
+    }
 
-    const outcome = await sendMail(mailbox, message);
+    const outcome = await sendMail(identity.mailbox, message, true, identity.config);
     const sentAt = new Date().toISOString();
 
     if (outcome.kind === "sent") {
@@ -691,7 +774,9 @@ async function raiseFailureNotice(
  * into history — switching the mailer on does not mail a year of funnel.
  */
 export async function sweepMissingStageEmails(limit = 100): Promise<EnqueueResult> {
-  const p = policy();
+  // Read once for the whole sweep, not once per lead.
+  const loaded = await loadPolicy();
+  const p = loaded.policy;
   const out: EnqueueResult = { queued: 0, skipped: 0, existing: 0 };
   if (p.maxAgeMs <= 0) return out;
 
@@ -752,11 +837,10 @@ export async function sweepMissingStageEmails(limit = 100): Promise<EnqueueResul
 
   for (const lead of byId.values()) {
     try {
-      const result = await enqueueStageEmails({
-        leadId: lead.id as string,
-        lead,
-        trigger: "manual",
-      });
+      const result = await enqueueWith(
+        { leadId: lead.id as string, lead, trigger: "manual" },
+        loaded,
+      );
       out.queued += result.queued;
       out.skipped += result.skipped;
       out.existing += result.existing;

@@ -259,6 +259,22 @@ export function parseLead(payload: Record<string, unknown>): ParsedLead | { erro
   };
 }
 
+/** A session length in whole minutes, or null for anything that is not one. */
+function durationMinutes(value: unknown): number | null {
+  const n = typeof value === "number" ? value : Number(String(value ?? "").trim());
+  return Number.isInteger(n) && n > 0 && n <= 480 ? n : null;
+}
+
+/** A video link the confirmation email may carry: https only, or nothing. */
+function meetingUrl(value: unknown): string | null {
+  const url = cleanLeadText(value, 1000);
+  return /^https:\/\/[^\s"'<>]+$/i.test(url) ? url : null;
+}
+
+function presentOnly(values: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(values).filter(([, value]) => value !== null));
+}
+
 /**
  * Parses a Stage 2 or Stage 3 submission.
  *
@@ -308,6 +324,23 @@ export function parseStageUpdate(
           stage3_access_mode: cleanLeadText(pick(payload, "accessMode", "access_mode")) || null,
           stage3_time_zone:
             cleanLeadText(pick(payload, "applicantTimeZone", "applicant_time_zone")) || null,
+          // What the confirmation email states, as the scheduler showed it to
+          // the applicant: their own clock, Sydney's, the session length and
+          // the video link. Only what the payload carries: the Airtable mirror
+          // writes these too, and a booking reported without them must not
+          // blank what it wrote.
+          ...presentOnly({
+            stage3_local_time:
+              cleanLeadText(pick(payload, "applicantLocalTime", "applicant_local_time")) || null,
+            stage3_host_local_time:
+              cleanLeadText(pick(payload, "hostLocalTime", "host_local_time")) || null,
+            stage3_duration_minutes: durationMinutes(
+              pick(payload, "durationMinutes", "duration_minutes"),
+            ),
+            stage3_booking_reference:
+              cleanLeadText(pick(payload, "calBookingUid", "cal_booking_uid")) || null,
+            stage3_meeting_url: meetingUrl(pick(payload, "meetingUrl", "meeting_url")),
+          }),
         };
 
   // Stage 2's `fields` block carries the answers under their own names; read

@@ -33,6 +33,7 @@ import {
   KeyRound,
   LayoutDashboard,
   Mail,
+  MailCheck,
   MailX,
   Flame,
   Megaphone,
@@ -354,6 +355,13 @@ export const NAV_SECTIONS: NavSection[] = [
         icon: Flame,
         keywords:
           "warmup warm up deliverability reputation inbox placement spam rescue instantly lemwarm mailbox ramp microsoft",
+      },
+      {
+        to: "/email/lead-emails",
+        label: "Lead Emails",
+        icon: MailCheck,
+        keywords:
+          "lead applicant free trial application received questionnaire strategic review confirmation stage email template make automation",
       },
       {
         to: "/email/suppressions",

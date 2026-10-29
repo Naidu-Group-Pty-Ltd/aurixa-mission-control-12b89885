@@ -1276,4 +1276,23 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       },
     ],
   },
+  {
+    migration: "20261029095900_lead_email_sender_kind.sql",
+    version: "20261029095900",
+    assertions: [{ kind: "enum", type: "notification_kind" }],
+  },
+  {
+    migration: "20261029100000_lead_email_templates.sql",
+    version: "20261029100000",
+    assertions: [
+      { kind: "table", table: "lead_email_templates" },
+      { kind: "column", table: "lead_email_templates", column: "content" },
+      { kind: "table", table: "lead_email_settings" },
+      { kind: "column", table: "lead_email_settings", column: "stage1_sender" },
+      { kind: "table", table: "lead_questionnaire_links" },
+      { kind: "column", table: "lead_questionnaire_links", column: "token_sha256" },
+      { kind: "column", table: "waitlist_leads", column: "stage3_meeting_url" },
+      { kind: "cron", jobname: "lead-stage-emails" },
+    ],
+  },
 ];

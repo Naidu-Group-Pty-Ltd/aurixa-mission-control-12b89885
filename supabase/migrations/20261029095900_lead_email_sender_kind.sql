@@ -1,0 +1,12 @@
+-- The notification raised when a free trial applicant email changes hands.
+--
+-- @asserts enum:notification_kind
+--
+-- Kept in its own migration, like 20260922100000: a new enum value cannot be
+-- USED in the transaction that adds it.
+--
+-- Handing a stage's applicant email from Make to Mission Control (or back) on
+-- Email → Lead emails decides whether applicants get one email, none or two.
+-- Every operator is told, with the Make module that must be off while Mission
+-- Control sends (docs/LEAD_EMAILS.md).
+ALTER TYPE public.notification_kind ADD VALUE IF NOT EXISTS 'lead_email_sender_changed';

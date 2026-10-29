@@ -77,10 +77,20 @@ export type StageEmailEnv = {
 
 export type ApplicantMode = "auto" | "always" | "off";
 
+/**
+ * Who sends a stage's applicant email: Make, with Mission Control as the
+ * backstop `applicantMode` describes, or Mission Control outright. Set per
+ * stage on Email → Lead emails (`lead_email_settings`), after the matching
+ * module is switched off in Make — see docs/LEAD_EMAILS.md.
+ */
+export type ApplicantSender = "make" | "mission_control";
+
 export type StageEmailPolicy = {
   internalRecipients: string[];
   internalStages: Set<LeadStage>;
   applicantMode: ApplicantMode;
+  /** `mission_control` sends that stage outright, whatever `applicantMode` says — unless it is `off`. */
+  applicantSenders: Record<LeadStage, ApplicantSender>;
   applicantStages: Set<LeadStage>;
   /** How long after a stage event the applicant backstop waits before it fires. */
   applicantGraceMs: number;
@@ -267,6 +277,9 @@ export function readPolicy(env: StageEmailEnv): StageEmailPolicy {
     internalRecipients,
     internalStages: stageSet(env.LEAD_STAGE_INTERNAL_STAGES, [1, 2, 3]),
     applicantMode,
+    // The environment never hands a stage to Mission Control: that is an act on
+    // the console, recorded with who did it. `withApplicantSenders` applies it.
+    applicantSenders: { 1: "make", 2: "make", 3: "make" },
     applicantStages: stageSet(env.LEAD_STAGE_APPLICANT_STAGES, [1, 2, 3]),
     applicantGraceMs: positiveNumber(env.LEAD_STAGE_APPLICANT_GRACE_MINUTES, 45) * 60_000,
     maxAgeMs: positiveNumber(env.LEAD_STAGE_EMAIL_MAX_AGE_HOURS, 72) * 3_600_000,
@@ -371,7 +384,22 @@ export function decideApplicant(
   if (!policy.applicantStages.has(stage)) {
     return { verdict: "skip", reason: `applicant email is switched off for stage ${stage}` };
   }
-  if (policy.applicantMode === "always") return { verdict: "send" };
+
+  const owned = policy.applicantSenders[stage] === "mission_control";
+  if (owned || policy.applicantMode === "always") {
+    // Make's Stage 1 email went only while `Send Stage 2 Invite` read SEND,
+    // which it stops doing once a questionnaire is in: an invitation to a
+    // questionnaire the applicant has already completed is the wrong email.
+    // Reached when the sync or the sweep finds a lead whose application never
+    // reached us on its own — by then they may be a stage further on.
+    if (stage === 1 && lead.stage2_completed_at) {
+      return {
+        verdict: "skip",
+        reason: "the applicant had already completed the questionnaire",
+      };
+    }
+    return { verdict: "send" };
+  }
 
   // ── auto: the backstop ──────────────────────────────────────────────────
   const evidence = applicantEmailEvidence(lead, stage, policy.applicantGraceMs, now);
@@ -545,4 +573,23 @@ export function nextStepUrlFor(stage: LeadStage, policy: StageEmailPolicy): stri
   if (stage === 1) return policy.questionnaireUrl;
   if (stage === 2) return policy.bookingUrl;
   return null;
+}
+
+/**
+ * The policy with each stage's sender as Email → Lead emails records it.
+ *
+ * A stage whose sender could not be read stays `make`: the backstop is what
+ * this mailer did before anyone could hand it a stage, and guessing
+ * `mission_control` would send a second copy of an email Make still sends.
+ */
+export function withApplicantSenders(
+  policy: StageEmailPolicy,
+  senders: Partial<Record<LeadStage, ApplicantSender>> | null | undefined,
+): StageEmailPolicy {
+  const next = { ...policy.applicantSenders };
+  for (const stage of [1, 2, 3] as const) {
+    const sender = senders?.[stage];
+    if (sender === "make" || sender === "mission_control") next[stage] = sender;
+  }
+  return { ...policy, applicantSenders: next };
 }

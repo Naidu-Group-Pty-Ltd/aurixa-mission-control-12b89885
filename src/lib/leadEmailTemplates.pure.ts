@@ -1,0 +1,1432 @@
+// The free trial applicant's emails: what they say, and how they are drawn.
+//
+// Pure — no I/O, no clock but the one handed in — so the editor can render a
+// live preview in the browser from the same code the dispatcher sends with.
+//
+// ## Where the copy came from
+//
+// Until 29 Oct 2026 these three emails were HTML inlined in Make.com scenarios
+// 9389960 (module 19), 9590512 (module 3) and 9601915 (module 7). The layout
+// below is that HTML, rebuilt as a function: the same tables, the same palette,
+// the same Outlook-safe buttons. The defaults are that copy, with what was
+// wrong in it fixed:
+//
+//   - "priority access" and "Waitlist" now say free trial;
+//   - Stage 1's "Update the email address" pointed at an identifier nothing
+//     defined, so it was a dead link; it now asks the applicant to reply;
+//   - every template ended `</html>}}`, a stray `}}` after the document;
+//   - merge values were spliced in without HTML escaping, so an organisation
+//     called `Smith & Sons <Trading>` broke the paragraph it sat in;
+//   - Stage 1's questionnaire link carried no reference, so the questionnaire
+//     it opened did not know whose it was. Mission Control's link does
+//     (`questionnaire_url`).
+//
+// ## How a template is written
+//
+// Every text field is plain text with `{{merge_fields}}`. Two marks only:
+// `**bold**`, and a blank line between paragraphs in the message. Link fields
+// take an `https://` or `mailto:` address, or a merge field that is one.
+//
+// **An element whose value comes out empty is left out**, never drawn blank: a
+// details row with no value, a button with no link, a card with no title. That
+// is what lets one template serve an applicant whose record holds less — a
+// booking with no video link, a lead with no organisation.
+
+import { escapeHtml, findTokens } from "@/lib/email/mergeTemplate.pure";
+
+export type LeadStage = 1 | 2 | 3;
+export const LEAD_STAGES: readonly LeadStage[] = [1, 2, 3];
+
+export type EmailFact = { label: string; value: string };
+export type EmailStep = { title: string; text: string };
+
+export type LeadEmailContent = {
+  /** The document's `<title>`. Some clients show it; nothing else does. */
+  title: string;
+  /** The inbox preview line. */
+  preheader: string;
+  /** The pill at the top right, e.g. APPLICATION RECEIVED. */
+  badge: string;
+  /** The small capitals above the heading. */
+  eyebrow: string;
+  heading: string;
+  intro: string;
+  greeting: string;
+  /** Paragraphs, separated by a blank line. */
+  paragraphs: string;
+  card: {
+    enabled: boolean;
+    index: string;
+    label: string;
+    title: string;
+    text: string;
+    facts: EmailFact[];
+  };
+  primaryButton: { label: string; url: string };
+  securityNote: {
+    enabled: boolean;
+    tagline: string;
+    text: string;
+    fallbackPrompt: string;
+    fallbackLabel: string;
+    fallbackUrl: string;
+  };
+  details: {
+    enabled: boolean;
+    label: string;
+    title: string;
+    rows: EmailFact[];
+    notePrompt: string;
+    noteLinkLabel: string;
+    noteLinkUrl: string;
+  };
+  steps: { enabled: boolean; label: string; title: string; items: EmailStep[]; closing: string };
+  secondaryButton: { enabled: boolean; prompt: string; label: string; url: string };
+  footer: { tagline: string; badge: string; compliance: string };
+};
+
+export type LeadEmailTemplate = { subject: string; content: LeadEmailContent };
+
+/** Who sends a stage's applicant email. */
+export type LeadEmailSender = "make" | "mission_control";
+
+export const STAGE_NAMES: Record<LeadStage, string> = {
+  1: "Application received",
+  2: "Questionnaire received",
+  3: "Review confirmed",
+};
+
+/** What each stage's email is for, in one line, for the editor. */
+export const STAGE_PURPOSE: Record<LeadStage, string> = {
+  1: "Sent when the free trial application lands. Carries the secure questionnaire link.",
+  2: "Sent when the Business Readiness Questionnaire is completed. Carries the strategic review link.",
+  3: "Sent when the strategic review is booked. Confirms the time.",
+};
+
+/**
+ * The Make modules that send each stage today, and how to stop them without
+ * stopping what else the scenario does — it still writes the applicant to
+ * Airtable. Read from the blueprints in the website repository
+ * (docs/integrations/make/waitlist/). The console shows `steps` before a stage
+ * is handed over.
+ */
+export const MAKE_EMAIL_MODULE: Record<
+  LeadStage,
+  { scenario: string; scenarioId: number; modules: string; steps: string[] }
+> = {
+  1: {
+    scenario: "Aurixa Waitlist Stage 1",
+    scenarioId: 9389960,
+    modules: "19, 21 and 22",
+    steps: [
+      "Delete modules 19 and 21 (they create and send the email) and module 22 (it records that email in Airtable). Modules 1 to 6 stay: they still write the application to Airtable.",
+    ],
+  },
+  2: {
+    scenario: "Aurixa Waitlist Stage 2",
+    scenarioId: 9590512,
+    modules: "3 and 4",
+    steps: [
+      "Delete modules 3 and 4 (they create and send the email). Modules 1 and 2 stay: they still write the answers to Airtable.",
+    ],
+  },
+  3: {
+    scenario: "Aurixa Waitlist Stage 3",
+    scenarioId: 9601915,
+    modules: "7 and 8",
+    steps: [
+      "Delete modules 7 and 8 (they create and send the email) and connect module 4 straight to module 9, which marks the booking Confirmed in Airtable.",
+      "On that new link, add the filter module 7 had: `Send Booking Confirmation` (from module 4) equal to SEND.",
+      "In module 9, clear the Confirmation Message ID field — it read the deleted module 7.",
+    ],
+  },
+};
+
+// ── Merge fields ────────────────────────────────────────────────────────────
+
+export type MergeField = {
+  key: string;
+  label: string;
+  /** What the preview shows when it has no applicant to read. */
+  sample: string;
+  stages: readonly LeadStage[];
+};
+
+const ALL: readonly LeadStage[] = [1, 2, 3];
+
+export const MERGE_FIELDS: readonly MergeField[] = [
+  { key: "first_name", label: "Applicant's first name", sample: "Jordan", stages: ALL },
+  { key: "last_name", label: "Applicant's last name", sample: "Avery", stages: ALL },
+  { key: "full_name", label: "Applicant's full name", sample: "Jordan Avery", stages: ALL },
+  {
+    key: "organisation",
+    label: 'Organisation ("your organisation" when none was given)',
+    sample: "Avery Property Advisory",
+    stages: ALL,
+  },
+  { key: "application_id", label: "Application reference", sample: "AX-7K2M9QX4TB", stages: ALL },
+  {
+    key: "work_email",
+    label: "Applicant's work email",
+    sample: "jordan@avery.example",
+    stages: ALL,
+  },
+  {
+    key: "support_email",
+    label: "The address applicants write to (reply-to, else the sending mailbox)",
+    sample: "admin@aurixasystems.com.au",
+    stages: ALL,
+  },
+  {
+    key: "trial_days",
+    label: "The trial length in days (the applicant's trial offer, else the default)",
+    sample: "14",
+    stages: ALL,
+  },
+  {
+    key: "questionnaire_url",
+    label: "The applicant's secure questionnaire link",
+    sample:
+      "https://www.aurixasystems.com.au/questionnaire?ref=AX-7K2M9QX4TB&token=preview&expires=2026-11-19T00%3A00%3A00.000Z",
+    stages: [1],
+  },
+  {
+    key: "questionnaire_expires",
+    label: "When the secure link stops working",
+    sample: "Thursday 19 November 2026",
+    stages: [1],
+  },
+  {
+    key: "questionnaire_resume_url",
+    label: "The questionnaire with the reference filled in (for an expired link)",
+    sample: "https://www.aurixasystems.com.au/questionnaire?ref=AX-7K2M9QX4TB",
+    stages: [1],
+  },
+  {
+    key: "received_at",
+    label: "When the application arrived",
+    sample: "29 Oct 2026, 9:41 am",
+    stages: [1],
+  },
+  {
+    key: "booking_url",
+    label: "The strategic review scheduler, with the reference",
+    sample: "https://www.aurixasystems.com.au/schedule-strategic-review?ref=AX-7K2M9QX4TB",
+    stages: [2, 3],
+  },
+  {
+    key: "questionnaire_completed_at",
+    label: "When the questionnaire was completed",
+    sample: "29 Oct 2026, 9:55 am",
+    stages: [2],
+  },
+  {
+    key: "review_local_time",
+    label: "The session time in the applicant's own time zone",
+    sample: "Tuesday 3 November 2026, 10:00 am",
+    stages: [3],
+  },
+  {
+    key: "review_time_zone",
+    label: "The applicant's time zone",
+    sample: "Australia/Perth",
+    stages: [3],
+  },
+  {
+    key: "review_host_time",
+    label: "The session time in Sydney",
+    sample: "Tuesday 3 November 2026, 1:00 pm",
+    stages: [3],
+  },
+  { key: "review_duration", label: "The session length in minutes", sample: "30", stages: [3] },
+  {
+    key: "meeting_url",
+    label: "The video link (empty for a requested time)",
+    sample: "https://app.cal.com/video/preview",
+    stages: [3],
+  },
+  {
+    key: "booked_at",
+    label: "When the session was booked",
+    sample: "29 Oct 2026, 10:02 am",
+    stages: [3],
+  },
+];
+
+export function mergeFieldsFor(stage: LeadStage): MergeField[] {
+  return MERGE_FIELDS.filter((field) => field.stages.includes(stage));
+}
+
+export function sampleContext(stage: LeadStage): Record<string, string> {
+  return Object.fromEntries(mergeFieldsFor(stage).map((field) => [field.key, field.sample]));
+}
+
+// ── Defaults ────────────────────────────────────────────────────────────────
+
+const FOOTER = {
+  tagline: "Structured intelligence for confident property decisions.",
+  badge: "SECURE APPLICATION WORKFLOW",
+  compliance:
+    "This message was sent in connection with your Aurixa Systems free trial application. Please do not share secure application links with third parties.",
+};
+
+const PATHWAY =
+  "**platform discovery session**, **guided demonstration** or **enterprise requirements consultation**";
+
+export const DEFAULT_LEAD_EMAIL_TEMPLATES: Record<LeadStage, LeadEmailTemplate> = {
+  1: {
+    subject: "Application received — your Aurixa Systems free trial",
+    content: {
+      title: "Aurixa Systems — Free Trial Application Received",
+      preheader:
+        "Your Aurixa Systems free trial application has been received. Complete the secure Business Readiness Questionnaire to continue.",
+      badge: "APPLICATION RECEIVED",
+      eyebrow: "CONFIRMATION",
+      heading: "Your application is in.",
+      intro:
+        "One focused questionnaire now gives our team the context required to recommend the right Aurixa pathway for your organisation.",
+      greeting: "Thank you, {{first_name}}.",
+      paragraphs: [
+        "Your free trial application for **{{organisation}}** has been successfully received.",
+        "The next step is to complete our **Business Readiness Questionnaire**. It allows us to understand your workflows, technology environment and preferred Aurixa modules before your application is reviewed.",
+        "Your free trial starts the day your workspace goes live.",
+      ].join("\n\n"),
+      card: {
+        enabled: true,
+        index: "01",
+        label: "YOUR NEXT STEP",
+        title: "Complete the readiness questionnaire",
+        text: "A concise, secure assessment tailored to your organisation. Most applicants complete it in approximately 6–8 minutes.",
+        facts: [
+          { label: "DURATION", value: "6–8 minutes" },
+          { label: "ACCESS", value: "Private & secure" },
+          { label: "PURPOSE", value: "Tailored review" },
+        ],
+      },
+      primaryButton: {
+        label: "Complete Business Readiness Questionnaire",
+        url: "{{questionnaire_url}}",
+      },
+      securityNote: {
+        enabled: true,
+        tagline: "SECURE • UNIQUE • TIME-LIMITED",
+        text: "This link is unique to your application and stays open until {{questionnaire_expires}}. Please do not forward it.",
+        fallbackPrompt: "Link expired, or opened on another device?",
+        fallbackLabel: "Continue with your Application ID",
+        fallbackUrl: "{{questionnaire_resume_url}}",
+      },
+      details: {
+        enabled: true,
+        label: "APPLICATION DETAILS",
+        title: "Your submission record",
+        rows: [
+          { label: "APPLICATION ID", value: "{{application_id}}" },
+          { label: "WORK EMAIL", value: "{{work_email}}" },
+          { label: "REVIEW TIMEFRAME", value: "Within 2 business days of the questionnaire" },
+        ],
+        notePrompt: "Not the correct work email? Reply to this email and we will correct it.",
+        noteLinkLabel: "",
+        noteLinkUrl: "",
+      },
+      steps: {
+        enabled: true,
+        label: "WHAT HAPPENS NEXT",
+        title: "A clear path from application to conversation",
+        items: [
+          { title: "Questionnaire", text: "Share your current operating context." },
+          { title: "Assessment", text: "Our team reviews readiness and fit." },
+          { title: "Recommendation", text: "We confirm the right next session." },
+        ],
+        closing: `Once completed, our team will assess your application and advise whether the appropriate next step is a ${PATHWAY}.`,
+      },
+      secondaryButton: {
+        enabled: true,
+        prompt: "Having trouble opening the primary button? Use the direct secure link below.",
+        label: "Open Secure Questionnaire",
+        url: "{{questionnaire_url}}",
+      },
+      footer: FOOTER,
+    },
+  },
+  2: {
+    subject: "Questionnaire Received — Aurixa Systems Strategic Review",
+    content: {
+      title: "Aurixa Systems — Business Readiness Questionnaire Received",
+      preheader:
+        "Your Business Readiness Questionnaire has been received. Choose a time for your Aurixa strategic review to continue.",
+      badge: "QUESTIONNAIRE RECEIVED",
+      eyebrow: "CONFIRMATION",
+      heading: "Your assessment is complete.",
+      intro:
+        "Your responses are with our team. The final step is to choose a time for the strategic review that closes out your application.",
+      greeting: "Thank you, {{first_name}}.",
+      paragraphs: [
+        "Your Business Readiness Questionnaire for **{{organisation}}** has been received in full.",
+        "The next step is to schedule your strategic review. Booking now gives our team time to prepare against your responses and bring specific recommendations to the session.",
+      ].join("\n\n"),
+      card: {
+        enabled: true,
+        index: "03",
+        label: "YOUR NEXT STEP",
+        title: "Schedule your strategic review",
+        text: "A focused session with the Aurixa team at a time you choose. Live availability, shown in your own time zone.",
+        facts: [
+          { label: "DURATION", value: "30 minutes" },
+          { label: "FORMAT", value: "Private session" },
+          { label: "PURPOSE", value: "Tailored recommendation" },
+        ],
+      },
+      primaryButton: { label: "Book Your Strategic Review", url: "{{booking_url}}" },
+      securityNote: {
+        enabled: true,
+        tagline: "SECURE • PERSONALISED • LIVE AVAILABILITY",
+        text: "This link carries your application reference so the session is matched to your submission. Please do not forward it.",
+        fallbackPrompt: "Opening this on another device?",
+        fallbackLabel: "Continue with your Application ID",
+        fallbackUrl: "{{booking_url}}",
+      },
+      details: {
+        enabled: true,
+        label: "APPLICATION DETAILS",
+        title: "Your submission record",
+        rows: [
+          { label: "APPLICATION ID", value: "{{application_id}}" },
+          { label: "WORK EMAIL", value: "{{work_email}}" },
+          { label: "BOOKING WINDOW", value: "Next 45 days" },
+        ],
+        notePrompt: "Need to correct something in your responses?",
+        noteLinkLabel: "Contact the Aurixa team",
+        noteLinkUrl: "mailto:{{support_email}}",
+      },
+      steps: {
+        enabled: true,
+        label: "WHAT HAPPENS NEXT",
+        title: "A clear path from assessment to recommendation",
+        items: [
+          { title: "Strategic review", text: "A focused session at a time you choose." },
+          { title: "Deep dive", text: "We work through your responses together." },
+          { title: "Recommendation", text: "You receive a tailored Aurixa pathway." },
+        ],
+        closing: `Your responses are now recorded against your application. In the review we confirm whether the right pathway is a ${PATHWAY}.`,
+      },
+      secondaryButton: {
+        enabled: true,
+        prompt: "Having trouble opening the primary button? Use the direct booking link below.",
+        label: "Open Booking Page",
+        url: "{{booking_url}}",
+      },
+      footer: FOOTER,
+    },
+  },
+  3: {
+    subject: "Strategic Review Confirmed — Aurixa Systems",
+    content: {
+      title: "Aurixa Systems — Strategic Review Confirmed",
+      preheader:
+        "Your Aurixa strategic review is confirmed. The time, the reference and what to expect are all below.",
+      badge: "REVIEW CONFIRMED",
+      eyebrow: "CONFIRMATION",
+      heading: "Your session is confirmed.",
+      intro:
+        "The final stage of your free trial application is booked. Everything you need for the session is below.",
+      greeting: "Thank you, {{first_name}}.",
+      paragraphs: [
+        "Your strategic review for **{{organisation}}** is confirmed.",
+        "We have you down for **{{review_local_time}}** in your own time zone. A calendar invitation with the meeting link follows separately.",
+      ].join("\n\n"),
+      card: {
+        enabled: true,
+        index: "03",
+        label: "YOUR SESSION",
+        title: "Your confirmed strategic review",
+        text: "A focused session with the Aurixa team, working through the responses you gave at Stage 2 and the pathway that fits them.",
+        facts: [
+          { label: "DURATION", value: "{{review_duration}} minutes" },
+          { label: "FORMAT", value: "Private session" },
+          { label: "REFERENCE", value: "{{application_id}}" },
+        ],
+      },
+      primaryButton: { label: "Change Or Rebook Your Session", url: "{{booking_url}}" },
+      securityNote: {
+        enabled: true,
+        tagline: "SECURE • PERSONALISED • NO EXPIRY",
+        text: "This link carries your application reference, so it opens your booking rather than a blank form. It does not expire. Please do not forward it.",
+        fallbackPrompt: "Booking from another device?",
+        fallbackLabel: "Continue with your Application ID",
+        fallbackUrl: "{{booking_url}}",
+      },
+      details: {
+        enabled: true,
+        label: "SESSION DETAILS",
+        title: "Your confirmed session",
+        rows: [
+          { label: "YOUR LOCAL TIME", value: "{{review_local_time}} ({{review_time_zone}})" },
+          { label: "AURIXA TIME (SYDNEY)", value: "{{review_host_time}}" },
+          { label: "APPLICATION ID", value: "{{application_id}}" },
+        ],
+        notePrompt: "Need a different time, or cannot make it?",
+        noteLinkLabel: "Contact the Aurixa team",
+        noteLinkUrl: "mailto:{{support_email}}",
+      },
+      steps: {
+        enabled: true,
+        label: "WHAT HAPPENS NEXT",
+        title: "A clear path from booking to recommendation",
+        items: [
+          { title: "Calendar invite", text: "An invitation arrives with the meeting link." },
+          { title: "The session", text: "We work through your responses together." },
+          { title: "Recommendation", text: "You receive a tailored Aurixa pathway." },
+        ],
+        closing: `Your responses are already with the team preparing for this session. In the review we confirm whether the right pathway is a ${PATHWAY}.`,
+      },
+      secondaryButton: {
+        enabled: true,
+        prompt: "Your video link, for the day of the session.",
+        label: "Join The Session",
+        url: "{{meeting_url}}",
+      },
+      footer: FOOTER,
+    },
+  },
+};
+
+// ── Normalising what the database or the editor holds ──────────────────────
+
+export const LIMITS = {
+  subject: 200,
+  short: 300,
+  text: 2000,
+  paragraphs: 6000,
+  url: 1000,
+  facts: 6,
+  rows: 8,
+  steps: 4,
+} as const;
+
+const str = (value: unknown, max: number): string =>
+  typeof value === "string" ? value.slice(0, max) : "";
+const bool = (value: unknown, fallback: boolean): boolean =>
+  typeof value === "boolean" ? value : fallback;
+const obj = (value: unknown): Record<string, unknown> =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+
+function facts(value: unknown, fallback: EmailFact[], max: number): EmailFact[] {
+  if (!Array.isArray(value)) return fallback.map((fact) => ({ ...fact }));
+  return value.slice(0, max).map((entry) => {
+    const o = obj(entry);
+    return { label: str(o.label, LIMITS.short), value: str(o.value, LIMITS.short) };
+  });
+}
+
+function steps(value: unknown, fallback: EmailStep[]): EmailStep[] {
+  if (!Array.isArray(value)) return fallback.map((step) => ({ ...step }));
+  return value.slice(0, LIMITS.steps).map((entry) => {
+    const o = obj(entry);
+    return { title: str(o.title, LIMITS.short), text: str(o.text, LIMITS.text) };
+  });
+}
+
+/**
+ * A template in the full shape, whatever it was handed.
+ *
+ * A key the stored row does not have — one this file added after the row was
+ * saved — takes the stage's default, so a template edited before a new section
+ * existed still renders that section as it ships.
+ */
+export function normaliseTemplate(stage: LeadStage, raw: unknown): LeadEmailTemplate {
+  const d = DEFAULT_LEAD_EMAIL_TEMPLATES[stage];
+  const input = obj(raw);
+  const c = obj(input.content);
+  const has = (o: Record<string, unknown>, key: string) =>
+    Object.prototype.hasOwnProperty.call(o, key);
+  const text = (o: Record<string, unknown>, key: string, fallback: string, max: number) =>
+    has(o, key) ? str(o[key], max) : fallback;
+
+  const card = obj(c.card);
+  const primary = obj(c.primaryButton);
+  const note = obj(c.securityNote);
+  const details = obj(c.details);
+  const stepsIn = obj(c.steps);
+  const secondary = obj(c.secondaryButton);
+  const footer = obj(c.footer);
+  const dc = d.content;
+
+  return {
+    subject: text(input, "subject", d.subject, LIMITS.subject),
+    content: {
+      title: text(c, "title", dc.title, LIMITS.short),
+      preheader: text(c, "preheader", dc.preheader, LIMITS.short),
+      badge: text(c, "badge", dc.badge, LIMITS.short),
+      eyebrow: text(c, "eyebrow", dc.eyebrow, LIMITS.short),
+      heading: text(c, "heading", dc.heading, LIMITS.short),
+      intro: text(c, "intro", dc.intro, LIMITS.text),
+      greeting: text(c, "greeting", dc.greeting, LIMITS.short),
+      paragraphs: text(c, "paragraphs", dc.paragraphs, LIMITS.paragraphs),
+      card: {
+        enabled: bool(card.enabled, dc.card.enabled),
+        index: text(card, "index", dc.card.index, 8),
+        label: text(card, "label", dc.card.label, LIMITS.short),
+        title: text(card, "title", dc.card.title, LIMITS.short),
+        text: text(card, "text", dc.card.text, LIMITS.text),
+        facts: has(card, "facts")
+          ? facts(card.facts, [], LIMITS.facts)
+          : facts(undefined, dc.card.facts, LIMITS.facts),
+      },
+      primaryButton: {
+        label: text(primary, "label", dc.primaryButton.label, LIMITS.short),
+        url: text(primary, "url", dc.primaryButton.url, LIMITS.url),
+      },
+      securityNote: {
+        enabled: bool(note.enabled, dc.securityNote.enabled),
+        tagline: text(note, "tagline", dc.securityNote.tagline, LIMITS.short),
+        text: text(note, "text", dc.securityNote.text, LIMITS.text),
+        fallbackPrompt: text(note, "fallbackPrompt", dc.securityNote.fallbackPrompt, LIMITS.short),
+        fallbackLabel: text(note, "fallbackLabel", dc.securityNote.fallbackLabel, LIMITS.short),
+        fallbackUrl: text(note, "fallbackUrl", dc.securityNote.fallbackUrl, LIMITS.url),
+      },
+      details: {
+        enabled: bool(details.enabled, dc.details.enabled),
+        label: text(details, "label", dc.details.label, LIMITS.short),
+        title: text(details, "title", dc.details.title, LIMITS.short),
+        rows: has(details, "rows")
+          ? facts(details.rows, [], LIMITS.rows)
+          : facts(undefined, dc.details.rows, LIMITS.rows),
+        notePrompt: text(details, "notePrompt", dc.details.notePrompt, LIMITS.text),
+        noteLinkLabel: text(details, "noteLinkLabel", dc.details.noteLinkLabel, LIMITS.short),
+        noteLinkUrl: text(details, "noteLinkUrl", dc.details.noteLinkUrl, LIMITS.url),
+      },
+      steps: {
+        enabled: bool(stepsIn.enabled, dc.steps.enabled),
+        label: text(stepsIn, "label", dc.steps.label, LIMITS.short),
+        title: text(stepsIn, "title", dc.steps.title, LIMITS.short),
+        items: has(stepsIn, "items") ? steps(stepsIn.items, []) : steps(undefined, dc.steps.items),
+        closing: text(stepsIn, "closing", dc.steps.closing, LIMITS.text),
+      },
+      secondaryButton: {
+        enabled: bool(secondary.enabled, dc.secondaryButton.enabled),
+        prompt: text(secondary, "prompt", dc.secondaryButton.prompt, LIMITS.text),
+        label: text(secondary, "label", dc.secondaryButton.label, LIMITS.short),
+        url: text(secondary, "url", dc.secondaryButton.url, LIMITS.url),
+      },
+      footer: {
+        tagline: text(footer, "tagline", dc.footer.tagline, LIMITS.short),
+        badge: text(footer, "badge", dc.footer.badge, LIMITS.short),
+        compliance: text(footer, "compliance", dc.footer.compliance, LIMITS.text),
+      },
+    },
+  };
+}
+
+export function templatesEqual(a: LeadEmailTemplate, b: LeadEmailTemplate): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+// ── Checking a template before it is saved ──────────────────────────────────
+
+/** Every text field and every link field, with where it sits, for checking. */
+function fieldsOf(template: LeadEmailTemplate): { where: string; value: string; link: boolean }[] {
+  const c = template.content;
+  const out: { where: string; value: string; link: boolean }[] = [
+    { where: "Subject", value: template.subject, link: false },
+    { where: "Preview line", value: c.preheader, link: false },
+    { where: "Title", value: c.title, link: false },
+    { where: "Badge", value: c.badge, link: false },
+    { where: "Eyebrow", value: c.eyebrow, link: false },
+    { where: "Heading", value: c.heading, link: false },
+    { where: "Introduction", value: c.intro, link: false },
+    { where: "Greeting", value: c.greeting, link: false },
+    { where: "Message", value: c.paragraphs, link: false },
+    { where: "Primary button", value: c.primaryButton.label, link: false },
+    { where: "Primary button link", value: c.primaryButton.url, link: true },
+    { where: "Footer", value: c.footer.tagline, link: false },
+    { where: "Footer badge", value: c.footer.badge, link: false },
+    { where: "Compliance line", value: c.footer.compliance, link: false },
+  ];
+  if (c.card.enabled) {
+    out.push(
+      { where: "Next-step card", value: c.card.index, link: false },
+      { where: "Next-step card", value: c.card.label, link: false },
+      { where: "Next-step card", value: c.card.title, link: false },
+      { where: "Next-step card", value: c.card.text, link: false },
+      ...c.card.facts.flatMap((fact) => [
+        { where: "Next-step card fact", value: fact.label, link: false },
+        { where: "Next-step card fact", value: fact.value, link: false },
+      ]),
+    );
+  }
+  if (c.securityNote.enabled) {
+    out.push(
+      { where: "Link note", value: c.securityNote.tagline, link: false },
+      { where: "Link note", value: c.securityNote.text, link: false },
+      { where: "Link note", value: c.securityNote.fallbackPrompt, link: false },
+      { where: "Link note", value: c.securityNote.fallbackLabel, link: false },
+      { where: "Link note fallback link", value: c.securityNote.fallbackUrl, link: true },
+    );
+  }
+  if (c.details.enabled) {
+    out.push(
+      { where: "Details", value: c.details.label, link: false },
+      { where: "Details", value: c.details.title, link: false },
+      ...c.details.rows.flatMap((row) => [
+        { where: "Details row", value: row.label, link: false },
+        { where: "Details row", value: row.value, link: false },
+      ]),
+      { where: "Details note", value: c.details.notePrompt, link: false },
+      { where: "Details note", value: c.details.noteLinkLabel, link: false },
+      { where: "Details note link", value: c.details.noteLinkUrl, link: true },
+    );
+  }
+  if (c.steps.enabled) {
+    out.push(
+      { where: "What happens next", value: c.steps.label, link: false },
+      { where: "What happens next", value: c.steps.title, link: false },
+      ...c.steps.items.flatMap((step) => [
+        { where: "Step", value: step.title, link: false },
+        { where: "Step", value: step.text, link: false },
+      ]),
+      { where: "What happens next", value: c.steps.closing, link: false },
+    );
+  }
+  if (c.secondaryButton.enabled) {
+    out.push(
+      { where: "Second button", value: c.secondaryButton.prompt, link: false },
+      { where: "Second button", value: c.secondaryButton.label, link: false },
+      { where: "Second button link", value: c.secondaryButton.url, link: true },
+    );
+  }
+  return out;
+}
+
+/**
+ * What stops a template being saved, in words for the editor. Empty is good.
+ *
+ * Every rule here is one whose breach the applicant would see: a merge field
+ * nothing can fill renders as a gap, a link that is not one is a dead button,
+ * an empty subject is an email that reads as spam.
+ */
+export function templateProblems(stage: LeadStage, template: LeadEmailTemplate): string[] {
+  const problems: string[] = [];
+  const known = new Set(mergeFieldsFor(stage).map((field) => field.key));
+  const c = template.content;
+
+  if (!template.subject.trim()) problems.push("The subject is empty.");
+  if (!c.heading.trim()) problems.push("The heading is empty.");
+  if (!c.paragraphs.trim()) problems.push("The message is empty.");
+  if (!c.footer.compliance.trim()) {
+    problems.push("The compliance line is empty. It says why the applicant is receiving this.");
+  }
+
+  const unknown = new Map<string, Set<string>>();
+  for (const field of fieldsOf(template)) {
+    for (const token of findTokens(field.value)) {
+      if (known.has(token)) continue;
+      if (!unknown.has(token)) unknown.set(token, new Set());
+      unknown.get(token)!.add(field.where);
+    }
+  }
+  for (const [token, where] of unknown) {
+    problems.push(
+      `{{${token}}} is not a field this email can fill (${[...where].join(", ")}). It would show as a gap.`,
+    );
+  }
+
+  for (const field of fieldsOf(template)) {
+    if (!field.link || !field.value.trim()) continue;
+    const sample = renderUrl(field.value, sampleContext(stage));
+    if (!sample) {
+      problems.push(
+        `${field.where} is not a link. Use an https:// or mailto: address, or a link field such as {{${stage === 1 ? "questionnaire_url" : "booking_url"}}}.`,
+      );
+    }
+  }
+
+  if (template.content.primaryButton.url.trim() && !template.content.primaryButton.label.trim()) {
+    problems.push("The primary button has a link but no label.");
+  }
+  return problems;
+}
+
+/**
+ * What is worth knowing before saving but does not stop it: the link the
+ * applicant needs to take the next step, missing from the email.
+ */
+export function templateWarnings(stage: LeadStage, template: LeadEmailTemplate): string[] {
+  const all = fieldsOf(template)
+    .map((field) => field.value)
+    .join("\n");
+  const warnings: string[] = [];
+  if (stage === 1 && !all.includes("{{questionnaire_url}}")) {
+    warnings.push(
+      "Nothing in this email uses {{questionnaire_url}}, so the applicant has no link to the questionnaire.",
+    );
+  }
+  if (stage === 2 && !all.includes("{{booking_url}}")) {
+    warnings.push(
+      "Nothing in this email uses {{booking_url}}, so the applicant has no way to book.",
+    );
+  }
+  return warnings;
+}
+
+// ── Rendering ───────────────────────────────────────────────────────────────
+
+const TOKEN = /\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}/g;
+export type MergeContext = Record<string, string | null | undefined>;
+
+/** Merge into plain text: a subject, a preview line, the text version. */
+export function renderPlain(template: string, context: MergeContext): string {
+  return tidy(
+    String(template ?? "")
+      .replace(/\*\*/g, "")
+      .replace(TOKEN, (_whole, name: string) => String(context[name] ?? "")),
+  );
+}
+
+/**
+ * Merge into HTML-safe text. The template is plain text, so its own words are
+ * escaped as well as the values merged into it; `**bold**` is read from the
+ * template before merging, so a value cannot make itself bold.
+ */
+export function renderInline(template: string, context: MergeContext, strong = STRONG): string {
+  const parts = String(template ?? "").split("**");
+  // An unmatched `**` is text, not the start of a bold run that never ends.
+  if (parts.length % 2 === 0) parts[parts.length - 2] += `**${parts.pop()}`;
+  const html = parts
+    .map((part, index) => {
+      const merged = part
+        .split(TOKEN)
+        .map((piece, i) =>
+          i % 2 === 1 ? escapeHtml(String(context[piece] ?? "")) : escapeHtml(piece),
+        )
+        .join("");
+      return index % 2 === 1 && merged.trim()
+        ? `<strong style="${strong}">${merged}</strong>`
+        : merged;
+    })
+    .join("");
+  return tidy(html);
+}
+
+/**
+ * Merge into a link, or nothing.
+ *
+ * A field that IS one merge field takes the value whole — `{{questionnaire_url}}`
+ * is already a link. A value merged into the middle of a web link is encoded,
+ * so a reference cannot break the query string. What comes out must be an
+ * `https://`, `http://` or `mailto:` link, or the element is left out.
+ */
+export function renderUrl(template: string, context: MergeContext): string {
+  const raw = String(template ?? "").trim();
+  if (!raw) return "";
+  const whole = /^\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}$/.exec(raw);
+  const mailto = /^mailto:/i.test(raw);
+  const merged = whole
+    ? String(context[whole[1]] ?? "").trim()
+    : raw.replace(TOKEN, (_w, name: string) => {
+        const value = String(context[name] ?? "").trim();
+        return mailto ? value : encodeURIComponent(value);
+      });
+  if (/^https?:\/\/[^\s"'<>]+$/i.test(merged)) return merged;
+  if (/^mailto:[^@\s"'<>]+@[^@\s"'<>]+$/i.test(merged)) return merged;
+  return "";
+}
+
+/** "Thank you, ." → "Thank you." and "()" → "" — what an empty value leaves. */
+function tidy(text: string): string {
+  return text
+    .replace(/\s*\(\s*\)/g, "")
+    .replace(/[ \t]*,[ \t]*([.!?])/g, "$1")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
+export type RenderedLeadEmail = { subject: string; html: string; text: string };
+
+/** One template, one applicant: the email as it will be sent. */
+export function renderLeadEmail(
+  template: LeadEmailTemplate,
+  context: MergeContext,
+): RenderedLeadEmail {
+  const c = template.content;
+  const p = (value: string) => renderInline(value, context);
+  const plain = (value: string) => renderPlain(value, context);
+
+  const paragraphs = c.paragraphs
+    .split(/\n\s*\n/)
+    .map((block) => block.replace(/\s*\n\s*/g, " ").trim())
+    .filter(Boolean);
+
+  const factsOut = (list: EmailFact[]) =>
+    list
+      .map((fact) => ({ label: p(fact.label), value: p(fact.value) }))
+      .filter((fact) => fact.label && fact.value);
+
+  const card =
+    c.card.enabled && plain(c.card.title)
+      ? {
+          index: p(c.card.index),
+          label: p(c.card.label),
+          title: p(c.card.title),
+          text: p(c.card.text),
+          facts: factsOut(c.card.facts),
+        }
+      : null;
+
+  const primaryUrl = renderUrl(c.primaryButton.url, context);
+  const primary =
+    primaryUrl && plain(c.primaryButton.label)
+      ? { label: p(c.primaryButton.label), plain: plain(c.primaryButton.label), url: primaryUrl }
+      : null;
+
+  const fallbackUrl = renderUrl(c.securityNote.fallbackUrl, context);
+  const note =
+    c.securityNote.enabled && (plain(c.securityNote.tagline) || plain(c.securityNote.text))
+      ? {
+          tagline: p(c.securityNote.tagline),
+          text: p(c.securityNote.text),
+          fallback:
+            fallbackUrl && plain(c.securityNote.fallbackLabel)
+              ? {
+                  prompt: p(c.securityNote.fallbackPrompt),
+                  label: p(c.securityNote.fallbackLabel),
+                  url: fallbackUrl,
+                }
+              : null,
+        }
+      : null;
+
+  const rows = factsOut(c.details.rows);
+  const noteUrl = renderUrl(c.details.noteLinkUrl, context);
+  const details =
+    c.details.enabled && rows.length
+      ? {
+          label: p(c.details.label),
+          title: p(c.details.title),
+          rows,
+          note:
+            plain(c.details.notePrompt) || (noteUrl && plain(c.details.noteLinkLabel))
+              ? {
+                  prompt: p(c.details.notePrompt),
+                  link:
+                    noteUrl && plain(c.details.noteLinkLabel)
+                      ? { label: p(c.details.noteLinkLabel), url: noteUrl }
+                      : null,
+                }
+              : null,
+        }
+      : null;
+
+  const items = c.steps.items
+    .map((step) => ({ title: p(step.title), text: p(step.text) }))
+    .filter((step) => step.title);
+  const stepsOut =
+    c.steps.enabled && items.length
+      ? { label: p(c.steps.label), title: p(c.steps.title), items, closing: p(c.steps.closing) }
+      : null;
+
+  const secondaryUrl = renderUrl(c.secondaryButton.url, context);
+  const secondary =
+    c.secondaryButton.enabled && secondaryUrl && plain(c.secondaryButton.label)
+      ? {
+          prompt: p(c.secondaryButton.prompt),
+          label: p(c.secondaryButton.label),
+          plain: plain(c.secondaryButton.label),
+          url: secondaryUrl,
+        }
+      : null;
+
+  const html = brandedLayout({
+    title: p(c.title),
+    preheader: p(c.preheader),
+    badge: p(c.badge),
+    eyebrow: p(c.eyebrow),
+    heading: p(c.heading),
+    intro: p(c.intro),
+    greeting: p(c.greeting),
+    paragraphs: paragraphs.map((block) => p(block)).filter(Boolean),
+    card,
+    primary,
+    note,
+    details,
+    steps: stepsOut,
+    secondary,
+    footer: {
+      tagline: p(c.footer.tagline),
+      badge: p(c.footer.badge),
+      compliance: p(c.footer.compliance),
+    },
+  });
+
+  const lines: string[] = [];
+  const add = (value: string) => {
+    const line = value.trim();
+    if (line) lines.push(line);
+  };
+  add(plain(c.heading));
+  add(plain(c.intro));
+  add(plain(c.greeting));
+  paragraphs.forEach((block) => add(plain(block)));
+  if (card) {
+    add(`${plain(c.card.label)}: ${plain(c.card.title)}`);
+    add(plain(c.card.text));
+  }
+  if (primary) add(`${primary.plain}: ${primary.url}`);
+  if (note) {
+    add(plain(c.securityNote.text));
+    if (note.fallback) add(`${plain(c.securityNote.fallbackPrompt)} ${note.fallback.url}`);
+  }
+  if (details) {
+    add(plain(c.details.title));
+    c.details.rows.forEach((row) => {
+      const value = plain(row.value);
+      if (value) add(`${plain(row.label)}: ${value}`);
+    });
+    if (details.note) add([plain(c.details.notePrompt), details.note.link?.url ?? ""].join(" "));
+  }
+  if (stepsOut) add(plain(c.steps.closing));
+  if (secondary) add(`${secondary.plain}: ${secondary.url}`);
+  add(plain(c.footer.compliance));
+
+  return { subject: plain(template.subject), html, text: lines.join("\n\n") };
+}
+
+// ── The layout ──────────────────────────────────────────────────────────────
+//
+// Make's HTML, as a function. Kept table-based with inline styles and the
+// Outlook VML buttons, because that is what renders the same in Outlook,
+// Gmail and Apple Mail — which is why it was built that way.
+
+const SANS = "Arial, Helvetica, sans-serif";
+const SERIF = "Georgia, 'Times New Roman', serif";
+const STRONG = "color:#f4f8fc;";
+
+type Layout = {
+  title: string;
+  preheader: string;
+  badge: string;
+  eyebrow: string;
+  heading: string;
+  intro: string;
+  greeting: string;
+  paragraphs: string[];
+  card: { index: string; label: string; title: string; text: string; facts: EmailFact[] } | null;
+  primary: { label: string; plain: string; url: string } | null;
+  note: {
+    tagline: string;
+    text: string;
+    fallback: { prompt: string; label: string; url: string } | null;
+  } | null;
+  details: {
+    label: string;
+    title: string;
+    rows: EmailFact[];
+    note: { prompt: string; link: { label: string; url: string } | null } | null;
+  } | null;
+  steps: { label: string; title: string; items: EmailStep[]; closing: string } | null;
+  secondary: { prompt: string; label: string; plain: string; url: string } | null;
+  footer: { tagline: string; badge: string; compliance: string };
+};
+
+const attr = (value: string) => escapeHtml(value);
+
+const CSS = `
+    :root { color-scheme: light; supported-color-schemes: light; }
+    html, body { margin: 0 !important; padding: 0 !important; width: 100% !important; min-width: 100% !important; background-color: transparent; }
+    * { -ms-text-size-adjust: 100%; -webkit-text-size-adjust: 100%; }
+    table, td { border-collapse: collapse !important; mso-table-lspace: 0pt !important; mso-table-rspace: 0pt !important; }
+    table { border-spacing: 0 !important; }
+    img { display: block; border: 0; outline: none; text-decoration: none; -ms-interpolation-mode: bicubic; }
+    a { text-decoration: none; }
+    a[x-apple-data-detectors], .unstyle-auto-detected-links a, .aBn { color: inherit !important; text-decoration: none !important; border-bottom: 0 !important; cursor: default !important; }
+    .preheader { display: none !important; visibility: hidden; opacity: 0; color: transparent; height: 0; width: 0; overflow: hidden; mso-hide: all; }
+    @media only screen and (max-width: 680px) {
+      .email-shell { width: 100% !important; max-width: 100% !important; }
+      .outer-pad { padding: 12px 7px !important; }
+      .mobile-pad { padding-left: 22px !important; padding-right: 22px !important; }
+      .hero-pad { padding-top: 30px !important; padding-bottom: 38px !important; }
+      .brand-meta { display: none !important; }
+      .brand-logo-cell { text-align: center !important; }
+      .brand-logo { width: 148px !important; max-width: 148px !important; height: auto !important; margin: 0 auto !important; }
+      .cta-primary-table, .cta-secondary-table { width: 100% !important; max-width: 100% !important; }
+      .hero-title { font-size: 36px !important; line-height: 42px !important; letter-spacing: -0.5px !important; }
+      .hero-subtitle { font-size: 15px !important; line-height: 24px !important; }
+      .next-step-index, .next-step-content { display: block !important; width: 100% !important; box-sizing: border-box !important; }
+      .next-step-index { padding: 22px 22px 0 22px !important; }
+      .next-step-content { padding: 15px 22px 24px 22px !important; }
+      .meta-column { display: block !important; width: 100% !important; box-sizing: border-box !important; border-right: 0 !important; border-bottom: 1px solid #1b4268 !important; }
+      .meta-column-last { border-bottom: 0 !important; }
+      .cta-mobile { display: block !important; width: auto !important; min-width: 0 !important; padding: 18px 16px !important; font-size: 14px !important; line-height: 20px !important; }
+      .cta-secondary-mobile { display: block !important; width: auto !important; min-width: 0 !important; padding: 13px 16px !important; font-size: 13px !important; line-height: 19px !important; }
+      .detail-label, .detail-value { display: block !important; width: 100% !important; box-sizing: border-box !important; text-align: left !important; }
+      .detail-label { padding-bottom: 3px !important; }
+      .detail-value { padding-top: 0 !important; }
+      .step-column { display: block !important; width: 100% !important; box-sizing: border-box !important; padding-left: 0 !important; padding-right: 0 !important; padding-bottom: 14px !important; }
+      .footer-right { display: none !important; }
+    }`;
+
+const spacer = (px: number) => `<div style="height:${px}px; line-height:${px}px;">&nbsp;</div>`;
+const row = (inner: string, style: string, extra = "") =>
+  `<tr><td bgcolor="#061326"${extra} class="mobile-pad" style="${style} background-color:#061326;">${inner}</td></tr>`;
+
+function cardBlock(card: NonNullable<Layout["card"]>): string {
+  const facts = card.facts
+    .map((fact, i) => {
+      const last = i === card.facts.length - 1;
+      const width = (100 / card.facts.length).toFixed(2);
+      return `<td width="${width}%" valign="top" class="meta-column${last ? " meta-column-last" : ""}" style="width:${width}%; padding:15px 14px;${last ? "" : " border-right:1px solid #1b4268;"}"><div style="font-family:${SANS}; font-size:10px; line-height:14px; font-weight:800; letter-spacing:1.1px; color:#dfb665;">${fact.label}</div><div style="padding-top:5px; font-family:${SANS}; font-size:14px; line-height:20px; font-weight:700; color:#f4f8fc;">${fact.value}</div></td>`;
+    })
+    .join("");
+  return row(
+    `<table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" bgcolor="#0a1e37" style="width:100%; background-color:#0a1e37; border:1px solid #1e4b73; border-radius:14px; overflow:hidden; box-shadow:0 12px 30px rgba(0,0,0,0.18);">
+<tr>
+<td width="92" valign="top" class="next-step-index" style="width:92px; padding:27px 0 26px 24px;">${
+      card.index
+        ? `<table role="presentation" width="54" height="54" border="0" cellspacing="0" cellpadding="0" style="width:54px; height:54px;"><tr><td align="center" valign="middle" bgcolor="#051328" style="width:54px; height:54px; background-color:#051328; border:1px solid #28618d; border-radius:50%; font-family:${SERIF}; font-size:21px; line-height:54px; font-weight:700; color:#e4bd6d; box-shadow:0 0 18px rgba(35,184,255,0.13);">${card.index}</td></tr></table>`
+        : "&nbsp;"
+    }</td>
+<td valign="top" class="next-step-content" style="padding:26px 24px 25px 14px;">${
+      card.label
+        ? `<div style="font-family:${SANS}; font-size:10px; line-height:15px; font-weight:800; letter-spacing:1.75px; color:#e0b864;">${card.label}</div>${spacer(7)}`
+        : ""
+    }<div style="font-family:${SERIF}; font-size:24px; line-height:31px; font-weight:700; color:#f4f8fc;">${card.title}</div>${
+      card.text
+        ? `${spacer(9)}<div style="font-family:${SANS}; font-size:14px; line-height:23px; color:#aec3d9;">${card.text}</div>`
+        : ""
+    }</td>
+</tr>${
+      card.facts.length
+        ? `<tr><td colspan="2" style="padding:0 22px 22px 22px;"><table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" bgcolor="#07182d" style="width:100%; background-color:#07182d; border:1px solid #1b4268; border-radius:10px; overflow:hidden;"><tr>${facts}</tr></table></td></tr>`
+        : ""
+    }
+</table>`,
+    "padding:29px 42px 0 42px;",
+  );
+}
+
+function primaryBlock(primary: NonNullable<Layout["primary"]>): string {
+  const href = attr(primary.url);
+  return `<tr><td bgcolor="#061326" align="center" class="mobile-pad" style="padding:34px 42px 12px 42px; background-color:#061326;">
+<table role="presentation" width="520" border="0" cellspacing="0" cellpadding="0" class="cta-primary-table" style="width:520px; max-width:520px;"><tr><td align="center">
+<!--[if mso]><v:roundrect href="${href}" style="height:64px; v-text-anchor:middle; width:500px;" arcsize="18%" strokeweight="2px" strokecolor="#68dcff" fillcolor="#f2c86b"><v:shadow on="t" color="#0b4f75" opacity="28%" offset="0px,4px"/><w:anchorlock/><center style="font-family:${SANS}; font-size:15px; font-weight:800; letter-spacing:0.15px; color:#071426;">${primary.label} &#8594;</center></v:roundrect><![endif]-->
+<!--[if !mso]><!-- --><table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" bgcolor="#68dcff" style="width:100%; background-color:#68dcff; border-radius:14px; box-shadow:0 0 0 4px rgba(35,184,255,0.08), 0 14px 36px rgba(35,184,255,0.26), 0 10px 24px rgba(211,154,47,0.28);"><tr><td align="center" bgcolor="#f2c86b" style="background-color:#f2c86b; border:2px solid #68dcff; border-radius:14px;"><a href="${href}" target="_blank" role="button" aria-label="${attr(primary.plain)}" class="cta-mobile" style="display:block; padding:20px 26px; font-family:${SANS}; font-size:15px; line-height:20px; font-weight:800; letter-spacing:0.15px; color:#071426; text-align:center; text-decoration:none;">${primary.label}&nbsp;&nbsp;&#8594;</a></td></tr></table><!--<![endif]-->
+</td></tr></table></td></tr>`;
+}
+
+function noteBlock(note: NonNullable<Layout["note"]>, afterPrimary: boolean): string {
+  return `<tr><td bgcolor="#061326" align="center" class="mobile-pad" style="padding:${afterPrimary ? 0 : 30}px 42px 32px 42px; background-color:#061326;">${
+    note.tagline
+      ? `<div style="font-family:${SANS}; font-size:11px; line-height:18px; font-weight:700; letter-spacing:0.55px; color:#7bcdf7;">${note.tagline}</div>`
+      : ""
+  }${
+    note.text
+      ? `<div style="padding-top:6px; font-family:${SANS}; font-size:12px; line-height:19px; color:#819bb6;">${note.text}</div>`
+      : ""
+  }${
+    note.fallback
+      ? `<div style="padding-top:9px; font-family:${SANS}; font-size:12px; line-height:19px; color:#819bb6;">${note.fallback.prompt} <a href="${attr(note.fallback.url)}" target="_blank" style="font-weight:800; color:#e3bd6d; text-decoration:underline;">${note.fallback.label}</a></div>`
+      : ""
+  }</td></tr>`;
+}
+
+function divider(): string {
+  return row(
+    `<table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0"><tr><td height="1" bgcolor="#173a5d" style="height:1px; background-color:#173a5d; font-size:0; line-height:0;">&nbsp;</td></tr></table>`,
+    "padding:0 42px;",
+  );
+}
+
+function sectionHeading(label: string, title: string, top: number): string {
+  return row(
+    `${
+      label
+        ? `<div style="font-family:${SANS}; font-size:10px; line-height:15px; font-weight:800; letter-spacing:1.85px; color:#dfb665;">${label}</div>${spacer(10)}`
+        : ""
+    }${title ? `<div style="font-family:${SERIF}; font-size:24px; line-height:31px; font-weight:700; color:#f4f8fc;">${title}</div>` : ""}`,
+    `padding:${top}px 42px 0 42px;`,
+  );
+}
+
+function detailsBlock(details: NonNullable<Layout["details"]>): string {
+  const rows = details.rows
+    .map((entry, i) => {
+      const last = i === details.rows.length - 1;
+      const border = last ? "" : " border-bottom:1px solid #1b4268;";
+      return `<tr><td width="39%" class="detail-label" style="width:39%; padding:17px 18px;${border} font-family:${SANS}; font-size:11px; line-height:18px; font-weight:800; letter-spacing:0.75px; color:#8ea9c4;">${entry.label}</td><td width="61%" align="right" class="detail-value" style="width:61%; padding:17px 18px;${border} font-family:${SANS}; font-size:14px; line-height:21px; font-weight:700; color:#f4f8fc; word-break:break-word;">${entry.value}</td></tr>`;
+    })
+    .join("");
+  return [
+    sectionHeading(details.label, details.title, 31),
+    row(
+      `<table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" bgcolor="#091c34" style="width:100%; background-color:#091c34; border:1px solid #1b4268; border-radius:12px; overflow:hidden;">${rows}</table>`,
+      "padding:18px 42px 0 42px;",
+    ),
+    details.note
+      ? row(
+          `<div style="font-family:${SANS}; font-size:12px; line-height:19px; color:#839db7;">${details.note.prompt}${
+            details.note.link
+              ? ` <a href="${attr(details.note.link.url)}" target="_blank" style="font-weight:800; color:#e3bd6d; text-decoration:underline;">${details.note.link.label}</a>`
+              : ""
+          }</div>`,
+          "padding:15px 42px 0 42px;",
+        )
+      : "",
+  ].join("\n");
+}
+
+function stepsBlock(steps: NonNullable<Layout["steps"]>): string {
+  const accents = ["#28bfff", "#dfb665", "#28bfff", "#dfb665"];
+  const width = (100 / steps.items.length).toFixed(2);
+  const columns = steps.items
+    .map((step, i) => {
+      const pad =
+        i === 0
+          ? "padding-right:8px;"
+          : i === steps.items.length - 1
+            ? "padding-left:8px;"
+            : "padding-left:4px; padding-right:4px;";
+      return `<td width="${width}%" valign="top" class="step-column" style="width:${width}%; ${pad}"><table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" bgcolor="#091c34" style="width:100%; background-color:#091c34; border:1px solid #1a4167; border-radius:11px;"><tr><td style="padding:18px 16px 19px 16px;"><div style="font-family:${SERIF}; font-size:18px; line-height:23px; font-weight:700; color:#e0b864;">${String(i + 1).padStart(2, "0")}</div><div style="padding-top:8px; font-family:${SANS}; font-size:13px; line-height:20px; font-weight:800; color:#f4f8fc;">${step.title}</div>${
+        step.text
+          ? `<div style="padding-top:5px; font-family:${SANS}; font-size:12px; line-height:19px; color:#96adc4;">${step.text}</div>`
+          : ""
+      }<div style="padding-top:15px;"><table role="presentation" width="36" border="0" cellspacing="0" cellpadding="0"><tr><td height="2" bgcolor="${accents[i]}" style="width:36px; height:2px; background-color:${accents[i]}; font-size:0; line-height:0;">&nbsp;</td></tr></table></div></td></tr></table></td>`;
+    })
+    .join("");
+  return [
+    sectionHeading(steps.label, steps.title, 37),
+    row(
+      `<table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0"><tr>${columns}</tr></table>`,
+      "padding:20px 42px 0 42px;",
+    ),
+    steps.closing
+      ? row(
+          `<div style="font-family:${SANS}; font-size:14px; line-height:24px; color:#aec3d8;">${steps.closing}</div>`,
+          "padding:25px 42px 0 42px;",
+        )
+      : "",
+  ].join("\n");
+}
+
+function secondaryBlock(secondary: NonNullable<Layout["secondary"]>): string {
+  const href = attr(secondary.url);
+  return row(
+    `<table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" bgcolor="#030b18" style="width:100%; background-color:#030b18; border:1px solid #173f65; border-left:3px solid #28bfff; border-radius:12px; box-shadow:0 10px 26px rgba(0,0,0,0.16);"><tr><td align="center" style="padding:20px 20px 21px 20px;">${
+      secondary.prompt
+        ? `<div style="font-family:${SANS}; font-size:12px; line-height:19px; color:#a9bed3; text-align:center;">${secondary.prompt}</div>${spacer(14)}`
+        : ""
+    }<table role="presentation" width="340" border="0" cellspacing="0" cellpadding="0" class="cta-secondary-table" style="width:340px; max-width:340px;"><tr><td align="center">
+<!--[if mso]><v:roundrect href="${href}" style="height:48px; v-text-anchor:middle; width:330px;" arcsize="18%" strokeweight="1.5px" strokecolor="#28bfff" fillcolor="#07182d"><w:anchorlock/><center style="font-family:${SANS}; font-size:13px; font-weight:800; letter-spacing:0.2px; color:#f2c86b;">${secondary.label} &#8594;</center></v:roundrect><![endif]-->
+<!--[if !mso]><!-- --><table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" bgcolor="#07182d" style="width:100%; background-color:#07182d; border:1.5px solid #28bfff; border-radius:10px; box-shadow:0 8px 24px rgba(35,184,255,0.14);"><tr><td align="center"><a href="${href}" target="_blank" role="button" aria-label="${attr(secondary.plain)}" class="cta-secondary-mobile" style="display:block; padding:14px 18px; font-family:${SANS}; font-size:13px; line-height:19px; font-weight:800; letter-spacing:0.2px; color:#f2c86b; text-align:center; text-decoration:none;">${secondary.label}&nbsp;&nbsp;&#8594;</a></td></tr></table><!--<![endif]-->
+</td></tr></table></td></tr></table>`,
+    "padding:30px 42px 39px 42px;",
+  );
+}
+
+function brandedLayout(l: Layout): string {
+  const body: string[] = [];
+  body.push(
+    row(
+      `${l.greeting ? `<div style="font-family:${SANS}; font-size:18px; line-height:29px; font-weight:700; color:#f4f8fc;">${l.greeting}</div>` : ""}${l.paragraphs
+        .map(
+          (para, i) =>
+            `${i === 0 ? (l.greeting ? spacer(18) : "") : spacer(14)}<div style="font-family:${SANS}; font-size:15px; line-height:25px; color:#b9cce0;">${para}</div>`,
+        )
+        .join("")}`,
+      "padding:39px 42px 0 42px;",
+    ),
+  );
+  if (l.card) body.push(cardBlock(l.card));
+  if (l.primary) body.push(primaryBlock(l.primary));
+  if (l.note) body.push(noteBlock(l.note, Boolean(l.primary)));
+  if (!l.note) body.push(row(spacer(32), "padding:0 42px;"));
+  if (l.details || l.steps) body.push(divider());
+  if (l.details) body.push(detailsBlock(l.details));
+  if (l.steps) body.push(stepsBlock(l.steps));
+  body.push(l.secondary ? secondaryBlock(l.secondary) : row(spacer(39), "padding:0 42px;"));
+
+  return `<!doctype html>
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="x-apple-disable-message-reformatting">
+<meta http-equiv="x-ua-compatible" content="ie=edge">
+<meta name="color-scheme" content="light">
+<meta name="supported-color-schemes" content="light">
+<title>${l.title}</title>
+<!--[if mso]><xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch><o:AllowPNG/></o:OfficeDocumentSettings></xml><![endif]-->
+<style>${CSS}
+</style>
+<!--[if mso]><style>body, table, td, div, p, a, span { font-family: ${SANS} !important; }</style><![endif]-->
+</head>
+<body style="margin:0; padding:0; background-color:transparent;">
+<div class="preheader">${l.preheader}</div>
+<div style="display:none; max-height:0; overflow:hidden; mso-hide:all;">${"&nbsp;&zwnj;".repeat(13)}</div>
+<table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" style="width:100%; background-color:transparent;"><tr><td align="center" class="outer-pad" style="padding:38px 14px; background-color:transparent;">
+<table role="presentation" width="640" border="0" cellspacing="0" cellpadding="0" class="email-shell" bgcolor="#061326" style="width:640px; max-width:640px; background-color:#061326; border:1px solid #173a5d; border-radius:20px; overflow:hidden; box-shadow:0 24px 70px rgba(2,8,18,0.34), 0 0 0 1px rgba(35,184,255,0.05);">
+<tr><td style="padding:0; font-size:0; line-height:0;"><table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0"><tr><td width="34%" height="5" bgcolor="#0b74ad" style="width:34%; height:5px; background-color:#0b74ad; font-size:0; line-height:0;">&nbsp;</td><td width="32%" height="5" bgcolor="#dfb665" style="width:32%; height:5px; background-color:#dfb665; font-size:0; line-height:0;">&nbsp;</td><td width="34%" height="5" bgcolor="#0b74ad" style="width:34%; height:5px; background-color:#0b74ad; font-size:0; line-height:0;">&nbsp;</td></tr></table></td></tr>
+<tr><td bgcolor="#030b18" class="mobile-pad hero-pad" style="padding:36px 42px 50px 42px; background-color:#030b18; background-image:radial-gradient(circle at 84% 8%, rgba(35,184,255,0.18) 0%, rgba(35,184,255,0) 34%), linear-gradient(135deg,#030b18 0%,#07182e 62%,#092440 100%);">
+<table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0"><tr><td valign="middle" class="brand-logo-cell"><img src="https://www.aurixasystems.com.au/brand/aurixa-systems-logo-source.jpg" width="180" height="180" class="brand-logo" alt="Aurixa Systems" style="display:block; width:180px; max-width:180px; height:auto; margin:0; border:0px solid #dcb566; border-radius:18px; background-color:#030b18; box-shadow:0 0 0 4px rgba(35,184,255,0.06), 0 0 34px rgba(35,184,255,0.24);"></td>${
+    l.badge
+      ? `<td align="right" valign="middle" class="brand-meta"><table role="presentation" border="0" cellspacing="0" cellpadding="0"><tr><td style="padding:8px 12px; border:1px solid #2b5f8d; border-radius:999px; background-color:#07162a; font-family:${SANS}; font-size:10px; line-height:14px; font-weight:800; letter-spacing:1.25px; color:#f1cf82; box-shadow:0 0 16px rgba(35,184,255,0.09);">${l.badge}</td></tr></table></td>`
+      : ""
+  }</tr></table>
+${spacer(28)}${
+    l.eyebrow
+      ? `<table role="presentation" border="0" cellspacing="0" cellpadding="0"><tr><td width="8" height="8" bgcolor="#28bfff" style="width:8px; height:8px; background-color:#28bfff; border-radius:50%; box-shadow:0 0 12px rgba(40,191,255,0.75); font-size:0; line-height:0;">&nbsp;</td><td width="11" style="width:11px; font-size:0; line-height:0;">&nbsp;</td><td style="font-family:${SANS}; font-size:11px; line-height:16px; font-weight:800; letter-spacing:2.15px; color:#e0ba69;">${l.eyebrow}</td></tr></table>${spacer(13)}`
+      : ""
+  }<div class="hero-title" style="font-family:${SERIF}; font-size:43px; line-height:50px; font-weight:700; letter-spacing:-0.8px; color:#f6f9fd;">${l.heading}</div>${
+    l.intro
+      ? `${spacer(15)}<div class="hero-subtitle" style="max-width:510px; font-family:${SANS}; font-size:16px; line-height:26px; color:#b8cbe0;">${l.intro}</div>`
+      : ""
+  }${spacer(30)}<table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0"><tr><td height="1" bgcolor="#173d61" style="height:1px; background-color:#173d61; font-size:0; line-height:0;">&nbsp;</td><td width="78" height="1" bgcolor="#dfb665" style="width:78px; height:1px; background-color:#dfb665; font-size:0; line-height:0;">&nbsp;</td><td width="48" height="1" bgcolor="#28bfff" style="width:48px; height:1px; background-color:#28bfff; font-size:0; line-height:0;">&nbsp;</td></tr></table>
+</td></tr>
+${body.join("\n")}
+<tr><td bgcolor="#030a15" class="mobile-pad" style="padding:25px 42px; background-color:#030a15; border-top:1px solid #214a70;"><table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0"><tr><td valign="middle"><div style="font-family:${SANS}; font-size:11px; line-height:18px; color:#8fa8c1;"><strong style="font-size:12px; letter-spacing:0.2px; color:#f2d28d;">Aurixa Systems</strong>${l.footer.tagline ? `<br>${l.footer.tagline}` : ""}</div></td>${
+    l.footer.badge
+      ? `<td align="right" valign="middle" class="footer-right"><div style="font-family:${SANS}; font-size:9px; line-height:14px; font-weight:800; letter-spacing:1.35px; color:#5fbfec;">${l.footer.badge}</div></td>`
+      : ""
+  }</tr></table></td></tr>
+</table>
+${
+  l.footer.compliance
+    ? `<table role="presentation" width="640" border="0" cellspacing="0" cellpadding="0" class="email-shell" style="width:640px; max-width:640px;"><tr><td align="center" style="padding:18px 24px 0 24px; font-family:${SANS}; font-size:10px; line-height:17px; color:#617e9a;">${l.footer.compliance}</td></tr></table>`
+    : ""
+}
+</td></tr></table>
+</body>
+</html>`;
+}
+
+// ── The applicant, as merge values ─────────────────────────────────────────
+
+/** The lead fields an applicant email reads. */
+export type LeadEmailSubject = {
+  application_id?: string | null;
+  first_name?: string | null;
+  last_name?: string | null;
+  email?: string | null;
+  entity_name?: string | null;
+  submitted_at?: string | null;
+  created_at?: string | null;
+  stage2_completed_at?: string | null;
+  stage3_booked_at?: string | null;
+  stage3_session_start?: string | null;
+  stage3_time_zone?: string | null;
+  stage3_local_time?: string | null;
+  stage3_host_local_time?: string | null;
+  stage3_duration_minutes?: number | null;
+  stage3_meeting_url?: string | null;
+};
+
+export type LeadEmailLinks = {
+  /** The website's origin, e.g. https://www.aurixasystems.com.au */
+  siteUrl: string;
+  /** The strategic review scheduler, if not `/schedule-strategic-review` on the site. */
+  bookingUrl?: string | null;
+  /** The secure questionnaire link, minted for this send. Stage 1 only. */
+  questionnaireUrl?: string | null;
+  questionnaireExpiresAt?: string | null;
+  supportEmail: string;
+  trialDays: number;
+};
+
+const SYDNEY = "Australia/Sydney";
+
+function formatInstant(iso: string | null | undefined, timeZone: string, withTime = true): string {
+  const ms = Date.parse(iso ?? "");
+  if (!Number.isFinite(ms)) return "";
+  try {
+    return new Intl.DateTimeFormat("en-AU", {
+      timeZone,
+      weekday: withTime ? undefined : "long",
+      day: "numeric",
+      month: withTime ? "short" : "long",
+      year: "numeric",
+      ...(withTime ? { hour: "numeric", minute: "2-digit" } : {}),
+    }).format(new Date(ms));
+  } catch {
+    return "";
+  }
+}
+
+function sessionTime(iso: string | null | undefined, timeZone: string): string {
+  const ms = Date.parse(iso ?? "");
+  if (!Number.isFinite(ms)) return "";
+  try {
+    return new Intl.DateTimeFormat("en-AU", {
+      timeZone,
+      weekday: "long",
+      day: "numeric",
+      month: "long",
+      year: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(new Date(ms));
+  } catch {
+    return "";
+  }
+}
+
+const isZone = (zone: string) => {
+  try {
+    new Intl.DateTimeFormat("en-AU", { timeZone: zone });
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/** Everything a template may name, for one applicant at one stage. */
+export function leadEmailContext(
+  lead: LeadEmailSubject,
+  stage: LeadStage,
+  links: LeadEmailLinks,
+): Record<string, string> {
+  const site = links.siteUrl.replace(/\/+$/, "");
+  const reference = (lead.application_id ?? "").trim();
+  const first = (lead.first_name ?? "").trim();
+  const last = (lead.last_name ?? "").trim();
+  const refQuery = reference ? `?ref=${encodeURIComponent(reference)}` : "";
+
+  const context: Record<string, string> = {
+    first_name: first,
+    last_name: last,
+    full_name: [first, last].filter(Boolean).join(" "),
+    organisation: (lead.entity_name ?? "").trim() || "your organisation",
+    application_id: reference,
+    work_email: (lead.email ?? "").trim(),
+    support_email: links.supportEmail,
+    trial_days: String(links.trialDays),
+  };
+
+  if (stage === 1) {
+    context.questionnaire_url = links.questionnaireUrl ?? "";
+    context.questionnaire_expires = formatInstant(links.questionnaireExpiresAt, SYDNEY, false);
+    context.questionnaire_resume_url = `${site}/questionnaire${refQuery}`;
+    context.received_at = formatInstant(lead.submitted_at ?? lead.created_at, SYDNEY);
+  }
+  if (stage === 2 || stage === 3) {
+    const scheduler = (links.bookingUrl ?? "").trim() || `${site}/schedule-strategic-review`;
+    context.booking_url = reference
+      ? `${scheduler}${scheduler.includes("?") ? "&" : "?"}ref=${encodeURIComponent(reference)}`
+      : scheduler;
+  }
+  if (stage === 2) {
+    context.questionnaire_completed_at = formatInstant(lead.stage2_completed_at, SYDNEY);
+  }
+  if (stage === 3) {
+    const zone = (lead.stage3_time_zone ?? "").trim();
+    context.review_time_zone = zone;
+    context.review_local_time =
+      (lead.stage3_local_time ?? "").trim() ||
+      sessionTime(lead.stage3_session_start, zone && isZone(zone) ? zone : SYDNEY);
+    context.review_host_time =
+      (lead.stage3_host_local_time ?? "").trim() || sessionTime(lead.stage3_session_start, SYDNEY);
+    context.review_duration = String(lead.stage3_duration_minutes ?? 30);
+    context.meeting_url = (lead.stage3_meeting_url ?? "").trim();
+    context.booked_at = formatInstant(lead.stage3_booked_at, SYDNEY);
+  }
+  return context;
+}

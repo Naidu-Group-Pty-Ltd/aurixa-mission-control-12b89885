@@ -142,6 +142,14 @@ the Stage 2 send, switch the Make scenario's mail module off and set
 and re-importing a blueprint creates a new scenario rather than updating the
 live one.
 
+**Since 29 Oct 2026 a stage can be handed to Mission Control outright** on
+Email → Lead emails, after its email modules are removed from Make: Mission
+Control then sends it within a minute, in copy edited on that page, with no
+grace period and no receipt to wait for. That supersedes
+`LEAD_STAGE_APPLICANT_MODE=always` as the way to own a stage. Whoever sends,
+every applicant email is now composed from that page's copy, backstop included.
+See `docs/LEAD_EMAILS.md`.
+
 ---
 
 ## How a send is decided and recorded
@@ -289,5 +297,6 @@ It carries a COUNT and never an address.
 | `src/server/leadStageEmail.pure.ts` | what the six messages say |
 | `src/server/leadStageEmailPolicy.pure.ts` | whether one is owed, and to whom |
 | `src/server/lead-stage-emails.server.ts` | enqueue, claim, send, record |
-| `src/routes/hooks.lead-stage-emails.tsx` | the five-minute tick |
+| `src/routes/hooks.lead-stage-emails.tsx` | the tick, every minute |
+| `docs/LEAD_EMAILS.md` | the applicant's emails: the console, handing a stage over, the questionnaire link |
 | `docs/lead-stage-email-cutover.md` | retiring the Airtable automation, in order |

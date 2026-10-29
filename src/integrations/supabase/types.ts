@@ -9929,6 +9929,112 @@ export type Database = {
           },
         ]
       }
+      lead_email_settings: {
+        Row: {
+          from_mailbox: string | null
+          from_name: string | null
+          id: boolean
+          reply_to: string | null
+          stage1_sender: string
+          stage2_sender: string
+          stage3_sender: string
+          tenant_id: string | null
+          updated_at: string
+          updated_by: string | null
+        }
+        Insert: {
+          from_mailbox?: string | null
+          from_name?: string | null
+          id?: boolean
+          reply_to?: string | null
+          stage1_sender?: string
+          stage2_sender?: string
+          stage3_sender?: string
+          tenant_id?: string | null
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Update: {
+          from_mailbox?: string | null
+          from_name?: string | null
+          id?: boolean
+          reply_to?: string | null
+          stage1_sender?: string
+          stage2_sender?: string
+          stage3_sender?: string
+          tenant_id?: string | null
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "lead_email_settings_tenant_id_fkey"
+            columns: ["tenant_id"]
+            isOneToOne: false
+            referencedRelation: "microsoft_tenants"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      lead_email_templates: {
+        Row: {
+          content: Json
+          stage: number
+          subject: string
+          updated_at: string
+          updated_by: string | null
+        }
+        Insert: {
+          content: Json
+          stage: number
+          subject: string
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Update: {
+          content?: Json
+          stage?: number
+          subject?: string
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Relationships: []
+      }
+      lead_questionnaire_links: {
+        Row: {
+          created_at: string
+          expires_at: string
+          id: string
+          last_used_at: string | null
+          lead_id: string
+          token_sha256: string
+        }
+        Insert: {
+          created_at?: string
+          expires_at: string
+          id?: string
+          last_used_at?: string | null
+          lead_id: string
+          token_sha256: string
+        }
+        Update: {
+          created_at?: string
+          expires_at?: string
+          id?: string
+          last_used_at?: string | null
+          lead_id?: string
+          token_sha256?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "lead_questionnaire_links_lead_id_fkey"
+            columns: ["lead_id"]
+            isOneToOne: false
+            referencedRelation: "waitlist_leads"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       lead_stage_emails: {
         Row: {
           attempts: number
@@ -15602,6 +15708,7 @@ export type Database = {
           stage3_invite_count: number | null
           stage3_invite_sent_at: string | null
           stage3_local_time: string | null
+          stage3_meeting_url: string | null
           stage3_notes: string | null
           stage3_session_end: string | null
           stage3_session_start: string | null
@@ -15687,6 +15794,7 @@ export type Database = {
           stage3_invite_count?: number | null
           stage3_invite_sent_at?: string | null
           stage3_local_time?: string | null
+          stage3_meeting_url?: string | null
           stage3_notes?: string | null
           stage3_session_end?: string | null
           stage3_session_start?: string | null
@@ -15772,6 +15880,7 @@ export type Database = {
           stage3_invite_count?: number | null
           stage3_invite_sent_at?: string | null
           stage3_local_time?: string | null
+          stage3_meeting_url?: string | null
           stage3_notes?: string | null
           stage3_session_end?: string | null
           stage3_session_start?: string | null
@@ -16893,6 +17002,7 @@ export type Database = {
         | "clone_announcement_recalled"
         | "deployment_bundle_identity"
         | "lead_stage_email_failed"
+        | "lead_email_sender_changed"
         | "calendar_booking_failed"
         | "crm_appointment_changed"
         | "agreement_attention"
@@ -17399,6 +17509,7 @@ export const Constants = {
         "clone_announcement_recalled",
         "deployment_bundle_identity",
         "lead_stage_email_failed",
+        "lead_email_sender_changed",
         "calendar_booking_failed",
         "crm_appointment_changed",
         "agreement_attention",
