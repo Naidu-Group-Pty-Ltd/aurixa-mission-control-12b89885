@@ -1345,4 +1345,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "column", table: "waitlist_leads", column: "applicant_email_generation" },
     ],
   },
+  {
+    migration: "20261029180000_lead_stage_emails_drop_obligation_key.sql",
+    version: "20261029180000",
+    assertions: [{ kind: "none", reason: "drops an index, creates no object" }],
+  },
 ];
