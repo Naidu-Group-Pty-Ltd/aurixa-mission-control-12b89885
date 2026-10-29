@@ -80,7 +80,16 @@ vi.mock("@/integrations/supabase/client.server", () => {
         mode = "delete";
         return b;
       },
-      eq: (c: string, v: unknown) => (filters.push((r) => r[c] === v), b),
+      eq: (c: string, v: unknown) => {
+        // `metadata->>env` reads a jsonb key as text, as PostgREST does.
+        const [column, key] = c.split("->>");
+        filters.push((r) =>
+          key === undefined
+            ? r[c] === v
+            : String((r[column] as Row | null)?.[key] ?? "") === String(v),
+        );
+        return b;
+      },
       is: (c: string, v: unknown) => (filters.push((r) => (r[c] ?? null) === v), b),
       in: (c: string, vs: unknown[]) => (filters.push((r) => vs.includes(r[c])), b),
       order: () => b,
@@ -101,9 +110,13 @@ vi.mock("./audit.server", () => ({
 }));
 
 const {
+  REBUILD_TIMEOUT_MS,
+  buildAnnouncementFrom,
   createUploadGrant,
   finalizeUpload,
+  lastWebsiteBuildRead,
   listPublicListings,
+  requestWebsiteRebuild,
   setWebsiteBriefingStatus,
   verifyUploadGrant,
 } = await import("./website-briefings.server");
@@ -360,12 +373,81 @@ describe("going live", () => {
     const hooks: string[] = [];
     vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
       hooks.push(`${init?.method} ${url}`);
-      return new Response("{}", { status: 201 });
+      return new Response('{"job":{"id":"job_1","state":"PENDING"}}', { status: 201 });
     });
     const result = await setWebsiteBriefingStatus({ id: "b1", status: "premiere", actorId: ACTOR });
-    expect(result).toMatchObject({ ok: true, rebuild: { requested: true } });
+    expect(result).toMatchObject({ ok: true, rebuild: { requested: true, job: "job_1" } });
     expect(hooks).toEqual(["POST https://hooks.test/deploy"]);
     expect(db.audit.map((a) => a.action)).toContain("website.rebuild_requested");
+  });
+
+  it("sends the hook a body of stated, empty length", async () => {
+    // A POST of unstated length leaves the other end to wait for a body.
+    vi.stubEnv("WEBSITE_DEPLOY_HOOK_URL", "https://hooks.test/deploy");
+    let sent: RequestInit | undefined;
+    vi.stubGlobal("fetch", async (_url: string, init?: RequestInit) => {
+      sent = init;
+      return new Response("{}", { status: 201 });
+    });
+    await requestWebsiteRebuild({ reason: "test", actorId: ACTOR });
+    expect(sent?.body).toBe("");
+    expect(sent?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("calls a hook Vercel did not answer in time unconfirmed — not failed", async () => {
+    // 29 Oct 2026: Vercel answered after the wait ran out, and started the build.
+    vi.stubEnv("WEBSITE_DEPLOY_HOOK_URL", "https://hooks.test/deploy");
+    vi.stubGlobal("fetch", async () => {
+      throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+    });
+    const result = await requestWebsiteRebuild({ reason: "test", actorId: ACTOR });
+    expect(result).toEqual({
+      requested: false,
+      reason: "unconfirmed",
+      detail: `Vercel had not answered after ${REBUILD_TIMEOUT_MS / 1000} seconds`,
+    });
+    expect(db.audit.at(-1)).toMatchObject({
+      action: "website.rebuild_unconfirmed",
+      metadata: { reason: "test", elapsed_ms: expect.any(Number) },
+    });
+  });
+
+  it("calls a refusal or an unreachable hook a failure", async () => {
+    vi.stubEnv("WEBSITE_DEPLOY_HOOK_URL", "https://hooks.test/deploy");
+    vi.stubGlobal("fetch", async () => new Response("gone", { status: 404 }));
+    expect(await requestWebsiteRebuild({ reason: "test", actorId: ACTOR })).toEqual({
+      requested: false,
+      reason: "failed",
+      detail: "HTTP 404",
+    });
+    vi.stubGlobal("fetch", async () => {
+      throw new TypeError("fetch failed");
+    });
+    expect(await requestWebsiteRebuild({ reason: "test", actorId: ACTOR })).toMatchObject({
+      reason: "failed",
+      detail: "fetch failed",
+    });
+    expect(db.audit.at(-1)).toMatchObject({ action: "website.rebuild_failed" });
+  });
+
+  it("reads a website build's announcement, and nothing that is not one", () => {
+    const headers = (h: Record<string, string>) => new Headers(h);
+    expect(
+      buildAnnouncementFrom(
+        headers({ "x-aurixa-build-env": "Production", "x-aurixa-build-id": "dpl_3BgjqP16QD7" }),
+      ),
+    ).toEqual({ env: "production", build: "dpl_3BgjqP16QD7" });
+    expect(buildAnnouncementFrom(headers({}))).toBeNull();
+    expect(
+      buildAnnouncementFrom(
+        headers({ "x-aurixa-build-env": "prod", "x-aurixa-build-id": "dpl_1" }),
+      ),
+    ).toBeNull();
+    expect(
+      buildAnnouncementFrom(
+        headers({ "x-aurixa-build-env": "production", "x-aurixa-build-id": "<script>" }),
+      ),
+    ).toBeNull();
   });
 
   it("the website reads premiere and published listings only, and a premiere without media", async () => {
@@ -383,5 +465,36 @@ describe("going live", () => {
     if (!listed.ok) return;
     expect(listed.listings.map((l) => l.slug)).toEqual(["soon"]);
     expect(listed.listings[0].media).toBeNull();
+  });
+});
+
+describe("the last production build that read the listings", () => {
+  const read = (created_at: string, metadata: Row): Row => ({
+    action: "website.build_read_listings",
+    created_at,
+    metadata,
+  });
+
+  it("is a production build's, and says whether it was given the listings", async () => {
+    db.tables.audit_log = [
+      read("2026-10-29T05:00:00.000Z", {
+        env: "production",
+        build: "dpl_b",
+        ok: false,
+        listings: 0,
+      }),
+    ];
+    expect(await lastWebsiteBuildRead()).toEqual({
+      at: "2026-10-29T05:00:00.000Z",
+      build: "dpl_b",
+      ok: false,
+    });
+  });
+
+  it("is not a preview build's", async () => {
+    db.tables.audit_log = [
+      read("2026-10-29T05:00:00.000Z", { env: "preview", build: "dpl_p", ok: true, listings: 3 }),
+    ];
+    expect(await lastWebsiteBuildRead()).toBeNull();
   });
 });

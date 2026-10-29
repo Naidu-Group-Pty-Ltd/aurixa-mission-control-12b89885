@@ -72,6 +72,10 @@ function WebsiteVideosPage() {
         toast.success("The website is rebuilding — live in a couple of minutes.");
       else if (result.reason === "not_configured")
         toast.error("Website rebuilds are not connected (WEBSITE_DEPLOY_HOOK_URL).");
+      else if (result.reason === "unconfirmed")
+        toast.info(
+          "Sent to Vercel, which had not answered yet. The build usually starts anyway: the line under the heading shows when it reads the listings.",
+        );
       else toast.error(`The rebuild request failed: ${result.detail ?? "unknown error"}`);
       await qc.invalidateQueries({ queryKey: ["website-briefings"] });
     } catch (err) {

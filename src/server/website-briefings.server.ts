@@ -638,15 +638,48 @@ export async function finalizeUpload(input: { uploadId: string; actorId: string 
 
 // ── Rebuilding the website ──────────────────────────────────────────────────
 
+/**
+ * How long Mission Control waits for Vercel to answer the hook. On 29 Oct 2026
+ * Vercel took longer than the 15 seconds this used to allow: Mission Control
+ * gave up and said the rebuild had failed, and the production build the hook
+ * had started went live 40 seconds later.
+ */
+export const REBUILD_TIMEOUT_MS = 25_000;
+
 export type RebuildResult =
-  | { requested: true; at: string }
-  | { requested: false; reason: "not_configured" | "failed"; detail?: string };
+  | { requested: true; at: string; job: string | null }
+  | {
+      requested: false;
+      /**
+       * `unconfirmed`: the hook was called and Vercel had not answered when the
+       * wait ran out. Vercel may still be starting the build, so this is not a
+       * failure — the console waits for the build to read the listings.
+       */
+      reason: "not_configured" | "failed" | "unconfirmed";
+      detail?: string;
+    };
+
+const isTimeout = (err: unknown) =>
+  err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+
+/** The job id Vercel answers a deploy hook with, if it said one. */
+async function hookJob(response: Response): Promise<string | null> {
+  try {
+    const body = (await response.json()) as { job?: { id?: unknown } };
+    return typeof body?.job?.id === "string" ? body.job.id : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Ask Vercel for a production build of the website. The hook is a Vercel
  * deploy hook URL (Project → Settings → Git → Deploy Hooks), held as the
  * Lovable secret `WEBSITE_DEPLOY_HOOK_URL`. Without it nothing is requested,
  * and the console says the change reaches the website on its next deploy.
+ *
+ * The request carries an empty body, so it is sent with `Content-Length: 0`
+ * rather than as a POST of unstated length for the other end to wait out.
  */
 export async function requestWebsiteRebuild(input: {
   reason: string;
@@ -654,40 +687,124 @@ export async function requestWebsiteRebuild(input: {
 }): Promise<RebuildResult> {
   const hook = process.env.WEBSITE_DEPLOY_HOOK_URL?.trim();
   if (!hook) return { requested: false, reason: "not_configured" };
+  const started = Date.now();
   let result: RebuildResult;
   try {
-    const response = await fetch(hook, { method: "POST", signal: AbortSignal.timeout(15_000) });
+    const response = await fetch(hook, {
+      method: "POST",
+      body: "",
+      signal: AbortSignal.timeout(REBUILD_TIMEOUT_MS),
+    });
     result = response.ok
-      ? { requested: true, at: new Date().toISOString() }
+      ? { requested: true, at: new Date().toISOString(), job: await hookJob(response) }
       : { requested: false, reason: "failed", detail: `HTTP ${response.status}` };
   } catch (err) {
-    result = { requested: false, reason: "failed", detail: (err as Error).message };
+    result = isTimeout(err)
+      ? {
+          requested: false,
+          reason: "unconfirmed",
+          detail: `Vercel had not answered after ${REBUILD_TIMEOUT_MS / 1000} seconds`,
+        }
+      : { requested: false, reason: "failed", detail: (err as Error).message };
   }
+  const elapsedMs = Date.now() - started;
   await writeAuditLog({
-    action: result.requested ? "website.rebuild_requested" : "website.rebuild_failed",
+    action: result.requested
+      ? "website.rebuild_requested"
+      : result.reason === "unconfirmed"
+        ? "website.rebuild_unconfirmed"
+        : "website.rebuild_failed",
     entityType: "website",
     entityId: null,
     actorUserId: input.actorId,
     metadata: {
       reason: input.reason,
-      ...(result.requested ? {} : { detail: result.detail ?? result.reason }),
+      elapsed_ms: elapsedMs,
+      ...(result.requested ? { job: result.job } : { detail: result.detail ?? result.reason }),
     },
   });
   return result;
 }
 
+export type LastRebuild = {
+  at: string;
+  reason: string | null;
+  outcome: "requested" | "unconfirmed";
+};
+
 /** When the website was last asked to rebuild, for the console. */
-export async function lastWebsiteRebuild(): Promise<{ at: string; reason: string | null } | null> {
+export async function lastWebsiteRebuild(): Promise<LastRebuild | null> {
   const { data, error } = await supabaseAdmin
     .from("audit_log")
-    .select("created_at, metadata")
-    .eq("action", "website.rebuild_requested")
+    .select("created_at, action, metadata")
+    .in("action", ["website.rebuild_requested", "website.rebuild_unconfirmed"])
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
   if (error || !data) return null;
   const metadata = (data.metadata ?? {}) as { reason?: string };
-  return { at: data.created_at as string, reason: metadata.reason ?? null };
+  return {
+    at: data.created_at as string,
+    reason: metadata.reason ?? null,
+    outcome: data.action === "website.rebuild_unconfirmed" ? "unconfirmed" : "requested",
+  };
+}
+
+/**
+ * A website build announcing that it read the listings — the effect a rebuild
+ * request exists to cause, and the only proof one happened that does not rest
+ * on Vercel's answer. `scripts/sync-briefings.ts` (aurixa-systems) sends these
+ * on a Vercel build: the build's environment and its deployment id.
+ */
+export type BuildAnnouncement = { env: string; build: string };
+
+const BUILD_ENVS = new Set(["production", "preview", "development"]);
+const BUILD_ID = /^[A-Za-z0-9._-]{1,120}$/;
+
+export function buildAnnouncementFrom(headers: Headers): BuildAnnouncement | null {
+  const env = (headers.get("x-aurixa-build-env") ?? "").trim().toLowerCase();
+  const build = (headers.get("x-aurixa-build-id") ?? "").trim();
+  if (!BUILD_ENVS.has(env) || !BUILD_ID.test(build)) return null;
+  return { env, build };
+}
+
+/** Records that a website build read the listings, and what it was given. */
+export async function recordWebsiteBuildRead(
+  announcement: BuildAnnouncement,
+  read: { ok: boolean; listings: number },
+): Promise<void> {
+  await writeAuditLog({
+    action: "website.build_read_listings",
+    entityType: "website",
+    entityId: null,
+    actorUserId: null,
+    metadata: { ...announcement, ok: read.ok, listings: read.listings },
+  });
+}
+
+/**
+ * When a production build of the website last read the listings, and whether
+ * it was given them. A build whose read failed was answered 503 and built from
+ * the site's committed snapshot: it is still the last rebuild, so it is shown
+ * as one, and as one that did not carry the listings — never as a success, and
+ * never hidden behind an older read that did.
+ */
+export async function lastWebsiteBuildRead(): Promise<{
+  at: string;
+  build: string;
+  ok: boolean;
+} | null> {
+  const { data, error } = await supabaseAdmin
+    .from("audit_log")
+    .select("created_at, metadata")
+    .eq("action", "website.build_read_listings")
+    .eq("metadata->>env", "production")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error || !data) return null;
+  const metadata = (data.metadata ?? {}) as { build?: string; ok?: unknown };
+  return { at: data.created_at as string, build: metadata.build ?? "", ok: metadata.ok === true };
 }
 
 export const websiteRebuildConfigured = () => Boolean(process.env.WEBSITE_DEPLOY_HOOK_URL?.trim());

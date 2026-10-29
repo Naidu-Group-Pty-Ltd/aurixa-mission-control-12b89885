@@ -20,6 +20,7 @@ import {
   createWebsiteBriefing,
   deleteDraftWebsiteBriefing,
   finalizeUpload,
+  lastWebsiteBuildRead,
   lastWebsiteRebuild,
   listWebsiteBriefings,
   readWebsiteBriefing,
@@ -37,12 +38,16 @@ const text = (max: number) => z.string().max(max);
 export const listWebsiteBriefingsFn = createServerFn({ method: "POST" })
   .middleware([requireOperator])
   .handler(async () => {
-    const [rows, rebuild] = await Promise.all([listWebsiteBriefings(), lastWebsiteRebuild()]);
+    const [rows, rebuild, built] = await Promise.all([
+      listWebsiteBriefings(),
+      lastWebsiteRebuild(),
+      lastWebsiteBuildRead(),
+    ]);
     return {
       rows: rows.ok ? rows.rows : [],
       error: rows.ok ? null : rows.schemaPending ? "schema_pending" : rows.error,
       mediaOrigin: websiteMediaOrigin(),
-      rebuild: { configured: websiteRebuildConfigured(), last: rebuild },
+      rebuild: { configured: websiteRebuildConfigured(), last: rebuild, built },
     };
   });
 
