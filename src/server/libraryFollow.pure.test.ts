@@ -7,7 +7,9 @@ import { describe, expect, it } from "vitest";
 import {
   ARCHIVE_FLOOR,
   FOLLOW_ATTEMPTS,
+  FOLLOW_BACKOFF_MS,
   FOLLOW_HELD,
+  FOLLOW_SKIPPED,
   emptyFollowReport,
   entryChange,
   followAuditMetadata,
@@ -38,6 +40,7 @@ const run = (over: Partial<FollowRun> = {}): FollowRun => ({
   commit_sha: HEAD,
   parameters: FOLLOW,
   started_at: minutesAgo(5),
+  completed_at: null,
   ...over,
 });
 
@@ -55,6 +58,17 @@ describe("which run is the follow's", () => {
 });
 
 describe("what the follow does at the prime's head", () => {
+  const detect = (
+    attempt: number,
+    over: Partial<{ stale: FollowRun[]; afterHold: boolean }> = {},
+  ) => ({
+    kind: "detect",
+    stale: [],
+    attempt,
+    afterHold: false,
+    ...over,
+  });
+
   it("nothing, where it settled the catalogue at the head", () => {
     const settled = run();
     expect(step([settled])).toEqual({ kind: "up_to_date", run: settled });
@@ -65,26 +79,55 @@ describe("what the follow does at the prime's head", () => {
     expect(step([held])).toEqual({ kind: "held", run: held });
   });
 
-  it("detects where it settled an older commit, as its first try at the head", () => {
-    expect(step([run({ commit_sha: OLDER })])).toEqual({ kind: "detect", stale: [], attempt: 1 });
+  it("detects where it settled an older commit, as its first try", () => {
+    expect(step([run({ commit_sha: OLDER })])).toEqual(detect(1));
   });
 
   it("detects where it never ran, and a detection a person ran is not the follow's", () => {
     const persons = run({ parameters: { strategy: "feature-first" } });
-    expect(step([])).toEqual({ kind: "detect", stale: [], attempt: 1 });
-    expect(step([persons])).toEqual({ kind: "detect", stale: [], attempt: 1 });
+    expect(step([])).toEqual(detect(1));
+    expect(step([persons])).toEqual(detect(1));
   });
 
-  it("tries a commit again after a failure, counting the tries", () => {
+  it("settles again at the same commit after a person's detection or a reset changed the catalogue", () => {
+    const persons = run({ parameters: { strategy: "feature-first" }, started_at: minutesAgo(2) });
+    expect(step([persons, run()])).toEqual(detect(1));
+  });
+
+  it("is not moved by a person's detection that finished before it settled", () => {
+    const settled = run();
+    const persons = run({ parameters: { strategy: "feature-first" }, started_at: minutesAgo(60) });
+    expect(step([settled, persons])).toEqual({ kind: "up_to_date", run: settled });
+  });
+
+  it("says when the follow that finished last was held, whose notice the operators have", () => {
+    expect(step([run({ status: FOLLOW_HELD, commit_sha: OLDER })])).toEqual(
+      detect(1, { afterHold: true }),
+    );
+  });
+
+  it("tries again after a failure, counting the tries", () => {
     const runs = [run({ status: "failed" }), run({ status: "failed" }), run({ commit_sha: OLDER })];
-    expect(step(runs)).toEqual({ kind: "detect", stale: [], attempt: 3 });
+    expect(step(runs)).toEqual(detect(3));
   });
 
-  it("waits for the head to move after the last try failed", () => {
+  it("counts every failure since it last settled, whatever commit each read, and none before", () => {
+    const runs = [
+      run({ status: "failed", commit_sha: OLDER }),
+      run({ status: "failed", commit_sha: null }),
+      run({ commit_sha: OLDER }),
+      run({ status: "failed" }),
+      run({ status: "failed" }),
+      run({ status: "failed" }),
+    ];
+    expect(step(runs)).toEqual(detect(3));
+  });
+
+  it("waits out the backoff after three failures in a row, wherever the prime moved", () => {
     const failed = [
-      run({ status: "failed" }),
-      run({ status: "failed" }),
-      run({ status: "failed" }),
+      run({ status: "failed", commit_sha: HEAD }),
+      run({ status: "failed", commit_sha: OLDER }),
+      run({ status: "failed", commit_sha: null }),
     ];
     expect(failed).toHaveLength(FOLLOW_ATTEMPTS);
     expect(step([...failed, run({ commit_sha: OLDER })])).toEqual({
@@ -94,33 +137,39 @@ describe("what the follow does at the prime's head", () => {
     });
   });
 
-  it("counts no failure at another commit, nor one before it last settled", () => {
-    const runs = [
-      run({ status: "failed", commit_sha: OLDER }),
-      run({ status: "failed", commit_sha: null }),
-      run({ commit_sha: OLDER }),
-      run({ status: "failed" }),
-      run({ status: "failed" }),
-      run({ status: "failed" }),
+  it("tries once more when the backoff has passed since the newest failure", () => {
+    const failedAt = (hours: number) =>
+      run({ status: "failed", completed_at: new Date(NOW - hours * 3_600_000).toISOString() });
+    const waited = [failedAt(6.5), failedAt(7), failedAt(8)];
+    expect(FOLLOW_BACKOFF_MS).toBe(6 * 3_600_000);
+    expect(step(waited)).toEqual(detect(4));
+    expect(step([failedAt(5), ...waited])).toEqual({
+      kind: "exhausted",
+      failed: [expect.objectContaining({ status: "failed" }), ...waited],
+      stale: [],
+    });
+  });
+
+  it("counts no run that stepped aside for a reset or a detection", () => {
+    const skipped = [
+      run({ status: FOLLOW_SKIPPED }),
+      run({ status: FOLLOW_SKIPPED }),
+      run({ status: FOLLOW_SKIPPED }),
     ];
-    expect(step(runs)).toEqual({ kind: "detect", stale: [], attempt: 1 });
+    expect(step([...skipped, run({ commit_sha: OLDER })])).toEqual(detect(1));
   });
 
   it("closes a run that died still saying running, and counts it as a try", () => {
     const died = run({ status: "running", started_at: minutesAgo(31) });
-    expect(step([died, run({ commit_sha: OLDER })])).toEqual({
-      kind: "detect",
-      stale: [died],
-      attempt: 2,
-    });
+    expect(step([died, run({ commit_sha: OLDER })])).toEqual(detect(2, { stale: [died] }));
   });
 
   it("leaves a run that may still be running to the competitor check", () => {
     const running = run({ status: "running", started_at: minutesAgo(5) });
-    expect(step([running])).toEqual({ kind: "detect", stale: [], attempt: 1 });
+    expect(step([running])).toEqual(detect(1));
   });
 
-  it("is exhausted when the run that died was the last try", () => {
+  it("is exhausted when the run that died was the third failure in a row", () => {
     const died = run({ status: "running", started_at: minutesAgo(45) });
     const failed = [run({ status: "failed" }), run({ status: "failed" })];
     expect(step([died, ...failed])).toEqual({
@@ -298,6 +347,12 @@ describe("whether a module's entry changed", () => {
     expect(entryChange(undefined, candidate(module()))).toBe("new");
   });
 
+  it("is rejected where a person rejected its latest entry, which the follow leaves as it is", () => {
+    const rejected = { ...latestOf(module()), approval_status: "rejected" };
+    expect(entryChange(rejected, candidate(module()))).toBe("rejected");
+    expect(entryChange(rejected, candidate(module({ name: "AML/CTF" })))).toBe("rejected");
+  });
+
   it("is unapproved where its latest was not approved at a commit, as every entry before the follow", () => {
     const pending = { ...latestOf(module()), approval_status: "pending" };
     expect(entryChange(pending, candidate(module()))).toBe("unapproved");
@@ -363,7 +418,7 @@ describe("what a follow reports", () => {
     expect(notice.metadata).toEqual({ run_id: RUN, commit_sha: HEAD, outcome: "held" });
   });
 
-  it("tells the operators where its last try failed, and that it waits for the prime", () => {
+  it("tells the operators where the third failure in a row came, and that it backs off", () => {
     const report = {
       ...emptyFollowReport("failed"),
       runId: RUN,
@@ -372,7 +427,9 @@ describe("what a follow reports", () => {
     };
     const notice = stoppedNotice(report);
     expect(notice.title).toBe("Library follow failed at prime@122b761");
-    expect(notice.body).toContain(`failed to follow prime@122b761 ${FOLLOW_ATTEMPTS} times`);
-    expect(notice.body).toContain("It tries again when the prime moves");
+    expect(notice.body).toContain(
+      `failed to follow the prime ${FOLLOW_ATTEMPTS} times in a row, most recently at prime@122b761`,
+    );
+    expect(notice.body).toContain("It tries again every six hours until one follow settles");
   });
 });

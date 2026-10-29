@@ -99,6 +99,18 @@ describe("the follow changes no clone", () => {
   });
 });
 
+describe("the follow's mark is the follow's only while its archive stands", () => {
+  it("is cleared by the database on any status change that does not write it", () => {
+    const sql = readFileSync(MIGRATION, "utf8").replace(/--[^\n]*/g, "");
+    expect(sql).toMatch(
+      /IF NEW\.status IS DISTINCT FROM OLD\.status\s+AND NEW\.archived_by_follow_run_id IS NOT DISTINCT FROM OLD\.archived_by_follow_run_id THEN\s+NEW\.archived_by_follow_run_id := NULL;/,
+    );
+    expect(sql).toMatch(
+      /CREATE TRIGGER modules_follow_mark_is_the_follows\s+BEFORE UPDATE OF status ON public\.modules\s+FOR EACH ROW EXECUTE FUNCTION public\.modules_follow_mark_is_the_follows\(\);/,
+    );
+  });
+});
+
 describe("a new clone says which commit its catalogue was at", () => {
   it("both provisioning paths reconcile with the catalogue's settled run", () => {
     for (const file of [

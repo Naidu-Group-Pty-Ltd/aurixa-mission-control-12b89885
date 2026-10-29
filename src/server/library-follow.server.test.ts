@@ -80,7 +80,12 @@ import {
   type FollowDeps,
 } from "./library-follow.server";
 import { DEFAULT_CONFIG, RUNNING_RUN_WINDOW_MS, runDetection } from "./module-detection.server";
-import { FOLLOW_ATTEMPTS, FOLLOW_AUDIT_ACTION } from "./libraryFollow.pure";
+import {
+  FOLLOW_ATTEMPTS,
+  FOLLOW_AUDIT_ACTION,
+  FOLLOW_BACKOFF_MS,
+  FOLLOW_SKIPPED,
+} from "./libraryFollow.pure";
 
 function fakeGithub() {
   const shaOf = (path: string) => gitBlobSha(prime.files[path]);
@@ -521,7 +526,7 @@ describe("a follow that fails is tried again, three times at one commit", () => 
     expect(audits().map((a) => (a.metadata as { outcome: string }).outcome)).toEqual(["failed"]);
   });
 
-  it("tells the operators at the last try, then waits for the prime to move", async () => {
+  it("tells the operators at the third failure in a row, then tries once per backoff", async () => {
     for (let i = 1; i <= FOLLOW_ATTEMPTS; i++) {
       const report = await follow();
       expect(report.attempt, `try ${i}`).toBe(i);
@@ -529,16 +534,36 @@ describe("a follow that fails is tried again, three times at one commit", () => 
     }
     expect(heldNotices()[0].title).toBe("Library follow failed at prime@122b761");
 
+    // The prime moving is no reason to try again: a failure three times in
+    // a row is the follow's, not the commit's.
+    prime.commit = COMMIT_2;
     const waiting = await follow();
     expect(waiting.outcome).toBe("exhausted");
     expect(detections).toBe(FOLLOW_ATTEMPTS);
     expect(audits()).toHaveLength(FOLLOW_ATTEMPTS);
     expect(heldNotices()).toHaveLength(1);
 
+    // Once the backoff has passed it tries again, and settles where it can.
     db.failures.clear();
     deps.detect = FOLLOW_DEPS.detect;
-    prime.commit = COMMIT_2;
-    expect((await follow()).outcome).toBe("settled");
+    deps.now = () => Date.now() + FOLLOW_BACKOFF_MS + 60_000;
+    const probe = await follow();
+    expect(probe.outcome).toBe("settled");
+    expect(probe.attempt).toBe(FOLLOW_ATTEMPTS + 1);
+    expect(heldNotices()).toHaveLength(1);
+  });
+
+  it("counts failures in a row across the commits it read", async () => {
+    for (const [i, commit] of [COMMIT_1, COMMIT_2, COMMIT_3].entries()) {
+      prime.commit = commit;
+      const report = await follow();
+      expect(report.attempt, commit).toBe(i + 1);
+    }
+    expect(heldNotices()).toHaveLength(1);
+    expect(heldNotices()[0].body).toContain("most recently at prime@3c4d5e6");
+    prime.commit = "4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f70";
+    expect((await follow()).outcome).toBe("exhausted");
+    expect(detections).toBe(3);
   });
 
   it("fails, and is tried again, where the prime has no route at all", async () => {
@@ -876,5 +901,216 @@ describe("a module that changed while the follow settled is not approved under i
       archived_by_follow_run_id: null,
     });
     expect(db.tables.module_library).toEqual([]);
+  });
+});
+
+describe("what the follow settles is what landed", () => {
+  it("fails a run whose entries did not all land, and the next follow writes them", async () => {
+    deps.detect = async (args) => {
+      detections++;
+      db.failures.delete("module_library.insert");
+      const result = await FOLLOW_DEPS.detect(args);
+      if (detections === 1) db.failures.set("module_library.insert", STATEMENT_TIMEOUT);
+      return result;
+    };
+
+    const first = await follow();
+
+    expect(first.outcome).toBe("failed");
+    expect(first.stoppedBecause).toMatch(/^5 entries were not written: /);
+    expect(followRuns()[0].status).toBe("failed");
+    expect(db.tables.module_library).toEqual([]);
+
+    const second = await follow();
+
+    expect(second.outcome).toBe("settled");
+    expect(second.attempt).toBe(2);
+    expect(second.published.map((p) => p.slug)).toEqual(FOUND);
+  });
+
+  it("publishes nothing over a latest entry a person rejected, and names it", async () => {
+    await follow();
+    const latest = entriesOf("clients").find((e) => e.is_latest);
+    if (latest) latest.approval_status = "rejected";
+    prime.commit = COMMIT_2;
+    prime.files["src/components/clients/ClientRow.tsx"] = "export const ClientRow = () => null;\n";
+    prime.files["src/components/clients/ClientList.tsx"] =
+      'import { ClientRow } from "./ClientRow";\n' + PRIME["src/components/clients/ClientList.tsx"];
+
+    const report = await follow();
+
+    expect(report.outcome).toBe("settled");
+    expect(report.rejectedEntries).toEqual(["clients"]);
+    expect(report.published).toEqual([]);
+    expect(entriesOf("clients")).toEqual([
+      expect.objectContaining({ version: 1, approval_status: "rejected", is_latest: true }),
+    ]);
+  });
+
+  it("publishes no module a person archived while it settled", async () => {
+    seed({ modules: [oldModule("clients"), oldModule("index"), oldModule("gone")] });
+    const from = db.from.bind(db);
+    db.from = (table: string) => {
+      const builder = from(table);
+      if (table !== "modules") return builder;
+      const update = builder.update;
+      builder.update = (values: Row) => {
+        // The follow archives `gone`; at that moment a person archives `clients`.
+        if (values.status === "archived") {
+          const clients = db.tables.modules.find((m) => m.slug === "clients");
+          if (clients) Object.assign(clients, { status: "archived" });
+        }
+        return update(values);
+      };
+      return builder;
+    };
+
+    const report = await follow();
+
+    expect(report.outcome).toBe("settled");
+    expect(report.warnings).toContain(
+      "1 module(s) changed while the follow settled and were not published: clients",
+    );
+    expect(report.published.map((p) => p.slug)).not.toContain("clients");
+    expect(moduleOf("clients")?.status).toBe("archived");
+  });
+});
+
+describe("a change to the catalogue the follow did not make", () => {
+  it("is settled again at the same commit after a person's detection", async () => {
+    await follow();
+    const persons = await runDetection({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the double
+      supabase: db as any,
+      userId: ADMIN,
+      config: { ...DEFAULT_CONFIG, deltaMode: false },
+    });
+    expect(persons.ok).toBe(true);
+
+    const report = await follow();
+
+    expect(report.outcome).toBe("settled");
+    expect(report.commitSha).toBe(COMMIT_1);
+    expect(detections).toBe(2);
+    const latestRun = followRuns().find((r) => r.id === report.runId);
+    for (const slug of FOUND) {
+      const m = moduleOf(slug);
+      expect(m?.detection_run_id, slug).toBe(latestRun?.id);
+      expect((m?.backend_manifest as { detection_run_id: string }).detection_run_id, slug).toBe(
+        latestRun?.id,
+      );
+    }
+    expect((await follow()).outcome).toBe("up_to_date");
+  });
+
+  it("does not bring back a module a person archived after the follow archived it", async () => {
+    await follow();
+    prime.commit = COMMIT_2;
+    for (const path of REPORTS) delete prime.files[path];
+    await follow();
+    expect(moduleOf("reports")?.archived_by_follow_run_id).not.toBeNull();
+
+    // A person approves it, then archives it: the trigger clears the mark.
+    const reports = moduleOf("reports");
+    const { error: approveError } = await db
+      .from("modules")
+      .update({ status: "approved" })
+      .eq("id", reports?.id);
+    expect(approveError).toBeNull();
+    const { error: archiveError } = await db
+      .from("modules")
+      .update({ status: "archived" })
+      .eq("id", reports?.id);
+    expect(archiveError).toBeNull();
+    expect(moduleOf("reports")).toMatchObject({
+      status: "archived",
+      archived_by_follow_run_id: null,
+    });
+
+    prime.commit = COMMIT_3;
+    prime.files = { ...PRIME };
+    const report = await follow();
+
+    expect(report.revived).toEqual([]);
+    expect(report.keptOut).toEqual(["reports"]);
+    expect(moduleOf("reports")?.status).toBe("archived");
+  });
+});
+
+describe("a run the follow no longer owns", () => {
+  it("is not written through once another tick closed it", async () => {
+    deps.detect = async (args) => {
+      detections++;
+      const result = await FOLLOW_DEPS.detect(args);
+      const run = db.tables.module_detection_runs.find((r) => r.id === result.runId);
+      if (run) run.status = "failed";
+      return result;
+    };
+
+    const report = await follow();
+
+    expect(report.outcome).toBe("failed");
+    expect(report.stoppedBecause).toBe(
+      "the run was closed (failed) while the follow settled it, so this follow wrote nothing more",
+    );
+    expect(db.tables.modules.every((m) => m.status === "proposed")).toBe(true);
+    expect(db.tables.module_library).toEqual([]);
+  });
+
+  it("steps aside, uncounted, for a detection that started between its two checks", async () => {
+    let asked = 0;
+    deps.competitor = async () =>
+      ++asked === 2 ? "Detection run r-person has been running since 2026-10-29." : null;
+
+    const report = await follow();
+
+    expect(report.outcome).toBe("skipped");
+    expect(followRuns()[0].status).toBe(FOLLOW_SKIPPED);
+    expect(audits()).toEqual([]);
+
+    deps.competitor = FOLLOW_DEPS.competitor;
+    const next = await follow();
+    expect(next.attempt).toBe(1);
+    expect(next.outcome).toBe("settled");
+  });
+});
+
+describe("the prune is bounded", () => {
+  it("prunes ten runs per follow, oldest first, stamps each, and never the same twice", async () => {
+    const runs = Array.from({ length: 12 }, (_, i) => ({
+      id: `31a7e000-0000-4000-8000-1000000000${String(i).padStart(2, "0")}`,
+      status: "completed",
+      commit_sha: null,
+      parameters: { strategy: "feature-first" },
+      started_at: `2026-08-${String(i + 1).padStart(2, "0")}T10:00:00Z`,
+    }));
+    seed({
+      module_detection_runs: runs,
+      module_import_edges: runs.map((r, i) => ({
+        id: `e-${i}`,
+        detection_run_id: r.id,
+        source_file: `src/a${i}.ts`,
+        target_file: `src/b${i}.ts`,
+      })),
+    });
+
+    const first = await follow();
+
+    expect(first.pruned).toEqual(runs.slice(0, 10).map((r) => r.id));
+    expect(db.tables.module_import_edges.map((e) => e.detection_run_id)).toEqual(
+      expect.arrayContaining(runs.slice(10).map((r) => r.id)),
+    );
+    for (const r of runs.slice(0, 10)) {
+      const row = db.tables.module_detection_runs.find((x) => x.id === r.id);
+      expect(row?.diagnostics_pruned_at, r.id).toEqual(expect.any(String));
+    }
+
+    prime.commit = COMMIT_2;
+    const second = await follow();
+
+    expect(second.pruned).toEqual([...runs.slice(10).map((r) => r.id), first.runId]);
+    expect(
+      db.tables.module_import_edges.filter((e) => e.detection_run_id !== second.runId),
+    ).toEqual([]);
   });
 });

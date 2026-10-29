@@ -1,4 +1,5 @@
 -- @asserts column:modules.archived_by_follow_run_id
+-- @asserts column:module_detection_runs.diagnostics_pruned_at
 -- @asserts cron:module-library-follow-15min
 --
 -- The module library follows the prime (docs/DELIVERY_SYSTEM_PLAN.md, D19).
@@ -31,6 +32,21 @@
 -- `detection_run_id` is: a run can be purged 180 days after it completes, and
 -- the module outlives it. Additive and nullable, and no row is written.
 --
+-- The mark is the follow's only while the follow's archive stands. A trigger
+-- clears it on any status change that does not write it, so a module a person
+-- approved, archived again or rejected after the follow archived it is a
+-- person's, and the follow never brings it back. The follow writes the mark
+-- on its archive and clears it on its revive, so it is never cleared under the
+-- follow. Measured 29 Oct 2026: no module carries an archived status, so no
+-- row changes.
+--
+-- `module_detection_runs.diagnostics_pruned_at` is when a follow deleted the
+-- run's diagnostics: its import edges, backend artifacts and drift alerts.
+-- Each of the 31 Jul runs left 13,698 such rows, the Modules page reads a
+-- module's artifacts across every run, and the drift metrics count alerts
+-- across them, so a finished follow prunes the runs before its own but the
+-- one the catalogue is settled at, ten runs at a time, and stamps each.
+--
 -- The schedule's patience is longer than any other job's. A follow that has
 -- detection to do reads about 4,600 files from GitHub by batch and writes the
 -- catalogue, and the last detection runs (31 Jul 2026, file by file) took 601
@@ -44,6 +60,32 @@ ALTER TABLE public.modules
 
 COMMENT ON COLUMN public.modules.archived_by_follow_run_id IS
   'The library follow''s detection run that archived this module because it no longer found it at the prime''s head (library-follow.server.ts). NULL for a module a person archived, which the follow never brings back. Soft reference: the run may be purged.';
+
+CREATE OR REPLACE FUNCTION public.modules_follow_mark_is_the_follows()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+BEGIN
+  -- A status change that does not write the mark was not the follow's.
+  IF NEW.status IS DISTINCT FROM OLD.status
+     AND NEW.archived_by_follow_run_id IS NOT DISTINCT FROM OLD.archived_by_follow_run_id THEN
+    NEW.archived_by_follow_run_id := NULL;
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+DROP TRIGGER IF EXISTS modules_follow_mark_is_the_follows ON public.modules;
+CREATE TRIGGER modules_follow_mark_is_the_follows
+  BEFORE UPDATE OF status ON public.modules
+  FOR EACH ROW EXECUTE FUNCTION public.modules_follow_mark_is_the_follows();
+
+ALTER TABLE public.module_detection_runs
+  ADD COLUMN IF NOT EXISTS diagnostics_pruned_at timestamptz;
+
+COMMENT ON COLUMN public.module_detection_runs.diagnostics_pruned_at IS
+  'When the library follow deleted this run''s import edges, backend artifacts and drift alerts (library-follow.server.ts). NULL while they are kept.';
 
 CREATE EXTENSION IF NOT EXISTS pg_cron;
 CREATE EXTENSION IF NOT EXISTS pg_net;

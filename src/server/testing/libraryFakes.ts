@@ -41,7 +41,10 @@
 //  - a filter treats NULL as SQL does: `eq`, `neq`, `in`, `lt` and `gt` never match it;
 //  - `maybeSingle` answers null for no row and PGRST116 for several, and
 //    `single` answers PGRST116 for anything but one;
-//  - `count: "exact"` counts the filtered rows before `range` or `limit`.
+//  - `count: "exact"` counts the filtered rows before `range` or `limit`;
+//  - an update of `modules.status` that does not write
+//    `archived_by_follow_run_id` clears it, as the trigger
+//    `modules_follow_mark_is_the_follows` (20261029140000) does.
 //
 // A failure is injected per table and operation (`module_library.select`,
 // `rpc.has_role`), as the error PostgREST passes through for a statement the
@@ -90,7 +93,8 @@ type Table = (typeof TABLES)[number];
 
 /**
  * The columns each table carries in production (`types.ts`, 28 Oct 2026, and
- * `modules.archived_by_follow_run_id` from 20261029140000).
+ * `modules.archived_by_follow_run_id` and
+ * `module_detection_runs.diagnostics_pruned_at` from 20261029140000).
  */
 const COLUMNS: Record<Table, readonly string[]> = {
   modules: [
@@ -144,6 +148,7 @@ const COLUMNS: Record<Table, readonly string[]> = {
     "database_object_count",
     "delta_mode",
     "dependency_count",
+    "diagnostics_pruned_at",
     "edge_function_count",
     "error_message",
     "file_count",
@@ -493,6 +498,24 @@ function defaultsFor(table: Table, now: string): Row {
     default:
       return { ...base, updated_at: now };
   }
+}
+
+/**
+ * The row an UPDATE leaves, BEFORE triggers included: production's
+ * `modules_follow_mark_is_the_follows` clears the follow's archive mark on a
+ * status change that does not write the mark to a new value.
+ */
+function updated(table: Table, old: Row, values: Row): Row {
+  const next = { ...old, ...structuredClone(values) };
+  if (
+    table === "modules" &&
+    "status" in values &&
+    (next.status ?? null) !== (old.status ?? null) &&
+    (next.archived_by_follow_run_id ?? null) === (old.archived_by_follow_run_id ?? null)
+  ) {
+    next.archived_by_follow_run_id = null;
+  }
+  return next;
 }
 
 const notNull = (table: Table, column: string): PgError => ({
@@ -870,7 +893,7 @@ function builder(db: LibraryFakeDb, table: Table, known: Set<string>): Builder {
         result = created;
       } else {
         result = rows().filter((r) => filters.every((f) => f(r)));
-        const after = (r: Row): Row => (result.includes(r) ? { ...r, ...(values as Row) } : r);
+        const after = (r: Row): Row => (result.includes(r) ? updated(table, r, values as Row) : r);
         for (const row of result) {
           const others = rows()
             .filter((r) => r !== row)
@@ -879,7 +902,7 @@ function builder(db: LibraryFakeDb, table: Table, known: Set<string>): Builder {
             violation(table, after(row), others) ?? unreferenced(db, table, after(row));
           if (broken) return { data: null, error: broken };
         }
-        for (const row of result) Object.assign(row, structuredClone(values as Row));
+        for (const row of result) Object.assign(row, updated(table, row, values as Row));
       }
       db.writes.push({ table, op, rows: result.map((r) => ({ ...r })) });
     }

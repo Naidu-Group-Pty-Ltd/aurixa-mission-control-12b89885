@@ -24,6 +24,7 @@ import { catalogueCompetitor } from "./library-reingest.server";
 import { MODULE_COLUMNS, writeLibraryEntries } from "./libraryApproval.server";
 import {
   describeDbError,
+  judgePublication,
   libraryApprovalNotice,
   libraryEntryInsert,
   type DetectionRunCommit,
@@ -33,6 +34,7 @@ import {
   FOLLOW_ATTEMPTS,
   FOLLOW_AUDIT_ACTION,
   FOLLOW_HELD,
+  FOLLOW_SKIPPED,
   emptyFollowReport,
   entryChange,
   followAuditMetadata,
@@ -156,13 +158,9 @@ async function recordFailure(
   ownRun?: string | null,
 ): Promise<void> {
   report.outcome = "failed";
-  if (
-    report.attempt === FOLLOW_ATTEMPTS &&
-    report.commitSha !== null &&
-    report.commitSha === report.headSha
-  ) {
-    await tellOperators(supabase, report);
-  }
+  // The third failure in a row, at whatever commits: the follow slows to its
+  // backoff from here, and says so once.
+  if (report.attempt === FOLLOW_ATTEMPTS) await tellOperators(supabase, report);
   await record(supabase, report, ownRun);
 }
 
@@ -179,6 +177,9 @@ async function readCatalogue(
   );
 }
 
+/** Runs whose diagnostics one finished follow prunes, oldest first: one DELETE per run and table. */
+const PRUNE_RUNS_PER_FOLLOW = 10;
+
 /** The tables a detection run writes for diagnosis, which name the run. */
 const DIAGNOSTIC_TABLES = [
   "module_backend_artifacts",
@@ -193,8 +194,11 @@ const DIAGNOSTIC_TABLES = [
  * 2,000 import edges, 11,598 backend artifacts and 100 drift alerts, measured
  * 29 Oct 2026), the Modules page reads a module's artifacts across every run,
  * and the drift metrics count alerts across them, so a follow per prime merge
- * would multiply both. A run's own row is kept, and so is a running run's
- * every row. A delete that fails is a warning: the next follow prunes again.
+ * would multiply both. A run's own row is kept, and stamped
+ * `diagnostics_pruned_at`; a running run keeps everything. One run per
+ * statement, because a hundred runs' rows in one DELETE could outlast the
+ * statement timeout every time it was tried, and ten runs per follow. A delete
+ * that fails is a warning: the next follow prunes again.
  */
 async function pruneDiagnostics(supabase: Db, report: FollowReport, ownRun: string): Promise<void> {
   const [own, settled] = await Promise.all([
@@ -222,6 +226,7 @@ async function pruneDiagnostics(supabase: Db, report: FollowReport, ownRun: stri
       .select("id")
       .lt("started_at", startedAt)
       .neq("status", "running")
+      .is("diagnostics_pruned_at", null)
       .order("started_at", { ascending: true })
       .range(from, to),
   );
@@ -230,9 +235,9 @@ async function pruneDiagnostics(supabase: Db, report: FollowReport, ownRun: stri
     return;
   }
   const ids = earlier.rows.map((r) => r.id).filter((id) => id !== keep && id !== ownRun);
-  for (const chunk of chunked(ids, ID_CHUNK)) {
+  for (const id of ids.slice(0, PRUNE_RUNS_PER_FOLLOW)) {
     for (const table of DIAGNOSTIC_TABLES) {
-      const { error } = await supabase.from(table).delete().in("detection_run_id", chunk);
+      const { error } = await supabase.from(table).delete().eq("detection_run_id", id);
       if (error) {
         report.warnings.push(
           `Earlier runs' ${table} were not all pruned: ${describeDbError(error)}`,
@@ -240,8 +245,38 @@ async function pruneDiagnostics(supabase: Db, report: FollowReport, ownRun: stri
         return;
       }
     }
-    report.pruned.push(...chunk);
+    const { error: stampError } = await supabase
+      .from("module_detection_runs")
+      .update({ diagnostics_pruned_at: new Date().toISOString() })
+      .eq("id", id);
+    if (stampError) {
+      report.warnings.push(
+        `Run ${id.slice(0, 8)} was pruned but not stamped, so the next follow prunes it again: ${describeDbError(stampError)}`,
+      );
+      return;
+    }
+    report.pruned.push(id);
   }
+}
+
+/**
+ * Whether the follow's run is still `running`, so still the follow's to
+ * settle. A run another tick closed as dead is not written to again, and a
+ * read that failed is taken as neither answer: the settle stops.
+ */
+async function stillOurs(supabase: Db, runId: string): Promise<true | string> {
+  const { data, error } = await supabase
+    .from("module_detection_runs")
+    .select("status")
+    .eq("id", runId)
+    .maybeSingle();
+  if (error) {
+    return `whether the run is still the follow's could not be read: ${describeDbError(error)}`;
+  }
+  if (data?.status !== "running") {
+    return `the run was closed (${data?.status ?? "deleted"}) while the follow settled it, so this follow wrote nothing more`;
+  }
+  return true;
 }
 
 /** Close the follow's run, from `running` only: a run something else closed stays as it was closed. */
@@ -285,7 +320,7 @@ export async function followPrimeHead(
 
   const runsRead = await supabase
     .from("module_detection_runs")
-    .select("id, status, commit_sha, parameters, started_at")
+    .select("id, status, commit_sha, parameters, started_at, completed_at")
     .order("started_at", { ascending: false })
     .limit(RUNS_READ);
   if (runsRead.error) {
@@ -326,11 +361,12 @@ export async function followPrimeHead(
     report.commitSha = head.sha;
     report.attempt = step.failed.length;
     report.runId = step.failed[0]?.id ?? null;
-    report.stoppedBecause = `the follow failed ${step.failed.length} times at this commit`;
-    // The try that died is closed now, by this tick: it was the last, so the
-    // operators are told here. A tick after that records nothing.
+    report.stoppedBecause = `the follow failed ${step.failed.length} times in a row`;
+    // A try that died is closed now, by this tick, and recorded; where it was
+    // the third failure in a row the operators are told, once. A tick that
+    // only waits out the backoff records nothing.
     if (step.failed.some((r) => report.closedStale.includes(r.id))) {
-      await tellOperators(supabase, report);
+      if (step.failed.length === FOLLOW_ATTEMPTS) await tellOperators(supabase, report);
       await record(supabase, report);
     }
     return report;
@@ -374,7 +410,7 @@ export async function followPrimeHead(
       report.stoppedBecause,
     );
     if (closing) report.warnings.push(closing);
-    await tellOperators(supabase, report);
+    if (!step.afterHold) await tellOperators(supabase, report);
     await record(supabase, report, detection.runId);
     return report;
   }
@@ -382,6 +418,20 @@ export async function followPrimeHead(
     report.stoppedBecause = detection.error ?? "the detection run failed without saying why";
     if (guarded.competitor) {
       report.outcome = "skipped";
+      // The run's row exists and the detection closed it failed: it stepped
+      // aside, which is not a try at the head.
+      if (detection.runId) {
+        const { error: skipError } = await supabase
+          .from("module_detection_runs")
+          .update({ status: FOLLOW_SKIPPED })
+          .eq("id", detection.runId)
+          .eq("status", "failed");
+        if (skipError) {
+          report.warnings.push(
+            `The run that stepped aside still reads failed: ${skipError.message}`,
+          );
+        }
+      }
       return report;
     }
     await recordFailure(supabase, report, detection.runId || null);
@@ -399,6 +449,7 @@ export async function followPrimeHead(
     runId: detection.runId,
     commitSha: detection.commitSha,
     detectedSlugs: detection.detectedSlugs ?? [],
+    afterHold: step.afterHold,
   });
   return report;
 }
@@ -408,7 +459,7 @@ async function settle(
   supabase: Db,
   deps: FollowDeps,
   report: FollowReport,
-  at: { runId: string; commitSha: string; detectedSlugs: string[] },
+  at: { runId: string; commitSha: string; detectedSlugs: string[]; afterHold: boolean },
 ): Promise<void> {
   const { runId, commitSha } = at;
   const now = new Date(deps.now()).toISOString();
@@ -418,8 +469,19 @@ async function settle(
     if (closing) report.warnings.push(closing);
     await recordFailure(supabase, report, runId);
   };
+  // A run another tick closed as dead is no longer this follow's to write
+  // through: it stops, writes nothing more, and records why.
+  const fenced = async (): Promise<boolean> => {
+    const ours = await stillOurs(supabase, runId);
+    if (ours === true) return false;
+    report.outcome = "failed";
+    report.stoppedBecause = ours;
+    await record(supabase, report);
+    return true;
+  };
 
   // ── The catalogue, as the run left it ──
+  if (await fenced()) return;
   const modulesRead = await readCatalogue(supabase);
   if (!modulesRead.ok) return fail(`The catalogue could not be read: ${modulesRead.error}`);
   const plan = planSettle({ runId, modules: modulesRead.rows, detectedSlugs: at.detectedSlugs });
@@ -433,7 +495,7 @@ async function settle(
     report.stoppedBecause = `${plan.held} (found once the run had written its modules)`;
     const closing = await closeRun(supabase, runId, FOLLOW_HELD, now, report.stoppedBecause);
     if (closing) report.warnings.push(closing);
-    await tellOperators(supabase, report);
+    if (!at.afterHold) await tellOperators(supabase, report);
     await record(supabase, report, runId);
     return;
   }
@@ -530,6 +592,7 @@ async function settle(
   }
 
   // ── Publish each module whose entry changed ──
+  if (await fenced()) return;
   const published = await publish(supabase, report, {
     runId,
     commitSha,
@@ -551,7 +614,17 @@ async function settle(
 const LATEST_COLUMNS =
   "slug, version, approval_status, source_commit_sha, name, description, route_path, entry_file, file_paths, metadata";
 
-/** Publish an entry for each module whose entry would differ from its latest. */
+/**
+ * Publish an entry for each module whose entry would differ from its latest.
+ *
+ * Only a module still approved and naming the run is published: one a person
+ * archived or rejected while the follow settled keeps what they decided. A
+ * module the publication's own judge refuses is named and passed over, because
+ * trying it again would refuse it again. A write that failed (a version read,
+ * an insert, another publication numbering the same version first) fails the
+ * run, so the next follow tries again; the entries that landed then read as
+ * unchanged. A latest entry a person rejected is left as it is, and named.
+ */
 async function publish(
   supabase: Db,
   report: FollowReport,
@@ -564,13 +637,26 @@ async function publish(
     at.modules.map((m) => m.id),
     ID_CHUNK,
   )) {
-    const { data, error } = await supabase.from("modules").select(MODULE_COLUMNS).in("id", ids);
+    const { data, error } = await supabase
+      .from("modules")
+      .select(MODULE_COLUMNS)
+      .in("id", ids)
+      .eq("status", "approved")
+      .eq("detection_run_id", at.runId);
     if (error)
       return {
         ok: false,
         error: `The modules to publish could not be read: ${describeDbError(error)}`,
       };
     modules.push(...((data ?? []) as PublishableModule[]));
+  }
+  const read = new Set(modules.map((m) => m.id));
+  const changedMeanwhile = at.modules.filter((m) => !read.has(m.id));
+  if (changedMeanwhile.length > 0) {
+    report.warnings.push(
+      `${changedMeanwhile.length} module(s) changed while the follow settled and were not ` +
+        `published: ${changedMeanwhile.map((m) => m.slug).join(", ")}`,
+    );
   }
 
   const { data: run, error: runError } = await supabase
@@ -605,6 +691,11 @@ async function publish(
   const change = new Map<string, EntryChange>();
   const changed: PublishableModule[] = [];
   for (const m of modules) {
+    const judged = judgePublication(m, runs);
+    if (!judged.ok) {
+      report.refused.push({ slug: m.slug, reason: judged.reason });
+      continue;
+    }
     const candidate = libraryEntryInsert(m, {
       version: 0,
       runId: at.runId,
@@ -618,9 +709,15 @@ async function publish(
       report.unchanged++;
       continue;
     }
+    if (verdict === "rejected") {
+      report.rejectedEntries.push(m.slug);
+      continue;
+    }
     change.set(m.slug, verdict);
     changed.push(m);
   }
+  report.refused.sort((a, b) => a.slug.localeCompare(b.slug));
+  report.rejectedEntries.sort();
 
   const written = await writeLibraryEntries(supabase, changed, runs, {
     publisherId: null,
@@ -630,7 +727,6 @@ async function publish(
   report.published = written.entries
     .map((e) => ({ slug: e.slug, version: e.version, change: change.get(e.slug) ?? "changed" }))
     .sort((a, b) => a.slug.localeCompare(b.slug));
-  report.refused = written.refused.map((r) => ({ slug: r.slug ?? r.moduleId, reason: r.reason }));
   report.warnings.push(...written.warnings);
 
   const notice = libraryApprovalNotice(written.entries);
@@ -638,6 +734,17 @@ async function publish(
     const { error: noticeError } = await supabase.from("notifications").insert(notice);
     if (noticeError)
       report.warnings.push(`The approval notice did not land: ${noticeError.message}`);
+  }
+  if (written.refused.length > 0) {
+    // Judged above, so each is a write that did not land.
+    const named = written.refused.slice(0, 3).map((r) => r.reason);
+    const more = written.refused.length > 3 ? `; and ${written.refused.length - 3} more` : "";
+    return {
+      ok: false,
+      error:
+        `${written.refused.length} entr${written.refused.length === 1 ? "y was" : "ies were"} ` +
+        `not written: ${named.join("; ")}${more}`,
+    };
   }
   return { ok: true };
 }
@@ -653,7 +760,7 @@ export async function catalogueSettledAt(
 ): Promise<{ runId: string; commitSha: string | null } | null> {
   const { data, error } = await supabase
     .from("module_detection_runs")
-    .select("id, status, commit_sha, parameters, started_at")
+    .select("id, status, commit_sha, parameters, started_at, completed_at")
     .eq("status", "completed")
     .order("started_at", { ascending: false })
     .limit(RUNS_READ);

@@ -1315,6 +1315,7 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20261029140000",
     assertions: [
       { kind: "column", table: "modules", column: "archived_by_follow_run_id" },
+      { kind: "column", table: "module_detection_runs", column: "diagnostics_pruned_at" },
       { kind: "cron", jobname: "module-library-follow-15min" },
     ],
   },

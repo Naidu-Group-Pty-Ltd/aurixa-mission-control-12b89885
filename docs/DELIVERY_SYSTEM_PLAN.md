@@ -1162,12 +1162,18 @@ run's commit:
 3. A live module the run did not find is archived as the follow's
    (`modules.archived_by_follow_run_id`). A later run that finds it again
    brings it back. A module a person archived or rejected stays as they left
-   it, and the report names it.
+   it, and the report names it. The mark is the follow's only while its
+   archive stands: a trigger clears it on any status change the follow did not
+   make, so a module a person approved and archived again stays archived.
 4. An entry is published, approved at the run's commit, for each module whose
    entry would differ from its latest, through the publication's own writer
    (`writeLibraryEntries`). A score is not a difference. A latest entry that is
    not approved at a commit, as every entry before the follow is, is replaced
-   whatever it says.
+   whatever it says, but one a person rejected is left as it is, and named.
+   Only a module still approved and naming the run is published, so one a
+   person archived while the follow settled keeps that. An entry that did not
+   land fails the run, which the next follow writes; one the publication's own
+   judge refuses is named and passed over.
 
 The follow changes no clone: no clone row, install or pin. A reconcile
 resolves a clone's plan from its metering tenant, and on 29 Oct all four clones
@@ -1180,7 +1186,12 @@ anything. A contract test holds the follow to it.
 
 The run stays `running` until it is settled, so a reset or a detection a
 person starts meets it and stops. The follow does the same in turn: it waits
-for either before it writes a run row. One audit row,
+for either before it writes a run row, and a run that meets one between its
+two checks is closed `skipped`, which is not a try. A detection a person ran,
+or a reset, after the follow last settled changed the catalogue, so the
+follow settles it again at the same commit. A run another tick closed as dead
+is not written through: the settle checks that its run is still its own
+before it approves, and again before it publishes. One audit row,
 `module_library.follow`, records each follow that did something or could
 not.
 
@@ -1189,20 +1200,24 @@ the one the catalogue is settled at: their import edges, backend artifacts and
 drift alerts, not the runs' own rows. Each of July's three runs left 13,698 of
 them (2,000 edges, 11,598 artifacts and 100 alerts). The Modules page reads a
 module's artifacts across every run, and the drift metrics count alerts across
-them, so a follow per prime merge would multiply both.
+them, so a follow per prime merge would multiply both. It deletes one run per
+statement, ten runs per follow, and stamps each `diagnostics_pruned_at`, so a
+run is pruned once.
 
 ### Where it stops for a person
 
 - **The breaker.** A run that finds no module, or would archive more than
   `max(10, a quarter of the live catalogue)`, is held before it writes a
-  module. Nothing is rewritten, approved, archived or published.
-  Every operator is told (`library_follow_held`), and the follow waits for the
-  prime to move. The first follow archives 14 of 135, inside the 34 it may.
-- **Three tries.** A follow that fails is tried again at the next tick, three
-  times at one commit. A run that died still saying `running` is closed and
-  counted as a try. The third failure tells the operators, and the follow then
-  waits for the prime to move, so a failure that repeats does not spend a
-  detection's GitHub calls every fifteen minutes.
+  module. Nothing is rewritten, approved, archived or published. Every
+  operator is told (`library_follow_held`), once for holds in a row, and the
+  follow waits for the prime to move. The first follow archives 14 of 135,
+  inside the 34 it may.
+- **Failures in a row.** A follow that fails is tried again at the next tick.
+  A run that died still saying `running` is closed and counted as a try.
+  Three failures in a row, whatever commits they read, tell the operators
+  once, and from then the follow tries once every six hours until one
+  settles. A runtime that kills the detection, or a fault that repeats, would
+  otherwise spend a detection at every merge and say nothing.
 
 ### What a new clone receives
 

@@ -10397,6 +10397,7 @@ export type Database = {
           created_at: string
           database_object_count: number
           delta_mode: boolean | null
+          diagnostics_pruned_at: string | null
           dependency_count: number | null
           edge_function_count: number
           error_message: string | null
@@ -10428,6 +10429,7 @@ export type Database = {
           created_at?: string
           database_object_count?: number
           delta_mode?: boolean | null
+          diagnostics_pruned_at?: string | null
           dependency_count?: number | null
           edge_function_count?: number
           error_message?: string | null
@@ -10459,6 +10461,7 @@ export type Database = {
           created_at?: string
           database_object_count?: number
           delta_mode?: boolean | null
+          diagnostics_pruned_at?: string | null
           dependency_count?: number | null
           edge_function_count?: number
           error_message?: string | null

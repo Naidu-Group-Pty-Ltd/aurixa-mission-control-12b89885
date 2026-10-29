@@ -52,10 +52,16 @@
  * archives 14 of 135 (measured against prime@122b761, 29 Oct 2026), well
  * inside it.
  *
- * A follow that fails is tried again at the next tick, three times at one
- * commit (`FOLLOW_ATTEMPTS`). The third failure tells the operators, and the
- * follow waits for the prime to move: a failure that repeats would otherwise
- * spend a detection's GitHub calls every fifteen minutes.
+ * A follow that fails is tried again at the next tick. Three failures in a row
+ * (`FOLLOW_ATTEMPTS`), at any commits, tell the operators once, and from then
+ * the follow tries once every six hours (`FOLLOW_BACKOFF_MS`) until one
+ * settles: a failure that repeats, a runtime that kills the detection, say,
+ * would otherwise spend a detection every fifteen minutes, or every merge,
+ * and say nothing.
+ *
+ * A detection a person ran, or a reset, after the follow last settled is a
+ * change to the catalogue the follow did not make, so the follow settles it
+ * again at the same commit.
  */
 import type { Database, Json } from "@/integrations/supabase/types";
 import { isCommitSha, primeCommitLabel } from "@/lib/libraryCommit.pure";
@@ -75,8 +81,14 @@ export const ARCHIVE_FLOOR = 10;
 /** ...or this share of the live catalogue, where that is more. */
 export const ARCHIVE_SHARE = 0.25;
 
-/** How many times the follow tries one commit before it waits for the prime to move. */
+/** How many failures in a row tell the operators, and slow the follow to one try per backoff. */
 export const FOLLOW_ATTEMPTS = 3;
+
+/** How long the follow waits between tries once it has failed `FOLLOW_ATTEMPTS` times in a row. */
+export const FOLLOW_BACKOFF_MS = 6 * 60 * 60_000;
+
+/** The status of a follow run that stepped aside for a reset or a detection: not a try. */
+export const FOLLOW_SKIPPED = "skipped";
 
 // ─── Which run is the follow's, and what it does next ───────────────────────
 
@@ -87,6 +99,7 @@ export type FollowRun = {
   commit_sha: string | null;
   parameters: Json | null;
   started_at: string | null;
+  completed_at: string | null;
 };
 
 /** Whether a run is the follow's: its configuration says so (`DetectionRunConfig.follow`). */
@@ -96,35 +109,46 @@ export function isFollowRun(run: Pick<FollowRun, "parameters">): boolean {
 }
 
 export type FollowStep =
-  /** The catalogue was settled at the head. */
+  /** The catalogue was settled at the head, and nothing changed it since. */
   | { kind: "up_to_date"; run: FollowRun }
   /** The follow stopped for a person at the head, and waits for the head to move. */
   | { kind: "held"; run: FollowRun }
-  /** The follow failed `FOLLOW_ATTEMPTS` times at the head, and waits for the head to move. */
+  /** The follow failed `FOLLOW_ATTEMPTS` times in a row and waits out its backoff. */
   | { kind: "exhausted"; failed: FollowRun[]; stale: FollowRun[] }
   /**
-   * Detect at the head, as the follow's `attempt`th try at it. `stale` are
-   * follow runs that died before they settled.
+   * Detect at the head, as the follow's `attempt`th try in a row. `stale` are
+   * follow runs that died before they settled. `afterHold` says the last
+   * follow run that finished was held, whose notice the operators have.
    */
-  | { kind: "detect"; stale: FollowRun[]; attempt: number };
+  | { kind: "detect"; stale: FollowRun[]; attempt: number; afterHold: boolean };
 
 /**
  * What the follow does at `headSha`, from the detection runs read (newest
  * first). A follow run still `running` past the window died with its
- * invocation, and is `stale`: the follow closes it as failed. A failed
- * follow run at the head, or a stale one, is a try: after `FOLLOW_ATTEMPTS`
- * the follow waits for the head to move, as it does at a held one.
+ * invocation, and is `stale`: the follow closes it as failed. Every follow run
+ * since the follow last settled or held that failed, or died, is a try,
+ * whatever commit it read: after `FOLLOW_ATTEMPTS` of them the follow tries
+ * once per `FOLLOW_BACKOFF_MS`, counted from the newest. A run that stepped
+ * aside (`FOLLOW_SKIPPED`) is not a try.
  */
 export function nextFollowStep(args: {
   headSha: string;
   runs: readonly FollowRun[];
   now: number;
   windowMs: number;
+  backoffMs?: number;
 }): FollowStep {
   const follows = args.runs.filter(isFollowRun);
   const lastIndex = follows.findIndex((r) => r.status === "completed" || r.status === FOLLOW_HELD);
   const last = lastIndex >= 0 ? follows[lastIndex] : undefined;
-  if (last && last.commit_sha === args.headSha) {
+  // A completed detection that is not the follow's, newer than the follow's
+  // last settle: a person's detection or a reset changed the catalogue.
+  const changedSince =
+    last !== undefined &&
+    args.runs
+      .slice(0, args.runs.indexOf(last))
+      .some((r) => !isFollowRun(r) && r.status === "completed");
+  if (last && last.commit_sha === args.headSha && !changedSince) {
     return last.status === FOLLOW_HELD
       ? { kind: "held", run: last }
       : { kind: "up_to_date", run: last };
@@ -136,14 +160,18 @@ export function nextFollowStep(args: {
       Date.parse(r.started_at) < args.now - args.windowMs,
   );
   const died = new Set(stale.map((r) => r.id));
-  // The tries since the follow last settled or held: a commit it settled at
-  // since is not tried again, so an older try at it counts for nothing.
   const since = lastIndex >= 0 ? follows.slice(0, lastIndex) : follows;
-  const failed = since.filter(
-    (r) => r.commit_sha === args.headSha && (r.status === "failed" || died.has(r.id)),
-  );
-  if (failed.length >= FOLLOW_ATTEMPTS) return { kind: "exhausted", failed, stale };
-  return { kind: "detect", stale, attempt: failed.length + 1 };
+  const failed = since.filter((r) => r.status === "failed" || died.has(r.id));
+  const afterHold = last?.status === FOLLOW_HELD;
+  if (failed.length >= FOLLOW_ATTEMPTS) {
+    const newest = Math.max(
+      ...failed.map((r) => Date.parse(r.completed_at ?? r.started_at ?? "") || 0),
+    );
+    if (args.now - newest < (args.backoffMs ?? FOLLOW_BACKOFF_MS)) {
+      return { kind: "exhausted", failed, stale };
+    }
+  }
+  return { kind: "detect", stale, attempt: failed.length + 1, afterHold };
 }
 
 // ─── Settling the catalogue at a run ────────────────────────────────────────
@@ -279,7 +307,7 @@ export type LatestEntry = {
   metadata: Json | null;
 };
 
-export type EntryChange = "new" | "unapproved" | "changed" | "unchanged";
+export type EntryChange = "new" | "unapproved" | "changed" | "unchanged" | "rejected";
 
 /** The backend contract an entry's metadata carries: what a pinned install needs (libraryEntryInsert). */
 const CONTRACT_KEYS = [
@@ -318,6 +346,8 @@ export function entryChange(
   candidate: LibraryInsert,
 ): EntryChange {
   if (!latest) return "new";
+  // A person rejected it, and the follow approves nothing over a person.
+  if (latest.approval_status === "rejected") return "rejected";
   if (latest.approval_status !== "approved" || !isCommitSha(latest.source_commit_sha)) {
     return "unapproved";
   }
@@ -352,7 +382,10 @@ export type FollowReport = {
   keptOut: string[];
   published: Array<{ slug: string; version: number; change: EntryChange }>;
   unchanged: number;
+  /** Modules the publication's own judge refused: named, and not a failure of the follow. */
   refused: Array<{ slug: string; reason: string }>;
+  /** Slugs whose latest entry a person rejected: the follow publishes nothing over it. */
+  rejectedEntries: string[];
   /** Why the follow stopped, held or failed. */
   stoppedBecause?: string;
   /** Follow runs that died before they settled, closed as failed. */
@@ -376,6 +409,7 @@ export function emptyFollowReport(outcome: FollowOutcome = "failed"): FollowRepo
     published: [],
     unchanged: 0,
     refused: [],
+    rejectedEntries: [],
     closedStale: [],
     pruned: [],
     warnings: [],
@@ -399,6 +433,7 @@ export function followAuditMetadata(report: FollowReport): Json {
       published: cut(report.published),
       unchanged: report.unchanged,
       refused: cut(report.refused),
+      rejected_entries: cut(report.rejectedEntries),
       stopped_because: report.stoppedBecause ?? null,
       closed_stale: report.closedStale,
       pruned: cut(report.pruned),
@@ -422,8 +457,9 @@ export function stoppedNotice(report: FollowReport): NotificationInsert {
     body: held
       ? `The module library did not follow ${at}: ${why}. No module was approved, archived ` +
         `or published. It follows again when the prime moves.`
-      : `The module library failed to follow ${at} ${FOLLOW_ATTEMPTS} times, most recently ` +
-        `because ${why}. It tries again when the prime moves.`,
+      : `The module library failed to follow the prime ${FOLLOW_ATTEMPTS} times in a row, ` +
+        `most recently at ${at} because ${why}. It tries again every six hours until one ` +
+        `follow settles.`,
     url: "/modules",
     metadata: { run_id: report.runId, commit_sha: report.commitSha, outcome: report.outcome },
   };
