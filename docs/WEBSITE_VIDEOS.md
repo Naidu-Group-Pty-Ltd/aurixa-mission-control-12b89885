@@ -95,6 +95,23 @@ because the website honours an empty list as "no videos".
 
 **Rebuild website** on the list asks for a build by hand.
 
+### How a rebuild is known to have happened
+
+Vercel does not always answer the hook quickly. On 29 Oct 2026 it took longer
+than the 15 seconds Mission Control then waited: the console said the rebuild
+had failed, and the production build the hook had started was live 40 seconds
+later. So the request now waits 25 seconds and carries an explicit empty body
+(`Content-Length: 0`). A request Vercel has not answered by then is
+**unconfirmed**, not failed (`website.rebuild_unconfirmed`, with the elapsed
+time), because the build often runs anyway. An HTTP refusal or an unreachable
+hook is a failure (`website.rebuild_failed`).
+
+The proof is the effect. A Vercel build of the website sends
+`X-Aurixa-Build-Env` and `X-Aurixa-Build-Id` when it reads the listings, and
+Mission Control records each read (`website.build_read_listings`, rate limited
+per address). The line under the heading on the list says when a production
+build last read them.
+
 ### Setting up the hook
 
 1. Vercel → **aurixa-systems** → Settings → Git → **Deploy Hooks**: create one

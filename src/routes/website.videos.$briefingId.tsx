@@ -77,6 +77,11 @@ function rebuildToast(rebuild: Rebuild, done: string) {
       `${done} Website rebuilds are not connected, so it appears on the website's next deploy.`,
     );
   }
+  if (rebuild.reason === "unconfirmed") {
+    return toast.success(
+      `${done} The rebuild was sent; Vercel had not answered yet. The list shows when the build reads the listings.`,
+    );
+  }
   return toast.warning(
     `${done} The website rebuild request failed (${rebuild.detail ?? "unknown"}) — use Rebuild website on the list.`,
   );
