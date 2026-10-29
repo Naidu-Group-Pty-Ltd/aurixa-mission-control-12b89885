@@ -182,7 +182,15 @@ function builder(db: FakeDb, table: string): QueryBuilder {
       (conflict = opts?.onConflict ?? null),
       b
     ),
-    eq: (c: string, v: unknown) => (filters.push((r) => compare(readPath(r, c), v) === 0), b),
+    // SQL's `=` against NULL is unknown, so false — a row with no value never
+    // matches. `compare` alone answers 0 for null against a string.
+    eq: (c: string, v: unknown) => (
+      filters.push((r) => {
+        const value = readPath(r, c);
+        return value !== null && value !== undefined && compare(value, v) === 0;
+      }),
+      b
+    ),
     neq: (c: string, v: unknown) => (filters.push((r) => compare(readPath(r, c), v) !== 0), b),
     in: (c: string, list: unknown[]) => (filters.push((r) => list.includes(readPath(r, c))), b),
     gte: (c: string, v: unknown) => (filters.push((r) => compare(readPath(r, c), v) >= 0), b),

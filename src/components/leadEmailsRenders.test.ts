@@ -175,6 +175,14 @@ describe("Email → Lead emails", () => {
     expect(html).toContain("Sample values. Choose an applicant above");
   });
 
+  it("shows the stage's send gate, from the rules the dispatcher applies", () => {
+    const html = show(overview());
+    expect(html).toContain("send gate");
+    expect(html).toContain("Send Stage 2 Invite");
+    expect(html).toContain("Applicant already reached Stage 2");
+    expect(html).toContain("The lead is Disqualified on the Leads page.");
+  });
+
   it("offers the hand-back once Mission Control sends a stage", () => {
     const html = show(
       overview({

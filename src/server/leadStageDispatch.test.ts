@@ -29,6 +29,8 @@ const state = vi.hoisted(() => ({
   templateRows: [] as Record<string, unknown>[],
   templatesError: null as { message: string; code?: string } | null,
   links: [] as Record<string, unknown>[],
+  // What the lead row says beyond the Stage 1 basics, per case.
+  leadOver: {} as Record<string, unknown>,
 }));
 
 vi.mock("@/server/graph-client", () => ({
@@ -81,6 +83,7 @@ vi.mock("@/integrations/supabase/client.server", () => ({
                       created_at: "2026-09-22T00:00:00.000Z",
                       submitted_at: "2026-09-22T00:00:00.000Z",
                       enrichment_synced_at: "2026-09-22T01:00:00.000Z",
+                      ...state.leadOver,
                     },
                   ],
               error: state.leadReadError,
@@ -206,6 +209,7 @@ beforeEach(() => {
   state.templateRows = [];
   state.templatesError = null;
   state.links = [];
+  state.leadOver = {};
   process.env.MICROSOFT_MAILBOX_EMAIL = "hello@aurixasystems.com.au";
   process.env.LEAD_STAGE_INTERNAL_RECIPIENTS = TEAM.join(",");
   delete process.env.LEAD_STAGE_INTERNAL_STAGES;
@@ -499,6 +503,7 @@ describe("the applicant backstop survives being enqueued too early", () => {
   const lead = (agoMs: number, syncedMsAgo: number | null = 0) => ({
     id: "lead-1",
     email: "applicant@example.com",
+    application_id: "AX-0000000001",
     created_at: new Date(Date.now() - agoMs).toISOString(),
     submitted_at: new Date(Date.now() - agoMs).toISOString(),
     enrichment_synced_at:
@@ -556,6 +561,7 @@ describe("the sweep asks three windows and merges them", () => {
   const lead = (id: string, over: Record<string, unknown> = {}) => ({
     id,
     email: `${id}@example.com`,
+    application_id: "AX-0000000001",
     created_at: new Date(Date.now() - 6 * 3_600_000).toISOString(),
     submitted_at: new Date(Date.now() - 6 * 3_600_000).toISOString(),
     ...over,
@@ -654,8 +660,12 @@ describe("Mission Control sends the applicant's own email (Email → Lead emails
     updated_at: "2026-10-29T00:00:00.000Z",
     updated_by: null,
   };
-  const applicantRow = (stage: number) =>
-    row({ audience: "applicant", stage, recipients: ["applicant@example.com"] });
+  // A Stage 2 email is owed only once a questionnaire is in, and the send gate
+  // asks the lead row at send time, as Make's filter did.
+  const applicantRow = (stage: number) => {
+    if (stage >= 2) state.leadOver = { stage2_completed_at: "2026-09-22T00:30:00.000Z" };
+    return row({ audience: "applicant", stage, recipients: ["applicant@example.com"] });
+  };
   const html = () =>
     String((state.sent[0]?.message.body as { content?: string } | undefined)?.content ?? "");
 
@@ -737,6 +747,33 @@ describe("Mission Control sends the applicant's own email (Email → Lead emails
     });
   });
 
+  it("asks the send gate again at send time, as Make re-read the record", async () => {
+    // Disqualified on the Leads page after the email was raised.
+    state.settingsRow = SETTINGS;
+    state.claimed = [applicantRow(1)];
+    state.leadOver = { status: "disqualified" };
+    await dispatchStageEmails();
+    expect(state.sent).toHaveLength(0);
+    expect(patch()).toMatchObject({
+      status: "skipped",
+      reason: "held by the send gate: Application declined",
+    });
+  });
+
+  it("holds a confirmation for a booking cancelled before it went", async () => {
+    state.settingsRow = SETTINGS;
+    state.claimed = [applicantRow(3)];
+    state.leadOver = {
+      ...state.leadOver,
+      stage3_booked_at: "2026-09-22T01:00:00.000Z",
+      stage3_session_start: "2026-09-29T01:00:00.000Z",
+      stage3_cancelled_at: "2026-09-22T01:00:30.000Z",
+    };
+    await dispatchStageEmails();
+    expect(state.sent).toHaveLength(0);
+    expect(patch()).toMatchObject({ reason: "held by the send gate: Booking cancelled" });
+  });
+
   it("sends the copy an operator saved, not the default", async () => {
     state.settingsRow = SETTINGS;
     state.templateRows = [
@@ -777,6 +814,7 @@ describe("Mission Control sends the applicant's own email (Email → Lead emails
     const lead = (over: Record<string, unknown> = {}) => ({
       id: "lead-1",
       email: "applicant@example.com",
+      application_id: "AX-0000000001",
       created_at: new Date(Date.now() - 60_000).toISOString(),
       submitted_at: new Date(Date.now() - 60_000).toISOString(),
       enrichment_synced_at: null,

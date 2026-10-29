@@ -319,6 +319,14 @@ export function parseStageUpdate(
           stage3_status:
             cleanLeadText(pick(payload, "bookingStatus", "booking_status")) || "Requested",
           stage3_booked_at: submitted_at,
+          // A booking reported now supersedes a cancellation Cal.com reported
+          // for an earlier one (the Stage 3 send gate reads this).
+          stage3_cancelled_at: null,
+          // The booking's own Cal.com uid, which the webhook matches a
+          // cancellation on. Only this report writes it, so a booking reported
+          // without one does not inherit the earlier booking's.
+          stage3_cal_booking_uid:
+            cleanLeadText(pick(payload, "calBookingUid", "cal_booking_uid")) || null,
           stage3_session_start: pickTimestamp(payload, "requestedStartUtc", "requested_start_utc"),
           stage3_session_end: pickTimestamp(payload, "requestedEndUtc", "requested_end_utc"),
           stage3_access_mode: cleanLeadText(pick(payload, "accessMode", "access_mode")) || null,

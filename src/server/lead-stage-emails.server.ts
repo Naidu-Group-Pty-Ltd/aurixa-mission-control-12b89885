@@ -24,6 +24,7 @@ import { isGraphConfigured, sendMail, type GraphMessage } from "@/server/graph-c
 import { notifyOperators } from "@/server/audit.server";
 import { composeStageEmail, type StageEmailLead } from "@/server/leadStageEmail.pure";
 import type { LeadEmailTemplate } from "@/lib/leadEmailTemplates.pure";
+import { heldReason, sendGate, type GateSubject } from "@/lib/leadEmailGates.pure";
 import {
   applicantMessage,
   composeApplicantEmail,
@@ -449,14 +450,13 @@ export async function dispatchStageEmails(limit = DISPATCH_BATCH): Promise<Dispa
     let message: GraphMessage;
 
     if (row.audience === "applicant") {
-      // Composed from the lead as it stands now. An applicant who finished the
-      // questionnaire before this went is not invited to start it — Make's own
-      // send stopped the same way, on `Send Stage 2 Invite`.
-      if (stage === 1 && lead.stage2_completed_at) {
-        await settle(row.id, {
-          status: "skipped",
-          reason: "the applicant completed the questionnaire before this email went",
-        });
+      // The send gate, asked again of the lead as it stands now — what Make's
+      // twenty-second re-read was for. An applicant disqualified, a booking
+      // cancelled or a questionnaire completed since the email was raised
+      // holds it here.
+      const gate = sendGate(lead as GateSubject, stage);
+      if (!gate.send) {
+        await settle(row.id, { status: "skipped", reason: heldReason(gate.reason) });
         out.skipped += 1;
         continue;
       }
