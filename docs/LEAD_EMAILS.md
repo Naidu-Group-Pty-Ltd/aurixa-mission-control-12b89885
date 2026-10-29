@@ -75,6 +75,17 @@ A stage handed to **Mission Control** is sent within a minute of the stage
 landing (the `lead-stage-emails` tick now runs every minute), with no grace
 period and no reliance on a Make receipt.
 
+**On production** (29 Oct 2026): all three stages are Mission Control's. The
+EU Make account that ran scenarios 9389960, 9590512 and 9601915 is deprecated
+(its hooks answer `200 Accepted` and run nothing), and the us2 account's
+copies — Aurixa Waitlist Stage 1, 2 and 3 (5979814, 5979818, 5979838) — are
+switched off, so nothing else sends these emails. The hand-over was written to
+`lead_email_settings` with an audited `lead_emails.sender_set` per stage and
+the operator notice, and proven by effect: test applicant `AX-F86555B04D`,
+addressed to `admin@aurixasystems.com.au`, went through all three stages and
+each applicant email and team notification was sent on its first attempt
+(Graph 202), within a minute of its stage.
+
 The order matters — the email modules come out of Make **first**, or every
 applicant receives the email twice:
 

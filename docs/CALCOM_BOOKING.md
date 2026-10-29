@@ -119,25 +119,43 @@ or `503 { ok: false, reason: "not_configured" | "calendar_unavailable" }`.
 | `access_unverifiable` / `calendar_unavailable` | 503     | Nothing booked (or "has not moved"); try again or email. **Never** turned into a request.     |
 | `not_configured`, or the route is absent       | 503/404 | The request form, exactly as before this route existed.                                       |
 
-Access is checked here the way the Stage 3 gate checks it, from Airtable and
-the lead mirror, so the page cannot book for a reference the gate would refuse.
+### Who may open the scheduler, and who may book
 
-A confirmed booking still goes down the **Aurixa Waitlist Stage 3** Make
-scenario (9601915) from the browser, once per tab and after the page has shown
-the booking: the scenario writes the Strategic Review Bookings record and sends
-the branded "Strategic Review Confirmed" email, as it always has. The payload
-adds `bookingStatus: "Confirmed"`, `bookingProvider`, `calBookingUid`,
-`meetingUrl` and `rescheduledFromUtc`; a request from the fallback form carries
-none of them, field for field the payload the scenario was built on. Two things
-follow from the scenario being left untouched:
+The page asks `POST /api/public/storefront/strategic-review-access`
+(`{ applicationId }`) before it opens, and the booking endpoint asks the same
+rule again before it spends a slot. Both read Mission Control's record of the
+application through `accessFromLead` (`src/server/strategicReview.pure.ts`),
+which recreates Airtable's gate condition for condition:
 
-- It does not map the new fields, so the Airtable record shows the booking's
-  time and applicant but not its Cal.com id or join link. Mapping them is a
-  change to the live scenario and was deliberately not made here.
-- It only ever creates a record. A review moved on the page arrives as a new
-  record for the new time, and the record for the old time stays; the
-  reschedule webhook raises a `lead_stage_three` notice naming both times so an
-  operator can retire the old one. A cancellation in Cal.com does the same.
+| Airtable | Mission Control |
+| --- | --- |
+| `{Application ID}` is not blank | the lead carries the reference |
+| `{Status}` is not `Declined` | `isDeclined` — Disqualified on the Leads page, or Declined read from Airtable — as the send gates read it |
+| a Business Readiness response exists (Make scenario 9602082) | `stage2_completed_at`, or a questionnaire the mirror read from Airtable |
+
+The access route answers in the shape the Make scenario "Aurixa Stage 3
+Access" answered with, so the page did not change how it reads it:
+`{ ok: true, applicant: { applicationId, firstName, lastName, workEmail,
+organisationName } }`, or `{ ok: false, reason }` (not granted, not a
+reference — the page is not told which), or **503** when the record could not
+be read, which the page shows as "could not be checked", never as a refusal.
+It is rate limited per address.
+
+That scenario lived in the EU Make account, which is deprecated: on
+29 Oct 2026 its hook answered every request `200 Accepted`, which is Make
+queueing for a scenario that no longer runs, and the page read that as
+"unavailable" for every applicant. Airtable no longer receives applications
+either, so it is not asked.
+
+A confirmed booking is reported to Mission Control
+(`/api/public/leads/capture`), which raises the branded "Strategic Review
+Confirmed" email (docs/LEAD_EMAILS.md). The payload carries
+`bookingStatus: "Confirmed"`, `bookingProvider`, `calBookingUid`, `meetingUrl`
+and `rescheduledFromUtc`; a request from the fallback form carries none of
+them. A review moved on the page arrives as a new report for the new time; the
+reschedule webhook raises a `lead_stage_three` notice naming both times. A
+cancellation in Cal.com marks the lead (`stage3_cancelled_at`), and the Stage 3
+send gate holds its confirmation.
 
 Mission Control's lead mirror (`/api/public/leads/capture`) has always read
 `bookingStatus` into `stage3_status`; a confirmed booking now records
