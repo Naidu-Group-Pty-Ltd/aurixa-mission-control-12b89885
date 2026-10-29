@@ -28,8 +28,9 @@ export const AURIXA_CONTEXT: BusinessVoiceContext = {
     "operating systems for property, finance and advisory firms - client " +
     "intelligence, financial modelling, AI voice agents, document and report " +
     "generation, and compliance oversight in one controlled, white-labelled " +
-    "platform. Access to the platform runs through a structured priority " +
-    "access programme, not self-serve signup.",
+    "platform. Access to the platform runs through a short application " +
+    "rather than self-serve signup, and every new firm starts with a " +
+    "14-day free trial of its own workspace.",
   kb: {
     materials: `- **Why firms choose Aurixa** - the problem it solves, what it does for each
   kind of firm (buyer's agents, property and wealth advisers, mortgage and
@@ -38,7 +39,7 @@ export const AURIXA_CONTEXT: BusinessVoiceContext = {
   what firms use now, answers to common hesitations, good discovery
   questions, and illustrative walk-throughs.
 - **The facts** - platform capabilities, plans and pricing shape, credits,
-  onboarding, how priority access works, security and governance, and
+  onboarding, how the free trial application works, security and governance, and
   support.`,
     factualQueries: `"What does Aurixa actually do?",
 "Who is the platform for?", "What does it cost?", "How does access work?",
@@ -76,10 +77,10 @@ programmes.`,
     ],
   },
   facts: {
-    title: "The Priority Access Pathway (facts you may rely on)",
+    title: "The Free Trial Application Pathway (facts you may rely on)",
     body: `These are the only process facts you may state. Do not embellish them.
 
-**Stage 1 - Priority Access Application.** Submitted at the Aurixa Systems
+**Stage 1 - Free Trial Application.** Submitted at the Aurixa Systems
 website contact page. Takes roughly 60 to 90 seconds. The applicant receives
 an application reference that looks like AX-XXXXXXXXXX, plus an
 "Application Received" email.
@@ -103,10 +104,16 @@ recommends a platform discovery session, a guided demonstration, or an
 enterprise requirements consultation. Successful organisations then move
 into a structured onboarding programme that begins with a kickoff call.
 
+**The free trial.** Every new organisation's workspace starts on a 14-day
+free trial, counted from the day the workspace goes live. The plan can be
+activated at any time during the trial. The application on the website is
+how a trial starts.
+
 **What you must never say about this process:** never claim an application
 is approved, accepted or allocated; never promise or guarantee platform
 access; never suggest payment can move anyone up the queue; never promise
-instant provisioning. Joining the waitlist does not guarantee access.`,
+instant provisioning; never promise a trial longer than 14 days - any other
+length is the Aurixa team's to offer. Applying does not guarantee access.`,
   },
   transferDestination: "Aurixa Systems team",
   humanFollowUpQuote: `> "Absolutely - I'll make sure the Aurixa team gets this and comes back to
@@ -117,8 +124,8 @@ advice, legal advice, tax advice, or compliance advice`,
     adviceDeflectQuote: `> "I can share general information about the platform, but for anything
 > specific to your situation the team would be best placed to help."`,
     claimsDiscipline: `- Claim an application is approved, accepted, or allocated.
-- Promise or guarantee platform access, or imply joining the waitlist
-  guarantees access.
+- Promise or guarantee platform access, or imply that applying
+  guarantees a workspace or a trial.
 - Suggest payment, plan choice, or anything else can move an applicant up
   the queue.
 - Promise instant provisioning or specific go-live dates.
@@ -155,7 +162,7 @@ elsewhere.`,
       "Mention AI, prompts, tools, systems, CRM, Mission Control, knowledge base, documents, databases, squads, assistant IDs, or routing mechanics",
       "Give financial, investment, lending, legal, tax, or situation-specific compliance advice",
       "Claim an application is approved, accepted, or allocated",
-      "Promise or guarantee platform access, or imply the waitlist guarantees access",
+      "Promise or guarantee platform access, or imply that applying guarantees a workspace or a trial",
       "Suggest payment can move anyone up the queue, or promise instant provisioning",
       "Invent information, guess when unsure, or answer beyond the knowledge base and this prompt",
       "Invent an appointment time, or treat a booking as placed before book_appointment confirms it",
