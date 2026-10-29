@@ -1,16 +1,19 @@
 // Stage 3 of the priority-access funnel — the strategic review — booked in
 // Cal.com from the waitlist site's scheduler.
 //
-// The site already decides who reaches the scheduler: a Make scenario reads
-// Airtable and answers yes only when the applicant's waitlist record carries
-// `Stage 3 Access (Application) = GRANT` AND a Business Readiness response
-// exists for the same reference. That answer is a claim by the time it
-// reaches Mission Control, so the booking endpoint asks the same question of
-// the same records again, with the same formula, before it spends a slot in
+// Who may book was Airtable's to say: the Make scenario "Aurixa Stage 3
+// Access" (9602082) answered yes only when the applicant's waitlist record
+// carried `Stage 3 Access (Application) = GRANT` and a Business Readiness
+// response existed for the same reference. That scenario lived in the EU Make
+// account, which is deprecated, and Airtable no longer receives applications,
+// so the rule is recreated here over Mission Control's own record — the same
+// conditions, read from the columns that hold them — and the site asks it
+// (`/api/public/storefront/strategic-review-access`) before it shows the
+// scheduler. The booking endpoint asks it again before it spends a slot in
 // the host's calendar. This module is the half of that which needs no
-// network: the formulas, how an answer is read, which of an applicant's
-// bookings is their review, and the shape of each reply to the page.
-import type { AirtableRecord } from "@/server/airtableLeadMapping.pure";
+// network: the rule, which of an applicant's bookings is their review, and
+// the shape of each reply to the page.
+import { hasReachedStage2, isDeclined } from "@/lib/leadEmailGates.pure";
 import {
   CALCOM_EVENT_TYPE_SLUGS,
   bookingEmail,
@@ -18,48 +21,8 @@ import {
   type CalcomBooking,
 } from "@/server/calcom.pure";
 
-/**
- * The two tables the live access gate reads — Make scenario "Aurixa Stage 3
- * Access" (9602082) — by id, as that scenario names them, so a renamed table
- * cannot quietly point this check somewhere else.
- */
-export const STAGE3_ACCESS_TABLES = {
-  /** "Aurixa Waitlist": carries `Application ID Key` and the access decision. */
-  waitlist: "tblHzGiB591W3GpoZ",
-  /** The Business Readiness responses: one per completed Stage 2. */
-  readiness: "tblB1t18q6aUTNI0g",
-} as const;
-
-/** The value the waitlist record's access field holds when Stage 3 is open. */
-export const STAGE3_ACCESS_GRANTED = "GRANT";
-
 /** Cal.com metadata `source` for a booking this path made. */
 export const STAGE3_BOOKING_SOURCE = "stage3_waitlist";
-
-/**
- * A reference as it may appear inside an Airtable formula: upper case, and
- * nothing but letters, digits and hyphens — the same cleaning the Make
- * scenario applies, which is also what makes a quote, and so an injected
- * clause, impossible.
- */
-export function formulaSafeReference(reference: string): string {
-  return String(reference ?? "")
-    .toUpperCase()
-    .trim()
-    .replace(/[^A-Z0-9-]/g, "");
-}
-
-/** The two `filterByFormula` expressions, character for character the live gate's. */
-export function stageThreeAccessFormulas(reference: string): {
-  waitlist: string;
-  readiness: string;
-} {
-  const ref = formulaSafeReference(reference);
-  return {
-    waitlist: `AND({Application ID Key} = '${ref}', {Stage 3 Access (Application)} = '${STAGE3_ACCESS_GRANTED}')`,
-    readiness: `UPPER(TRIM({Application ID})) = '${ref}'`,
-  };
-}
 
 export type StageThreeApplicant = {
   applicationId: string;
@@ -70,76 +33,52 @@ export type StageThreeApplicant = {
 };
 
 export type AccessVerdict =
-  | { granted: true; applicant: StageThreeApplicant; source: "airtable" | "mirror" }
-  | { granted: false; source: "airtable" | "mirror" };
+  | { granted: true; applicant: StageThreeApplicant; source: "mission_control" }
+  | { granted: false; source: "mission_control" };
 
-function field(record: AirtableRecord | undefined, name: string): string {
-  const value = record?.fields?.[name];
-  if (typeof value === "string") return value.trim();
-  if (Array.isArray(value) && typeof value[0] === "string") return value[0].trim();
-  return "";
-}
-
-/**
- * The live gate's verdict from its two answers: granted only when both found
- * a record. The applicant's details come from the waitlist record, exactly the
- * fields the Make scenario hands the site.
- */
-export function accessFromAirtable(
-  reference: string,
-  waitlist: AirtableRecord[],
-  readiness: AirtableRecord[],
-): AccessVerdict {
-  if (waitlist.length === 0 || readiness.length === 0)
-    return { granted: false, source: "airtable" };
-  const record = waitlist[0];
-  return {
-    granted: true,
-    source: "airtable",
-    applicant: {
-      applicationId: field(record, "Application ID Key") || reference,
-      firstName: field(record, "First Name"),
-      lastName: field(record, "Last Name"),
-      email: bookingEmail(field(record, "Corporate Email")),
-      organisation: field(record, "Entity Name") || null,
-    },
-  };
-}
-
-export type MirroredLead = {
+/** The lead columns the rule reads. */
+export type AccessLead = {
   application_id: string | null;
   first_name: string;
   last_name: string;
   email: string;
   entity_name: string | null;
-  stage3_access_state: string | null;
+  status: string | null;
+  airtable_status: string | null;
   stage2_completed_at: string | null;
   stage2_airtable_record_id: string | null;
 };
 
 /**
- * The same verdict from Mission Control's mirror of those tables, for when
- * Airtable cannot be asked. The mirror is up to one sync tick behind — ten
- * minutes — so it can refuse somebody granted a moment ago, but it can never
- * admit somebody Airtable never granted.
+ * Airtable's gate, over Mission Control's record. Granted only when all three
+ * of its conditions hold:
+ *
+ *   `{Application ID}` is not blank   the lead carries this reference
+ *   `{Status}` is not "Declined"      `isDeclined`, as the send gates read it
+ *   a Business Readiness response     `hasReachedStage2`, or a questionnaire
+ *   exists for the reference          the mirror read from Airtable
+ *
+ * The applicant's details are the ones they gave at Stage 1, as the Make
+ * scenario handed them to the site. `rows` newest first: a reference names
+ * one application, and if it ever named two the latest is the live one.
  */
-export function accessFromMirror(reference: string, rows: MirroredLead[]): AccessVerdict {
-  const match = rows.find(
-    (row) =>
-      (row.application_id ?? "").toUpperCase() === reference.toUpperCase() &&
-      (row.stage3_access_state ?? "").trim().toUpperCase() === STAGE3_ACCESS_GRANTED &&
-      Boolean(row.stage2_completed_at || row.stage2_airtable_record_id),
+export function accessFromLead(reference: string, rows: AccessLead[]): AccessVerdict {
+  const lead = rows.find(
+    (row) => (row.application_id ?? "").trim().toUpperCase() === reference.toUpperCase(),
   );
-  if (!match) return { granted: false, source: "mirror" };
+  if (!lead || isDeclined(lead)) return { granted: false, source: "mission_control" };
+  if (!hasReachedStage2(lead) && !lead.stage2_airtable_record_id) {
+    return { granted: false, source: "mission_control" };
+  }
   return {
     granted: true,
-    source: "mirror",
+    source: "mission_control",
     applicant: {
       applicationId: reference,
-      firstName: match.first_name,
-      lastName: match.last_name,
-      email: bookingEmail(match.email),
-      organisation: match.entity_name,
+      firstName: lead.first_name,
+      lastName: lead.last_name,
+      email: bookingEmail(lead.email),
+      organisation: lead.entity_name,
     },
   };
 }

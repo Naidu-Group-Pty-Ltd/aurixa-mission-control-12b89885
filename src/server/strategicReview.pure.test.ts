@@ -1,66 +1,39 @@
 // Who may book a strategic review, and which of their bookings is it. The
-// access rule must be the live Make gate's rule exactly — the site shows the
-// scheduler on that gate's word, and a Mission Control that disagreed would
-// either refuse somebody the page just admitted or admit somebody it refused.
+// access rule is Airtable's `Stage 3 Access (Application)` gate, recreated over
+// Mission Control's record: the site shows the scheduler on its word, and the
+// booking endpoint asks it again, so the two can never disagree.
 import { describe, expect, it } from "vitest";
 import { readBooking, type CalcomBooking } from "./calcom.pure";
 import {
   REVIEW_REFUSAL_STATUS,
-  STAGE3_ACCESS_TABLES,
-  accessFromAirtable,
-  accessFromMirror,
+  accessFromLead,
   applicantsReview,
   bookingView,
-  formulaSafeReference,
   isApplicantsReview,
-  stageThreeAccessFormulas,
-  type MirroredLead,
+  type AccessLead,
 } from "./strategicReview.pure";
 
 const REF = "AX-7Q2M4L9XZ1";
 
-describe("the access formulas", () => {
-  it("are the live gate's, character for character", () => {
-    // Make scenario 9602082, modules 2 and 3.
-    expect(stageThreeAccessFormulas(REF)).toEqual({
-      waitlist:
-        "AND({Application ID Key} = 'AX-7Q2M4L9XZ1', {Stage 3 Access (Application)} = 'GRANT')",
-      readiness: "UPPER(TRIM({Application ID})) = 'AX-7Q2M4L9XZ1'",
-    });
-    expect(STAGE3_ACCESS_TABLES).toEqual({
-      waitlist: "tblHzGiB591W3GpoZ",
-      readiness: "tblB1t18q6aUTNI0g",
-    });
-  });
+describe("accessFromLead — Airtable's Stage 3 Access, over Mission Control's record", () => {
+  // IF(OR({Application ID} = BLANK(), {Status} = "Declined"), "DENY", "GRANT"),
+  // and Make scenario 9602082 also required a Business Readiness response.
+  const lead: AccessLead = {
+    application_id: REF,
+    first_name: "Jane",
+    last_name: "Citizen",
+    email: "Jane@Citizen.com.au",
+    entity_name: "Citizen Property Group",
+    status: "new",
+    airtable_status: null,
+    stage2_completed_at: "2026-09-02T00:00:00.000Z",
+    stage2_airtable_record_id: null,
+  };
 
-  it("cannot be broken out of", () => {
-    // The gate's own cleaning: anything but A-Z, 0-9 and a hyphen is dropped,
-    // so a quote — and with it an injected clause — cannot survive.
-    expect(formulaSafeReference("ax-7q2m')OR(TRUE()")).toBe("AX-7Q2MORTRUE");
-    const formulas = stageThreeAccessFormulas("x' , TRUE()) OR ('");
-    expect(formulas.waitlist.match(/'/g)).toHaveLength(4);
-    expect(formulas.readiness.match(/'/g)).toHaveLength(2);
-  });
-});
-
-const waitlistRecord = {
-  id: "rec1",
-  createdTime: "2026-09-01T00:00:00.000Z",
-  fields: {
-    "Application ID Key": REF,
-    "First Name": "Jane",
-    "Last Name": "Citizen",
-    "Corporate Email": "Jane@Citizen.com.au",
-    "Entity Name": "Citizen Property Group",
-  },
-};
-const readinessRecord = { id: "rec2", createdTime: "2026-09-02T00:00:00.000Z", fields: {} };
-
-describe("accessFromAirtable", () => {
-  it("grants only when both records exist, as the live gate does", () => {
-    expect(accessFromAirtable(REF, [waitlistRecord], [readinessRecord])).toEqual({
+  it("grants an application that is not declined and whose questionnaire is in", () => {
+    expect(accessFromLead(REF, [lead])).toEqual({
       granted: true,
-      source: "airtable",
+      source: "mission_control",
       applicant: {
         applicationId: REF,
         firstName: "Jane",
@@ -69,60 +42,31 @@ describe("accessFromAirtable", () => {
         organisation: "Citizen Property Group",
       },
     });
-    expect(accessFromAirtable(REF, [waitlistRecord], [])).toEqual({
-      granted: false,
-      source: "airtable",
-    });
-    expect(accessFromAirtable(REF, [], [readinessRecord])).toEqual({
-      granted: false,
-      source: "airtable",
-    });
   });
 
-  it("tolerates a lookup field that arrives as a list", () => {
-    const verdict = accessFromAirtable(
-      REF,
-      [
-        {
-          ...waitlistRecord,
-          fields: { ...waitlistRecord.fields, "Entity Name": ["Citizen Pty Ltd"] },
-        },
-      ],
-      [readinessRecord],
-    );
-    expect(verdict.granted && verdict.applicant.organisation).toBe("Citizen Pty Ltd");
-  });
-});
-
-describe("accessFromMirror", () => {
-  const lead: MirroredLead = {
-    application_id: REF,
-    first_name: "Jane",
-    last_name: "Citizen",
-    email: "jane@citizen.com.au",
-    entity_name: null,
-    stage3_access_state: "GRANT",
-    stage2_completed_at: "2026-09-02T00:00:00.000Z",
-    stage2_airtable_record_id: null,
-  };
-
-  it("grants on the same two facts", () => {
-    expect(accessFromMirror(REF, [lead]).granted).toBe(true);
+  it("counts a questionnaire the mirror read from Airtable", () => {
     expect(
-      accessFromMirror(REF, [
-        { ...lead, stage2_completed_at: null, stage2_airtable_record_id: "recX" },
+      accessFromLead(REF, [
+        { ...lead, stage2_completed_at: null, stage2_airtable_record_id: "recReadiness" },
       ]).granted,
     ).toBe(true);
   });
 
-  it("never admits somebody Airtable never granted", () => {
-    expect(accessFromMirror(REF, [{ ...lead, stage3_access_state: null }]).granted).toBe(false);
-    expect(accessFromMirror(REF, [{ ...lead, stage3_access_state: "DENY" }]).granted).toBe(false);
-    expect(accessFromMirror(REF, [{ ...lead, stage2_completed_at: null }]).granted).toBe(false);
-    expect(accessFromMirror(REF, [{ ...lead, application_id: "AX-0000000000" }]).granted).toBe(
-      false,
-    );
-    expect(accessFromMirror(REF, []).granted).toBe(false);
+  it("refuses a declined application, wherever it was declined", () => {
+    expect(accessFromLead(REF, [{ ...lead, status: "disqualified" }]).granted).toBe(false);
+    expect(accessFromLead(REF, [{ ...lead, airtable_status: "Declined" }]).granted).toBe(false);
+  });
+
+  it("refuses an applicant with no questionnaire, and a reference it does not hold", () => {
+    expect(accessFromLead(REF, [{ ...lead, stage2_completed_at: null }]).granted).toBe(false);
+    expect(accessFromLead(REF, [{ ...lead, application_id: "AX-0000000000" }]).granted).toBe(false);
+    expect(accessFromLead(REF, [{ ...lead, application_id: null }]).granted).toBe(false);
+    expect(accessFromLead(REF, []).granted).toBe(false);
+  });
+
+  it("reads the newest application a reference names", () => {
+    const declinedLater = { ...lead, status: "disqualified" };
+    expect(accessFromLead(REF, [declinedLater, lead]).granted).toBe(false);
   });
 });
 

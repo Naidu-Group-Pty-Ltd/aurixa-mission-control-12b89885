@@ -6,13 +6,11 @@
 // same calendar through `calendar.server.ts` — a time an applicant takes here
 // can no longer be offered to a caller, and the reverse.
 //
-// The site still sends the booked time down its Make scenario afterwards, as
-// it always has: that is what writes the Strategic Review Bookings record in
-// Airtable and sends the branded confirmation. What changed is that the time
-// is a real booking before that happens, rather than a request somebody has to
-// reconcile against a calendar nothing here could see.
+// The site reports the booked time to `/api/public/leads/capture` afterwards,
+// which is what raises the branded Stage 3 confirmation (docs/LEAD_EMAILS.md).
+// The time is a real booking before that happens, rather than a request
+// somebody has to reconcile against a calendar nothing here could see.
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
-import { queryAirtableTable } from "@/server/airtable-sync.server";
 import { notifyOperators } from "@/server/audit.server";
 import {
   CALCOM_DEFAULT_DURATION_MINUTES,
@@ -34,13 +32,10 @@ import { calcomFreeSlots } from "@/server/calendar.server";
 import { normaliseApplicationId } from "@/server/lead-capture.server";
 import {
   REVIEW_REFUSAL_STATUS,
-  STAGE3_ACCESS_TABLES,
   STAGE3_BOOKING_SOURCE,
-  accessFromAirtable,
-  accessFromMirror,
+  accessFromLead,
   applicantsReview,
   bookingView,
-  stageThreeAccessFormulas,
   type AccessVerdict,
   type ReviewRefusal,
 } from "@/server/strategicReview.pure";
@@ -88,40 +83,26 @@ export async function strategicReviewSlots(now: Date = new Date()): Promise<Revi
 type AccessCheck = { decided: true; verdict: AccessVerdict } | { decided: false };
 
 /**
- * Asks Airtable the live gate's question; failing that, the mirror.
+ * Whether this reference may book its strategic review, from Mission
+ * Control's record of the application (`accessFromLead`).
  *
- * "Airtable said no" is final and never overruled by the mirror. Only
- * "Airtable could not be asked" falls through to it, and a mirror read that
- * fails too is `decided: false` — the page is told access could not be checked,
- * never that it was refused.
+ * A read that fails is `decided: false`: the page is told access could not be
+ * checked, never that it was refused.
  */
 export async function verifyStageThreeAccess(reference: string): Promise<AccessCheck> {
-  const formulas = stageThreeAccessFormulas(reference);
-  try {
-    const [waitlist, readiness] = await Promise.all([
-      queryAirtableTable(STAGE3_ACCESS_TABLES.waitlist, { filterByFormula: formulas.waitlist }),
-      queryAirtableTable(STAGE3_ACCESS_TABLES.readiness, { filterByFormula: formulas.readiness }),
-    ]);
-    return { decided: true, verdict: accessFromAirtable(reference, waitlist, readiness) };
-  } catch (err) {
-    console.error(
-      `[strategic-review] live access check failed for ${reference}; reading the mirror: ${(err as Error).message}`,
-    );
-  }
   const { data, error } = await supabaseAdmin
     .from("waitlist_leads")
     .select(
-      "application_id, first_name, last_name, email, entity_name, stage3_access_state, stage2_completed_at, stage2_airtable_record_id",
+      "application_id, first_name, last_name, email, entity_name, status, airtable_status, stage2_completed_at, stage2_airtable_record_id",
     )
     .eq("application_id", reference)
+    .order("created_at", { ascending: false })
     .limit(5);
   if (error) {
-    console.error(
-      `[strategic-review] mirror access check failed for ${reference}: ${error.message}`,
-    );
+    console.error(`[strategic-review] access check failed for ${reference}: ${error.message}`);
     return { decided: false };
   }
-  return { decided: true, verdict: accessFromMirror(reference, data ?? []) };
+  return { decided: true, verdict: accessFromLead(reference, data ?? []) };
 }
 
 /* --------------------------------- booking --------------------------------- */

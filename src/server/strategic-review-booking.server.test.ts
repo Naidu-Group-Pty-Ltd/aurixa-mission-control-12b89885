@@ -1,7 +1,6 @@
 // The Stage 3 scheduler's server half, end to end: the access re-check against
-// the live gate's two Airtable tables (and the mirror when Airtable cannot be
-// asked), the booking in Cal.com, the move, and every refusal the page is
-// built to tell apart.
+// Mission Control's record of the application, the booking in Cal.com, the
+// move, and every refusal the page is built to tell apart.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   calcomFetch,
@@ -11,47 +10,10 @@ import {
   type FakeDb,
 } from "./testing/bookingFakes";
 
-type AirtableRow = { id: string; createdTime: string; fields: Record<string, unknown> };
-
-const h = vi.hoisted(() => ({
-  db: null as unknown as FakeDb,
-  airtable: {
-    waitlist: [] as AirtableRow[],
-    readiness: [] as AirtableRow[],
-    fail: false,
-    formulas: [] as string[],
-  },
-}));
+const h = vi.hoisted(() => ({ db: null as unknown as FakeDb }));
 
 vi.mock("@/integrations/supabase/client.server", () => ({
   supabaseAdmin: { from: (table: string) => h.db.from(table) },
-}));
-
-// Airtable, answering the gate's two formulas the way Airtable would — by the
-// reference quoted in them — rather than handing back whatever is seeded.
-vi.mock("@/server/airtable-sync.server", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/server/airtable-sync.server")>()),
-  queryAirtableTable: async (table: string, query: { filterByFormula: string }) => {
-    h.airtable.formulas.push(query.filterByFormula);
-    if (h.airtable.fail) throw new Error("Airtable gateway timed out");
-    const reference = /'([^']*)'/.exec(query.filterByFormula)?.[1] ?? "";
-    if (table === "tblHzGiB591W3GpoZ") {
-      return h.airtable.waitlist.filter(
-        (r) =>
-          r.fields["Application ID Key"] === reference &&
-          r.fields["Stage 3 Access (Application)"] === "GRANT",
-      );
-    }
-    if (table === "tblB1t18q6aUTNI0g") {
-      return h.airtable.readiness.filter(
-        (r) =>
-          String(r.fields["Application ID"] ?? "")
-            .trim()
-            .toUpperCase() === reference,
-      );
-    }
-    throw new Error(`unexpected table ${table}`);
-  },
 }));
 
 import { bookStrategicReview, strategicReviewSlots } from "./strategic-review-booking.server";
@@ -64,22 +26,19 @@ const FRI_0900 = "2026-10-01T23:00:00.000Z";
 
 const REF = "AX-7Q2M4L9XZ1";
 
-const WAITLIST: AirtableRow = {
-  id: "recWaitlist",
-  createdTime: "2026-09-01T00:00:00.000Z",
-  fields: {
-    "Application ID Key": REF,
-    "Stage 3 Access (Application)": "GRANT",
-    "First Name": "Jane",
-    "Last Name": "Citizen",
-    "Corporate Email": "Jane@Citizen.com.au",
-    "Entity Name": "Citizen Property Group",
-  },
-};
-const READINESS: AirtableRow = {
-  id: "recReadiness",
-  createdTime: "2026-09-02T00:00:00.000Z",
-  fields: { "Application ID": ` ${REF.toLowerCase()} ` },
+// The application as Mission Control holds it: not declined, questionnaire in.
+const LEAD = {
+  id: "lead_1",
+  application_id: REF,
+  first_name: "Jane",
+  last_name: "Citizen",
+  email: "Jane@Citizen.com.au",
+  entity_name: "Citizen Property Group",
+  status: "new",
+  airtable_status: null,
+  stage2_completed_at: "2026-09-02T00:00:00.000Z",
+  stage2_airtable_record_id: null,
+  created_at: "2026-09-01T00:00:00.000Z",
 };
 
 let db: FakeDb;
@@ -94,12 +53,8 @@ beforeEach(() => {
   process.env.CALCOM_API_KEY = "cal_test_key";
   cal = createFakeCalcom({ slots: [THU_0900, THU_0930, THU_1000, FRI_0900] });
   vi.stubGlobal("fetch", calcomFetch(cal));
-  db = createFakeDb({ waitlist_leads: [], notifications: [], crm_appointments: [] });
+  db = createFakeDb({ waitlist_leads: [{ ...LEAD }], notifications: [], crm_appointments: [] });
   h.db = db;
-  h.airtable.waitlist = [WAITLIST];
-  h.airtable.readiness = [READINESS];
-  h.airtable.fail = false;
-  h.airtable.formulas = [];
 });
 
 afterEach(() => {
@@ -159,74 +114,37 @@ describe("the free review times", () => {
 });
 
 describe("who may book", () => {
-  it("re-checks the live gate's two tables for the cleaned reference", async () => {
+  it("re-checks the application Mission Control holds for the cleaned reference", async () => {
     const result = await book();
     expect(result.status).toBe(200);
-    expect(h.airtable.formulas).toEqual([
-      `AND({Application ID Key} = '${REF}', {Stage 3 Access (Application)} = 'GRANT')`,
-      `UPPER(TRIM({Application ID})) = '${REF}'`,
-    ]);
+    expect(posts()[0].body).toMatchObject({ metadata: { applicationId: REF } });
   });
 
   it("refuses a reference that cannot be one, before asking anybody", async () => {
     const result = await book({ applicationId: "hello" });
     expect(result).toEqual({ status: 400, body: { ok: false, reason: "invalid_reference" } });
-    expect(h.airtable.formulas).toHaveLength(0);
     expect(cal.requests).toHaveLength(0);
   });
 
-  it("refuses an applicant the gate has not granted, and books nothing", async () => {
-    h.airtable.waitlist = [
-      { ...WAITLIST, fields: { ...WAITLIST.fields, "Stage 3 Access (Application)": "HOLD" } },
-    ];
+  it("refuses a declined application, and books nothing", async () => {
+    db.tables.waitlist_leads = [{ ...LEAD, status: "disqualified" }];
     const result = await book();
     expect(result).toEqual({ status: 403, body: { ok: false, reason: "access_denied" } });
     expect(cal.requests).toHaveLength(0);
   });
 
-  it("refuses an applicant with no readiness record, as the gate does", async () => {
-    h.airtable.readiness = [];
+  it("refuses an applicant whose questionnaire is not in, as the gate did", async () => {
+    db.tables.waitlist_leads = [{ ...LEAD, stage2_completed_at: null }];
     expect((await book()).status).toBe(403);
   });
 
-  it("never lets the mirror overrule an Airtable refusal", async () => {
-    h.airtable.readiness = [];
-    db.tables.waitlist_leads = [
-      {
-        application_id: REF,
-        first_name: "Jane",
-        last_name: "Citizen",
-        email: "jane@citizen.com.au",
-        entity_name: null,
-        stage3_access_state: "GRANT",
-        stage2_completed_at: "2026-09-02T00:00:00.000Z",
-        stage2_airtable_record_id: null,
-      },
-    ];
+  it("refuses a reference Mission Control does not hold", async () => {
+    db.tables.waitlist_leads = [{ ...LEAD, application_id: "AX-0000000000" }];
     expect((await book()).status).toBe(403);
+    expect(cal.requests).toHaveLength(0);
   });
 
-  it("reads the mirror when Airtable cannot be asked, and says so to Cal.com", async () => {
-    h.airtable.fail = true;
-    db.tables.waitlist_leads = [
-      {
-        application_id: REF,
-        first_name: "Jane",
-        last_name: "Citizen",
-        email: "jane@citizen.com.au",
-        entity_name: "Citizen Property Group",
-        stage3_access_state: "GRANT",
-        stage2_completed_at: "2026-09-02T00:00:00.000Z",
-        stage2_airtable_record_id: null,
-      },
-    ];
-    const result = await book();
-    expect(result.status).toBe(200);
-    expect(posts()[0].body).toMatchObject({ metadata: { accessVerifiedBy: "mirror" } });
-  });
-
-  it("says access could not be checked — never that it was refused — when neither can be read", async () => {
-    h.airtable.fail = true;
+  it("says access could not be checked — never that it was refused — when the record cannot be read", async () => {
     db.failReads.add("waitlist_leads");
     expect(await book()).toEqual({
       status: 503,
@@ -268,7 +186,7 @@ describe("booking a review", () => {
         source: "stage3_waitlist",
         kind: "strategic_review",
         applicationId: REF,
-        accessVerifiedBy: "airtable",
+        accessVerifiedBy: "mission_control",
       },
     });
     expect(notices()).toHaveLength(0);
@@ -429,6 +347,6 @@ describe("without CALCOM_API_KEY", () => {
   it("books nothing and says the calendar is not configured", async () => {
     delete process.env.CALCOM_API_KEY;
     expect(await book()).toEqual({ status: 503, body: { ok: false, reason: "not_configured" } });
-    expect(h.airtable.formulas).toHaveLength(0);
+    expect(db.log.filter((entry) => entry.table === "waitlist_leads")).toHaveLength(0);
   });
 });
