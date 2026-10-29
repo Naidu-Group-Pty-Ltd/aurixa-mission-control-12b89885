@@ -43,10 +43,27 @@ export const detectModules = createServerFn({ method: "POST" })
       maxBackendBlobs: data.maxBackendBlobs ?? DEFAULT_CONFIG.maxBackendBlobs,
     };
 
+    const refused = (error: string) => ({
+      ok: false,
+      runId: "",
+      proposed: 0,
+      inserted: 0,
+      updated: 0,
+      orphanAlerts: 0,
+      error,
+    });
+    // A detection beside a running reset or another run writes the same
+    // modules. It looks before it starts, and again once its run row exists,
+    // when the look settles it (`catalogueCompetitor`).
+    const { catalogueCompetitor } = await import(/* @vite-ignore */ "./library-reingest.server");
+    const competitor = await catalogueCompetitor(context.supabase, {});
+    if (competitor) return refused(competitor);
+
     return runDetection({
       supabase: context.supabase,
       userId: context.userId,
       config,
+      guard: (runId) => catalogueCompetitor(context.supabase, { runId }),
     });
   });
 

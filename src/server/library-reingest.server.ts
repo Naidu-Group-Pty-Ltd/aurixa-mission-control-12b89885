@@ -23,32 +23,147 @@
  *   4. reports precisely what could not be restored, rather than dropping it
  *
  * `dryRun` performs step 1 and reports the plan without deleting anything.
+ *
+ * Step 1's snapshot is written to the audit log before step 2 deletes
+ * anything, every way out after that closes the record with what it could not
+ * restore, and the next reset restores what earlier ones left owed
+ * (`libraryReset.pure.ts`). A reset looks for a running reset or detection
+ * before it snapshots and again once its row is written, and stops before the
+ * wipe when one is there (`catalogueCompetitor`).
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
-import { runDetection, DEFAULT_CONFIG, type DetectionRunConfig } from "./module-detection.server";
+import {
+  runDetection,
+  findRunningDetection,
+  runningRefusal,
+  DEFAULT_CONFIG,
+  RUNNING_RUN_WINDOW_MS,
+  type DetectionRunConfig,
+} from "./module-detection.server";
 import {
   probeCommitColumns,
   publishModulesToLibrary,
   requireLibraryAdmin,
 } from "./libraryApproval.server";
+import {
+  EMPTY_SNAPSHOT,
+  RESET_AUDIT_ACTION,
+  RESET_COMPLETE_AUDIT_ACTION,
+  completionMetadata,
+  installCount,
+  judgeResetState,
+  snapshotForAudit,
+  withOwed,
+  type AuditRow,
+  type CloneInstallSnapshot,
+  type PinSnapshot,
+  type ResetSnapshot,
+  type ResetState,
+} from "./libraryReset.pure";
+import { describeDbError } from "./libraryApproval.pure";
+import type { Json } from "@/integrations/supabase/types";
 
 type Supabase = SupabaseClient<Database>;
+
+/** Rows per page of a paged read: PostgREST answers at most 1,000 rows a request. */
+const SNAPSHOT_PAGE = 1000;
 
 /** Typing this out is the point: it is hard to trigger by accident. */
 export const RESET_CONFIRMATION = "RESET LIBRARY";
 
-export type CloneInstallSnapshot = {
-  cloneId: string;
-  slugs: string[];
-};
+/**
+ * Which resets are running and what earlier ones left owed, read from the
+ * audit log (`judgeResetState`). `excludeId` leaves out the caller's own
+ * reset, for the look it takes after recording it.
+ *
+ * Every reset and every completion is read, not the latest few: a debt stays
+ * with the reset that left it until another takes it on, however many have
+ * recorded themselves since. There are few: one of each on 28 Oct 2026.
+ *
+ * A failed read is an error, never "none running" or "nothing owed": a reset
+ * that went on would wipe beside one that is running, or restore only what a
+ * dead one left.
+ */
+export async function readResetState(
+  supabase: Supabase,
+  opts: { excludeId?: string; now?: number } = {},
+): Promise<{ ok: true; state: ResetState } | { ok: false; error: string }> {
+  const [resets, completions] = await Promise.all([
+    readAuditTrail(supabase, RESET_AUDIT_ACTION),
+    readAuditTrail(supabase, RESET_COMPLETE_AUDIT_ACTION),
+  ]);
+  if (!resets.ok) {
+    return { ok: false, error: `the resets on record are unreadable: ${resets.error}` };
+  }
+  if (!completions.ok) {
+    return { ok: false, error: `the resets' completions are unreadable: ${completions.error}` };
+  }
+  return {
+    ok: true,
+    state: judgeResetState({
+      resets: resets.rows,
+      completions: completions.rows,
+      now: opts.now ?? Date.now(),
+      windowMs: RUNNING_RUN_WINDOW_MS,
+      excludeId: opts.excludeId,
+    }),
+  };
+}
 
-export type PinSnapshot = {
-  cloneId: string;
-  slug: string;
-  version: number;
-};
+/** Every audit row of `action`, page by page, or the read's error. */
+async function readAuditTrail(
+  supabase: Supabase,
+  action: string,
+): Promise<{ ok: true; rows: AuditRow[] } | { ok: false; error: string }> {
+  const rows: AuditRow[] = [];
+  for (let from = 0; ; from += SNAPSHOT_PAGE) {
+    const { data, error } = await supabase
+      .from("audit_log")
+      .select("id, created_at, metadata")
+      .eq("action", action)
+      .order("id", { ascending: true })
+      .range(from, from + SNAPSHOT_PAGE - 1);
+    if (error) return { ok: false, error: describeDbError(error) };
+    const page = (data ?? []) as AuditRow[];
+    rows.push(...page);
+    if (page.length < SNAPSHOT_PAGE) return { ok: true, rows };
+  }
+}
+
+/** The refusal a reset or a detection meets beside a reset that may still be running. */
+export function resetRunningRefusal(reset: AuditRow): string {
+  const retryAt = new Date(Date.parse(reset.created_at) + RUNNING_RUN_WINDOW_MS).toISOString();
+  return (
+    `The reset of ${reset.created_at} has not recorded its completion and may still be running. ` +
+    `If it died, reset again after ${retryAt}, and that reset restores what it recorded.`
+  );
+}
+
+/**
+ * Who else is working on the catalogue, for a reset or a detection that has
+ * just written its own marker (its reset row, or its run row) and looks again:
+ * a reset still running, or a detection run, beside it. Null when nobody is.
+ *
+ * Asked only after the caller's own marker is written, so of two that start
+ * together, the one that looks second sees the first and stops, and both can
+ * never go on. A failed read stops the caller too: it cannot tell.
+ */
+export async function catalogueCompetitor(
+  supabase: Supabase,
+  own: { resetId?: string; runId?: string },
+): Promise<string | null> {
+  const [resets, runs] = await Promise.all([
+    readResetState(supabase, { excludeId: own.resetId }),
+    findRunningDetection(supabase, Date.now(), own.runId),
+  ]);
+  if (!resets.ok) return `${resets.error}, so it is not known whether a reset is running.`;
+  if (resets.state.running.length > 0) return resetRunningRefusal(resets.state.running[0]);
+  if (!runs.ok) return `${runs.error}, so it is not known whether a detection is running.`;
+  if (runs.running) return runningRefusal(runs.running, own.resetId ? "a reset" : "a detection");
+  return null;
+}
 
 export type ReingestReport = {
   ok: boolean;
@@ -110,32 +225,70 @@ function emptyReport(dryRun: boolean): ReingestReport {
   };
 }
 
+/**
+ * Every row of `table`, page by page, or the read's error. A snapshot that
+ * stopped at the first page would restore a thousand installs and lose the
+ * rest, and a failed read is never an empty table: the wipe that followed it
+ * would take every install with it.
+ */
+async function readAllRows<T>(
+  supabase: Supabase,
+  table: "clone_modules" | "clone_library_pins",
+  columns: string,
+): Promise<{ ok: true; rows: T[] } | { ok: false; error: string }> {
+  const rows: T[] = [];
+  for (let from = 0; ; from += SNAPSHOT_PAGE) {
+    const { data, error } = await supabase
+      .from(table)
+      .select(columns)
+      .order("id", { ascending: true })
+      .range(from, from + SNAPSHOT_PAGE - 1);
+    if (error) return { ok: false, error: `${table}: ${describeDbError(error)}` };
+    const page = (data ?? []) as T[];
+    rows.push(...page);
+    if (page.length < SNAPSHOT_PAGE) return { ok: true, rows };
+  }
+}
+
 /** Read every clone's installed module slugs, so they survive the wipe. */
-export async function snapshotCloneInstalls(supabase: Supabase): Promise<CloneInstallSnapshot[]> {
-  const { data } = await supabase.from("clone_modules").select("clone_id, modules(slug)");
+export async function snapshotCloneInstalls(
+  supabase: Supabase,
+): Promise<{ ok: true; installs: CloneInstallSnapshot[] } | { ok: false; error: string }> {
+  const read = await readAllRows<{ clone_id: string; modules: { slug: string } | null }>(
+    supabase,
+    "clone_modules",
+    "clone_id, modules(slug)",
+  );
+  if (!read.ok) return read;
   const byClone = new Map<string, string[]>();
-  for (const row of (data ?? []) as Array<{
-    clone_id: string;
-    modules: { slug: string } | null;
-  }>) {
+  for (const row of read.rows) {
     if (!row.modules?.slug) continue;
     const list = byClone.get(row.clone_id) ?? [];
     list.push(row.modules.slug);
     byClone.set(row.clone_id, list);
   }
-  return [...byClone.entries()].map(([cloneId, slugs]) => ({
-    cloneId,
-    slugs: [...new Set(slugs)].sort(),
-  }));
+  return {
+    ok: true,
+    installs: [...byClone.entries()].map(([cloneId, slugs]) => ({
+      cloneId,
+      slugs: [...new Set(slugs)].sort(),
+    })),
+  };
 }
 
-export async function snapshotPins(supabase: Supabase): Promise<PinSnapshot[]> {
-  const { data } = await supabase.from("clone_library_pins").select("clone_id, slug, version");
-  return ((data ?? []) as Array<{ clone_id: string; slug: string; version: number }>).map((p) => ({
-    cloneId: p.clone_id,
-    slug: p.slug,
-    version: p.version,
-  }));
+export async function snapshotPins(
+  supabase: Supabase,
+): Promise<{ ok: true; pins: PinSnapshot[] } | { ok: false; error: string }> {
+  const read = await readAllRows<{ clone_id: string; slug: string; version: number }>(
+    supabase,
+    "clone_library_pins",
+    "clone_id, slug, version",
+  );
+  if (!read.ok) return read;
+  return {
+    ok: true,
+    pins: read.rows.map((p) => ({ cloneId: p.clone_id, slug: p.slug, version: p.version })),
+  };
 }
 
 export type ReingestOptions = {
@@ -199,19 +352,83 @@ export async function resetAndReingestLibrary(args: {
     report.warnings.push(`A real run would be refused: ${columns.error}.`);
   }
 
+  // Two runs at once write the same modules, and a reset beside a detection
+  // that is still running wipes what it is writing. On 31 Jul 2026 three runs
+  // overlapped, two of them started while the reset's own was reading. This is
+  // the first look; the one that settles it is taken once this reset's row is
+  // written (step 2).
+  const running = await findRunningDetection(supabase);
+  const runningWhy = !running.ok
+    ? `${running.error}, so it is not known whether a detection is running.`
+    : running.running
+      ? runningRefusal(running.running, "a reset")
+      : null;
+  if (runningWhy) {
+    if (!dryRun) {
+      report.error = `${runningWhy} Nothing was wiped.`;
+      return report;
+    }
+    report.warnings.push(`A real run would be refused: ${runningWhy}`);
+  }
+
   // ── 1. Snapshot current state ──
-  const [modulesRes, libraryRes, installs, pins] = await Promise.all([
+  const [modulesRes, libraryRes, installsRead, pinsRead, stateRead] = await Promise.all([
     supabase.from("modules").select("id, slug, status"),
     supabase.from("module_library").select("id, slug"),
     snapshotCloneInstalls(supabase),
     snapshotPins(supabase),
+    readResetState(supabase),
   ]);
+  const unreadable = [
+    modulesRes.error ? `modules: ${describeDbError(modulesRes.error)}` : null,
+    libraryRes.error ? `module_library: ${describeDbError(libraryRes.error)}` : null,
+    installsRead.ok ? null : installsRead.error,
+    pinsRead.ok ? null : pinsRead.error,
+    stateRead.ok ? null : stateRead.error,
+  ].filter((why): why is string => why !== null);
+  if (!installsRead.ok || !pinsRead.ok || !stateRead.ok || unreadable.length > 0) {
+    report.error =
+      `What the reset would remove and restore could not be read (${unreadable.join("; ")}). ` +
+      `Nothing was wiped.`;
+    return report;
+  }
+
+  // A reset with no completion inside the window may not be dead: it records
+  // its snapshot before its detection run exists, and approves, publishes and
+  // restores after that run says `completed`. A second reset now would wipe
+  // what it is restoring.
+  const otherReset = stateRead.state.running[0];
+  if (otherReset) {
+    const why = resetRunningRefusal(otherReset);
+    if (!dryRun) {
+      report.error = `${why} Nothing was wiped.`;
+      return report;
+    }
+    report.warnings.push(`A real run would be refused: ${why}`);
+  }
+
+  // What earlier resets left on no clone, each by its own record: everything
+  // one recorded when it died, or what its completion says it could not
+  // restore. This reset takes all of it on.
+  const current: ResetSnapshot = { installs: installsRead.installs, pins: pinsRead.pins };
+  const owed = stateRead.state.owed;
+  const snapshot = withOwed(current, owed);
+  const { installs, pins } = snapshot;
+  for (const debt of owed) {
+    report.warnings.push(
+      (debt.because === "died"
+        ? `The reset of ${debt.from} never finished.`
+        : `The reset of ${debt.from} could not restore everything it recorded.`) +
+        ` The ${installCount(debt.snapshot)} install(s) and ${debt.snapshot.pins.length} pin(s) ` +
+        `it left are restored with this one's.`,
+    );
+  }
 
   const existingModules = modulesRes.data ?? [];
   report.before = {
     modules: existingModules.length,
     libraryEntries: (libraryRes.data ?? []).length,
-    cloneInstalls: installs.reduce((n, c) => n + c.slugs.length, 0),
+    cloneInstalls: installCount(snapshot),
     clonesWithModules: installs.length,
     libraryPins: pins.length,
   };
@@ -237,7 +454,69 @@ export async function resetAndReingestLibrary(args: {
     return report;
   }
 
-  // ── 2. Wipe ──
+  // ── 2. Record, look again, then wipe ──
+  // The snapshot is written before anything is deleted. The wipe takes
+  // `clone_modules` with the modules, so an invocation that died after it
+  // would otherwise take the only record of what to restore with it.
+  const { data: recorded, error: recordErr } = await supabase
+    .from("audit_log")
+    .insert({
+      action: RESET_AUDIT_ACTION,
+      entity_type: "module_library",
+      actor_user_id: userId,
+      metadata: {
+        modules_removed: report.before.modules,
+        library_entries_removed: report.before.libraryEntries,
+        clone_installs_snapshotted: report.before.cloneInstalls,
+        pins_snapshotted: report.before.libraryPins,
+        ...(owed.length > 0 ? { restores_owed_by: owed.map((debt) => debt.resetId) } : {}),
+        snapshot: snapshotForAudit(snapshot),
+      },
+    })
+    .select("id")
+    .single();
+  if (recordErr || !recorded) {
+    report.error =
+      `The snapshot of what to restore could not be recorded ` +
+      `(${recordErr ? describeDbError(recordErr) : "no row came back"}), so nothing was wiped.`;
+    return report;
+  }
+  const resetId = recorded.id as string;
+
+  // Every way out from here closes this reset's record, saying what it could
+  // not restore, so the next reset restores that at once instead of waiting
+  // out the window as it would for one that died.
+  const complete = async (
+    unrestored: ResetSnapshot,
+    outcome: { stoppedBecause?: string; beforeWipe?: boolean; extra?: Record<string, Json> } = {},
+  ) => {
+    const { error } = await supabase.from("audit_log").insert({
+      action: RESET_COMPLETE_AUDIT_ACTION,
+      entity_type: "module_library",
+      entity_id: report.runId ?? null,
+      actor_user_id: userId,
+      metadata: completionMetadata(resetId, { unrestored, ...outcome }),
+    });
+    if (error) {
+      report.warnings.push(
+        `This reset's completion could not be recorded (${describeDbError(error)}). The next ` +
+          `reset waits out the window and then restores everything this one recorded.`,
+      );
+    }
+  };
+
+  // Of two resets, or a reset and a detection, that start together, the one
+  // that looks second sees the first here and stops before anything is
+  // deleted. It wiped nothing, so it owes nothing, and it hands back what it
+  // took on: an earlier reset's debt stays with that reset's own record, for
+  // the reset that goes on. The other reset may well have taken it on too.
+  const competitor = await catalogueCompetitor(supabase, { resetId });
+  if (competitor) {
+    await complete(EMPTY_SNAPSHOT, { stoppedBecause: competitor, beforeWipe: true });
+    report.error = `${competitor} This reset stopped before wiping anything.`;
+    return report;
+  }
+
   // Order matters: soft-referencing rows first, then the tables that cascade.
   await supabase.from("clone_library_pins").delete().not("id", "is", null);
   await supabase.from("module_library").delete().not("id", "is", null);
@@ -261,20 +540,9 @@ export async function resetAndReingestLibrary(args: {
   const { error: wipeErr } = await supabase.from("modules").delete().not("id", "is", null);
   if (wipeErr) {
     report.error = `Failed to wipe modules: ${wipeErr.message}`;
+    await complete(snapshot, { stoppedBecause: report.error });
     return report;
   }
-
-  await supabase.from("audit_log").insert({
-    action: "module_library.reset",
-    entity_type: "module_library",
-    actor_user_id: userId,
-    metadata: {
-      modules_removed: report.before.modules,
-      library_entries_removed: report.before.libraryEntries,
-      clone_installs_snapshotted: report.before.cloneInstalls,
-      pins_snapshotted: report.before.libraryPins,
-    },
-  });
 
   // ── 3. Re-detect ──
   const config: DetectionRunConfig = { ...DEFAULT_CONFIG, ...options.config, deltaMode: false };
@@ -283,9 +551,10 @@ export async function resetAndReingestLibrary(args: {
 
   if (!detection.ok) {
     report.error = `Detection failed after wipe: ${detection.error ?? "unknown"}`;
+    await complete(snapshot, { stoppedBecause: report.error });
     report.warnings.push(
-      "The catalogue is now empty. Fix the detection error and re-run — clone installs " +
-        "were snapshotted but cannot be restored until modules exist again.",
+      "The catalogue is now empty. The clone installs are recorded as owed, and the next reset " +
+        "restores them with its own: fix the detection error and reset again.",
     );
     return report;
   }
@@ -298,6 +567,7 @@ export async function resetAndReingestLibrary(args: {
 
   if (freshModules.length === 0) {
     report.error = "Detection produced no modules";
+    await complete(snapshot, { stoppedBecause: report.error });
     return report;
   }
 
@@ -336,6 +606,8 @@ export async function resetAndReingestLibrary(args: {
 
   // ── 6. Restore clone installs by slug ──
   const idBySlug = new Map(freshModules.map((m) => [m.slug, m.id]));
+  let installsUnrestored = false;
+  let pinsUnrestored = false;
 
   if (options.preserveCloneInstalls !== false && installs.length > 0) {
     const rows: Array<{ clone_id: string; module_id: string; installed_by: string }> = [];
@@ -360,7 +632,10 @@ export async function resetAndReingestLibrary(args: {
       const { error } = await supabase
         .from("clone_modules")
         .upsert(rows.slice(i, i + 500), { onConflict: "clone_id,module_id" });
-      if (error) report.warnings.push(`Restoring clone installs failed: ${error.message}`);
+      if (error) {
+        installsUnrestored = true;
+        report.warnings.push(`Restoring clone installs failed: ${error.message}`);
+      }
     }
 
     report.restored.cloneInstalls = rows.length;
@@ -424,8 +699,10 @@ export async function resetAndReingestLibrary(args: {
       const { error } = await supabase
         .from("clone_library_pins")
         .upsert(pinRows, { onConflict: "clone_id,slug" });
-      if (error) report.warnings.push(`Restoring library pins failed: ${error.message}`);
-      else report.restored.pins = pinRows.length;
+      if (error) {
+        pinsUnrestored = true;
+        report.warnings.push(`Restoring library pins failed: ${error.message}`);
+      } else report.restored.pins = pinRows.length;
     }
     if (report.restored.unmappedPins.length > 0) {
       report.warnings.push(
@@ -435,12 +712,17 @@ export async function resetAndReingestLibrary(args: {
     }
   }
 
-  await supabase.from("audit_log").insert({
-    action: "module_library.reingest_complete",
-    entity_type: "module_library",
-    entity_id: detection.runId,
-    actor_user_id: userId,
-    metadata: JSON.parse(
+  // What could not be written back is owed to the next reset, whole: an
+  // upsert is idempotent, and which rows of a failed chunk landed is not known.
+  // A slug the new catalogue no longer has is not owed: there is nothing to
+  // restore it to.
+  const unrestored: ResetSnapshot = {
+    installs: installsUnrestored ? installs : [],
+    pins: pinsUnrestored ? pins : [],
+  };
+  await complete(unrestored, {
+    stoppedBecause: installsUnrestored || pinsUnrestored ? "a restore write failed" : undefined,
+    extra: JSON.parse(
       JSON.stringify({
         strategy: config.strategy,
         before: report.before,
@@ -453,6 +735,12 @@ export async function resetAndReingestLibrary(args: {
       }),
     ),
   });
+  if (installsUnrestored || pinsUnrestored) {
+    report.error =
+      "Some installs or pins could not be written back. They are recorded as owed, and the " +
+      "next reset restores them.";
+    return report;
+  }
 
   report.ok = true;
   return report;

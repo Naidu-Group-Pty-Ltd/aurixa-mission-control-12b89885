@@ -156,6 +156,12 @@ export function LibraryReingestDialog({ onDone }: { onDone: () => void }) {
                 )}
                 Preview what this will do
               </Button>
+            ) : !plan.ok ? (
+              // A preview that could not read what it would remove and restore
+              // shows why, never a column of zeros.
+              <p className="text-xs text-destructive">
+                {plan.error ?? "The preview could not be made."}
+              </p>
             ) : (
               <>
                 <div className="border border-border p-3">

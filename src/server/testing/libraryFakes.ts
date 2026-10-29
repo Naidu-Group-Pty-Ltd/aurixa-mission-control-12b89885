@@ -1,9 +1,13 @@
 // A test double for the tables the module library lives in — `modules`,
 // `module_detection_runs`, `module_library`, `clone_library_pins`,
-// `clone_modules`, `audit_log`, `notifications`, `profiles` and `user_roles` —
-// behind the slice of the PostgREST builder that `libraryApproval.server.ts`,
-// `library-validation.server.ts`, `cascade/installedGlobs.server.ts` and
-// `library-reingest.server.ts` use, plus the `has_role` RPC.
+// `clone_modules`, `audit_log`, `notifications`, `profiles` and `user_roles`,
+// and the ones a detection run and a reset write beside them: `prime_config`,
+// `repo_blob_analysis`, `module_import_edges`, `module_backend_artifacts`,
+// `module_drift_alerts` and `module_config_snapshots` — behind the slice of
+// the PostgREST builder that `libraryApproval.server.ts`,
+// `library-validation.server.ts`, `cascade/installedGlobs.server.ts`,
+// `library-reingest.server.ts` and `module-detection.server.ts` use, plus the
+// `has_role` RPC.
 //
 // It answers as the server does rather than replaying canned results:
 //
@@ -21,10 +25,15 @@
 //    Postgres's own codes and wording: NOT NULL, `module_library`'s CHECK on
 //    `approval_status`, its UNIQUE (slug, version) from 20261028140000, and
 //    the `notification_kind` enum;
+//  - an upsert resolves on the unique key production holds for its
+//    `onConflict` columns and is 42P10 where it holds none, and a delete
+//    cascades along the foreign keys production declares: a module's
+//    `clone_modules`, `module_backend_artifacts` and `module_drift_alerts`
+//    go with it, and a run's artifacts, alerts and import edges with the run;
 //  - `has_role` answers as production's has since 20260820: the user's
 //    highest role level against the role's (`ROLE_LEVELS`), and an unknown
 //    role is the enum's 22P02;
-//  - a filter treats NULL as SQL does: `eq`, `neq`, `in` and `lt` never match it;
+//  - a filter treats NULL as SQL does: `eq`, `neq`, `in`, `lt` and `gt` never match it;
 //  - `maybeSingle` answers null for no row and PGRST116 for several, and
 //    `single` answers PGRST116 for anything but one;
 //  - `count: "exact"` counts the filtered rows before `range` or `limit`.
@@ -45,7 +54,7 @@ export type PgError = {
   hint: string | null;
 };
 type Result = { data: unknown; error: PgError | null; count?: number | null };
-type Op = "select" | "insert" | "update";
+type Op = "select" | "insert" | "update" | "upsert" | "delete";
 
 export const STATEMENT_TIMEOUT: PgError = {
   message: "canceling statement due to statement timeout",
@@ -64,6 +73,12 @@ const TABLES = [
   "notifications",
   "profiles",
   "user_roles",
+  "prime_config",
+  "repo_blob_analysis",
+  "module_import_edges",
+  "module_backend_artifacts",
+  "module_drift_alerts",
+  "module_config_snapshots",
 ] as const;
 type Table = (typeof TABLES)[number];
 
@@ -206,6 +221,120 @@ const COLUMNS: Record<Table, readonly string[]> = {
   ],
   profiles: ["avatar_url", "created_at", "display_name", "id", "updated_at", "user_id"],
   user_roles: ["assigned_at", "assigned_by", "created_at", "id", "role", "user_id"],
+  prime_config: [
+    "cascade_follows_lineage",
+    "clone_gate_default_hours",
+    "clone_gate_enabled",
+    "codex_auto_merge_ceiling",
+    "codex_autofix_enabled",
+    "codex_autofix_max_per_night",
+    "codex_cascade_gate",
+    "codex_deep_scan_scope",
+    "codex_nightly_cron",
+    "codex_nightly_enabled",
+    "codex_post_merge_revalidate",
+    "codex_pr_check_enabled",
+    "codex_pr_check_fail_on",
+    "codex_pr_scan_enabled",
+    "codex_scan_dedup_hours",
+    "convergence_slo_minutes",
+    "created_at",
+    "crm_dependent_parent_clone_id",
+    "crm_independent_parent_clone_id",
+    "default_branch",
+    "default_cascade_mode",
+    "default_clone_org",
+    "github_app_installation_id",
+    "github_owner",
+    "github_repo",
+    "id",
+    "notes",
+    "supabase_project_ref",
+    "updated_at",
+  ],
+  repo_blob_analysis: [
+    "analysis",
+    "blob_sha",
+    "byte_size",
+    "created_at",
+    "kind",
+    "last_seen_at",
+    "path",
+  ],
+  module_import_edges: [
+    "created_at",
+    "detection_run_id",
+    "id",
+    "import_type",
+    "source_file",
+    "target_file",
+  ],
+  module_backend_artifacts: [
+    "artifact_kind",
+    "confidence",
+    "created_at",
+    "detection_run_id",
+    "file_path",
+    "id",
+    "identifier",
+    "link_reason",
+    "metadata",
+    "module_id",
+    "module_slug",
+    "shared_with_modules",
+  ],
+  module_drift_alerts: [
+    "alert_type",
+    "created_at",
+    "detection_run_id",
+    "file_path",
+    "id",
+    "module_id",
+    "reasoning",
+    "resolved",
+    "resolved_at",
+    "resolved_by",
+    "severity",
+    "suggested_module_slug",
+  ],
+  module_config_snapshots: [
+    "clone_id",
+    "created_at",
+    "created_by",
+    "id",
+    "is_active",
+    "label",
+    "module_ids",
+  ],
+};
+
+/**
+ * The unique keys an upsert may resolve on: the primary key, and each UNIQUE
+ * constraint production holds that a caller names in `onConflict`.
+ */
+const UNIQUE_KEYS: Partial<Record<Table, string[][]>> = {
+  clone_modules: [["id"], ["clone_id", "module_id"]],
+  clone_library_pins: [["id"], ["clone_id", "slug"]],
+  module_library: [["id"], ["slug", "version"]],
+  repo_blob_analysis: [["blob_sha"]],
+};
+
+/** Production's ON DELETE rules: whose rows go with a deleted row, and whose are nulled. */
+const ON_DELETE: Partial<
+  Record<Table, Array<{ table: Table; column: string; rule: "cascade" | "set null" }>>
+> = {
+  modules: [
+    { table: "clone_modules", column: "module_id", rule: "cascade" },
+    { table: "module_backend_artifacts", column: "module_id", rule: "cascade" },
+    { table: "module_drift_alerts", column: "module_id", rule: "cascade" },
+  ],
+  module_detection_runs: [
+    { table: "module_backend_artifacts", column: "detection_run_id", rule: "cascade" },
+    { table: "module_drift_alerts", column: "detection_run_id", rule: "cascade" },
+    { table: "module_import_edges", column: "detection_run_id", rule: "cascade" },
+    { table: "modules", column: "detection_run_id", rule: "set null" },
+    { table: "module_detection_runs", column: "previous_run_id", rule: "set null" },
+  ],
 };
 
 /** The two columns 20261028120000 adds. */
@@ -224,6 +353,12 @@ const REQUIRED: Partial<Record<Table, string[]>> = {
   notifications: ["kind", "title"],
   profiles: ["user_id"],
   user_roles: ["role", "user_id"],
+  prime_config: ["github_owner", "github_repo"],
+  repo_blob_analysis: ["analysis", "blob_sha", "kind", "path"],
+  module_import_edges: ["detection_run_id", "source_file", "target_file"],
+  module_backend_artifacts: ["artifact_kind", "identifier", "module_slug"],
+  module_drift_alerts: ["alert_type"],
+  module_config_snapshots: ["clone_id"],
 };
 
 /** Production's column defaults, for the columns an insert may leave out. */
@@ -257,6 +392,8 @@ function defaultsFor(table: Table, now: string): Row {
       };
     case "audit_log":
       return { ...base, actor_user_id: null, entity_id: null, entity_type: null, metadata: {} };
+    case "repo_blob_analysis":
+      return { created_at: now, last_seen_at: now, byte_size: null };
     case "notifications":
       return {
         ...base,
@@ -443,6 +580,52 @@ export function createLibraryFakeDb(
   return db;
 }
 
+let lastStatementAt = 0;
+
+/**
+ * `now()` as two statements see it: never the same instant twice. Production
+ * stamps each statement with its own transaction time, so a row written after
+ * another is later than it, and "the completion after the reset" is a
+ * question with an answer. Two inserts in one millisecond here would tie.
+ */
+function statementNow(): string {
+  lastStatementAt = Math.max(Date.now(), lastStatementAt + 1);
+  return new Date(lastStatementAt).toISOString();
+}
+
+/** Apply production's ON DELETE rules for rows of `table` that were deleted. */
+function cascadeDelete(db: LibraryFakeDb, table: Table, deleted: Row[]): void {
+  const ids = new Set<unknown>(
+    deleted.map((r) => r.id).filter((id) => id !== null && id !== undefined),
+  );
+  if (ids.size === 0) return;
+  for (const { table: child, column, rule } of ON_DELETE[table] ?? []) {
+    const hit = db.tables[child].filter((r) => ids.has(r[column]));
+    if (hit.length === 0) continue;
+    if (rule === "set null") {
+      for (const r of hit) r[column] = null;
+      continue;
+    }
+    const gone = new Set(hit);
+    db.tables[child] = db.tables[child].filter((r) => !gone.has(r));
+    cascadeDelete(db, child, hit);
+  }
+}
+
+const noMatchingConstraint: PgError = {
+  message: "there is no unique or exclusion constraint matching the ON CONFLICT specification",
+  code: "42P10",
+  details: null,
+  hint: null,
+};
+
+const affectsRowTwice: PgError = {
+  message: "ON CONFLICT DO UPDATE command cannot affect row a second time",
+  code: "21000",
+  details: null,
+  hint: "Ensure that no rows proposed for insertion within the same command have duplicate constrained values.",
+};
+
 function builder(db: LibraryFakeDb, table: Table, known: Set<string>): Builder {
   const rows = () => db.tables[table];
   let op: Op = "select";
@@ -455,6 +638,7 @@ function builder(db: LibraryFakeDb, table: Table, known: Set<string>): Builder {
   const orders: Array<{ column: string; ascending: boolean }> = [];
   let limit: number | null = null;
   let range: [number, number] | null = null;
+  let conflict: string[] | null = null;
 
   const missingColumn = (column: string): PgError => ({
     message: `column ${table}.${column} does not exist`,
@@ -538,8 +722,55 @@ function builder(db: LibraryFakeDb, table: Table, known: Set<string>): Builder {
           if (!known.has(column)) return { data: null, error: notInCache(column) };
         }
       }
-      if (op === "insert") {
-        const now = new Date().toISOString();
+      if (op === "delete") {
+        result = rows().filter((r) => filters.every((f) => f(r)));
+        const gone = new Set(result);
+        db.tables[table] = rows().filter((r) => !gone.has(r));
+        cascadeDelete(db, table, result);
+      } else if (op === "upsert") {
+        // PostgREST resolves on the primary key unless `onConflict` names a
+        // unique constraint, and Postgres refuses columns that are not one.
+        const key = conflict ?? ["id"];
+        const keyed = (UNIQUE_KEYS[table] ?? [["id"]]).some(
+          (k) => k.length === key.length && k.every((c) => key.includes(c)),
+        );
+        if (!keyed) return { data: null, error: noMatchingConstraint };
+        const keyOf = (r: Row) => JSON.stringify(key.map((c) => r[c] ?? null));
+        const proposed = new Set<string>();
+        for (const v of incoming) {
+          const k = keyOf(v);
+          if (proposed.has(k)) return { data: null, error: affectsRowTwice };
+          proposed.add(k);
+        }
+        // One statement: every row is judged before any lands.
+        const now = statementNow();
+        const plan = incoming.map((v) => {
+          const existing = rows().find((r) =>
+            key.every((c) => r[c] !== null && r[c] !== undefined && r[c] === v[c]),
+          );
+          return existing
+            ? { existing, row: { ...existing, ...structuredClone(v) } }
+            : { existing: null, row: { ...defaultsFor(table, now), ...structuredClone(v) } };
+        });
+        const after = [
+          ...rows().filter((r) => !plan.some((p) => p.existing === r)),
+          ...plan.map((p) => p.row),
+        ];
+        for (const p of plan) {
+          const broken = violation(
+            table,
+            p.row,
+            after.filter((r) => r !== p.row),
+          );
+          if (broken) return { data: null, error: broken };
+        }
+        result = plan.map((p) => {
+          if (p.existing) return Object.assign(p.existing, p.row);
+          rows().push(p.row);
+          return p.row;
+        });
+      } else if (op === "insert") {
+        const now = statementNow();
         const created = incoming.map((v) => ({
           ...defaultsFor(table, now),
           ...structuredClone(v),
@@ -623,6 +854,13 @@ function builder(db: LibraryFakeDb, table: Table, known: Set<string>): Builder {
     },
     insert: (v: Row | Row[]) => ((op = "insert"), (values = v), b),
     update: (v: Row) => ((op = "update"), (values = v), b),
+    upsert: (v: Row | Row[], opts?: { onConflict?: string }) => {
+      op = "upsert";
+      values = v;
+      conflict = opts?.onConflict ? opts.onConflict.split(",").map((c) => c.trim()) : null;
+      return b;
+    },
+    delete: () => ((op = "delete"), b),
     // SQL: a comparison with NULL is unknown, so no NULL ever matches these.
     eq: (c: string, v: unknown) => filterOn(c, (x) => x !== null && x !== undefined && x === v),
     neq: (c: string, v: unknown) => filterOn(c, (x) => x !== null && x !== undefined && x !== v),
@@ -630,6 +868,8 @@ function builder(db: LibraryFakeDb, table: Table, known: Set<string>): Builder {
       filterOn(c, (x) => x !== null && x !== undefined && list.includes(x)),
     lt: (c: string, v: number | string) =>
       filterOn(c, (x) => x !== null && x !== undefined && (x as number | string) < v),
+    gt: (c: string, v: number | string) =>
+      filterOn(c, (x) => x !== null && x !== undefined && (x as number | string) > v),
     is: (c: string, v: unknown) => {
       if (v !== null) throw new Error("library fake: is() is modelled for null only");
       return filterOn(c, (x) => x === null || x === undefined);

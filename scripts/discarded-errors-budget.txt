@@ -73,7 +73,7 @@ src/server/fit-analysis.server.ts 4
 src/server/fleet-drift.functions.ts 2
 src/server/handoff-observability.server.ts 2
 src/server/library-admin.functions.ts 1
-src/server/library-reingest.server.ts 10
+src/server/library-reingest.server.ts 8
 src/server/migration-sync.functions.ts 0
 src/server/module-detection.server.ts 11
 src/server/module-sync.server.ts 2
