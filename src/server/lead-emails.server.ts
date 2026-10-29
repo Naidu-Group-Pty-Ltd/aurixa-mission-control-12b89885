@@ -421,7 +421,13 @@ export async function sendingIdentity(
         : "Microsoft Graph is not configured on this deployment",
     };
   }
-  const mailbox = settings.fromMailbox || envMailbox || config.mailbox || null;
+  // The deployment's mailbox belongs to the deployment's tenant. Under an added
+  // tenant a blank mailbox is that tenant's own default — the deployment's
+  // address is in another directory, and Graph refuses to send as it.
+  const mailbox =
+    settings.fromMailbox ||
+    (settings.tenantId ? config.mailbox : envMailbox || config.mailbox) ||
+    null;
   if (!mailbox) return { ok: false, error: "no sending mailbox is configured" };
   return {
     ok: true,

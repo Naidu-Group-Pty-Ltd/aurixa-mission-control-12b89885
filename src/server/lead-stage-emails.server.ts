@@ -31,6 +31,7 @@ import {
   settingsForSending,
   templatesForSending,
   type LeadEmailSettings,
+  type SendingIdentity,
 } from "@/server/lead-emails.server";
 import {
   decideApplicant,
@@ -38,6 +39,7 @@ import {
   nextStepUrlFor,
   readPolicy,
   withApplicantSenders,
+  withSendingMailbox,
   type ApplicantMode,
   type DroppedRecipient,
   type LeadStage,
@@ -63,6 +65,13 @@ type LoadedPolicy = {
   policy: StageEmailPolicy;
   /** Null when Email → Lead emails could not be read this tick. */
   settings: LeadEmailSettings | null;
+  /** Who the emails send as — the tenant and mailbox chosen there. */
+  identity: SendingIdentity;
+};
+
+const SETTINGS_UNREAD: SendingIdentity = {
+  ok: false,
+  error: "Email → Lead emails could not be read; nothing was sent this tick.",
 };
 
 /**
@@ -77,10 +86,18 @@ type LoadedPolicy = {
  * later tick.
  */
 async function loadPolicy(): Promise<LoadedPolicy> {
+  const base = policy();
   const settings = await settingsForSending();
+  if (!settings) return { policy: base, settings, identity: SETTINGS_UNREAD };
+  // The tenant and mailbox chosen on Email → Lead emails, else the
+  // deployment's. Resolved here, once, because the mailbox it lands on is also
+  // the team notification's fallback recipient and the ledger's `mailbox`.
+  const identity = await sendingIdentity(settings, base.mailbox);
+  const senders = withApplicantSenders(base, settings.senders);
   return {
-    policy: settings ? withApplicantSenders(policy(), settings.senders) : policy(),
+    policy: identity.ok ? withSendingMailbox(senders, identity.mailbox) : senders,
     settings,
+    identity,
   };
 }
 
@@ -254,16 +271,9 @@ export type DispatchReadiness = {
  * caller rather than reporting as "nothing to do".
  */
 export async function dispatchStageEmails(limit = DISPATCH_BATCH): Promise<DispatchResult> {
-  const { policy: p, settings } = await loadPolicy();
-  // The tenant and mailbox chosen on Email → Lead emails, else the deployment's.
-  // Unreadable, nothing is claimed: sending from the deployment's mailbox
-  // instead of the one chosen is a different sender, not a fallback.
-  const identity = settings
-    ? await sendingIdentity(settings, p.mailbox)
-    : ({
-        ok: false,
-        error: "Email → Lead emails could not be read; nothing was sent this tick.",
-      } as const);
+  // Settings unreadable, nothing is claimed: sending from the deployment's
+  // mailbox instead of the one chosen is a different sender, not a fallback.
+  const { policy: p, identity } = await loadPolicy();
   const graph = identity.ok || isGraphConfigured();
   const mailbox = identity.ok ? identity.mailbox : null;
 

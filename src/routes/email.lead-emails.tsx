@@ -413,8 +413,10 @@ function IdentityPanel({ overview, canEdit }: { overview: Overview; canEdit: boo
           <p className="label-mono">sent as</p>
           <p className="mt-1 text-sm text-muted-foreground">
             The tenant and mailbox every applicant email sends from, for all three stages, and where
-            a reply goes. Left blank, they are the deployment's:{" "}
-            {overview.envMailbox ? <code>{overview.envMailbox}</code> : "no mailbox is set"}.
+            a reply goes. The team's own notification sends from it too and, while no{" "}
+            <code>LEAD_STAGE_INTERNAL_RECIPIENTS</code> list is set, goes to it. A blank mailbox is
+            the tenant's default — for the deployment's own tenant,{" "}
+            {overview.envMailbox ? <code>{overview.envMailbox}</code> : "none is set"}.
           </p>
         </div>
         {identity &&

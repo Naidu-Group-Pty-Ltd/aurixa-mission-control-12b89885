@@ -696,6 +696,47 @@ describe("Mission Control sends the applicant's own email (Email → Lead emails
     });
   });
 
+  it("sends the team's notification from the chosen mailbox too, to the whole list", async () => {
+    state.settingsRow = SETTINGS;
+    state.claimed = [row()];
+    await dispatchStageEmails();
+    expect(state.sent[0]?.mailbox).toBe("trials@aurixasystems.com.au");
+    expect(wire()).toEqual(TEAM);
+  });
+
+  it("tells the chosen mailbox, not the deployment's, when no recipient list is set", async () => {
+    // "Only the sending mailbox was told" has to be true of the mailbox that
+    // sent: on production the deployment's own mailbox is another company's.
+    delete process.env.LEAD_STAGE_INTERNAL_RECIPIENTS;
+    state.settingsRow = SETTINGS;
+    state.claimed = [row({ recipients: [] })];
+    const result = await dispatchStageEmails();
+    expect(state.sent[0]?.mailbox).toBe("trials@aurixasystems.com.au");
+    expect(wire()).toEqual(["trials@aurixasystems.com.au"]);
+    expect(result.readiness).toMatchObject({ recipients: 1, recipientSource: "mailbox_fallback" });
+  });
+
+  it("raises the team's obligation against the chosen mailbox", async () => {
+    delete process.env.LEAD_STAGE_INTERNAL_RECIPIENTS;
+    state.settingsRow = SETTINGS;
+    await enqueueStageEmails({
+      leadId: "lead-1",
+      lead: {
+        id: "lead-1",
+        email: "applicant@example.com",
+        created_at: new Date(Date.now() - 60_000).toISOString(),
+        submitted_at: new Date(Date.now() - 60_000).toISOString(),
+      },
+      trigger: "ingest",
+    });
+    const internal = state.upserts.flat().find((r) => r.audience === "internal" && r.stage === 1);
+    expect(internal).toMatchObject({
+      mailbox: "trials@aurixasystems.com.au",
+      recipients: ["trials@aurixasystems.com.au"],
+      recipient_source: "mailbox_fallback",
+    });
+  });
+
   it("sends the copy an operator saved, not the default", async () => {
     state.settingsRow = SETTINGS;
     state.templateRows = [
