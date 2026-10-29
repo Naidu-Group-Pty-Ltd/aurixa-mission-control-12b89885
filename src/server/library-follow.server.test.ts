@@ -85,6 +85,8 @@ import {
   FOLLOW_AUDIT_ACTION,
   FOLLOW_BACKOFF_MS,
   FOLLOW_SKIPPED,
+  SETTLE_QUIET_MS,
+  SETTLE_WINDOW_MS,
 } from "./libraryFollow.pure";
 
 function fakeGithub() {
@@ -626,6 +628,159 @@ describe("the follow never runs beside another detection or a reset", () => {
     });
     expect(report.outcome).toBe("settled");
     expect(report.attempt).toBe(2);
+  });
+});
+
+describe("a follow whose invocation ended once its run had written its modules", () => {
+  // Measured 29 Oct 2026: both of the day's follow invocations died in their
+  // second minute, the second 23 entries into its publication, and each cost
+  // a whole detection and a try. Here the invocation ends where they did:
+  // nothing after the throw runs, as nothing does in an isolate that is gone.
+  const ENDED = "the invocation ended";
+  const later = (ms: number) => () => Date.now() + ms;
+
+  beforeEach(() => {
+    seed({
+      modules: [oldModule("clients"), oldModule("index"), oldModule("gone")],
+      module_library: [pendingEntry("clients"), pendingEntry("index"), pendingEntry("gone")],
+    });
+  });
+
+  /** The first tick detects, and its invocation ends before the settle. */
+  async function detectThenEnd() {
+    deps.detect = async (args) => {
+      detections++;
+      await FOLLOW_DEPS.detect(args);
+      throw new Error(ENDED);
+    };
+    await expect(follow()).rejects.toThrow(ENDED);
+    deps.detect = async (args) => {
+      detections++;
+      return FOLLOW_DEPS.detect(args);
+    };
+    const [run] = followRuns();
+    return run;
+  }
+
+  it("is settled by a later tick at the run's commit, with no second detection, and says it resumed", async () => {
+    const run = await detectThenEnd();
+    expect(run).toMatchObject({ status: "running", commit_sha: COMMIT_1 });
+    expect(run.tree_hash).toEqual(expect.any(String));
+    expect(moduleOf("reports")?.status).toBe("proposed");
+    expect(db.tables.module_library.filter((e) => e.approval_status === "approved")).toEqual([]);
+
+    deps.now = later(SETTLE_QUIET_MS + 60_000);
+    const report = await follow();
+
+    expect(detections).toBe(1);
+    expect(report).toMatchObject({
+      outcome: "settled",
+      resumed: true,
+      runId: run.id,
+      commitSha: COMMIT_1,
+      attempt: 1,
+      approved: ["backend-send", "platform-core", "reports"],
+      archived: ["gone"],
+      warnings: [],
+    });
+    expect(report.published.map((p) => p.slug)).toEqual(FOUND);
+    expect(run.status).toBe("completed");
+    for (const slug of FOUND) {
+      expect(moduleOf(slug)?.status, slug).toBe("approved");
+      expect(
+        entriesOf(slug).filter((e) => e.is_latest),
+        slug,
+      ).toEqual([
+        expect.objectContaining({
+          approval_status: "approved",
+          source_commit_sha: COMMIT_1,
+          source_detection_run_id: run.id,
+        }),
+      ]);
+    }
+    expect(audits()).toHaveLength(1);
+    expect(audits()[0].metadata).toMatchObject({ outcome: "settled", resumed: true });
+  });
+
+  it("leaves the run to the invocation that detected it inside the quiet, and records nothing", async () => {
+    const run = await detectThenEnd();
+
+    const report = await follow();
+
+    expect(report.outcome).toBe("skipped");
+    expect(report.stoppedBecause).toMatch(/wrote its modules at .* and is being settled/);
+    expect(detections).toBe(1);
+    expect(run.status).toBe("running");
+    expect(audits()).toEqual([]);
+  });
+
+  it("finishes a publication that ended part-way, and publishes only what had not landed", async () => {
+    let inserts = 0;
+    const realFrom = db.from;
+    db.from = (table: string) => {
+      const builder = realFrom(table);
+      if (table !== "module_library") return builder;
+      const insert = builder.insert;
+      builder.insert = (...args: unknown[]) => {
+        if (++inserts > 2) throw new Error(ENDED);
+        return insert(...args);
+      };
+      return builder;
+    };
+    await expect(follow()).rejects.toThrow(ENDED);
+    db.from = realFrom;
+    const [run] = followRuns();
+    expect(run.status).toBe("running");
+    const landed = db.tables.module_library.filter((e) => e.source_commit_sha === COMMIT_1);
+    expect(landed).toHaveLength(2);
+
+    deps.now = later(SETTLE_QUIET_MS + 60_000);
+    const report = await follow();
+
+    expect(report.outcome).toBe("settled");
+    expect(report.unchanged).toBe(2);
+    expect(report.published).toHaveLength(FOUND.length - 2);
+    expect(detections).toBe(1);
+    for (const slug of FOUND) {
+      expect(
+        entriesOf(slug).filter((e) => e.is_latest && e.source_commit_sha === COMMIT_1),
+        slug,
+      ).toHaveLength(1);
+    }
+  });
+
+  it("closes the run as a try where two hours passed without a settle, and detects again", async () => {
+    const run = await detectThenEnd();
+
+    deps.now = later(SETTLE_WINDOW_MS + 60_000);
+    const report = await follow();
+
+    expect(report.closedStale).toEqual([run.id]);
+    expect(run).toMatchObject({
+      status: "failed",
+      error_message: expect.stringMatching(/wrote its modules and was not settled/),
+    });
+    expect(detections).toBe(2);
+    expect(report).toMatchObject({ outcome: "settled", resumed: false, attempt: 2 });
+  });
+
+  it("closes the run where a person's detection followed it, rather than settle modules it no longer shaped", async () => {
+    const run = await detectThenEnd();
+    const persons = await FOLLOW_DEPS.detect({
+      supabase: db as never,
+      userId: ADMIN,
+      config: { ...DEFAULT_CONFIG, deltaMode: false },
+    });
+    expect(persons.ok).toBe(true);
+
+    deps.now = later(SETTLE_QUIET_MS + 60_000);
+    const report = await follow();
+
+    expect(report.closedStale).toEqual([run.id]);
+    expect(run.status).toBe("failed");
+    expect(detections).toBe(2);
+    expect(report).toMatchObject({ outcome: "settled", resumed: false });
+    expect(report.runId).not.toBe(run.id);
   });
 });
 

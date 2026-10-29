@@ -359,6 +359,54 @@ const TRACE_TEXT_CHARS = 8192;
 const TRACE_MAX_BYTES = 1024 * 1024;
 
 /**
+ * Its own copy of `value`, holding nothing it was cut from. V8 keeps a slice
+ * of a long string as a view of the whole, so an 8,192-character cut of a
+ * 1 MB file keeps the 1 MB, and a name a parser matched in a migration keeps
+ * the migration. Replayed at prime@6dbda61 on 29 Oct 2026, the trace's cuts
+ * held every source file it read whole (78 MB) and a cold backend pass's
+ * analyses held every migration whole (50 MB more): 142.6 MB live, in an
+ * isolate of 128 MB, and the day's two follow runs both died in their second
+ * minute. `JSON.parse` builds every string afresh.
+ */
+function detached<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+/**
+ * The files a source file imports, resolved against the tree, in order and
+ * with a target twice where two specifiers name it, as the trace walks them;
+ * null for a file the trace holds no text of.
+ */
+type ImportTargets = (file: string) => string[] | null;
+
+/**
+ * Each file's import targets, worked out once. The trace walks every route
+ * separately and used to read a file's imports again for each route that
+ * reached it: 40,804 edges' worth of regular expressions over the same 3,394
+ * texts at prime@6dbda61. A file not read yet is not remembered as importing
+ * nothing.
+ */
+function importTargetsFrom(
+  contentCache: ReadonlyMap<string, string>,
+  allFilesSet: Set<string>,
+): ImportTargets {
+  const memo = new Map<string, string[]>();
+  return (file) => {
+    const known = memo.get(file);
+    if (known) return known;
+    const content = contentCache.get(file);
+    if (!content) return null;
+    const targets: string[] = [];
+    for (const spec of extractImports(file, content)) {
+      const target = findActualFile(spec, allFilesSet);
+      if (target) targets.push(target);
+    }
+    memo.set(file, targets);
+    return targets;
+  };
+}
+
+/**
  * Read every source file the import trace can reach, before it walks.
  *
  * The trace asked the contents API for each file as it came to it, one call at
@@ -370,19 +418,20 @@ const TRACE_MAX_BYTES = 1024 * 1024;
  *
  * This walks the same graph breadth-first from every route at once, to the
  * same depth, and asks each level's files by batch: the same files for a few
- * dozen queries. Each text is cut to the 8,192 characters the trace read.
+ * dozen queries. Each text is cut to the 8,192 characters the trace read, and
+ * the cut is the text's own copy (`detached`).
  */
 async function prefetchTraceSources(args: {
   octokit: Octokit;
   ref: RepoRef;
   roots: string[];
-  allFilesSet: Set<string>;
   shaByPath: Map<string, string>;
   sizeByPath: Map<string, number>;
   contentCache: Map<string, string>;
+  importTargets: ImportTargets;
   maxDepth?: number;
 }): Promise<UnreadFiles> {
-  const { octokit, ref, roots, allFilesSet, shaByPath, sizeByPath, contentCache } = args;
+  const { octokit, ref, roots, shaByPath, sizeByPath, contentCache, importTargets } = args;
   const maxDepth = args.maxDepth ?? TRACE_MAX_DEPTH;
   const out: UnreadFiles = { tooLarge: [], unread: [] };
   const seen = new Set<string>();
@@ -398,18 +447,15 @@ async function prefetchTraceSources(args: {
       ref,
       wants,
       maxBytes: TRACE_MAX_BYTES,
-      take: (want, text) => contentCache.set(want.path, text.slice(0, TRACE_TEXT_CHARS)),
+      take: (want, text) => contentCache.set(want.path, detached(text.slice(0, TRACE_TEXT_CHARS))),
     });
     out.tooLarge.push(...level.tooLarge);
     out.unread.push(...level.unread);
 
     const next = new Set<string>();
     for (const path of frontier) {
-      const content = contentCache.get(path);
-      if (!content) continue;
-      for (const spec of extractImports(path, content)) {
-        const target = findActualFile(spec, allFilesSet);
-        if (target && !seen.has(target)) next.add(target);
+      for (const target of importTargets(path) ?? []) {
+        if (!seen.has(target)) next.add(target);
       }
     }
     frontier = [...next];
@@ -520,7 +566,8 @@ async function readBlobsCached<T>(args: {
     wants: misses,
     maxBytes: CASCADE_MAX_FILE_BYTES,
     take: (want, content) => {
-      const analysis = parse(content, want.path);
+      // Its own copy: a parse of a migration otherwise keeps the migration.
+      const analysis = detached(parse(content, want.path));
       results.set(want.path, analysis);
       toCache.push({
         blob_sha: want.sha,
@@ -631,8 +678,7 @@ const TRACE_MAX_DEPTH = 20;
 // `prefetchTraceSources` read: the walk itself reads nothing.
 function traceImports(
   rootFile: string,
-  allFilesSet: Set<string>,
-  contentCache: Map<string, string>,
+  importTargets: ImportTargets,
   maxDepth: number = TRACE_MAX_DEPTH,
 ): { files: string[]; edges: ImportEdge[] } {
   const visited = new Set<string>();
@@ -644,13 +690,8 @@ function traceImports(
     if (visited.has(file) || depth > maxDepth) continue;
     visited.add(file);
 
-    const content = contentCache.get(file);
-    if (!content) continue;
-
-    const imports = extractImports(file, content);
-    for (const imp of imports) {
-      const actual = findActualFile(imp, allFilesSet);
-      if (actual && !visited.has(actual)) {
+    for (const actual of importTargets(file) ?? []) {
+      if (!visited.has(actual)) {
         edges.push({ source_file: file, target_file: actual, import_type: "static" });
         queue.push({ file: actual, depth: depth + 1 });
       }
@@ -951,14 +992,15 @@ export async function runDetection(args: {
     // which both the feature partition and the backend pass read from.
     progress("import_tracing", "Reading the source files the routes reach…", 30);
     const contentCache = new Map<string, string>();
+    const importTargets = importTargetsFrom(contentCache, allFilesSet);
     const traceReads = await prefetchTraceSources({
       octokit,
       ref,
       roots: routeFiles,
-      allFilesSet,
       shaByPath,
       sizeByPath,
       contentCache,
+      importTargets,
     });
     if (traceReads.unread.length > 0) {
       throw unreadRefusal("source file(s) the import trace reaches", traceReads.unread);
@@ -978,7 +1020,7 @@ export async function runDetection(args: {
       const pct = 30 + Math.round((i / routeFiles.length) * 40);
       progress("import_tracing", `Tracing ${rf} (${i + 1}/${routeFiles.length})…`, pct);
 
-      const { files: resolvedFiles, edges } = traceImports(rf, allFilesSet, contentCache);
+      const { files: resolvedFiles, edges } = traceImports(rf, importTargets);
       allEdges.push(...edges);
 
       const slug = routeFileToSlug(rf);
@@ -1024,16 +1066,7 @@ export async function runDetection(args: {
 
       // Import edges resolved against the cache the trace just filled — no
       // further network reads.
-      const importsOf = (file: string): string[] => {
-        const content = contentCache.get(file);
-        if (!content) return [];
-        const out: string[] = [];
-        for (const spec of extractImports(file, content)) {
-          const target = findActualFile(spec, allFilesSet);
-          if (target) out.push(target);
-        }
-        return out;
-      };
+      const importsOf = (file: string): string[] => importTargets(file) ?? [];
 
       const edgeSlugs = files
         .map((f) => classifyBackendPath(f))
@@ -1409,6 +1442,11 @@ export async function runDetection(args: {
       }
     }
 
+    // The texts were read for their imports and their crossings into the
+    // backend, and both are taken: let them go before the run writes.
+    const sampledFileCount = contentCache.size;
+    contentCache.clear();
+
     // ── Phase 6: Find orphan files ──
     const coveredFiles = new Set<string>();
     for (const mod of routeModules) {
@@ -1736,14 +1774,18 @@ export async function runDetection(args: {
     const totalSecrets = new Set(routeModules.flatMap((m) => m.backend.secrets)).size;
 
     // A follow run stays `running` until the follow has settled the
-    // catalogue at it, so a reset or a detection meets it throughout.
-    await supabase
+    // catalogue at it, so a reset or a detection meets it throughout. Its
+    // tree hash, written here and nowhere else in follow mode, says the run
+    // has written every module it found: a follow whose invocation ended
+    // after this settles the run at a later tick rather than detect again
+    // (`libraryFollow.pure.ts`). So a follow run that cannot say so stops.
+    const { error: finishError } = await supabase
       .from("module_detection_runs")
       .update({
         status: config.follow ? "running" : "completed",
         tree_hash: treeHash,
         file_count: files.length,
-        sampled_file_count: contentCache.size,
+        sampled_file_count: sampledFileCount,
         dependency_count: allEdges.length + backendEdges.length,
         pass_count: passes.length,
         passes: JSON.parse(JSON.stringify(passes)),
@@ -1764,6 +1806,11 @@ export async function runDetection(args: {
         completed_at: config.follow ? null : new Date().toISOString(),
       })
       .eq("id", runId);
+    if (finishError && config.follow) {
+      throw new Error(
+        `The run's findings were not recorded on it: ${describeDbError(finishError)}`,
+      );
+    }
 
     await supabase.from("audit_log").insert({
       action: "module.route_detection_complete",

@@ -79,12 +79,20 @@ describe("who writes an entry no person approved", () => {
     );
   });
 
-  it("the hook is scheduled where it is served, with the patience a detection needs", () => {
-    const sql = readFileSync(MIGRATION, "utf8").replace(/--[^\n]*/g, "");
+  it("the hook is scheduled where it is served, with patience that holds no other hook for long", () => {
+    // pg_net sends its next batch only once this one has answered, so the
+    // newest schedule of the job is the one production runs, and its
+    // patience is how long every other cron hook can be held (29 Oct 2026).
+    const schedules = readdirSync("supabase/migrations")
+      .filter((f) => f.endsWith(".sql"))
+      .sort()
+      .map((f) => readFileSync(join("supabase/migrations", f), "utf8").replace(/--[^\n]*/g, ""))
+      .filter((sql) => /cron\.schedule\(\s*'module-library-follow-15min'/.test(sql));
+    const sql = schedules[schedules.length - 1] ?? "";
     expect(source(HOOK)).toContain('createFileRoute("/hooks/module-library-follow")');
     expect(sql).toContain("v_base || '/hooks/module-library-follow'");
     expect(sql).toMatch(/'module-library-follow-15min',\s*'4,19,34,49 \* \* \* \*'/);
-    expect(sql).toContain("timeout_milliseconds := 600000");
+    expect(sql).toContain("timeout_milliseconds := 150000");
   });
 });
 

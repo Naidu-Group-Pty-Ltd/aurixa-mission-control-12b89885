@@ -38,6 +38,7 @@ import {
   emptyFollowReport,
   entryChange,
   followAuditMetadata,
+  hasDetected,
   holdBeforeWriting,
   isFollowRun,
   nextFollowStep,
@@ -60,6 +61,10 @@ const ID_CHUNK = 100;
 
 /** How many recent detection runs the follow reads to find its own. */
 const RUNS_READ = 50;
+
+/** What the follow reads of a detection run (`FollowRun`). */
+const RUN_COLUMNS =
+  "id, status, commit_sha, parameters, started_at, completed_at, tree_hash, updated_at";
 
 export type FollowDeps = {
   /** The prime's head commit, or why it could not be read. */
@@ -320,7 +325,7 @@ export async function followPrimeHead(
 
   const runsRead = await supabase
     .from("module_detection_runs")
-    .select("id, status, commit_sha, parameters, started_at, completed_at")
+    .select(RUN_COLUMNS)
     .order("started_at", { ascending: false })
     .limit(RUNS_READ);
   if (runsRead.error) {
@@ -342,6 +347,15 @@ export async function followPrimeHead(
     report.commitSha = step.run.commit_sha;
     return report;
   }
+  if (step.kind === "settling") {
+    // The invocation that detected it settles it next; a tick after the quiet
+    // settles it if that one ended first. Nothing changed, so nothing is recorded.
+    report.outcome = "skipped";
+    report.runId = step.run.id;
+    report.commitSha = step.run.commit_sha;
+    report.stoppedBecause = `run ${step.run.id.slice(0, 8)} wrote its modules at ${step.run.updated_at} and is being settled`;
+    return report;
+  }
 
   const now = new Date(deps.now()).toISOString();
   for (const stale of step.stale) {
@@ -350,10 +364,34 @@ export async function followPrimeHead(
       stale.id,
       "failed",
       now,
-      "The follow's invocation ended before it settled the catalogue at this run",
+      hasDetected(stale)
+        ? "The run wrote its modules and was not settled before another detection followed it, or two hours passed"
+        : "The follow's invocation ended before it settled the catalogue at this run",
     );
     if (why) report.warnings.push(why);
     else report.closedStale.push(stale.id);
+  }
+
+  if (step.kind === "settle") {
+    report.attempt = step.attempt;
+    report.resumed = true;
+    report.runId = step.run.id;
+    report.commitSha = step.commitSha;
+    // A reset running now would wipe what the settle approves: it waits, as a
+    // detection does. Its own run is no competitor.
+    const busy = await deps.competitor(supabase, { runId: step.run.id });
+    if (busy) {
+      report.outcome = "skipped";
+      report.stoppedBecause = busy;
+      return report;
+    }
+    await settle(supabase, deps, report, {
+      runId: step.run.id,
+      commitSha: step.commitSha,
+      detectedSlugs: null,
+      afterHold: step.afterHold,
+    });
+    return report;
   }
 
   if (step.kind === "exhausted") {
@@ -459,7 +497,13 @@ async function settle(
   supabase: Db,
   deps: FollowDeps,
   report: FollowReport,
-  at: { runId: string; commitSha: string; detectedSlugs: string[]; afterHold: boolean },
+  at: {
+    runId: string;
+    commitSha: string;
+    /** Every slug the run found, or null for a run an earlier invocation detected. */
+    detectedSlugs: string[] | null;
+    afterHold: boolean;
+  },
 ): Promise<void> {
   const { runId, commitSha } = at;
   const now = new Date(deps.now()).toISOString();
@@ -484,7 +528,13 @@ async function settle(
   if (await fenced()) return;
   const modulesRead = await readCatalogue(supabase);
   if (!modulesRead.ok) return fail(`The catalogue could not be read: ${modulesRead.error}`);
-  const plan = planSettle({ runId, modules: modulesRead.rows, detectedSlugs: at.detectedSlugs });
+  // A run an earlier invocation detected says what it found by the modules
+  // that name it: one a person archived keeps its own run, so it is not named
+  // among those kept out.
+  const detectedSlugs =
+    at.detectedSlugs ??
+    modulesRead.rows.filter((m) => m.detection_run_id === runId).map((m) => m.slug);
+  const plan = planSettle({ runId, modules: modulesRead.rows, detectedSlugs });
   report.keptOut = plan.keptOut;
 
   if (plan.held) {
@@ -760,7 +810,7 @@ export async function catalogueSettledAt(
 ): Promise<{ runId: string; commitSha: string | null } | null> {
   const { data, error } = await supabase
     .from("module_detection_runs")
-    .select("id, status, commit_sha, parameters, started_at, completed_at")
+    .select(RUN_COLUMNS)
     .eq("status", "completed")
     .order("started_at", { ascending: false })
     .limit(RUNS_READ);
