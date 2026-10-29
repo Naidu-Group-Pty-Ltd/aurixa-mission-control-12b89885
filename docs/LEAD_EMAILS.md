@@ -108,13 +108,10 @@ backstops the stage.
 
 ### What changes when Mission Control sends
 
-- **Airtable's send gates are not consulted.** Make sent Stage 1 only while
-  Airtable's `Send Stage 2 Invite` read `SEND`, and Stage 3 only while
-  `Send Booking Confirmation` did. Mission Control sends to every applicant who
-  reached the stage, with a valid address not on the do-not-send register — and
-  never a Stage 1 invitation to someone who has already completed the
-  questionnaire. If those Airtable fields encode a rule the team relies on,
-  keep that stage on Make until the rule is written down here.
+- **The send gates come with it.** Airtable's gate formulas are recreated in
+  Mission Control and hold the email on the same conditions — see
+  [The send gates](#the-send-gates). Declining an applicant is now
+  **Disqualified** on the Leads page.
 - **Airtable no longer records the Stage 1 send** (module 22 wrote
   `Stage 2 Invite Sent At`, the message id and the invite count). The ledger
   records it; the Leads page shows it. Stage 3 keeps module 9, so the booking
@@ -124,6 +121,60 @@ backstops the stage.
   submission reached Mission Control with no email (refused as
   `invalid_email`). Mission Control's link names the application and holds a
   256-bit token it can check.
+
+## The send gates
+
+Make sent each email only while an Airtable formula on the record read `SEND`,
+re-reading the record twenty seconds after the event so a change in between
+counted. Those formulas are recreated in `src/lib/leadEmailGates.pure.ts`,
+condition for condition and in Airtable's order, with Airtable's own hold
+reasons. They come from the 2026-08-18 export of base `apptyShYE0yzL4IGB`
+(`npc-property-dashbord/docs/integrations/airtable/npc-emails/schema/base-schema.source.json`),
+and `leadEmailGates.test.ts` quotes each formula beside its port.
+
+| Email | Airtable formula | Held when (first that is true) |
+| --- | --- | --- |
+| 1. Application received | `Aurixa Waitlist.Send Stage 2 Invite` | Applicant already reached Stage 2 · Application declined · No Application ID on the record · No corporate email to send to |
+| 2. Questionnaire received | `Aurixa Waitlist.Send Stage 3 Invite` | Applicant already booked a strategic review · Applicant has not reached Stage 2 yet · Application declined · No Application ID on the record · No corporate email to send to · Invitation limit reached (3) |
+| 3. Review confirmed | `Strategic Review Bookings.Send Booking Confirmation` | Confirmation already sent · Booking cancelled · No applicant email to send to · No requested time on the booking |
+
+The Stage 2 email is the strategic review invitation — it carries the link
+`Stage 3 Booking URL` builds — so it takes the Stage 3 invitation's gate, which
+the Make scenario never read.
+
+**Where each input comes from now:**
+
+| Airtable | Mission Control |
+| --- | --- |
+| `Stage 2 Reached` | a questionnaire is in (`stage2_completed_at`) |
+| `Status = "Declined"` | the lead is **Disqualified** on the Leads page, or the mirror read Declined from Airtable |
+| `Application ID`, `Corporate Email` | `application_id`, `email` |
+| `Stage 3 Reached` (`Counts As Booked`) | a booking with a time, not cancelled, not a no-show |
+| `Stage 3 Invite Count` | as Make recorded it; Mission Control sends each email once (its ledger is unique per applicant and stage) |
+| `Confirmation Message ID` | Make's receipt (`stage3_confirmation_sent_at`); Mission Control's own send is its ledger row |
+| `Booking Status = "Cancelled"` | `stage3_cancelled_at` — set by the Cal.com webhook when a stage-three booking is cancelled, cleared when the website reports a new booking — or the status read as cancelled. The webhook finds the lead by `stage3_cal_booking_uid`, the Cal.com uid the website reported, else by the application reference; it never compares `stage3_booking_reference`, which the Airtable mirror rewrites with the base's own reference |
+| `Requested Start (UTC)` | `stage3_session_start` |
+
+**When it is asked.** When the email is raised, and again just before it goes —
+Mission Control's twenty-second re-read. A held email is a `skipped` ledger row
+reading `held by the send gate: <reason>`, which Recent applicant emails and
+the Leads page show. As with Make's filter, a held email is not sent later.
+
+**One difference from Make.** Make confirmed each booking — every booking was
+its own Airtable record with its own gate. Mission Control sends each email
+once per applicant (the ledger is unique per applicant and stage), so a review
+booked again after a cancellation is confirmed by Cal.com's own invitation,
+not by a second Mission Control email.
+
+**It applies whoever sends.** A stage still on Make is held in the backstop on
+the same rule, so the backstop never sends an email Make deliberately held.
+Email → Lead emails lists each stage's gate beside who sends it.
+
+**Airtable is not in the path.** Every input above is a column Mission Control
+holds. That matters now: since mid-October the NPC Emails workspace has been
+over Airtable's monthly API allowance (`PUBLIC_API_BILLING_LIMIT_EXCEEDED`),
+which stops Mission Control's mirror — and Make's own Airtable steps, since
+they use the same API — until it resets.
 
 ## The questionnaire link
 
@@ -170,6 +221,7 @@ the truth.
 | Path | What it holds |
 | --- | --- |
 | `src/lib/leadEmailTemplates.pure.ts` | the default copy, merge fields, validation, the renderer and the layout (Make's HTML, rebuilt) |
+| `src/lib/leadEmailGates.pure.ts` | the send gates — Airtable's three formulas, recreated |
 | `src/server/lead-emails.server.ts` | settings, templates, sending identity, questionnaire links, preview and test |
 | `src/server/lead-emails.functions.ts` | the console's server functions |
 | `src/routes/email.lead-emails.tsx` | the console |
@@ -177,3 +229,5 @@ the truth.
 | `src/server/lead-stage-emails.server.ts` | enqueue, claim, compose, send, record |
 | `src/server/leadStageEmailPolicy.pure.ts` | whether an email is owed — `applicantSenders` decides who sends |
 | `supabase/migrations/20261029100000_lead_email_templates.sql` | the three tables, `stage3_meeting_url`, the one-minute tick |
+| `supabase/migrations/20261029120000_lead_stage3_cancelled_at.sql` | `stage3_cancelled_at`, the cancellation the Stage 3 gate reads |
+| `supabase/migrations/20261029130000_lead_stage3_cal_booking_uid.sql` | `stage3_cal_booking_uid`, the Cal.com uid a cancellation is matched on |

@@ -1295,4 +1295,14 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "cron", jobname: "lead-stage-emails" },
     ],
   },
+  {
+    migration: "20261029120000_lead_stage3_cancelled_at.sql",
+    version: "20261029120000",
+    assertions: [{ kind: "column", table: "waitlist_leads", column: "stage3_cancelled_at" }],
+  },
+  {
+    migration: "20261029130000_lead_stage3_cal_booking_uid.sql",
+    version: "20261029130000",
+    assertions: [{ kind: "column", table: "waitlist_leads", column: "stage3_cal_booking_uid" }],
+  },
 ];
