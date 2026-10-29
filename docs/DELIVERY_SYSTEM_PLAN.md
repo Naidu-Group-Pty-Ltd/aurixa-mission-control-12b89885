@@ -45,10 +45,11 @@ Still open: the rest of P1 (L1–L7, L9, L10), P2, and the owner's decisions in
 been read back, D9's owed list is delivered, and D20 reports. D14 is parked by
 the owner (28 Oct). D15 shipped on 28 Oct, the engine first and the switch
 once it was live, and its guards with it (Where it stands). D19 no longer waits on the
-reset: from 29 Oct the library follows the prime by itself (§16). Its first two
-invocations were cut in their second minute, holding 142.6 MB in an isolate of
-128 MB; #417 holds 49 MB with the same output and settles a run that wrote its
-modules at a later tick (§16).
+reset: from 29 Oct the library follows the prime by itself (§16). Its first three
+invocations were cut 68 to 72 s in, so it told the operators at 16:04 UTC and
+now tries every six hours. In the replay, #417 ends detection at 20 to 28 s
+rather than 63 to 85, holds 49 MB rather than 143 with the same output, and
+settles a run that wrote its modules at a later tick (§16).
 D3 and D8 are the ones that stand between this
 fleet and a launch, and D3 is smaller than §4.2 read (§15). §14 records the
 clones' open tables, found and closed on 28 Oct, and §15 what else 28 Oct
@@ -1272,34 +1273,82 @@ and the 15-minute job. The prime's head was `6dbda61`.
   (`20d88195`): 143 modules (9 new, 134 rewritten), approved by policy and 14
   archived at 14:50:10, then 23 entries published at `6dbda61` before it was
   cut 71 s in. It stayed `running`, with its tree hash.
+- **15:34.** The code that settles such a run at a later tick was not yet
+  published, so the tick closed `20d88195` as a try and detected again
+  (`96746f45`). By its own rows, it had written its 2,000 edges 48 s in, its
+  143 modules 58 s in, and 14,000 of its backend artifacts, 28 of 36 inserts,
+  by 69 s, when it was cut, 72 s after its request was sent. It wrote no tree
+  hash.
+- **16:04.** The tick closed `96746f45`, the third failure in a row, and told
+  the operators once (`library_follow_held`, 16:04:04). From here the follow
+  tries once every six hours, the first after 22:04 UTC. The notice gave its
+  reason as "because the follow failed 3 times in a row"; #417 names why the
+  last try died instead.
 - **Clones.** At 15:28, every clone's recorded plan (scale, scale, launch,
   scale), its installs (134, 135, 22, 37) and its sync time read as they did
   before the first tick, and no pin exists.
 
 Why it was cut, measured rather than assumed:
 
-- **Not wall time.** In the two days before, pg_net batches whose slowest
-  request took 80 to 87 s answered `200` throughout.
+- **Time, most likely.** The three invocations were cut 68, 71 and 72 s in,
+  each in a different part of its work: writing modules, publishing entries,
+  inserting artifacts. What each was doing differed, and when it stopped did
+  not. pg_net was not the one to stop waiting: it had ten minutes' patience.
+  An earlier draft of this section said it was not wall time, because pg_net
+  batches whose slowest request took 80 to 87 s had answered `200`. That was
+  wrong: pg_net records when a batch began, not when each request in it was
+  answered, so a batch's length is no request's. The cascade's passes were
+  cut at 55 and 68.7 s (`docs/CASCADE_PASS_REPLAY.md`), so the limit is about
+  a minute, not a number this has measured exactly.
 - **Not likely CPU.** The detection, replayed at `6dbda61` against a copy of
-  the prime, took 5.4 s of CPU on a cold blob cache and 3.6 s on a warm one,
+  the prime, took 5.7 s of CPU on a cold blob cache and 3.4 s on a warm one,
   against the 30 s a Worker is allowed by default. The replay does not parse
   GitHub's answers off the wire, so this is a bound from below.
-- **Memory.** The same replay's live heap, after collection, reached 142.4 MB
-  cold and 92.5 MB warm, about 10 MB of it the stand-in database; the isolate
-  has 128 MB. V8 keeps a slice of a long string as a view of the whole, so
-  the trace's 8,192-character cuts held all 3,394 source files whole, and a
-  cold backend pass's parsed analyses held every migration whole.
+- **Memory, as well.** The same replay's live heap, after collection, reached
+  142.6 MB cold and 92.6 MB warm, about 10 MB of it the stand-in database;
+  the isolate has 128 MB. V8 keeps a slice of a long string as a view of the
+  whole, so the trace's 8,192-character cuts held all 3,394 source files
+  whole, and a cold backend pass's parsed analyses held every migration
+  whole. A 502 does not say whether an invocation died of it; a cold one was
+  over the limit in the replay.
+- **Statements one after another.** By the third try's own rows, its 28
+  artifact inserts of 500 rows took 10.8 s, 386 ms apiece, and its last edge
+  to its last module 9.6 s, two round trips per module. The blob cache's 18
+  reads and 18 refreshes add about 6 s more in the model below.
 
 What #417 changes, with the replay to show it:
 
 - each cut and each parsed analysis is its own copy, each file's imports are
   worked out once rather than once per route that reaches it, and the texts
   are let go once the backend pass has read them: 49.1 MB live at most cold
-  and 43.2 MB warm, 3.6 and 2.4 s of CPU, and the 143 modules, the run row
+  and 43.3 MB warm, 3.8 and 2.7 s of CPU, and the 143 modules, the run row
   and every edge, artifact and alert byte-identical to `main`'s;
+- the run sends its statements five at a time, a Worker holding six
+  connections open: the blob cache's reads, writes and refreshes, its edges,
+  its module writes and its artifacts. A module that cannot be read or
+  written still stops the run, as it did one at a time
+  (`mapWithConcurrencyOrThrow` starts nothing after a failure, where
+  `mapWithConcurrency` let its other runners carry on). The library writer
+  publishes five entries at a time, in the same order;
 - a run that wrote its modules is settled by a later tick, not detected
-  again (above);
+  again (above), and a follow whose detection ended more than 40 s into its
+  invocation leaves the settle to that tick. A settle still pruning 50 s in
+  leaves the earlier runs it has not reached to the next settle, so its audit
+  row is written;
+- a follow run that has written nothing for ten minutes died with its
+  invocation, and the next tick closes it. The 30 minutes a person's
+  detection is given held a dead follow run's commit for two ticks;
 - the hook's patience is 150 s, not 600 (`20261029160000`): pg_net sends its
   next batch only once every request of this one has answered, so the 14:50
   jobs' requests went out at 14:50:14, and a follow that hung would have held
   every cron hook in Mission Control for ten minutes.
+
+The replay was timed too, six requests at a time at most, with each database
+statement waiting 33 ms, and 0.67 ms more per row inserted and 1.3 ms per row
+updated (production's artifact inserts took 386 ms for 500 rows), each
+GraphQL batch 600 ms and the tree 2 s. For `main`'s code it reaches the end
+of detection at 63.4 s warm. Production's second try had ended detection and
+begun approving by 61 s, and its third, extrapolated from its inserts, would
+have ended it at about 72 s, so the model sits inside production's spread.
+For #417's code it reaches the end of detection at 19.9 s warm and 27.8 s
+cold, with the same output.
