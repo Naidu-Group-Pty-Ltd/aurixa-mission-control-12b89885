@@ -117,6 +117,7 @@ import { Route as HooksLeadStageEmailsRouteImport } from './routes/hooks.lead-st
 import { Route as HooksMarketingSnapshotsRouteImport } from './routes/hooks.marketing-snapshots'
 import { Route as HooksMigrationDriftRouteImport } from './routes/hooks.migration-drift'
 import { Route as HooksMigrationEnqueueRouteImport } from './routes/hooks.migration-enqueue'
+import { Route as HooksModuleLibraryFollowRouteImport } from './routes/hooks.module-library-follow'
 import { Route as HooksPrimeSecretPairsRouteImport } from './routes/hooks.prime-secret-pairs'
 import { Route as HooksReferenceDataSyncRouteImport } from './routes/hooks.reference-data-sync'
 import { Route as HooksRunSchedulesRouteImport } from './routes/hooks.run-schedules'
@@ -807,6 +808,12 @@ const HooksMigrationEnqueueRoute = HooksMigrationEnqueueRouteImport.update({
   path: '/hooks/migration-enqueue',
   getParentRoute: () => rootRouteImport,
 } as any)
+const HooksModuleLibraryFollowRoute =
+  HooksModuleLibraryFollowRouteImport.update({
+    id: '/hooks/module-library-follow',
+    path: '/hooks/module-library-follow',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const HooksPrimeSecretPairsRoute = HooksPrimeSecretPairsRouteImport.update({
   id: '/hooks/prime-secret-pairs',
   path: '/hooks/prime-secret-pairs',
@@ -1617,6 +1624,7 @@ export interface FileRoutesByFullPath {
   '/hooks/marketing-snapshots': typeof HooksMarketingSnapshotsRoute
   '/hooks/migration-drift': typeof HooksMigrationDriftRoute
   '/hooks/migration-enqueue': typeof HooksMigrationEnqueueRoute
+  '/hooks/module-library-follow': typeof HooksModuleLibraryFollowRoute
   '/hooks/prime-secret-pairs': typeof HooksPrimeSecretPairsRoute
   '/hooks/reference-data-sync': typeof HooksReferenceDataSyncRoute
   '/hooks/run-schedules': typeof HooksRunSchedulesRoute
@@ -1855,6 +1863,7 @@ export interface FileRoutesByTo {
   '/hooks/marketing-snapshots': typeof HooksMarketingSnapshotsRoute
   '/hooks/migration-drift': typeof HooksMigrationDriftRoute
   '/hooks/migration-enqueue': typeof HooksMigrationEnqueueRoute
+  '/hooks/module-library-follow': typeof HooksModuleLibraryFollowRoute
   '/hooks/prime-secret-pairs': typeof HooksPrimeSecretPairsRoute
   '/hooks/reference-data-sync': typeof HooksReferenceDataSyncRoute
   '/hooks/run-schedules': typeof HooksRunSchedulesRoute
@@ -2096,6 +2105,7 @@ export interface FileRoutesById {
   '/hooks/marketing-snapshots': typeof HooksMarketingSnapshotsRoute
   '/hooks/migration-drift': typeof HooksMigrationDriftRoute
   '/hooks/migration-enqueue': typeof HooksMigrationEnqueueRoute
+  '/hooks/module-library-follow': typeof HooksModuleLibraryFollowRoute
   '/hooks/prime-secret-pairs': typeof HooksPrimeSecretPairsRoute
   '/hooks/reference-data-sync': typeof HooksReferenceDataSyncRoute
   '/hooks/run-schedules': typeof HooksRunSchedulesRoute
@@ -2338,6 +2348,7 @@ export interface FileRouteTypes {
     | '/hooks/marketing-snapshots'
     | '/hooks/migration-drift'
     | '/hooks/migration-enqueue'
+    | '/hooks/module-library-follow'
     | '/hooks/prime-secret-pairs'
     | '/hooks/reference-data-sync'
     | '/hooks/run-schedules'
@@ -2576,6 +2587,7 @@ export interface FileRouteTypes {
     | '/hooks/marketing-snapshots'
     | '/hooks/migration-drift'
     | '/hooks/migration-enqueue'
+    | '/hooks/module-library-follow'
     | '/hooks/prime-secret-pairs'
     | '/hooks/reference-data-sync'
     | '/hooks/run-schedules'
@@ -2816,6 +2828,7 @@ export interface FileRouteTypes {
     | '/hooks/marketing-snapshots'
     | '/hooks/migration-drift'
     | '/hooks/migration-enqueue'
+    | '/hooks/module-library-follow'
     | '/hooks/prime-secret-pairs'
     | '/hooks/reference-data-sync'
     | '/hooks/run-schedules'
@@ -3054,6 +3067,7 @@ export interface RootRouteChildren {
   HooksMarketingSnapshotsRoute: typeof HooksMarketingSnapshotsRoute
   HooksMigrationDriftRoute: typeof HooksMigrationDriftRoute
   HooksMigrationEnqueueRoute: typeof HooksMigrationEnqueueRoute
+  HooksModuleLibraryFollowRoute: typeof HooksModuleLibraryFollowRoute
   HooksPrimeSecretPairsRoute: typeof HooksPrimeSecretPairsRoute
   HooksReferenceDataSyncRoute: typeof HooksReferenceDataSyncRoute
   HooksRunSchedulesRoute: typeof HooksRunSchedulesRoute
@@ -3916,6 +3930,13 @@ declare module '@tanstack/react-router' {
       path: '/hooks/migration-enqueue'
       fullPath: '/hooks/migration-enqueue'
       preLoaderRoute: typeof HooksMigrationEnqueueRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/module-library-follow': {
+      id: '/hooks/module-library-follow'
+      path: '/hooks/module-library-follow'
+      fullPath: '/hooks/module-library-follow'
+      preLoaderRoute: typeof HooksModuleLibraryFollowRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/hooks/prime-secret-pairs': {
@@ -5093,6 +5114,7 @@ const rootRouteChildren: RootRouteChildren = {
   HooksMarketingSnapshotsRoute: HooksMarketingSnapshotsRoute,
   HooksMigrationDriftRoute: HooksMigrationDriftRoute,
   HooksMigrationEnqueueRoute: HooksMigrationEnqueueRoute,
+  HooksModuleLibraryFollowRoute: HooksModuleLibraryFollowRoute,
   HooksPrimeSecretPairsRoute: HooksPrimeSecretPairsRoute,
   HooksReferenceDataSyncRoute: HooksReferenceDataSyncRoute,
   HooksRunSchedulesRoute: HooksRunSchedulesRoute,

@@ -214,7 +214,9 @@ export function judgePublication(
 
 /**
  * The library entry a publication writes: approved, by its publisher, at the
- * commit its module was detected at, all in the one insert.
+ * commit its module was detected at, all in the one insert. The library follow
+ * publishes with no publisher (`library-follow.server.ts`): the owner approved
+ * its entries by policy, on 29 Oct 2026, and no person published them.
  *
  * A clone that pins an entry has that module's globs REPLACED by its
  * `file_paths` at cascade time (`cascade/installedGlobs.server.ts`), so the
@@ -228,7 +230,7 @@ export function libraryEntryInsert(
     version: number;
     runId: string;
     commitSha: string;
-    publisherId: string;
+    publisherId: string | null;
     /** One instant for the whole publication: it is published and approved at once. */
     now: string;
     tags: string[];

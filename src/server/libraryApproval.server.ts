@@ -92,9 +92,10 @@ export async function probeCommitColumns(supabase: Db): Promise<Check> {
 /**
  * The columns of `modules` a publication reads. One literal: supabase-js
  * parses a column list at the type level, and a built-up string would type
- * the row as an error.
+ * the row as an error. The library follow reads the modules it publishes with
+ * it too, so both publish from the same read.
  */
-const MODULE_COLUMNS =
+export const MODULE_COLUMNS =
   "id, name, slug, status, description, routes, route_entry_file, resolved_files, file_globs, backend_file_globs, backend_manifest, detection_run_id, layer, cohesion_score, coupling_score, ai_confidence, ai_reasoning, shared_by_modules, edge_functions, database_tables, required_secrets, required_migrations, storage_buckets, cron_jobs";
 
 /** Ids per `in` read of `modules`: 100 uuids is about 3.7 KB of query string. */
@@ -211,83 +212,13 @@ export async function publishModulesToLibrary(
   }
 
   const now = new Date().toISOString();
-  const entries: PublishedEntry[] = [];
-  const warnings: string[] = [];
-
-  for (const m of modules) {
-    const verdict = judgePublication(m, runs);
-    if (!verdict.ok) {
-      refused.push({ moduleId: m.id, slug: m.slug, reason: verdict.reason });
-      continue;
-    }
-
-    // The next version. A read that failed is not "no versions": numbering the
-    // entry v1 would write a second v1 beside the first.
-    const { data: latest, error: versionError } = await supabase
-      .from("module_library")
-      .select("version")
-      .eq("slug", m.slug)
-      .order("version", { ascending: false })
-      .limit(1);
-    if (versionError) {
-      refused.push({
-        moduleId: m.id,
-        slug: m.slug,
-        reason: `${m.name} (${m.slug}): could not read its published versions: ${describeDbError(versionError)}`,
-      });
-      continue;
-    }
-    const version = (latest?.[0]?.version ?? 0) + 1;
-
-    const { data: written, error: insertError } = await supabase
-      .from("module_library")
-      .insert(
-        libraryEntryInsert(m, {
-          version,
-          runId: verdict.runId,
-          commitSha: verdict.commitSha,
-          publisherId: request.userId,
-          now,
-          tags: request.tagsFor?.(m) ?? [],
-        }),
-      )
-      .select("id, name, slug, version, source_commit_sha")
-      .single();
-    if (insertError || !written) {
-      // module_library_slug_version_key (20261028140000): a publication of the
-      // same module that read the same last version wrote this number first.
-      const raced = insertError?.code === "23505";
-      refused.push({
-        moduleId: m.id,
-        slug: m.slug,
-        reason: raced
-          ? `${m.name} (${m.slug}): another publication wrote v${version} first, so this one ` +
-            `wrote nothing; publish it again to number it after that one`
-          : `${m.name} (${m.slug}): the entry was not written: ${
-              insertError ? describeDbError(insertError) : "no row came back"
-            }`,
-      });
-      continue;
-    }
-    entries.push(written);
-
-    // Superseded only once the new entry exists. Flipping first, as this used
-    // to, left a slug with no latest entry whenever the insert then failed.
-    // Only versions below this one: a publication that numbered itself after
-    // this one, and landed while this one was being written, stays latest.
-    // Clearing every other latest row let two publications clear each other.
-    const { error: supersedeError } = await supabase
-      .from("module_library")
-      .update({ is_latest: false })
-      .eq("slug", m.slug)
-      .eq("is_latest", true)
-      .lt("version", version);
-    if (supersedeError) {
-      warnings.push(
-        `${m.slug} v${version} was published, but its earlier versions still read latest: ${supersedeError.message}`,
-      );
-    }
-  }
+  const written = await writeLibraryEntries(supabase, modules, runs, {
+    publisherId: request.userId,
+    now,
+    tagsFor: request.tagsFor,
+  });
+  const { entries, warnings } = written;
+  refused.push(...written.refused);
 
   const { error: auditError } = await supabase.from("audit_log").insert({
     action: "module.publish_to_library",
@@ -333,6 +264,109 @@ export async function publishModulesToLibrary(
     };
   }
   return { ok: true, published: entries.length, entries, refused, warnings };
+}
+
+/**
+ * Write each module's next entry, approved at the commit `runs` records for
+ * it: the one writer both publications go through. It asks nobody's role,
+ * so it is called only behind a check that did: `publishModulesToLibrary`,
+ * after `requireLibraryAdmin`, and the library follow, from the cron-secret
+ * hook (`libraryFollowCallers.contract.test.ts` holds it to those two).
+ * `publisherId` is null for the follow, whose entries the owner approved by
+ * policy.
+ *
+ * A module that cannot be published is refused by name, with its reason, and
+ * the rest are written.
+ */
+export async function writeLibraryEntries(
+  supabase: Db,
+  modules: readonly PublishableModule[],
+  runs: ReadonlyMap<string, DetectionRunCommit>,
+  at: {
+    publisherId: string | null;
+    now: string;
+    tagsFor?: (module: PublishableModule) => string[];
+  },
+): Promise<{ entries: PublishedEntry[]; refused: RefusedModule[]; warnings: string[] }> {
+  const entries: PublishedEntry[] = [];
+  const refused: RefusedModule[] = [];
+  const warnings: string[] = [];
+
+  for (const m of modules) {
+    const verdict = judgePublication(m, runs);
+    if (!verdict.ok) {
+      refused.push({ moduleId: m.id, slug: m.slug, reason: verdict.reason });
+      continue;
+    }
+
+    // The next version. A read that failed is not "no versions": numbering the
+    // entry v1 would write a second v1 beside the first.
+    const { data: latest, error: versionError } = await supabase
+      .from("module_library")
+      .select("version")
+      .eq("slug", m.slug)
+      .order("version", { ascending: false })
+      .limit(1);
+    if (versionError) {
+      refused.push({
+        moduleId: m.id,
+        slug: m.slug,
+        reason: `${m.name} (${m.slug}): could not read its published versions: ${describeDbError(versionError)}`,
+      });
+      continue;
+    }
+    const version = (latest?.[0]?.version ?? 0) + 1;
+
+    const { data: written, error: insertError } = await supabase
+      .from("module_library")
+      .insert(
+        libraryEntryInsert(m, {
+          version,
+          runId: verdict.runId,
+          commitSha: verdict.commitSha,
+          publisherId: at.publisherId,
+          now: at.now,
+          tags: at.tagsFor?.(m) ?? [],
+        }),
+      )
+      .select("id, name, slug, version, source_commit_sha")
+      .single();
+    if (insertError || !written) {
+      // module_library_slug_version_key (20261028140000): a publication of the
+      // same module that read the same last version wrote this number first.
+      const raced = insertError?.code === "23505";
+      refused.push({
+        moduleId: m.id,
+        slug: m.slug,
+        reason: raced
+          ? `${m.name} (${m.slug}): another publication wrote v${version} first, so this one ` +
+            `wrote nothing; publish it again to number it after that one`
+          : `${m.name} (${m.slug}): the entry was not written: ${
+              insertError ? describeDbError(insertError) : "no row came back"
+            }`,
+      });
+      continue;
+    }
+    entries.push(written);
+
+    // Superseded only once the new entry exists. Flipping first, as this used
+    // to, left a slug with no latest entry whenever the insert then failed.
+    // Only versions below this one: a publication that numbered itself after
+    // this one, and landed while this one was being written, stays latest.
+    // Clearing every other latest row let two publications clear each other.
+    const { error: supersedeError } = await supabase
+      .from("module_library")
+      .update({ is_latest: false })
+      .eq("slug", m.slug)
+      .eq("is_latest", true)
+      .lt("version", version);
+    if (supersedeError) {
+      warnings.push(
+        `${m.slug} v${version} was published, but its earlier versions still read latest: ${supersedeError.message}`,
+      );
+    }
+  }
+  return { entries, refused, warnings };
 }
 
 // ─── Deciding entries already published ─────────────────────────────────────

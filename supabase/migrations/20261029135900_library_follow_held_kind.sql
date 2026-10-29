@@ -1,0 +1,13 @@
+-- The notification raised when the module library's follow stops for a person.
+--
+-- @asserts enum:notification_kind
+--
+-- Kept in its own migration, like 20261029095900: a new enum value cannot be
+-- USED in the transaction that adds it.
+--
+-- The follow (20261029140000, `library-follow.server.ts`) settles the module
+-- catalogue at each new prime head by itself. It stops instead where the run
+-- found no module, or would archive more than a quarter of the live
+-- catalogue, and does not try that commit again; every operator is told, once
+-- per commit, with the reason (docs/DELIVERY_SYSTEM_PLAN.md, D19).
+ALTER TYPE public.notification_kind ADD VALUE IF NOT EXISTS 'library_follow_held';

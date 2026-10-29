@@ -65,6 +65,15 @@ export type DetectionRunConfig = {
   synthesizeBackendModules: boolean;
   /** Upper bound on blobs read per run; cache hits don't count against it. */
   maxBackendBlobs: number;
+  /**
+   * A run of the library follow (`library-follow.server.ts`, D19, 29 Oct
+   * 2026). An approved module, and one the follow archived, has its files
+   * rewritten from the run as a proposed one does, so every module the run
+   * finds names it; one a person archived keeps its files. Every module write
+   * is checked, a prime with no route is a failure, and the run stays
+   * `running` until the follow has settled the catalogue at its commit.
+   */
+  follow?: boolean;
 };
 
 export const DEFAULT_CONFIG: DetectionRunConfig = {
@@ -414,6 +423,11 @@ async function prefetchTraceSources(args: {
  * declaring nothing, and the modules shaped from that would be approved at a
  * commit whose files they do not describe.
  */
+/** A follow run's module write that did not land: the run stops, because what it settles would not be what it found. */
+function moduleWriteRefusal(slug: string, error: { message: string; code?: string }): Error {
+  return new Error(`The module ${slug} was not written: ${describeDbError(error)}`);
+}
+
 function unreadRefusal(what: string, unread: string[]): Error {
   const shown = unread.slice(0, 10).join(", ");
   const more = unread.length > 10 ? ` and ${unread.length - 10} more` : "";
@@ -727,7 +741,8 @@ function calculateMetrics(
 
 export async function runDetection(args: {
   supabase: Supabase;
-  userId: string;
+  /** Who started the run; null for the library follow, which nobody starts. */
+  userId: string | null;
   config: DetectionRunConfig;
   onProgress?: (p: DetectionProgress) => void;
   /**
@@ -737,6 +752,14 @@ export async function runDetection(args: {
    * recording itself and before its wipe.
    */
   guard?: (runId: string) => Promise<string | null>;
+  /**
+   * Asked in follow mode once the run knows every slug it found, before it
+   * writes a module: an answer stops the run there, with no module written,
+   * and leaves the run `running` for the caller to close
+   * (`library-follow.server.ts`, which holds rather than archive the
+   * catalogue).
+   */
+  beforeWriting?: (detectedSlugs: string[]) => Promise<string | null>;
 }): Promise<{
   ok: boolean;
   runId: string;
@@ -745,6 +768,12 @@ export async function runDetection(args: {
   updated: number;
   orphanAlerts: number;
   error?: string;
+  /** The commit the run read, once it has read the tree. */
+  commitSha?: string;
+  /** Every slug the run found and wrote a module for (or would have, for one a person archived). */
+  detectedSlugs?: string[];
+  /** Why `beforeWriting` stopped the run before it wrote a module. */
+  stoppedBeforeWriting?: string;
 }> {
   const { supabase, userId, config, onProgress } = args;
   const apiKey = process.env.LOVABLE_API_KEY;
@@ -819,6 +848,8 @@ export async function runDetection(args: {
     onProgress?.({ runId, phase, detail, percent });
   };
 
+  // The commit the run read, for a failure after it read the tree to name.
+  let readCommit: string | undefined;
   try {
     const competitor = args.guard ? await args.guard(runId) : null;
     if (competitor) throw new Error(competitor);
@@ -835,6 +866,7 @@ export async function runDetection(args: {
       octokit,
       branchRef,
     );
+    readCommit = commitSha;
 
     // The commit this run read, recorded before anything is changed. A library
     // entry is approved at the commit its module was detected at, so a run
@@ -886,6 +918,13 @@ export async function runDetection(args: {
     progress("route_detection", `Found ${routeFiles.length} route files`, 25);
 
     if (routeFiles.length === 0) {
+      // A follow that completed here would settle a catalogue of nothing, and
+      // its settle archives whatever the run did not find.
+      if (config.follow) {
+        throw new Error(
+          `No route file was found in the prime's tree at ${commitSha}, so the follow does not settle the catalogue at it`,
+        );
+      }
       await supabase
         .from("module_detection_runs")
         .update({
@@ -1417,25 +1456,62 @@ export async function runDetection(args: {
     const globRejections: Array<{ slug: string; reason: string; glob: string }> = [];
     const moduleIdBySlug = new Map<string, string>();
 
+    // Sanitise every module's file_globs before hitting the DB: a bad glob
+    // here poisons every downstream cascade / tree-walk / re-sync for this
+    // module. The modules that keep a glob are the ones the run found.
+    const persisted: RouteModule[] = [];
     for (const m of routeModules) {
-      // Sanitise file_globs before hitting the DB: a bad glob here poisons
-      // every downstream cascade / tree-walk / re-sync for this module.
       const { valid: safeGlobs, invalid: badGlobs } = validateModuleGlobs(m.file_globs);
       for (const bad of badGlobs) {
         globRejections.push({ slug: m.slug, glob: bad.glob, reason: bad.reason });
       }
       m.file_globs = safeGlobs;
-      if (safeGlobs.length === 0) {
-        // Skip modules whose entire glob set was rejected — writing an empty
-        // list would silently disable cascades for this module.
-        continue;
-      }
+      // Skip modules whose entire glob set was rejected — writing an empty
+      // list would silently disable cascades for this module.
+      if (safeGlobs.length > 0) persisted.push(m);
+    }
+    const detectedSlugs = persisted.map((m) => m.slug);
 
-      const { data: existing } = await supabase
-        .from("modules")
-        .select("id, status")
-        .eq("slug", m.slug)
-        .maybeSingle();
+    // A follow is asked before any module is written, so a run it would not
+    // settle changes nothing a clone receives.
+    if (config.follow && args.beforeWriting) {
+      const stop = await args.beforeWriting(detectedSlugs);
+      if (stop) {
+        return {
+          ok: false,
+          runId,
+          proposed: routeModules.length,
+          inserted: 0,
+          updated: 0,
+          orphanAlerts: 0,
+          error: stop,
+          commitSha,
+          detectedSlugs,
+          stoppedBeforeWriting: stop,
+        };
+      }
+    }
+
+    for (const m of persisted) {
+      // A follow run reads who archived the module, and stops on a read that
+      // failed: read as no module, it would insert a second one of the slug.
+      const existingRead = config.follow
+        ? await supabase
+            .from("modules")
+            .select("id, status, archived_by_follow_run_id")
+            .eq("slug", m.slug)
+            .maybeSingle()
+        : await supabase.from("modules").select("id, status").eq("slug", m.slug).maybeSingle();
+      if (config.follow && existingRead.error) {
+        throw new Error(
+          `The module ${m.slug} could not be read: ${describeDbError(existingRead.error)}`,
+        );
+      }
+      const existing = existingRead.data as {
+        id: string;
+        status: string;
+        archived_by_follow_run_id?: string | null;
+      } | null;
 
       // Backend surface resolved for this module. Written on every run so an
       // existing module picks up backend detail the first time it is rescanned.
@@ -1477,36 +1553,59 @@ export async function runDetection(args: {
         ),
       };
 
+      // What the run found of the module, written whole wherever the module is
+      // rewritten from this run.
+      const shape = {
+        file_globs: m.file_globs,
+        routes: m.routes,
+        route_entry_file: m.entry_file,
+        resolved_files: m.resolved_files,
+        shared_by_modules: m.shared_by_modules,
+        ai_confidence: m.ai_confidence,
+        ai_reasoning: m.ai_reasoning,
+        cohesion_score: m.cohesion_score,
+        coupling_score: m.coupling_score,
+        requires: m.requires,
+        incompatible_with: m.incompatible_with,
+        detection_run_id: runId,
+        tree_snapshot_hash: treeHash,
+        ...backendFields,
+      };
+      // A follow rewrites an approved module, and one it archived, from the
+      // run, so every module it settles names the run that found its files and
+      // its backend at one commit. One a person archived keeps its files.
+      const followRewrites =
+        config.follow === true &&
+        (existing?.status === "approved" ||
+          (existing?.status === "archived" && existing.archived_by_follow_run_id != null));
+
       if (existing) {
         if (existing.status === "proposed" || existing.status === "rejected") {
-          await supabase
+          const { error: writeError } = await supabase
             .from("modules")
-            .update({
-              name: m.name,
-              description: m.description,
-              file_globs: m.file_globs,
-              routes: m.routes,
-              route_entry_file: m.entry_file,
-              resolved_files: m.resolved_files,
-              shared_by_modules: m.shared_by_modules,
-              ai_confidence: m.ai_confidence,
-              ai_reasoning: m.ai_reasoning,
-              cohesion_score: m.cohesion_score,
-              coupling_score: m.coupling_score,
-              requires: m.requires,
-              incompatible_with: m.incompatible_with,
-              detection_run_id: runId,
-              tree_snapshot_hash: treeHash,
-              ...backendFields,
-            })
+            .update({ name: m.name, description: m.description, ...shape })
             .eq("id", existing.id);
+          if (writeError && config.follow) throw moduleWriteRefusal(m.slug, writeError);
+          updated++;
+          moduleIdBySlug.set(m.slug, existing.id);
+        } else if (followRewrites) {
+          // Its name and description are kept: a person may have written them.
+          const { error: writeError } = await supabase
+            .from("modules")
+            .update(shape)
+            .eq("id", existing.id);
+          if (writeError) throw moduleWriteRefusal(m.slug, writeError);
           updated++;
           moduleIdBySlug.set(m.slug, existing.id);
         } else if (config.detectBackend) {
           // An approved/archived module keeps its curated shape, but stale or
           // absent backend metadata is worse than none: it drives cascades and
           // secret provisioning. Refresh only the detected backend fields.
-          await supabase.from("modules").update(backendFields).eq("id", existing.id);
+          const { error: writeError } = await supabase
+            .from("modules")
+            .update(backendFields)
+            .eq("id", existing.id);
+          if (writeError && config.follow) throw moduleWriteRefusal(m.slug, writeError);
           moduleIdBySlug.set(m.slug, existing.id);
         }
       } else {
@@ -1516,25 +1615,13 @@ export async function runDetection(args: {
             name: m.name,
             slug: m.slug,
             description: m.description,
-            file_globs: m.file_globs,
-            routes: m.routes,
-            route_entry_file: m.entry_file,
-            resolved_files: m.resolved_files,
-            shared_by_modules: m.shared_by_modules,
-            ai_confidence: m.ai_confidence,
-            ai_reasoning: m.ai_reasoning,
-            cohesion_score: m.cohesion_score,
-            coupling_score: m.coupling_score,
-            requires: m.requires,
-            incompatible_with: m.incompatible_with,
             status: "proposed",
             detected_by_ai: false,
-            detection_run_id: runId,
-            tree_snapshot_hash: treeHash,
-            ...backendFields,
+            ...shape,
           })
           .select("id")
           .single();
+        if (error && config.follow) throw moduleWriteRefusal(m.slug, error);
         if (!error) {
           inserted++;
           if (created?.id) moduleIdBySlug.set(m.slug, created.id);
@@ -1648,10 +1735,12 @@ export async function runDetection(args: {
 
     const totalSecrets = new Set(routeModules.flatMap((m) => m.backend.secrets)).size;
 
+    // A follow run stays `running` until the follow has settled the
+    // catalogue at it, so a reset or a detection meets it throughout.
     await supabase
       .from("module_detection_runs")
       .update({
-        status: "completed",
+        status: config.follow ? "running" : "completed",
         tree_hash: treeHash,
         file_count: files.length,
         sampled_file_count: contentCache.size,
@@ -1672,7 +1761,7 @@ export async function runDetection(args: {
         backend_summary: JSON.parse(
           JSON.stringify({ ...backendSummary, trace_too_large_to_hold: traceReads.tooLarge }),
         ),
-        completed_at: new Date().toISOString(),
+        completed_at: config.follow ? null : new Date().toISOString(),
       })
       .eq("id", runId);
 
@@ -1698,7 +1787,16 @@ export async function runDetection(args: {
       },
     });
 
-    return { ok: true, runId, proposed: routeModules.length, inserted, updated, orphanAlerts };
+    return {
+      ok: true,
+      runId,
+      proposed: routeModules.length,
+      inserted,
+      updated,
+      orphanAlerts,
+      commitSha,
+      detectedSlugs,
+    };
   } catch (e) {
     const errorMsg = e instanceof Error ? e.message : String(e);
     console.error("Detection run failed:", errorMsg);
@@ -1718,6 +1816,7 @@ export async function runDetection(args: {
       updated: 0,
       orphanAlerts: 0,
       error: errorMsg,
+      commitSha: readCommit,
     };
   }
 }

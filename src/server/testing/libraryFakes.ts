@@ -6,8 +6,8 @@
 // `module_drift_alerts` and `module_config_snapshots` — behind the slice of
 // the PostgREST builder that `libraryApproval.server.ts`,
 // `library-validation.server.ts`, `cascade/installedGlobs.server.ts`,
-// `library-reingest.server.ts` and `module-detection.server.ts` use, plus the
-// `has_role` RPC.
+// `library-reingest.server.ts`, `module-detection.server.ts` and
+// `library-follow.server.ts` use, plus the `has_role` RPC.
 //
 // It answers as the server does rather than replaying canned results:
 //
@@ -88,7 +88,10 @@ const TABLES = [
 ] as const;
 type Table = (typeof TABLES)[number];
 
-/** The columns each table carries in production (`types.ts`, 28 Oct 2026). */
+/**
+ * The columns each table carries in production (`types.ts`, 28 Oct 2026, and
+ * `modules.archived_by_follow_run_id` from 20261029140000).
+ */
 const COLUMNS: Record<Table, readonly string[]> = {
   modules: [
     "ai_confidence",
@@ -96,6 +99,7 @@ const COLUMNS: Record<Table, readonly string[]> = {
     "apply_on_install",
     "approved_at",
     "approved_by",
+    "archived_by_follow_run_id",
     "backend_file_globs",
     "backend_manifest",
     "clone_migration_sql",
@@ -871,7 +875,8 @@ function builder(db: LibraryFakeDb, table: Table, known: Set<string>): Builder {
           const others = rows()
             .filter((r) => r !== row)
             .map(after);
-          const broken = violation(table, after(row), others) ?? unreferenced(db, table, after(row));
+          const broken =
+            violation(table, after(row), others) ?? unreferenced(db, table, after(row));
           if (broken) return { data: null, error: broken };
         }
         for (const row of result) Object.assign(row, structuredClone(values as Row));
