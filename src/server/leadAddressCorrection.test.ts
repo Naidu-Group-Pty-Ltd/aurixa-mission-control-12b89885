@@ -208,9 +208,11 @@ vi.mock("@/server/audit.server", () => ({
   notifyOperators: async (notice: Record<string, unknown>) => void db.notices.push(notice),
 }));
 
-const { CORRECTION_TOKEN_KEY, mintCorrectionToken, resolveStageOneConflict } =
+const { CORRECTION_TOKEN_KEY, correctionTokenFor, resolveStageOneConflict } =
   await import("./lead-address-correction.server");
-const TOKEN = mintCorrectionToken();
+// The token the applying browser generated and sent with its application.
+const BROWSER_TOKEN = "browser-held-token_0123456789abcdef";
+const TOKEN = { token: BROWSER_TOKEN, sha256: correctionTokenFor(BROWSER_TOKEN).sha256 };
 // A lead as Mission Control holds it: its 201 handed the browser TOKEN.
 const held = (over: Record<string, unknown> = {}) =>
   applied({ metadata: { channel: "website", [CORRECTION_TOKEN_KEY]: TOKEN.sha256 }, ...over });
@@ -270,6 +272,31 @@ beforeEach(() => {
   db.ops = [];
   db.audits = [];
   db.notices = [];
+});
+
+describe("correctionTokenFor", () => {
+  it("keeps the hash of the token the browser generated, and hands back nothing", () => {
+    const kept = correctionTokenFor(BROWSER_TOKEN);
+    expect(kept.issued).toBeNull();
+    expect(kept.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(kept.sha256).not.toContain(BROWSER_TOKEN);
+    expect(correctionTokenFor(BROWSER_TOKEN).sha256).toBe(kept.sha256);
+  });
+
+  it("mints one for a browser that sent none, or one that is not a token", () => {
+    for (const presented of [
+      undefined,
+      null,
+      "",
+      "short",
+      "has spaces in it, so it is not one",
+      42,
+    ]) {
+      const minted = correctionTokenFor(presented);
+      expect(minted.issued).toMatch(/^[A-Za-z0-9_-]{32}$/);
+      expect(correctionTokenFor(minted.issued).sha256).toBe(minted.sha256);
+    }
+  });
 });
 
 describe("resolveStageOneConflict", () => {
@@ -385,7 +412,12 @@ describe("resolveStageOneConflict", () => {
   });
 
   it("refuses, quietly, a correction from anybody but the applying browser", async () => {
-    for (const correctionToken of [null, "not-the-token", mintCorrectionToken().token]) {
+    for (const correctionToken of [
+      null,
+      "not-the-token",
+      "another-browsers-token_0123456789",
+      correctionTokenFor(null).issued,
+    ]) {
       db.ops = [];
       db.audits = [];
       db.notices = [];

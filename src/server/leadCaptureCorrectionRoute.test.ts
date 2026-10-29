@@ -52,7 +52,10 @@ vi.mock("@/integrations/supabase/client.server", () => ({
 }));
 vi.mock("@/server/lead-address-correction.server", () => ({
   CORRECTION_TOKEN_KEY: "correction_token_sha256",
-  mintCorrectionToken: () => ({ token: "tok_for_the_browser", sha256: "a".repeat(64) }),
+  correctionTokenFor: (presented: unknown) =>
+    typeof presented === "string"
+      ? { sha256: "b".repeat(64), issued: null }
+      : { sha256: "a".repeat(64), issued: "tok_for_the_browser" },
   resolveStageOneConflict: async (input: Record<string, unknown>) => {
     h.conflictInput = input;
     return h.conflict;
@@ -106,7 +109,17 @@ beforeEach(() => {
 });
 
 describe("POST /api/public/leads/capture — a new application", () => {
-  it("hands the applying browser a correction token, and keeps only its hash", async () => {
+  it("keeps the hash of the token the browser generated, and hands nothing back", async () => {
+    h.held = false;
+    const { status, body } = await post({ correctionToken: "generated_in_the_browser_0123" });
+    expect(status).toBe(201);
+    expect(body).not.toHaveProperty("correction_token");
+    const metadata = h.inserted[0]?.metadata as Record<string, unknown>;
+    expect(metadata.correction_token_sha256).toBe("b".repeat(64));
+    expect(JSON.stringify(h.inserted)).not.toContain("generated_in_the_browser_0123");
+  });
+
+  it("hands a browser that sent no token one, and keeps only its hash", async () => {
     h.held = false;
     const { status, body } = await post();
     expect(status).toBe(201);

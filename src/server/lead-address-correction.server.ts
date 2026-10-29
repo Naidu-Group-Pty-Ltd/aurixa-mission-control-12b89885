@@ -17,10 +17,10 @@
  *
  * The caller then raises the stage emails as for any new application.
  *
- * Only the browser that made the application may correct it: the 201 that
- * accepted it carried a one-time token (`mintCorrectionToken`), whose hash is
- * kept on the lead, and the correction presents it. The reference alone is
- * printed in the email that went to the mistyped address.
+ * Only the browser that made the application may correct it: the lead keeps
+ * the hash of a token that browser holds (`correctionTokenFor`), and the
+ * correction presents it. The reference alone is printed in the email that
+ * went to the mistyped address.
  */
 import crypto from "node:crypto";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
@@ -29,6 +29,8 @@ import { dedupeKeyFor, type ParsedLead } from "@/server/lead-capture.server";
 import { notifyOperators, writeAuditLog } from "@/server/audit.server";
 import { timingSafeEqualStr } from "@/server/cron-auth.server";
 import {
+  CORRECTION_TOKEN_KEY,
+  CORRECTION_TOKEN_SHAPE,
   decideAddressCorrection,
   REFUSAL_TEXT,
   SUPERSEDED_REASON,
@@ -55,18 +57,29 @@ export type StageOneConflict =
 
 const sha256 = (value: string) => crypto.createHash("sha256").update(value).digest("hex");
 
-/** Where the correction token's hash is kept: the lead's own metadata. */
-export const CORRECTION_TOKEN_KEY = "correction_token_sha256";
+export { CORRECTION_TOKEN_KEY };
 
-/** The token the applying browser is handed, and the hash the lead keeps. */
-export function mintCorrectionToken(): { token: string; sha256: string } {
+/**
+ * The correction token a new application's lead keeps the hash of.
+ *
+ * The website generates it in the browser and sends it with every submission
+ * of the application, the first included, so it holds whichever answer
+ * reaches it: a retry after a response that never arrived is answered
+ * `duplicate`, and the browser still has the token its first post stored. A
+ * browser that sent none (the site before it generated its own) is handed one
+ * minted here, in the `201`.
+ */
+export function correctionTokenFor(presented: unknown): { sha256: string; issued: string | null } {
+  if (typeof presented === "string" && CORRECTION_TOKEN_SHAPE.test(presented)) {
+    return { sha256: sha256(presented), issued: null };
+  }
   const token = crypto.randomBytes(24).toString("base64url");
-  return { token, sha256: sha256(token) };
+  return { sha256: sha256(token), issued: token };
 }
 
 function presentsToken(metadata: unknown, token: string | null): boolean {
   const stored = (metadata as Record<string, unknown> | null)?.[CORRECTION_TOKEN_KEY];
-  if (typeof stored !== "string" || !token || token.length > 128) return false;
+  if (typeof stored !== "string" || !token || !CORRECTION_TOKEN_SHAPE.test(token)) return false;
   return timingSafeEqualStr(sha256(token), stored);
 }
 

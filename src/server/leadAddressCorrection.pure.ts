@@ -35,6 +35,20 @@ export const ADDRESS_CORRECTION_WINDOW_MS = 24 * 3_600_000;
 /** How many times one application's address may be corrected. */
 export const ADDRESS_CORRECTION_LIMIT = 3;
 
+/** Where the correction token's hash is kept: the lead's own metadata. */
+export const CORRECTION_TOKEN_KEY = "correction_token_sha256";
+
+/**
+ * Metadata only Mission Control writes, which every other writer of the lead
+ * keeps: the correction token's hash and the record of corrections. The
+ * Airtable mirror replaces a lead's metadata with its own, and would otherwise
+ * take the applicant's right to correct with it.
+ */
+export const MISSION_CONTROL_METADATA_KEYS = [CORRECTION_TOKEN_KEY, "email_corrections"] as const;
+
+/** A correction token as a browser may send one: base64url, long enough to guess at nothing. */
+export const CORRECTION_TOKEN_SHAPE = /^[A-Za-z0-9_-]{22,128}$/;
+
 /** The reason an applicant email for an address no longer theirs is not sent. */
 export const SUPERSEDED_REASON = "superseded: the applicant corrected their address";
 

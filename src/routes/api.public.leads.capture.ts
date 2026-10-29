@@ -14,7 +14,7 @@ import {
 import { enqueueStageEmails } from "@/server/lead-stage-emails.server";
 import {
   CORRECTION_TOKEN_KEY,
-  mintCorrectionToken,
+  correctionTokenFor,
   resolveStageOneConflict,
 } from "@/server/lead-address-correction.server";
 import { checkPublicRateLimit } from "@/server/token-rate-limit.server";
@@ -383,9 +383,10 @@ async function captureStageOne(
   conflict: ConflictContext,
 ): Promise<Response> {
   const dedupe_key = dedupeKeyFor(lead, 1);
-  // Handed to the browser that made the application, and nobody else: it is
-  // what lets that browser correct the address (lead-address-correction.server.ts).
-  const correction = mintCorrectionToken();
+  // The token that lets the browser that made the application, and nobody
+  // else, correct its address (lead-address-correction.server.ts): the one
+  // the browser sent, or one minted for it here.
+  const correction = correctionTokenFor(conflict.correctionToken);
   const { data: inserted, error } = await supabaseAdmin
     .from("waitlist_leads")
     .insert({
@@ -418,7 +419,7 @@ async function captureStageOne(
       lead_id: inserted.id,
       stage: 1,
       duplicate: false,
-      correction_token: correction.token,
+      ...(correction.issued ? { correction_token: correction.issued } : {}),
     },
     201,
     origin,

@@ -66,7 +66,10 @@ import {
   type Stage3Enrichment,
 } from "@/server/airtableLeadMapping.pure";
 import { enqueueStageEmails } from "@/server/lead-stage-emails.server";
-import { correctedAddressOf } from "@/server/leadAddressCorrection.pure";
+import {
+  correctedAddressOf,
+  MISSION_CONTROL_METADATA_KEYS,
+} from "@/server/leadAddressCorrection.pure";
 
 const AIRTABLE_BASE_ID = "apptyShYE0yzL4IGB";
 const GATEWAY_URL = "https://connector-gateway.lovable.dev/airtable";
@@ -589,29 +592,43 @@ function latestStage2(candidates: Stage2Enrichment[]): Stage2Enrichment | null {
  * the backstop window inside the enqueue, not by this caller remembering to.
  */
 /**
- * The mirror's write over a lead whose applicant corrected their address in
- * Mission Control. Airtable never hears of a correction, so its record is
- * still at the mistyped address: written as it stands, it would put the typo
- * back and erase the lead's own record of the change. The mirror keeps the
- * corrected address and merges its metadata over the lead's; the emails it
- * finds owed are for the corrected address, at its generation
- * (docs/LEAD_EMAILS.md, "Address corrections"). A lead never corrected is
- * written exactly as before.
+ * The mirror's write over a lead Mission Control has written its own facts on
+ * (docs/LEAD_EMAILS.md, "Address corrections").
+ *
+ * The mirror replaces a lead's metadata with Airtable's. The keys only Mission
+ * Control writes are kept whatever else is replaced: without the correction
+ * token's hash, the applying browser could no longer correct its address.
+ *
+ * And Airtable never hears of a correction, so for a corrected lead its record
+ * is still at the mistyped address: written as it stands, it would put the
+ * typo back. The mirror keeps the corrected address and merges its metadata
+ * over the lead's, and the emails it finds owed are for the corrected address,
+ * at its generation.
  */
 export function overCorrection<W extends { metadata: Record<string, Json> }, R extends object>(
   existingMetadata: unknown,
   write: W,
   row: R,
 ): { write: W; owed: Record<string, unknown> } {
+  const existing = (existingMetadata as Record<string, Json> | null) ?? {};
   const corrected = correctedAddressOf(existingMetadata);
-  if (!corrected) return { write, owed: row as Record<string, unknown> };
+  if (corrected) {
+    return {
+      write: { ...write, email: corrected.email, metadata: { ...existing, ...write.metadata } },
+      owed: { ...row, email: corrected.email, applicant_email_generation: corrected.generation },
+    };
+  }
+  const kept = MISSION_CONTROL_METADATA_KEYS.filter((key) => key in existing);
+  if (kept.length === 0) return { write, owed: row as Record<string, unknown> };
   return {
     write: {
       ...write,
-      email: corrected.email,
-      metadata: { ...((existingMetadata as Record<string, Json> | null) ?? {}), ...write.metadata },
+      metadata: {
+        ...write.metadata,
+        ...Object.fromEntries(kept.map((key) => [key, existing[key]])),
+      },
     },
-    owed: { ...row, email: corrected.email, applicant_email_generation: corrected.generation },
+    owed: row as Record<string, unknown>,
   };
 }
 

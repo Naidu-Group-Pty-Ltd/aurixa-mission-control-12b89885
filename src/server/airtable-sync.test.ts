@@ -220,6 +220,24 @@ describe("overCorrection — a lead whose applicant corrected their address", ()
     expect(owed).toMatchObject({ email: "jordan@firm.com", applicant_email_generation: 1 });
   });
 
+  it("keeps the correction token's hash on a lead not yet corrected", () => {
+    // Replaced with Airtable's metadata, the applying browser could no longer
+    // correct its address.
+    const row = { ...mirrored, stage: 1 };
+    const { write, owed } = overCorrection(
+      { channel: "website", ip: "203.0.113.9", correction_token_sha256: "e".repeat(64) },
+      mirrored,
+      row,
+    );
+    expect(write.email).toBe("jordan@firm.con");
+    expect(write.metadata).toEqual({
+      channel: "airtable_mirror",
+      airtable_record_id: "rec1",
+      correction_token_sha256: "e".repeat(64),
+    });
+    expect(owed).toBe(row);
+  });
+
   it("writes a lead never corrected exactly as before", () => {
     const row = { ...mirrored, stage: 1 };
     const { write, owed } = overCorrection({ channel: "website" }, mirrored, row);
