@@ -54,6 +54,7 @@ import {
   completionMetadata,
   installCount,
   judgeResetState,
+  onLiveClones,
   snapshotForAudit,
   withOwed,
   type AuditRow,
@@ -233,7 +234,7 @@ function emptyReport(dryRun: boolean): ReingestReport {
  */
 async function readAllRows<T>(
   supabase: Supabase,
-  table: "clone_modules" | "clone_library_pins",
+  table: "clone_modules" | "clone_library_pins" | "clones",
   columns: string,
 ): Promise<{ ok: true; rows: T[] } | { ok: false; error: string }> {
   const rows: T[] = [];
@@ -372,12 +373,13 @@ export async function resetAndReingestLibrary(args: {
   }
 
   // ── 1. Snapshot current state ──
-  const [modulesRes, libraryRes, installsRead, pinsRead, stateRead] = await Promise.all([
+  const [modulesRes, libraryRes, installsRead, pinsRead, stateRead, clonesRead] = await Promise.all([
     supabase.from("modules").select("id, slug, status"),
     supabase.from("module_library").select("id, slug"),
     snapshotCloneInstalls(supabase),
     snapshotPins(supabase),
     readResetState(supabase),
+    readAllRows<{ id: string }>(supabase, "clones", "id"),
   ]);
   const unreadable = [
     modulesRes.error ? `modules: ${describeDbError(modulesRes.error)}` : null,
@@ -385,8 +387,15 @@ export async function resetAndReingestLibrary(args: {
     installsRead.ok ? null : installsRead.error,
     pinsRead.ok ? null : pinsRead.error,
     stateRead.ok ? null : stateRead.error,
+    clonesRead.ok ? null : clonesRead.error,
   ].filter((why): why is string => why !== null);
-  if (!installsRead.ok || !pinsRead.ok || !stateRead.ok || unreadable.length > 0) {
+  if (
+    !installsRead.ok ||
+    !pinsRead.ok ||
+    !stateRead.ok ||
+    !clonesRead.ok ||
+    unreadable.length > 0
+  ) {
     report.error =
       `What the reset would remove and restore could not be read (${unreadable.join("; ")}). ` +
       `Nothing was wiped.`;
@@ -412,7 +421,14 @@ export async function resetAndReingestLibrary(args: {
   // restore. This reset takes all of it on.
   const current: ResetSnapshot = { installs: installsRead.installs, pins: pinsRead.pins };
   const owed = stateRead.state.owed;
-  const snapshot = withOwed(current, owed);
+  // What is owed can name a clone deleted since its reset recorded it, and one
+  // such install fails the clone's foreign key for the whole batch it is
+  // written in, on this reset and on every one after. There is nothing to
+  // restore it to, so it is left out, and said to be.
+  const { kept: snapshot, gone } = onLiveClones(
+    withOwed(current, owed),
+    new Set(clonesRead.rows.map((c) => c.id)),
+  );
   const { installs, pins } = snapshot;
   for (const debt of owed) {
     report.warnings.push(
@@ -421,6 +437,12 @@ export async function resetAndReingestLibrary(args: {
         : `The reset of ${debt.from} could not restore everything it recorded.`) +
         ` The ${installCount(debt.snapshot)} install(s) and ${debt.snapshot.pins.length} pin(s) ` +
         `it left are restored with this one's.`,
+    );
+  }
+  if (gone.clones.length > 0) {
+    report.warnings.push(
+      `${gone.installs} install(s) and ${gone.pins} pin(s) recorded for ${gone.clones.length} ` +
+        `clone(s) that no longer exist are not restored: ${gone.clones.join(", ")}.`,
     );
   }
 
@@ -607,7 +629,6 @@ export async function resetAndReingestLibrary(args: {
   // ── 6. Restore clone installs by slug ──
   const idBySlug = new Map(freshModules.map((m) => [m.slug, m.id]));
   let installsUnrestored = false;
-  let pinsUnrestored = false;
 
   if (options.preserveCloneInstalls !== false && installs.length > 0) {
     const rows: Array<{ clone_id: string; module_id: string; installed_by: string }> = [];
@@ -659,56 +680,81 @@ export async function resetAndReingestLibrary(args: {
   }
 
   // ── 7. Re-point library pins ──
+  // A pin is dropped only where the new catalogue has no module of its slug.
+  // One whose entry could not be read, or did not publish, still has a slug to
+  // point at, so it is owed, and the next reset points it at its entry.
+  const pinsOwed: PinSnapshot[] = [];
+  let pinWriteFailed = false;
   if (pins.length > 0) {
-    const { data: entries } = await supabase
+    const { data: entries, error: entriesErr } = await supabase
       .from("module_library")
       .select("id, slug, version")
       .eq("is_latest", true);
-    const entryBySlug = new Map(
-      ((entries ?? []) as Array<{ id: string; slug: string; version: number }>).map((e) => [
-        e.slug,
-        e,
-      ]),
-    );
-
-    const pinRows: Array<{
-      clone_id: string;
-      library_entry_id: string;
-      slug: string;
-      version: number;
-      pinned_by: string;
-      notes: string;
-    }> = [];
-    for (const p of pins) {
-      const entry = entryBySlug.get(p.slug);
-      if (!entry) {
-        report.restored.unmappedPins.push(p);
-        continue;
-      }
-      pinRows.push({
-        clone_id: p.cloneId,
-        library_entry_id: entry.id,
-        slug: p.slug,
-        version: entry.version,
-        pinned_by: userId,
-        notes: `Re-pointed from v${p.version} during library re-ingest`,
-      });
-    }
-
-    if (pinRows.length > 0) {
-      const { error } = await supabase
-        .from("clone_library_pins")
-        .upsert(pinRows, { onConflict: "clone_id,slug" });
-      if (error) {
-        pinsUnrestored = true;
-        report.warnings.push(`Restoring library pins failed: ${error.message}`);
-      } else report.restored.pins = pinRows.length;
-    }
-    if (report.restored.unmappedPins.length > 0) {
+    if (entriesErr) {
+      pinsOwed.push(...pins);
       report.warnings.push(
-        `${report.restored.unmappedPins.length} pin(s) referenced slugs that no longer exist and were dropped. ` +
-          `Those clones now track the live module instead of a pinned version.`,
+        `The published entries could not be read (${describeDbError(entriesErr)}), so no pin ` +
+          `was re-pointed. The ${pins.length} pin(s) are recorded as owed.`,
       );
+    } else {
+      const entryBySlug = new Map(
+        ((entries ?? []) as Array<{ id: string; slug: string; version: number }>).map((e) => [
+          e.slug,
+          e,
+        ]),
+      );
+
+      const attempted: PinSnapshot[] = [];
+      const unpublished: PinSnapshot[] = [];
+      const pinRows: Array<{
+        clone_id: string;
+        library_entry_id: string;
+        slug: string;
+        version: number;
+        pinned_by: string;
+        notes: string;
+      }> = [];
+      for (const p of pins) {
+        const entry = entryBySlug.get(p.slug);
+        if (!entry) {
+          if (idBySlug.has(p.slug)) unpublished.push(p);
+          else report.restored.unmappedPins.push(p);
+          continue;
+        }
+        attempted.push(p);
+        pinRows.push({
+          clone_id: p.cloneId,
+          library_entry_id: entry.id,
+          slug: p.slug,
+          version: entry.version,
+          pinned_by: userId,
+          notes: `Re-pointed from v${p.version} during library re-ingest`,
+        });
+      }
+
+      if (pinRows.length > 0) {
+        const { error } = await supabase
+          .from("clone_library_pins")
+          .upsert(pinRows, { onConflict: "clone_id,slug" });
+        if (error) {
+          pinWriteFailed = true;
+          pinsOwed.push(...attempted);
+          report.warnings.push(`Restoring library pins failed: ${error.message}`);
+        } else report.restored.pins = pinRows.length;
+      }
+      if (unpublished.length > 0) {
+        pinsOwed.push(...unpublished);
+        report.warnings.push(
+          `${unpublished.length} pin(s) name a module whose entry did not publish, so they are ` +
+            `recorded as owed: ${[...new Set(unpublished.map((p) => p.slug))].sort().join(", ")}.`,
+        );
+      }
+      if (report.restored.unmappedPins.length > 0) {
+        report.warnings.push(
+          `${report.restored.unmappedPins.length} pin(s) referenced slugs that no longer exist and were dropped. ` +
+            `Those clones now track the live module instead of a pinned version.`,
+        );
+      }
     }
   }
 
@@ -718,10 +764,15 @@ export async function resetAndReingestLibrary(args: {
   // restore it to.
   const unrestored: ResetSnapshot = {
     installs: installsUnrestored ? installs : [],
-    pins: pinsUnrestored ? pins : [],
+    pins: pinsOwed,
   };
   await complete(unrestored, {
-    stoppedBecause: installsUnrestored || pinsUnrestored ? "a restore write failed" : undefined,
+    stoppedBecause:
+      installsUnrestored || pinWriteFailed
+        ? "a restore write failed"
+        : pinsOwed.length > 0
+          ? "a pin has no published entry to point at"
+          : undefined,
     extra: JSON.parse(
       JSON.stringify({
         strategy: config.strategy,
@@ -735,7 +786,7 @@ export async function resetAndReingestLibrary(args: {
       }),
     ),
   });
-  if (installsUnrestored || pinsUnrestored) {
+  if (installsUnrestored || pinsOwed.length > 0) {
     report.error =
       "Some installs or pins could not be written back. They are recorded as owed, and the " +
       "next reset restores them.";

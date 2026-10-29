@@ -118,6 +118,16 @@ const moduleRow = (id: string, slug: string): Row => ({
   backend_manifest: {},
 });
 
+/** A clone row: what an install's foreign key names. */
+const cloneRow = (id: string): Row => ({
+  id,
+  name: id.slice(-4),
+  slug: `clone-${id.slice(-4)}`,
+  github_owner: "Naidu-Group-Pty-Ltd",
+  github_repo: `clone-${id.slice(-4)}`,
+  provisioning_method: "fork",
+});
+
 function seed(extra: Partial<Record<string, Row[]>> = {}) {
   db = createLibraryFakeDb({
     user_roles: [{ id: "r1", user_id: ADMIN, role: "admin" }],
@@ -125,6 +135,7 @@ function seed(extra: Partial<Record<string, Row[]>> = {}) {
       { id: OLD_RUN, status: "completed", commit_sha: null, started_at: "2026-07-31T23:13:41Z" },
     ],
     modules: [moduleRow(AML, "aml"), moduleRow(CLIENTS, "clients")],
+    clones: [cloneRow(CLONE_A), cloneRow(CLONE_B)],
     clone_modules: [
       { id: "i1", clone_id: CLONE_A, module_id: AML },
       { id: "i2", clone_id: CLONE_A, module_id: CLIENTS },
@@ -265,12 +276,14 @@ describe("a reset records what it will restore before it wipes anything", () => 
 
   it("snapshots every install, past the thousand a page holds", async () => {
     const many: Row[] = [];
+    const clones: Row[] = [];
     for (let c = 0; c < 600; c++) {
       const clone = `c0000000-0000-4000-8000-${String(c).padStart(12, "0")}`;
+      clones.push(cloneRow(clone));
       many.push({ id: `a${String(c).padStart(5, "0")}`, clone_id: clone, module_id: AML });
       many.push({ id: `b${String(c).padStart(5, "0")}`, clone_id: clone, module_id: CLIENTS });
     }
-    seed({ clone_modules: many });
+    seed({ clones, clone_modules: many });
 
     const report = await reset();
 
@@ -448,6 +461,139 @@ describe("what a reset leaves owed, the next one restores", () => {
     const read = await readResetState(client());
 
     expect(read).toEqual({ ok: true, state: { running: [], owed: [] } });
+  });
+});
+
+describe("a pin is dropped only where its slug is gone", () => {
+  const OLD_ENTRY = "e0000000-0000-4000-8000-000000000001";
+  const pin = (slug: string, version: number): Row => ({
+    id: `p-${slug}`,
+    clone_id: CLONE_A,
+    library_entry_id: OLD_ENTRY,
+    slug,
+    version,
+  });
+  /** Each clone's pins, as the double holds them now. */
+  const pins = () =>
+    db.tables.clone_library_pins
+      .map((p) => [p.clone_id, p.slug, p.version])
+      .sort((a, b) => String(a[1]).localeCompare(String(b[1])));
+  /**
+   * Fails only the reset's read of the published entries, as a statement
+   * timeout would, until the function it returns is called.
+   */
+  function failEntriesLookup(): () => void {
+    const from = db.from;
+    db.from = (table: string) => {
+      const builder = from(table);
+      if (table !== "module_library") return builder;
+      const select = builder.select;
+      builder.select = (columns: string, ...rest: unknown[]) => {
+        const next = select(columns, ...rest);
+        if (columns !== "id, slug, version") return next;
+        const eq = next.eq;
+        next.eq = (column: string, value: unknown) => {
+          const filtered = eq(column, value);
+          if (column === "is_latest") {
+            filtered.then = (resolve: (r: unknown) => unknown) =>
+              Promise.resolve({ data: null, error: STATEMENT_TIMEOUT }).then(resolve);
+          }
+          return filtered;
+        };
+        return next;
+      };
+      return builder;
+    };
+    return () => {
+      db.from = from;
+    };
+  }
+
+  beforeEach(() => seed({ clone_library_pins: [pin("aml", 3)] }));
+
+  it("re-points a pin at its slug's new entry", async () => {
+    const report = await reset();
+
+    expect(report.ok).toBe(true);
+    expect(report.restored.pins).toBe(1);
+    expect(pins()).toEqual([[CLONE_A, "aml", 1]]);
+  });
+
+  it("owes every pin when the published entries cannot be read, and the next reset restores them", async () => {
+    const answerAgain = failEntriesLookup();
+    const first = await reset();
+
+    expect(first.ok).toBe(false);
+    expect(first.warnings.join(" ")).toMatch(
+      /The published entries could not be read \(canceling statement.*The 1 pin\(s\) are recorded as owed\./,
+    );
+    expect(pins()).toEqual([]);
+    expect(completions()[0].metadata).toMatchObject({
+      unrestored: { installs: [], pins: [{ clone_id: CLONE_A, slug: "aml", version: 3 }] },
+    });
+
+    answerAgain();
+    const second = await reset();
+
+    expect(second.ok).toBe(true);
+    expect(pins()).toEqual([[CLONE_A, "aml", 1]]);
+  });
+
+  it("owes a pin whose module did not publish, and drops one whose slug is gone", async () => {
+    db.tables.clone_library_pins.push(pin("retired", 2));
+    db.failures.set("module_library.insert", STATEMENT_TIMEOUT);
+    const first = await reset();
+
+    expect(first.ok).toBe(false);
+    expect(first.warnings.join(" ")).toContain(
+      "1 pin(s) name a module whose entry did not publish, so they are recorded as owed: aml.",
+    );
+    expect(first.restored.unmappedPins).toEqual([
+      { cloneId: CLONE_A, slug: "retired", version: 2 },
+    ]);
+    expect(completions()[0].metadata).toMatchObject({
+      unrestored: { pins: [{ clone_id: CLONE_A, slug: "aml", version: 3 }] },
+      stopped_because: "a pin has no published entry to point at",
+    });
+
+    db.failures.delete("module_library.insert");
+    const second = await reset();
+
+    expect(second.ok).toBe(true);
+    expect(pins()).toEqual([[CLONE_A, "aml", 1]]);
+  });
+});
+
+describe("what is owed to a clone that no longer exists is left out", () => {
+  const CLONE_GONE = "c0000000-0000-4000-8000-00000000000c";
+
+  it("restores the rest, and says what it left out", async () => {
+    // A reset that died after its wipe recorded three clones; one has been deleted since.
+    const died = resetRow("au1", "2026-09-01T10:00:00.000Z");
+    (died.metadata as { snapshot: typeof snapshotOfBoth }).snapshot = {
+      installs: [...snapshotOfBoth.installs, { clone_id: CLONE_GONE, slugs: ["aml", "clients"] }],
+      pins: [],
+    };
+    seed({ audit_log: [died], modules: [], clone_modules: [] });
+
+    const report = await reset();
+
+    expect(report.ok).toBe(true);
+    expect(installs()).toEqual(BOTH);
+    expect(report.warnings.join(" ")).toContain(
+      `2 install(s) and 0 pin(s) recorded for 1 clone(s) that no longer exist are not restored: ${CLONE_GONE}.`,
+    );
+    expect(resetRows()[1].metadata).toMatchObject({ snapshot: snapshotOfBoth });
+  });
+
+  it("refuses when the clones cannot be read, rather than taking every clone as gone", async () => {
+    db.failures.set("clones.select", STATEMENT_TIMEOUT);
+
+    const report = await reset();
+
+    expect(report.ok).toBe(false);
+    expect(report.error).toMatch(/could not be read \(clones: canceling statement.*Nothing was wiped/);
+    expect(deletes()).toEqual([]);
   });
 });
 

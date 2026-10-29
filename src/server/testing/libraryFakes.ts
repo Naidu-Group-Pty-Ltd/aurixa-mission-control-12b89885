@@ -1,7 +1,7 @@
 // A test double for the tables the module library lives in — `modules`,
 // `module_detection_runs`, `module_library`, `clone_library_pins`,
-// `clone_modules`, `audit_log`, `notifications`, `profiles` and `user_roles`,
-// and the ones a detection run and a reset write beside them: `prime_config`,
+// `clone_modules`, `clones`, `audit_log`, `notifications`, `profiles` and
+// `user_roles`, and the ones a detection run and a reset write beside them: `prime_config`,
 // `repo_blob_analysis`, `module_import_edges`, `module_backend_artifacts`,
 // `module_drift_alerts` and `module_config_snapshots` — behind the slice of
 // the PostgREST builder that `libraryApproval.server.ts`,
@@ -29,7 +29,12 @@
 //    `onConflict` columns and is 42P10 where it holds none, and a delete
 //    cascades along the foreign keys production declares: a module's
 //    `clone_modules`, `module_backend_artifacts` and `module_drift_alerts`
-//    go with it, and a run's artifacts, alerts and import edges with the run;
+//    go with it, a clone's `clone_modules` with the clone, and a run's
+//    artifacts, alerts and import edges with the run;
+//  - a written `clone_modules` row names a clone and a module that exist, or
+//    the whole statement is 23503, as `clone_modules_clone_id_fkey` and
+//    `clone_modules_module_id_fkey` refuse it. Rows a test seeds are not
+//    judged, so a suite that never writes an install need not seed clones;
 //  - `has_role` answers as production's has since 20260820: the user's
 //    highest role level against the role's (`ROLE_LEVELS`), and an unknown
 //    role is the enum's 22P02;
@@ -69,6 +74,7 @@ const TABLES = [
   "module_library",
   "clone_library_pins",
   "clone_modules",
+  "clones",
   "audit_log",
   "notifications",
   "profiles",
@@ -197,6 +203,53 @@ const COLUMNS: Record<Table, readonly string[]> = {
     "version",
   ],
   clone_modules: ["clone_id", "id", "installed_at", "installed_by", "module_id", "version"],
+  clones: [
+    "billing_stripe_customer_id",
+    "billing_user_id",
+    "cloudflare_enabled",
+    "cloudflare_zone_id",
+    "codex_nightly_enabled",
+    "commits_behind",
+    "contract_excluded_module_slugs",
+    "created_at",
+    "crm_mode",
+    "default_branch",
+    "deploy_url",
+    "drift_suggestions",
+    "entitled_module_slugs",
+    "entitled_plan_slug",
+    "entitlement_keys",
+    "entitlements_synced_at",
+    "github_app_installation_id",
+    "github_owner",
+    "github_repo",
+    "github_url",
+    "id",
+    "idempotency_key",
+    "isolated_tenant",
+    "last_cascade_at",
+    "last_drift_check_at",
+    "last_synced_sha",
+    "lovable_project_id",
+    "lovable_project_url",
+    "merge_drain_at",
+    "name",
+    "notes",
+    "owner_user_id",
+    "parent_clone_id",
+    "provisioning_method",
+    "purchased_addon_slugs",
+    "repo_full_name",
+    "revoked_module_slugs",
+    "slug",
+    "subdomain",
+    "subdomain_fqdn",
+    "subdomain_status",
+    "sync_scope",
+    "sync_status",
+    "tags",
+    "updated_at",
+  ],
   audit_log: [
     "action",
     "actor_user_id",
@@ -323,6 +376,7 @@ const UNIQUE_KEYS: Partial<Record<Table, string[][]>> = {
 const ON_DELETE: Partial<
   Record<Table, Array<{ table: Table; column: string; rule: "cascade" | "set null" }>>
 > = {
+  clones: [{ table: "clone_modules", column: "clone_id", rule: "cascade" }],
   modules: [
     { table: "clone_modules", column: "module_id", rule: "cascade" },
     { table: "module_backend_artifacts", column: "module_id", rule: "cascade" },
@@ -337,6 +391,32 @@ const ON_DELETE: Partial<
   ],
 };
 
+/** Production's foreign keys a written row is held to: the column, the table it names, the constraint. */
+const REFERENCES: Partial<
+  Record<Table, Array<{ column: string; table: Table; constraint: string }>>
+> = {
+  clone_modules: [
+    { column: "clone_id", table: "clones", constraint: "clone_modules_clone_id_fkey" },
+    { column: "module_id", table: "modules", constraint: "clone_modules_module_id_fkey" },
+  ],
+};
+
+/** The foreign key a written row breaks, as Postgres words it, or null. */
+function unreferenced(db: LibraryFakeDb, table: Table, row: Row): PgError | null {
+  for (const { column, table: parent, constraint } of REFERENCES[table] ?? []) {
+    const value = row[column];
+    if (value === null || value === undefined) continue;
+    if (db.tables[parent].some((p) => p.id === value)) continue;
+    return {
+      message: `insert or update on table "${table}" violates foreign key constraint "${constraint}"`,
+      code: "23503",
+      details: `Key (${column})=(${String(value)}) is not present in table "${parent}".`,
+      hint: null,
+    };
+  }
+  return null;
+}
+
 /** The two columns 20261028120000 adds. */
 const ADDED_BY_THIS_CHANGE: Partial<Record<Table, string[]>> = {
   module_detection_runs: ["commit_sha"],
@@ -349,6 +429,7 @@ const REQUIRED: Partial<Record<Table, string[]>> = {
   module_library: ["name", "slug", "entry_file"],
   clone_library_pins: ["clone_id", "library_entry_id", "slug", "version"],
   clone_modules: ["clone_id", "module_id"],
+  clones: ["github_owner", "github_repo", "name", "provisioning_method", "slug"],
   audit_log: ["action"],
   notifications: ["kind", "title"],
   profiles: ["user_id"],
@@ -757,11 +838,12 @@ function builder(db: LibraryFakeDb, table: Table, known: Set<string>): Builder {
           ...plan.map((p) => p.row),
         ];
         for (const p of plan) {
-          const broken = violation(
-            table,
-            p.row,
-            after.filter((r) => r !== p.row),
-          );
+          const broken =
+            violation(
+              table,
+              p.row,
+              after.filter((r) => r !== p.row),
+            ) ?? unreferenced(db, table, p.row);
           if (broken) return { data: null, error: broken };
         }
         result = plan.map((p) => {
@@ -777,7 +859,7 @@ function builder(db: LibraryFakeDb, table: Table, known: Set<string>): Builder {
         }));
         for (const row of created) {
           const others = [...rows(), ...created.filter((c) => c !== row)];
-          const broken = violation(table, row, others);
+          const broken = violation(table, row, others) ?? unreferenced(db, table, row);
           if (broken) return { data: null, error: broken };
         }
         rows().push(...created);
@@ -789,7 +871,7 @@ function builder(db: LibraryFakeDb, table: Table, known: Set<string>): Builder {
           const others = rows()
             .filter((r) => r !== row)
             .map(after);
-          const broken = violation(table, after(row), others);
+          const broken = violation(table, after(row), others) ?? unreferenced(db, table, after(row));
           if (broken) return { data: null, error: broken };
         }
         for (const row of result) Object.assign(row, structuredClone(values as Row));
