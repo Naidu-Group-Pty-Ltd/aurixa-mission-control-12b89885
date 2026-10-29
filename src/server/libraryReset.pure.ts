@@ -27,11 +27,19 @@
  * snapshot. A completion's `unrestored` is owed the same way, with no wait,
  * because a completion is written by a reset that has stopped.
  *
+ * What a reset owes stays with its own record until a reset that goes on
+ * takes it on, by naming it in `restores_owed_by`, and from then on that
+ * reset's record carries it. So the next reset restores what every earlier
+ * one still owes, not only the newest: of two that started together, the one
+ * that stepped aside may well have written the newer record.
+ *
  * No database lock spans an invocation, so exclusivity is the audit log's
  * too. Each reset records its row and then looks again: if another reset is
  * running beside it, it stops before the wipe. Each looks only after its own
  * row is written, so whichever looks second sees the other, and two can never
- * both go on. Both may stop, and then neither has wiped anything.
+ * both go on. Both may stop, and then neither has wiped anything. A reset
+ * that stops there completes with `wiped: false`: it owes nothing, and takes
+ * on nothing either, so what an earlier reset owes stays with that reset.
  */
 import type { Json } from "@/integrations/supabase/types";
 
@@ -153,6 +161,11 @@ export function completionMetadata(
     unrestored: ResetSnapshot;
     /** Why it stopped short, when it did. */
     stoppedBecause?: string;
+    /**
+     * It stopped before the wipe: it deleted nothing, so it owes nothing, and
+     * what it had taken on stays with the resets that owe it.
+     */
+    beforeWipe?: boolean;
     extra?: Record<string, Json>;
   },
 ): Json {
@@ -161,7 +174,22 @@ export function completionMetadata(
     reset_audit_id: resetId,
     unrestored: snapshotForAudit(outcome.unrestored),
     ...(outcome.stoppedBecause ? { stopped_because: outcome.stoppedBecause } : {}),
+    ...(outcome.beforeWipe ? { wiped: false } : {}),
   };
+}
+
+/**
+ * The earlier resets whose debt a reset's row says it took on
+ * (`restores_owed_by`), folded into the snapshot it recorded.
+ */
+function owedByOfResetRow(metadata: Json | null | undefined): string[] {
+  if (!isObject(metadata) || !Array.isArray(metadata.restores_owed_by)) return [];
+  return metadata.restores_owed_by.filter((id): id is string => typeof id === "string");
+}
+
+/** Whether a completion says its reset stopped before the wipe. */
+function stoppedBeforeWipe(completion: AuditRow): boolean {
+  return isObject(completion.metadata) && completion.metadata.wiped === false;
 }
 
 /**
@@ -175,24 +203,38 @@ function closes(completion: AuditRow, reset: AuditRow): boolean {
   return completion.created_at > reset.created_at;
 }
 
+/** What one earlier reset left on no clone, by its own record. */
+export type OwedRestore = {
+  /** The reset that owes it. */
+  resetId: string;
+  /** When that reset recorded itself. */
+  from: string;
+  /** It died after its record, or its completion says it could not restore everything. */
+  because: "died" | "unrestored";
+  snapshot: ResetSnapshot;
+};
+
 export type ResetState = {
   /** Resets recorded inside the window that nothing has completed: taken to be running. */
   running: AuditRow[];
   /**
-   * What the latest reset left on no clone: its snapshot when it died, or
-   * what its completion says it could not restore. Null when nothing is owed.
+   * What earlier resets left on no clone and no reset has taken on since,
+   * oldest first: each one's snapshot when it died, or what its completion
+   * says it could not restore. Empty when nothing is owed.
    */
-  owed: { snapshot: ResetSnapshot; from: string; because: "died" | "unrestored" } | null;
+  owed: OwedRestore[];
 };
 
 /**
  * Which resets are running and what is still owed, from the reset rows and
  * the completions the audit log holds.
  *
- * Only the latest reset can owe anything: each reset folds what was owed into
- * the snapshot it records, so a chain of failures is carried forward whole.
- * `excludeId` leaves out the caller's own reset, for the look it takes after
- * recording it.
+ * A reset that goes on takes on what is owed when it starts: it folds it into
+ * the snapshot it records and names the resets it came from in
+ * `restores_owed_by`, so its own record carries the debt from then on. One
+ * that stopped before its wipe takes on nothing and owes nothing. Every other
+ * debt is still owed, whichever reset recorded itself last. `excludeId`
+ * leaves out the caller's own reset, for the look it takes after recording it.
  */
 export function judgeResetState(args: {
   resets: readonly AuditRow[];
@@ -209,23 +251,52 @@ export function judgeResetState(args: {
     (r) => completionOf(r) === null && now - Date.parse(r.created_at) < windowMs,
   );
 
-  const latest = [...resets].sort((a, b) => (a.created_at < b.created_at ? 1 : -1))[0];
-  let owed: ResetState["owed"] = null;
-  if (latest && !running.includes(latest)) {
-    const completion = completionOf(latest);
-    if (completion === null) {
-      const snapshot = snapshotOfResetRow(latest.metadata);
-      if (snapshot && !isEmptySnapshot(snapshot)) {
-        owed = { snapshot, from: latest.created_at, because: "died" };
-      }
-    } else {
-      const unrestored = isObject(completion.metadata)
-        ? readSnapshot(completion.metadata.unrestored)
-        : null;
-      if (unrestored && !isEmptySnapshot(unrestored)) {
-        owed = { snapshot: unrestored, from: latest.created_at, because: "unrestored" };
-      }
+  const takenOn = new Set<string>();
+  const debts: OwedRestore[] = [];
+  for (const reset of resets) {
+    const completion = completionOf(reset);
+    if (completion !== null && stoppedBeforeWipe(completion)) continue;
+    const owedBy = owedByOfResetRow(reset.metadata);
+    // A running reset may yet restore what it recorded: it owes nothing so far.
+    if (running.includes(reset)) {
+      for (const id of owedBy) takenOn.add(id);
+      continue;
+    }
+    const own =
+      completion === null
+        ? snapshotOfResetRow(reset.metadata)
+        : isObject(completion.metadata)
+          ? readSnapshot(completion.metadata.unrestored)
+          : null;
+    // A record that cannot be read carries nothing on, so what it took on
+    // stays with the resets that owe it. Every reset before snapshots, and
+    // 31 Jul 2026's completion, read this way and owe nothing.
+    if (own === null) continue;
+    for (const id of owedBy) takenOn.add(id);
+    if (!isEmptySnapshot(own)) {
+      debts.push({
+        resetId: reset.id,
+        from: reset.created_at,
+        because: completion === null ? "died" : "unrestored",
+        snapshot: own,
+      });
     }
   }
+  const owed = debts
+    .filter((d) => !takenOn.has(d.resetId))
+    .sort((a, b) => (a.from < b.from ? -1 : a.from > b.from ? 1 : 0));
   return { running, owed };
+}
+
+/**
+ * This reset's snapshot with every owed one folded in, the oldest first, so
+ * where two pin the same slug the later record's pin is the one kept, and the
+ * clones' own pins over both.
+ */
+export function withOwed(current: ResetSnapshot, owed: readonly OwedRestore[]): ResetSnapshot {
+  const earlier = owed.reduce<ResetSnapshot>(
+    (acc, debt) => mergeResetSnapshots(debt.snapshot, acc),
+    EMPTY_SNAPSHOT,
+  );
+  return owed.length > 0 ? mergeResetSnapshots(current, earlier) : current;
 }

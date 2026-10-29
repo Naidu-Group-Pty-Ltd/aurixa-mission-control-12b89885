@@ -20,7 +20,11 @@ import {
 const detection = vi.hoisted(() => ({
   slugs: ["aml", "clients"] as string[],
   fail: null as string | null,
+  runs: 0,
 }));
+
+/** The commit the stand-in detection reads, as a completed run records it. */
+const COMMIT = "122b761274a9c5ef98207b16b5e02a5d7cfeb37e";
 
 vi.mock("./module-detection.server", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./module-detection.server")>();
@@ -34,7 +38,8 @@ vi.mock("./module-detection.server", async (importOriginal) => {
           };
         };
       }) => {
-        const runId = "0a3c9817-0000-4000-8000-0000000000f1";
+        // Each run is its own row, under the id it reports, as runDetection's are.
+        const runId = `0a3c9817-0000-4000-8000-${String(++detection.runs).padStart(12, "0")}`;
         // A run that could not write what it found says so, as runDetection's own writes do.
         const write = async (table: string, row: unknown) => {
           const { error } = await args.supabase.from(table).insert(row);
@@ -52,9 +57,10 @@ vi.mock("./module-detection.server", async (importOriginal) => {
           };
         }
         await write("module_detection_runs", {
+          id: runId,
           status: "completed",
           strategy: "feature-first",
-          commit_sha: "122b761274a9c5ef98207b16b5e02a5d7cfeb37e",
+          commit_sha: COMMIT,
         });
         for (const slug of detection.slugs) {
           await write("modules", {
@@ -131,6 +137,7 @@ function seed(extra: Partial<Record<string, Row[]>> = {}) {
 beforeEach(() => {
   detection.slugs = ["aml", "clients"];
   detection.fail = null;
+  detection.runs = 0;
   seed();
 });
 
@@ -174,8 +181,9 @@ const resetRow = (id: string, createdAt: string): Row => ({
   metadata: { modules_removed: 2, snapshot: snapshotOfBoth },
 });
 
-/** Runs `then` once, just after this reset's own row lands: what another did in that gap. */
-function afterResetRecorded(then: () => void) {
+/** Runs `then` once, just after the next reset's own row lands: what another did in that gap. */
+function afterResetRecorded(then: (own: Row) => void) {
+  let ran = false;
   const from = db.from;
   db.from = (table: string) => {
     const builder = from(table);
@@ -183,11 +191,12 @@ function afterResetRecorded(then: () => void) {
     const insert = builder.insert;
     builder.insert = (values: Row) => {
       const next = insert(values);
-      if (values.action === "module_library.reset") {
+      if (values.action === "module_library.reset" && !ran) {
+        ran = true;
         const single = next.single;
         next.single = async () => {
           const answer = await single();
-          then();
+          then(resetRows().at(-1)!);
           return answer;
         };
       }
@@ -218,6 +227,15 @@ describe("a reset records what it will restore before it wipes anything", () => 
       reset_audit_id: resetRows()[0].id,
       unrestored: { installs: [], pins: [] },
     });
+    // Every entry is approved at the commit its run read, which is what D19 asks of a reset.
+    expect(report.warnings.join(" ")).not.toContain("failed to publish");
+    expect(report.after.libraryEntriesPublished).toBe(2);
+    expect(
+      db.tables.module_library.map((e) => [e.slug, e.approval_status, e.source_commit_sha]).sort(),
+    ).toEqual([
+      ["aml", "approved", COMMIT],
+      ["clients", "approved", COMMIT],
+    ]);
   });
 
   it("wipes nothing when the record cannot be written", async () => {
@@ -274,7 +292,7 @@ describe("what a reset leaves owed, the next one restores", () => {
     expect(report.ok).toBe(true);
     expect(report.warnings.join(" ")).toContain(`The reset of ${diedAt} never finished`);
     expect(installs()).toEqual(BOTH);
-    expect(resetRows()[1].metadata).toMatchObject({ restores_owed_from: diedAt });
+    expect(resetRows()[1].metadata).toMatchObject({ restores_owed_by: ["au1"] });
   });
 
   it("does not restore a reset that finished", async () => {
@@ -398,6 +416,22 @@ describe("what a reset leaves owed, the next one restores", () => {
     expect(deletes()).toEqual([]);
   });
 
+  it("keeps a debt owed when the reset that took it on left a record that cannot be read", async () => {
+    const unreadable: Row = {
+      id: "au2",
+      action: "module_library.reset",
+      created_at: "2026-09-02T10:00:00.000Z",
+      metadata: { modules_removed: 2, restores_owed_by: ["au1"], snapshot: "not a snapshot" },
+    };
+    seed({ audit_log: [resetRow("au1", diedAt), unreadable], modules: [], clone_modules: [] });
+
+    const report = await reset();
+
+    expect(report.ok).toBe(true);
+    expect(report.warnings.join(" ")).toContain(`The reset of ${diedAt} never finished`);
+    expect(installs()).toEqual(BOTH);
+  });
+
   it("reads a reset row that predates snapshots as nothing owed", async () => {
     // 31 Jul 2026's reset recorded counts, never a snapshot.
     seed({
@@ -413,7 +447,7 @@ describe("what a reset leaves owed, the next one restores", () => {
 
     const read = await readResetState(client());
 
-    expect(read).toEqual({ ok: true, state: { running: [], owed: null } });
+    expect(read).toEqual({ ok: true, state: { running: [], owed: [] } });
   });
 });
 
@@ -503,6 +537,7 @@ describe("a reset never runs beside another reset or a detection", () => {
       reset_audit_id: own.id,
       unrestored: { installs: [], pins: [] },
       stopped_because: expect.stringContaining("may still be running"),
+      wiped: false,
     });
   });
 
@@ -518,6 +553,125 @@ describe("a reset never runs beside another reset or a detection", () => {
       /^Detection run 9e9e9e9e has been running since .* This reset stopped before wiping anything\.$/,
     );
     expect(deletes()).toEqual([]);
+    expect(installs()).toEqual(BOTH);
+  });
+});
+
+describe("a reset that stepped aside leaves what is owed where it was", () => {
+  const longAgo = "2026-09-01T10:00:00.000Z";
+  const secondBefore = (row: Row) =>
+    new Date(Date.parse(row.created_at as string) - 1000).toISOString();
+  /** Every record on the audit log, moved back past the window: what a death looks like later. */
+  const pastTheWindow = () => {
+    for (const row of db.tables.audit_log) {
+      row.created_at = new Date(
+        Date.parse(row.created_at as string) - RUNNING_RUN_WINDOW_MS - 60_000,
+      ).toISOString();
+    }
+  };
+  /** What a reset's wipe left: no module, so no install. */
+  const wiped = () => {
+    db.tables.modules = [];
+    db.tables.clone_modules = [];
+  };
+  /**
+   * Two resets looked together. The other recorded itself first, found nobody
+   * and went on; this one recorded itself second, a second later, found it,
+   * and stepped aside.
+   */
+  async function stepAsideBeside(other: (own: Row) => Row) {
+    afterResetRecorded((own) => db.tables.audit_log.push(other(own)));
+    const report = await reset();
+    expect(report.error).toMatch(/This reset stopped before wiping anything\.$/);
+    expect(deletes()).toEqual([]);
+  }
+
+  it("restores what the reset that went on left when it died, though it recorded itself first", async () => {
+    await stepAsideBeside((own) => resetRow("went-on", secondBefore(own)));
+    wiped();
+    pastTheWindow();
+
+    const next = await reset();
+
+    expect(next.ok).toBe(true);
+    expect(next.warnings.join(" ")).toMatch(/The reset of .* never finished/);
+    expect(installs()).toEqual(BOTH);
+    expect(resetRows().at(-1)!.metadata).toMatchObject({ restores_owed_by: ["went-on"] });
+  });
+
+  it("restores at once what the reset that went on could not write back", async () => {
+    await stepAsideBeside((own) => resetRow("went-on", secondBefore(own)));
+    wiped();
+    db.tables.audit_log.push({
+      id: "went-on-done",
+      action: "module_library.reingest_complete",
+      created_at: new Date().toISOString(),
+      metadata: {
+        reset_audit_id: "went-on",
+        unrestored: snapshotOfBoth,
+        stopped_because: "a restore write failed",
+      },
+    });
+
+    const next = await reset();
+
+    expect(next.ok).toBe(true);
+    expect(next.warnings.join(" ")).toContain("could not restore everything it recorded");
+    expect(installs()).toEqual(BOTH);
+  });
+
+  it("does not bring back what the reset that went on restored and a person removed since", async () => {
+    // A reset that died long ago owed clone B's `clients`. Both resets took
+    // it on; the one that went on restored it and finished, and since then
+    // clone B's `clients` has been uninstalled.
+    const owedByDead = resetRow("died", longAgo);
+    (owedByDead.metadata as { snapshot: typeof snapshotOfBoth }).snapshot = {
+      installs: [
+        { clone_id: CLONE_A, slugs: ["aml", "clients"] },
+        { clone_id: CLONE_B, slugs: ["aml", "clients"] },
+      ],
+      pins: [],
+    };
+    seed({ audit_log: [owedByDead] });
+    await stepAsideBeside((own) => ({
+      ...resetRow("went-on", secondBefore(own)),
+      metadata: {
+        ...(resetRow("went-on", longAgo).metadata as object),
+        restores_owed_by: ["died"],
+      },
+    }));
+    expect(resetRows().at(-2)!.metadata).toMatchObject({ restores_owed_by: ["died"] });
+    db.tables.audit_log.push({
+      id: "went-on-done",
+      action: "module_library.reingest_complete",
+      created_at: new Date().toISOString(),
+      metadata: { reset_audit_id: "went-on", unrestored: { installs: [], pins: [] } },
+    });
+
+    const next = await reset();
+
+    expect(next.ok).toBe(true);
+    expect(next.warnings.join(" ")).not.toMatch(/never finished|could not restore/);
+    expect(installs()).toEqual(BOTH);
+  });
+
+  it("leaves an earlier reset's debt with it when it stepped aside for a detection", async () => {
+    seed({ audit_log: [resetRow("died", longAgo)], modules: [], clone_modules: [] });
+    afterResetRecorded(() => {
+      db.tables.module_detection_runs.push({
+        id: "9e9e9e9e-0000-4000-8000-000000000009",
+        status: "running",
+        started_at: new Date().toISOString(),
+      });
+    });
+    const steppedAside = await reset();
+    expect(steppedAside.error).toMatch(/This reset stopped before wiping anything\.$/);
+    db.tables.module_detection_runs.at(-1)!.status = "completed";
+
+    const next = await reset();
+
+    expect(next.ok).toBe(true);
+    expect(next.warnings.join(" ")).toContain(`The reset of ${longAgo} never finished`);
     expect(installs()).toEqual(BOTH);
   });
 });
