@@ -1319,4 +1319,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "cron", jobname: "module-library-follow-15min" },
     ],
   },
+  {
+    migration: "20261029160000_library_follow_patience.sql",
+    version: "20261029160000",
+    assertions: [{ kind: "cron", jobname: "module-library-follow-15min" }],
+  },
 ];

@@ -503,10 +503,12 @@ function defaultsFor(table: Table, now: string): Row {
 /**
  * The row an UPDATE leaves, BEFORE triggers included: production's
  * `modules_follow_mark_is_the_follows` clears the follow's archive mark on a
- * status change that does not write the mark to a new value.
+ * status change that does not write the mark to a new value, and
+ * `update_module_detection_runs_updated_at` stamps a run's every write.
  */
-function updated(table: Table, old: Row, values: Row): Row {
+function updated(table: Table, old: Row, values: Row, now: string): Row {
   const next = { ...old, ...structuredClone(values) };
+  if (table === "module_detection_runs") next.updated_at = now;
   if (
     table === "modules" &&
     "status" in values &&
@@ -893,7 +895,9 @@ function builder(db: LibraryFakeDb, table: Table, known: Set<string>): Builder {
         result = created;
       } else {
         result = rows().filter((r) => filters.every((f) => f(r)));
-        const after = (r: Row): Row => (result.includes(r) ? updated(table, r, values as Row) : r);
+        const now = statementNow();
+        const after = (r: Row): Row =>
+          result.includes(r) ? updated(table, r, values as Row, now) : r;
         for (const row of result) {
           const others = rows()
             .filter((r) => r !== row)
@@ -902,7 +906,7 @@ function builder(db: LibraryFakeDb, table: Table, known: Set<string>): Builder {
             violation(table, after(row), others) ?? unreferenced(db, table, after(row));
           if (broken) return { data: null, error: broken };
         }
-        for (const row of result) Object.assign(row, updated(table, row, values as Row));
+        for (const row of result) Object.assign(row, updated(table, row, values as Row, now));
       }
       db.writes.push({ table, op, rows: result.map((r) => ({ ...r })) });
     }

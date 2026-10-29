@@ -10,6 +10,8 @@ import {
   FOLLOW_BACKOFF_MS,
   FOLLOW_HELD,
   FOLLOW_SKIPPED,
+  SETTLE_QUIET_MS,
+  SETTLE_WINDOW_MS,
   emptyFollowReport,
   entryChange,
   followAuditMetadata,
@@ -41,8 +43,20 @@ const run = (over: Partial<FollowRun> = {}): FollowRun => ({
   parameters: FOLLOW,
   started_at: minutesAgo(5),
   completed_at: null,
+  tree_hash: null,
+  updated_at: null,
   ...over,
 });
+
+/** A follow run that wrote every module it found `minutes` ago, and was not settled. */
+const detected = (minutes: number, over: Partial<FollowRun> = {}): FollowRun =>
+  run({
+    status: "running",
+    started_at: minutesAgo(minutes + 1),
+    tree_hash: "6dbda61tree0000a",
+    updated_at: minutesAgo(minutes),
+    ...over,
+  });
 
 const step = (runs: FollowRun[]) =>
   nextFollowStep({ headSha: HEAD, runs, now: NOW, windowMs: WINDOW });
@@ -167,6 +181,56 @@ describe("what the follow does at the prime's head", () => {
   it("leaves a run that may still be running to the competitor check", () => {
     const running = run({ status: "running", started_at: minutesAgo(5) });
     expect(step([running])).toEqual(detect(1));
+  });
+
+  it("settles a run that wrote its modules once its invocation has had its quiet, and detects nothing", () => {
+    const pending = detected(SETTLE_QUIET_MS / 60_000 + 1);
+    expect(step([pending, run({ commit_sha: OLDER })])).toEqual({
+      kind: "settle",
+      run: pending,
+      commitSha: HEAD,
+      stale: [],
+      attempt: 1,
+      afterHold: false,
+    });
+  });
+
+  it("leaves a run that wrote its modules to its own invocation inside the quiet", () => {
+    const pending = detected(SETTLE_QUIET_MS / 60_000 - 1);
+    expect(step([pending, run({ commit_sha: OLDER })])).toEqual({ kind: "settling", run: pending });
+  });
+
+  it("settles a run started past the detection's window, as long as it wrote its modules inside two hours", () => {
+    const pending = detected(SETTLE_WINDOW_MS / 60_000 - 1, { started_at: minutesAgo(150) });
+    expect(step([pending])).toMatchObject({ kind: "settle", run: pending, stale: [] });
+  });
+
+  it("closes a run whose settle never came in two hours, and counts it as a try", () => {
+    const expired = detected(SETTLE_WINDOW_MS / 60_000 + 1);
+    expect(step([expired, run({ commit_sha: OLDER })])).toEqual(detect(2, { stale: [expired] }));
+  });
+
+  it("closes a run another detection followed, whose modules may have been written over", () => {
+    const superseded = detected(20);
+    const persons = run({ parameters: { strategy: "feature-first" }, status: "completed" });
+    expect(step([persons, superseded, run({ commit_sha: OLDER })])).toEqual(
+      detect(2, { stale: [superseded] }),
+    );
+  });
+
+  it("does not settle a run that wrote its modules without a commit to settle them at", () => {
+    const noCommit = detected(20, { commit_sha: null });
+    expect(step([noCommit])).toEqual(detect(2, { stale: [noCommit] }));
+  });
+
+  it("settles a run that wrote its modules even while it backs off, which is for detections", () => {
+    const pending = detected(20);
+    const failed = [
+      run({ status: "failed", completed_at: minutesAgo(30) }),
+      run({ status: "failed", completed_at: minutesAgo(60) }),
+      run({ status: "failed", completed_at: minutesAgo(90) }),
+    ];
+    expect(step([pending, ...failed])).toMatchObject({ kind: "settle", run: pending, attempt: 4 });
   });
 
   it("is exhausted when the run that died was the third failure in a row", () => {
@@ -396,10 +460,12 @@ describe("what a follow reports", () => {
     const report = emptyFollowReport("settled");
     report.archived = Array.from({ length: 250 }, (_, i) => `m${i}`);
     report.attempt = 2;
+    report.resumed = true;
     const metadata = followAuditMetadata(report) as Record<string, unknown>;
     expect((metadata.archived as string[]).length).toBe(200);
     expect(metadata.outcome).toBe("settled");
     expect(metadata.attempt).toBe(2);
+    expect(metadata.resumed).toBe(true);
     expect(metadata.stopped_because).toBeNull();
   });
 

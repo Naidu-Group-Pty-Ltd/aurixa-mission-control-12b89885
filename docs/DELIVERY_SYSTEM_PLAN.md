@@ -36,7 +36,7 @@ what became of it.
 | D18                                         | prime #3398, #3409; #381                                                         | Each deployment recorded the stated list on its next balance call on 28 Oct: the prime `[]` at 15:08:55, the dashboard at 16:02:08, the CRM at 16:03:26, and Preflight at 17:45:26, its first row. On NPC Test an exclusion set in Mission Control at 15:42:59 was recorded at 16:11:29, and after it was cleared at 16:19:49 NPC Test recorded `[]` at 17:43:11.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | D9 (the owed list)                          | prime #3401–#3405; #393, #394                                                    | Every owed file applied on the prime and all four clones with its `@effect` probe true; the 12:01 fleet sweep lists all 12 withdrawn files; the chart catalogue's 13 rows reached every clone with the prime's fingerprint by 14:58.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | D20                                         | #387                                                                             | Report-only. The 14:37 pass on 28 Oct: 991 surplus privileges on 65 relations on the dashboard, NPC Test and Preflight each, and 1,198 on 78 on the CRM.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| D19                                         | #388, #405, #414                                                                 | An entry is approved only at a commit (a CHECK), and `(slug, version)` is unique. Before anyone pressed the reset that detects the catalogue again, its detection was replayed against prime@122b761 on 28 Oct. Pressed then, it would have read the 25 template seeds (37 to 43 MB) whole inside the 128 MB isolate after its wipe, made 7,199 GitHub calls and swallowed any that failed, and held the fleet's 328 installs only in memory. #405 reads by batch (95 queries and 7 blob reads for the same 143 modules), never asks for a file over 8 MB, writes no module when a file could not be read, records the snapshot before the wipe, restores what any earlier reset still owes, and runs alone. On 29 Oct the owner chose that the library follow the prime by itself instead (#414, §16): nobody presses the reset, and the first follow approves the catalogue at the prime's head. |
+| D19                                         | #388, #405, #414, #417                                                           | An entry is approved only at a commit (a CHECK), and `(slug, version)` is unique. Before anyone pressed the reset that detects the catalogue again, its detection was replayed against prime@122b761 on 28 Oct. Pressed then, it would have read the 25 template seeds (37 to 43 MB) whole inside the 128 MB isolate after its wipe, made 7,199 GitHub calls and swallowed any that failed, and held the fleet's 328 installs only in memory. #405 reads by batch (95 queries and 7 blob reads for the same 143 modules), never asks for a file over 8 MB, writes no module when a file could not be read, records the snapshot before the wipe, restores what any earlier reset still owes, and runs alone. On 29 Oct the owner chose that the library follow the prime by itself instead (#414, §16): nobody presses the reset, and the first follow approves the catalogue at the prime's head. |
 | D15 (the owner's step 0), and its guards    | #399, #401, #404; prime #3416                                                    | The switch applied at 21:32:00 on 28 Oct: the CRM reads `mirror` with 31 exclusions, its three new notes are the default policy's, and no other clone changed. Its first mirror cascade, CRM #158 at prime `122b761`, carried 259 files (231 added, 28 changed, none deleted) and merged on green at 22:00 (`b57d4d1`). That is the 20:41 replay's 245, 243 of them blob for blob and two at the newer copies of prime #3415, which merged at 21:17 between the replay and the switch, and 14 of #3415's files. None of `.claude/**`, the agent specs or `clientImportRecords.spec.ts` travelled, the security baselines were recomputed for the CRM (388 functions), and 9 files wait for a person, `parityRegister.ts` among them. It also carried the streaming half of prime #3413 (`streamSecureFunction.ts`) to the CRM.                                                                     |
 | Outside the plan (§15)                      | #395, #397; prime #3411, #3413, #3414                                            | NPC Test's lock screen showed $999 and its button opened Stripe (`checkout_started`, plan `launch`, 17:42:10 on 28 Oct). Preflight's password recovery sent from its own domain at 17:43:51. After the 20:00 email audit both Resend rows read `set` on all four clones, from their projects' secret names. Prime #3413's refusal rule was in all four clones' live bundles by 21:04, and prime #3414's `authenticated-data` is byte-identical on the prime and the four clones (deployed 20:17–20:30), with the comments rule.                                                                                                                                                                                                                                                                                                                                                                    |
 
@@ -45,7 +45,11 @@ Still open: the rest of P1 (L1–L7, L9, L10), P2, and the owner's decisions in
 been read back, D9's owed list is delivered, and D20 reports. D14 is parked by
 the owner (28 Oct). D15 shipped on 28 Oct, the engine first and the switch
 once it was live, and its guards with it (Where it stands). D19 no longer waits on the
-reset: from 29 Oct the library follows the prime by itself (§16).
+reset: from 29 Oct the library follows the prime by itself (§16). Its first three
+invocations were cut 68 to 72 s in, so it told the operators at 16:04 UTC and
+now tries every six hours. In the replay, #417 ends detection at 20 to 28 s
+rather than 63 to 85, holds 49 MB rather than 143 with the same output, and
+settles a run that wrote its modules at a later tick (§16).
 D3 and D8 are the ones that stand between this
 fleet and a launch, and D3 is smaller than §4.2 read (§15). §14 records the
 clones' open tables, found and closed on 28 Oct, and §15 what else 28 Oct
@@ -1213,11 +1217,20 @@ run is pruned once.
   follow waits for the prime to move. The first follow archives 14 of 135,
   inside the 34 it may.
 - **Failures in a row.** A follow that fails is tried again at the next tick.
-  A run that died still saying `running` is closed and counted as a try.
-  Three failures in a row, whatever commits they read, tell the operators
-  once, and from then the follow tries once every six hours until one
-  settles. A runtime that kills the detection, or a fault that repeats, would
-  otherwise spend a detection at every merge and say nothing.
+  A run that died still saying `running` is closed and counted as a try,
+  unless it died after writing every module it found: that run is settled by
+  a later tick instead (below). Three failures in a row, whatever commits
+  they read, tell the operators once, and from then the follow tries once
+  every six hours until one settles. A runtime that kills the detection, or a
+  fault that repeats, would otherwise spend a detection at every merge and say
+  nothing.
+- **A run that wrote its modules is settled, not detected again.** Its tree
+  hash is written with its findings, after its last module. Ten minutes after
+  that write, long after the invocation that detected it has ended, a tick
+  settles it at its commit, without detecting, and the audit row says
+  `resumed`. Only while it is the newest detection of all: one a person's
+  detection or a reset followed is closed as a try, because its modules may
+  have been written over. Past two hours it is closed as a try too.
 
 ### What a new clone receives
 
@@ -1243,4 +1256,99 @@ read back by effect:
 - every clone's row and installs as they were before.
 
 A run that cannot finish on the runtime shows as three failed tries and one
-notice, and nothing it wrote is published.
+notice. Entries a cut invocation had already published are approved at its
+run's commit, and the settle that finishes reads them as unchanged.
+
+### What production showed on 29 Oct, and what changed (#417)
+
+Mission Control was published at 14:13:22 UTC (deployment `36bf0172`), with
+both migrations applied: the two columns, the trigger, `library_follow_held`
+and the 15-minute job. The prime's head was `6dbda61`.
+
+- **14:19.** Run `387547a8` read 12,022 files, wrote 2,000 import edges and
+  103 of its 143 modules, and was cut at 14:20:09, 68 s after pg_net sent the
+  request, which it answered 502. The run stayed `running`. The 14:34 tick
+  stood aside for it, as designed.
+- **14:49.** The tick closed `387547a8` as a try and detected again
+  (`20d88195`): 143 modules (9 new, 134 rewritten), approved by policy and 14
+  archived at 14:50:10, then 23 entries published at `6dbda61` before it was
+  cut 71 s in. It stayed `running`, with its tree hash.
+- **15:34.** The code that settles such a run at a later tick was not yet
+  published, so the tick closed `20d88195` as a try and detected again
+  (`96746f45`). By its own rows, it had written its 2,000 edges 48 s in, its
+  143 modules 58 s in, and 14,000 of its backend artifacts, 28 of 36 inserts,
+  by 69 s, when it was cut, 72 s after its request was sent. It wrote no tree
+  hash.
+- **16:04.** The tick closed `96746f45`, the third failure in a row, and told
+  the operators once (`library_follow_held`, 16:04:04). From here the follow
+  tries once every six hours, the first after 22:04 UTC. The notice gave its
+  reason as "because the follow failed 3 times in a row"; #417 names why the
+  last try died instead.
+- **Clones.** At 15:28, every clone's recorded plan (scale, scale, launch,
+  scale), its installs (134, 135, 22, 37) and its sync time read as they did
+  before the first tick, and no pin exists.
+
+Why it was cut, measured rather than assumed:
+
+- **Time, most likely.** The three invocations were cut 68, 71 and 72 s in,
+  each in a different part of its work: writing modules, publishing entries,
+  inserting artifacts. What each was doing differed, and when it stopped did
+  not. pg_net was not the one to stop waiting: it had ten minutes' patience.
+  An earlier draft of this section said it was not wall time, because pg_net
+  batches whose slowest request took 80 to 87 s had answered `200`. That was
+  wrong: pg_net records when a batch began, not when each request in it was
+  answered, so a batch's length is no request's. The cascade's passes were
+  cut at 55 and 68.7 s (`docs/CASCADE_PASS_REPLAY.md`), so the limit is about
+  a minute, not a number this has measured exactly.
+- **Not likely CPU.** The detection, replayed at `6dbda61` against a copy of
+  the prime, took 5.7 s of CPU on a cold blob cache and 3.4 s on a warm one,
+  against the 30 s a Worker is allowed by default. The replay does not parse
+  GitHub's answers off the wire, so this is a bound from below.
+- **Memory, as well.** The same replay's live heap, after collection, reached
+  142.6 MB cold and 92.6 MB warm, about 10 MB of it the stand-in database;
+  the isolate has 128 MB. V8 keeps a slice of a long string as a view of the
+  whole, so the trace's 8,192-character cuts held all 3,394 source files
+  whole, and a cold backend pass's parsed analyses held every migration
+  whole. A 502 does not say whether an invocation died of it; a cold one was
+  over the limit in the replay.
+- **Statements one after another.** By the third try's own rows, its 28
+  artifact inserts of 500 rows took 10.8 s, 386 ms apiece, and its last edge
+  to its last module 9.6 s, two round trips per module. The blob cache's 18
+  reads and 18 refreshes add about 6 s more in the model below.
+
+What #417 changes, with the replay to show it:
+
+- each cut and each parsed analysis is its own copy, each file's imports are
+  worked out once rather than once per route that reaches it, and the texts
+  are let go once the backend pass has read them: 49.1 MB live at most cold
+  and 43.3 MB warm, 3.8 and 2.7 s of CPU, and the 143 modules, the run row
+  and every edge, artifact and alert byte-identical to `main`'s;
+- the run sends its statements five at a time, a Worker holding six
+  connections open: the blob cache's reads, writes and refreshes, its edges,
+  its module writes and its artifacts. A module that cannot be read or
+  written still stops the run, as it did one at a time
+  (`mapWithConcurrencyOrThrow` starts nothing after a failure, where
+  `mapWithConcurrency` let its other runners carry on). The library writer
+  publishes five entries at a time, in the same order;
+- a run that wrote its modules is settled by a later tick, not detected
+  again (above), and a follow whose detection ended more than 40 s into its
+  invocation leaves the settle to that tick. A settle still pruning 50 s in
+  leaves the earlier runs it has not reached to the next settle, so its audit
+  row is written;
+- a follow run that has written nothing for ten minutes died with its
+  invocation, and the next tick closes it. The 30 minutes a person's
+  detection is given held a dead follow run's commit for two ticks;
+- the hook's patience is 150 s, not 600 (`20261029160000`): pg_net sends its
+  next batch only once every request of this one has answered, so the 14:50
+  jobs' requests went out at 14:50:14, and a follow that hung would have held
+  every cron hook in Mission Control for ten minutes.
+
+The replay was timed too, six requests at a time at most, with each database
+statement waiting 33 ms, and 0.67 ms more per row inserted and 1.3 ms per row
+updated (production's artifact inserts took 386 ms for 500 rows), each
+GraphQL batch 600 ms and the tree 2 s. For `main`'s code it reaches the end
+of detection at 63.4 s warm. Production's second try had ended detection and
+begun approving by 61 s, and its third, extrapolated from its inserts, would
+have ended it at about 72 s, so the model sits inside production's spread.
+For #417's code it reaches the end of detection at 19.9 s warm and 27.8 s
+cold, with the same output.

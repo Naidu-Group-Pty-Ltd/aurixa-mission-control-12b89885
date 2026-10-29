@@ -7,8 +7,9 @@ import { readGitHubRemaining } from "@/server/githubAllowance.server";
 import { followPrimeHead } from "@/server/library-follow.server";
 
 // The module library follows the prime (docs/DELIVERY_SYSTEM_PLAN.md, D19).
-// pg_cron POSTs here every 15 minutes, with ten minutes' patience, and
-// Bearer(cron_secret) auth (20261029140000_module_library_follows_the_prime).
+// pg_cron POSTs here every 15 minutes, with two and a half minutes' patience
+// (20261029160000_library_follow_patience), and Bearer(cron_secret) auth
+// (20261029140000_module_library_follows_the_prime).
 // While the catalogue is settled at the prime's head this reads the head and
 // returns; when the head has moved it detects the catalogue there and settles
 // it (`library-follow.server.ts`).

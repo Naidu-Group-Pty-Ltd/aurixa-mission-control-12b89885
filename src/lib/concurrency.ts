@@ -26,6 +26,36 @@ export async function mapWithConcurrency<T, R>(
 }
 
 /**
+ * `mapWithConcurrency` for a loop that stopped at its first failure, and must
+ * still. Once a worker throws, no further item is started; the items already
+ * in flight finish, and then the first error is thrown. `mapWithConcurrency`
+ * rejects on that error too, but its other runners carry on through the rest
+ * of the list after it, writing whatever their items write.
+ */
+export async function mapWithConcurrencyOrThrow<T, R>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const failure: { thrown: boolean; error?: unknown } = { thrown: false };
+  const { results } = await mapWithConcurrencyUntil(
+    items,
+    limit,
+    async (item) => {
+      try {
+        return await worker(item);
+      } catch (error) {
+        if (!failure.thrown) Object.assign(failure, { thrown: true, error });
+        return undefined as R;
+      }
+    },
+    () => failure.thrown,
+  );
+  if (failure.thrown) throw failure.error;
+  return results;
+}
+
+/**
  * `mapWithConcurrency`, but the caller can stop it.
  *
  * `shouldStop` is asked before each item is STARTED; an item already started

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mapWithConcurrency } from "./concurrency";
+import { mapWithConcurrency, mapWithConcurrencyOrThrow } from "./concurrency";
 
 describe("mapWithConcurrency", () => {
   it("preserves input order regardless of completion order", async () => {
@@ -35,5 +35,54 @@ describe("mapWithConcurrency", () => {
 
   it("returns an empty array for no items", async () => {
     expect(await mapWithConcurrency([], 4, async () => 1)).toEqual([]);
+  });
+});
+
+describe("mapWithConcurrencyOrThrow", () => {
+  const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it("returns every result in input order when no worker throws", async () => {
+    const out = await mapWithConcurrencyOrThrow([30, 10, 20, 0], 3, async (ms) => {
+      await wait(ms);
+      return ms;
+    });
+    expect(out).toEqual([30, 10, 20, 0]);
+  });
+
+  it("starts nothing after a worker throws, and throws once the ones in flight finish", async () => {
+    const started: number[] = [];
+    const finished: number[] = [];
+    const run = mapWithConcurrencyOrThrow(
+      Array.from({ length: 10 }, (_, i) => i),
+      3,
+      async (i) => {
+        started.push(i);
+        if (i === 1) {
+          await wait(1);
+          throw new Error("item 1 failed");
+        }
+        await wait(10);
+        finished.push(i);
+        return i;
+      },
+    );
+    await expect(run).rejects.toThrow("item 1 failed");
+    expect(started.sort()).toEqual([0, 1, 2]);
+    expect(finished.sort()).toEqual([0, 2]);
+    // Nothing is started later, either.
+    await wait(30);
+    expect(started.sort()).toEqual([0, 1, 2]);
+  });
+
+  it("throws the first error when more than one worker fails", async () => {
+    const run = mapWithConcurrencyOrThrow([5, 1, 3], 3, async (ms) => {
+      await wait(ms);
+      throw new Error(`failed after ${ms} ms`);
+    });
+    await expect(run).rejects.toThrow("failed after 1 ms");
+  });
+
+  it("returns an empty array for no items", async () => {
+    expect(await mapWithConcurrencyOrThrow([], 4, async () => 1)).toEqual([]);
   });
 });

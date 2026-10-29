@@ -90,6 +90,41 @@ export const FOLLOW_BACKOFF_MS = 6 * 60 * 60_000;
 /** The status of a follow run that stepped aside for a reset or a detection: not a try. */
 export const FOLLOW_SKIPPED = "skipped";
 
+/**
+ * How long a run that has written every module it found is left to the
+ * invocation that detected it, which settles it next. A tick after that
+ * settles it instead, without detecting again.
+ */
+export const SETTLE_QUIET_MS = 10 * 60_000;
+
+/** How long a run that has written its modules stays the follow's to settle. Past it, the run died. */
+export const SETTLE_WINDOW_MS = 2 * 60 * 60_000;
+
+/**
+ * How far into its invocation a follow still settles the run it detected.
+ * The platform cut the follow's invocations of 29 Oct 2026 68 to 72 s in, and
+ * publishing the whole catalogue one entry at a time took 12 s of that (an
+ * entry every 87 ms; five at a time now). A settle that would start later is
+ * left to a later tick, which settles the run without detecting again.
+ */
+export const SETTLE_START_BY_MS = 40_000;
+
+/**
+ * How far into its invocation a follow still starts pruning an earlier run's
+ * diagnostics: a delete of a run's 17,662 artifacts is one statement, and the
+ * audit row is written after the prune, so a run left unpruned waits for the
+ * next settle rather than cost the record of this one.
+ */
+export const PRUNE_START_BY_MS = 50_000;
+
+/**
+ * How long a follow run that has not written its findings may still be
+ * running. Its invocation is cut about 70 s in, so one older than this died:
+ * the shared `RUNNING_RUN_WINDOW_MS` (30 minutes) is for a person's detection,
+ * and held a dead follow run's commit for two ticks on 29 Oct.
+ */
+export const FOLLOW_RUN_WINDOW_MS = 10 * 60_000;
+
 // ─── Which run is the follow's, and what it does next ───────────────────────
 
 /** A detection run, as the follow reads it. */
@@ -100,12 +135,25 @@ export type FollowRun = {
   parameters: Json | null;
   started_at: string | null;
   completed_at: string | null;
+  /** Written with the run's findings, after its last module (`runDetection`). */
+  tree_hash: string | null;
+  /** The run row's last write, stamped by its trigger. */
+  updated_at: string | null;
 };
 
 /** Whether a run is the follow's: its configuration says so (`DetectionRunConfig.follow`). */
 export function isFollowRun(run: Pick<FollowRun, "parameters">): boolean {
   const p = run.parameters;
   return !!p && typeof p === "object" && !Array.isArray(p) && p.follow === true;
+}
+
+/**
+ * Whether a follow run, still `running`, has written every module it found
+ * and waits only to be settled. Its tree hash is written with its findings,
+ * after the last module, and nowhere else in follow mode.
+ */
+export function hasDetected(run: Pick<FollowRun, "status" | "tree_hash">): boolean {
+  return run.status === "running" && run.tree_hash !== null;
 }
 
 export type FollowStep =
@@ -115,6 +163,21 @@ export type FollowStep =
   | { kind: "held"; run: FollowRun }
   /** The follow failed `FOLLOW_ATTEMPTS` times in a row and waits out its backoff. */
   | { kind: "exhausted"; failed: FollowRun[]; stale: FollowRun[] }
+  /** A run wrote every module it found moments ago, and the invocation that detected it may be settling it. */
+  | { kind: "settling"; run: FollowRun }
+  /**
+   * Settle `run`, which wrote every module it found before the invocation
+   * that detected it ended, without detecting again. `stale`, `attempt` and
+   * `afterHold` as for `detect`.
+   */
+  | {
+      kind: "settle";
+      run: FollowRun;
+      commitSha: string;
+      stale: FollowRun[];
+      attempt: number;
+      afterHold: boolean;
+    }
   /**
    * Detect at the head, as the follow's `attempt`th try in a row. `stale` are
    * follow runs that died before they settled. `afterHold` says the last
@@ -130,6 +193,16 @@ export type FollowStep =
  * whatever commit it read: after `FOLLOW_ATTEMPTS` of them the follow tries
  * once per `FOLLOW_BACKOFF_MS`, counted from the newest. A run that stepped
  * aside (`FOLLOW_SKIPPED`) is not a try.
+ *
+ * A follow run that wrote every module it found (`hasDetected`) is settled,
+ * not detected again, once `SETTLE_QUIET_MS` has passed since it wrote them,
+ * which is long after the invocation that detected it ended: settling is what
+ * that invocation did next. On 29 Oct 2026 two invocations died in their
+ * second minute, the second of them 23 entries into its publication, and each
+ * cost a whole detection and a try. Only while the run is the newest
+ * detection of all: one a person's detection or a reset followed had its
+ * modules written over, and is stale. Past `SETTLE_WINDOW_MS` it is stale
+ * too, so a settle that dies at every tick is a try in the end.
  */
 export function nextFollowStep(args: {
   headSha: string;
@@ -153,16 +226,39 @@ export function nextFollowStep(args: {
       ? { kind: "held", run: last }
       : { kind: "up_to_date", run: last };
   }
+  const detectedAt = (r: FollowRun) => Date.parse(r.updated_at ?? "") || 0;
+  const newestRun = args.runs[0];
+  const pending =
+    newestRun !== undefined &&
+    isFollowRun(newestRun) &&
+    hasDetected(newestRun) &&
+    newestRun.commit_sha !== null &&
+    detectedAt(newestRun) >= args.now - SETTLE_WINDOW_MS
+      ? newestRun
+      : undefined;
   const stale = follows.filter(
     (r) =>
       r.status === "running" &&
-      r.started_at !== null &&
-      Date.parse(r.started_at) < args.now - args.windowMs,
+      r !== pending &&
+      (hasDetected(r) ||
+        (r.started_at !== null && Date.parse(r.started_at) < args.now - args.windowMs)),
   );
   const died = new Set(stale.map((r) => r.id));
   const since = lastIndex >= 0 ? follows.slice(0, lastIndex) : follows;
   const failed = since.filter((r) => r.status === "failed" || died.has(r.id));
   const afterHold = last?.status === FOLLOW_HELD;
+  if (pending?.commit_sha) {
+    // Settling it is cheap, and the backoff is for detections.
+    if (detectedAt(pending) > args.now - SETTLE_QUIET_MS) return { kind: "settling", run: pending };
+    return {
+      kind: "settle",
+      run: pending,
+      commitSha: pending.commit_sha,
+      stale,
+      attempt: failed.length + 1,
+      afterHold,
+    };
+  }
   if (failed.length >= FOLLOW_ATTEMPTS) {
     const newest = Math.max(
       ...failed.map((r) => Date.parse(r.completed_at ?? r.started_at ?? "") || 0),
@@ -364,7 +460,15 @@ export function entryChange(
 
 // ─── What a follow reports ──────────────────────────────────────────────────
 
-export type FollowOutcome = "up_to_date" | "held" | "exhausted" | "settled" | "failed" | "skipped";
+export type FollowOutcome =
+  | "up_to_date"
+  | "held"
+  | "exhausted"
+  /** The run wrote its modules late in the invocation, and a later tick settles it. */
+  | "detected"
+  | "settled"
+  | "failed"
+  | "skipped";
 
 export type FollowReport = {
   outcome: FollowOutcome;
@@ -376,6 +480,8 @@ export type FollowReport = {
   commitSha: string | null;
   /** Which try at the head this was, out of `FOLLOW_ATTEMPTS`. */
   attempt: number | null;
+  /** Whether this tick settled a run an earlier invocation had detected (`settle`). */
+  resumed: boolean;
   approved: string[];
   revived: string[];
   archived: string[];
@@ -402,6 +508,7 @@ export function emptyFollowReport(outcome: FollowOutcome = "failed"): FollowRepo
     runId: null,
     commitSha: null,
     attempt: null,
+    resumed: false,
     approved: [],
     revived: [],
     archived: [],
@@ -426,6 +533,7 @@ export function followAuditMetadata(report: FollowReport): Json {
       run_id: report.runId,
       commit_sha: report.commitSha,
       attempt: report.attempt,
+      resumed: report.resumed,
       approved: cut(report.approved),
       revived: cut(report.revived),
       archived: cut(report.archived),
@@ -448,7 +556,8 @@ export function followAuditMetadata(report: FollowReport): Json {
  */
 export function stoppedNotice(report: FollowReport): NotificationInsert {
   const at = primeCommitLabel(report.commitSha) ?? "the prime's head";
-  const why = report.stoppedBecause ?? "no reason was recorded";
+  // A reason written as a sentence reads on after "because".
+  const why = (report.stoppedBecause ?? "no reason was recorded").replace(/^The /, "the ");
   const held = report.outcome === "held";
   return {
     kind: "library_follow_held",
