@@ -300,3 +300,34 @@ export function withOwed(current: ResetSnapshot, owed: readonly OwedRestore[]): 
   );
   return owed.length > 0 ? mergeResetSnapshots(current, earlier) : current;
 }
+
+/**
+ * The snapshot without what it records for a clone that no longer exists, and
+ * what was left out. A clone's installs are restored by a foreign key to it,
+ * so one deleted since an earlier reset recorded it cannot take them, and one
+ * such row fails the whole statement it is written in.
+ */
+export function onLiveClones(
+  snapshot: ResetSnapshot,
+  liveCloneIds: ReadonlySet<string>,
+): { kept: ResetSnapshot; gone: { clones: string[]; installs: number; pins: number } } {
+  const goneInstalls = snapshot.installs.filter((i) => !liveCloneIds.has(i.cloneId));
+  const gonePins = snapshot.pins.filter((p) => !liveCloneIds.has(p.cloneId));
+  const clones = [
+    ...new Set([...goneInstalls.map((i) => i.cloneId), ...gonePins.map((p) => p.cloneId)]),
+  ].sort();
+  if (clones.length === 0) {
+    return { kept: snapshot, gone: { clones, installs: 0, pins: 0 } };
+  }
+  return {
+    kept: {
+      installs: snapshot.installs.filter((i) => liveCloneIds.has(i.cloneId)),
+      pins: snapshot.pins.filter((p) => liveCloneIds.has(p.cloneId)),
+    },
+    gone: {
+      clones,
+      installs: installCount({ installs: goneInstalls, pins: [] }),
+      pins: gonePins.length,
+    },
+  };
+}
