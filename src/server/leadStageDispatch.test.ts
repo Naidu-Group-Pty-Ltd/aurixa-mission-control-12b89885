@@ -16,6 +16,10 @@ const state = vi.hoisted(() => ({
   sent: [] as { mailbox: string; message: Record<string, unknown> }[],
   outcome: { kind: "sent", status: 202, requestId: "rq" } as Record<string, unknown>,
   upserts: [] as Record<string, unknown>[][],
+  upsertTargets: [] as string[],
+  // One answer per upsert, in order; a ledger without the generation column
+  // answers the way PostgREST does (`PGRST204`).
+  upsertErrors: [] as ({ message: string; code: string } | null)[],
   existingKeys: new Set<string>(),
   suppressionQueries: [] as string[][],
   sweepWindows: {} as Record<string, Record<string, unknown>[]>,
@@ -31,6 +35,10 @@ const state = vi.hoisted(() => ({
   links: [] as Record<string, unknown>[],
   // What the lead row says beyond the Stage 1 basics, per case.
   leadOver: {} as Record<string, unknown>,
+  // What a re-read of the lead says once a link is minted: a correction can
+  // land between the batch read and the send.
+  leadNow: null as Record<string, unknown> | null,
+  linksClosed: [] as { patch: Record<string, unknown>; token: string }[],
 }));
 
 vi.mock("@/server/graph-client", () => ({
@@ -61,6 +69,13 @@ vi.mock("@/integrations/supabase/client.server", () => ({
       if (table === "waitlist_leads") {
         return {
           select: () => ({
+            // The re-read after a Stage 1 link is minted.
+            eq: () => ({
+              maybeSingle: async () => ({
+                data: { id: "lead-1", ...state.leadOver, ...(state.leadNow ?? {}) },
+                error: null,
+              }),
+            }),
             // The sweep reads one window per column: .gte(col, since).order().limit()
             gte: (column: string) => ({
               order: () => ({
@@ -111,6 +126,12 @@ vi.mock("@/integrations/supabase/client.server", () => ({
             state.links.push(link);
             return { error: null };
           },
+          update: (patch: Record<string, unknown>) => ({
+            eq: async (_column: string, token: string) => {
+              state.linksClosed.push({ patch, token });
+              return { error: null };
+            },
+          }),
         };
       }
       if (table === "email_suppressions") {
@@ -140,21 +161,27 @@ vi.mock("@/integrations/supabase/client.server", () => ({
             return { error: null };
           },
         }),
-        upsert: (batch: Record<string, unknown>[]) => {
+        upsert: (batch: Record<string, unknown>[], options: { onConflict?: string } = {}) => {
+          const error = state.upsertErrors.shift() ?? null;
           state.upserts.push(batch);
+          state.upsertTargets.push(options.onConflict ?? "");
           return {
             // The real upsert carries `ignoreDuplicates`, so a row that exists
             // is NOT returned. Modelled here, because that is the mechanism
-            // that made a terminal row permanent.
-            select: async () => ({
-              data: batch.filter((r) => {
-                const key = `${r.lead_id}/${r.stage}/${r.audience}`;
-                if (state.existingKeys.has(key)) return false;
-                state.existingKeys.add(key);
-                return true;
-              }),
-              error: null,
-            }),
+            // that made a terminal row permanent. The key is the index's own:
+            // an applicant email belongs to its address generation.
+            select: async () =>
+              error
+                ? { data: null, error }
+                : {
+                    data: batch.filter((r) => {
+                      const key = `${r.lead_id}/${r.stage}/${r.audience}/${r.generation ?? 0}`;
+                      if (state.existingKeys.has(key)) return false;
+                      state.existingKeys.add(key);
+                      return true;
+                    }),
+                    error: null,
+                  },
           };
         },
       };
@@ -200,6 +227,8 @@ beforeEach(() => {
   state.sent = [];
   state.outcome = { kind: "sent", status: 202, requestId: "rq" };
   state.upserts = [];
+  state.upsertTargets = [];
+  state.upsertErrors = [];
   state.existingKeys = new Set();
   state.suppressionQueries = [];
   state.sweepWindows = {};
@@ -210,6 +239,8 @@ beforeEach(() => {
   state.templatesError = null;
   state.links = [];
   state.leadOver = {};
+  state.leadNow = null;
+  state.linksClosed = [];
   process.env.MICROSOFT_MAILBOX_EMAIL = "hello@aurixasystems.com.au";
   process.env.LEAD_STAGE_INTERNAL_RECIPIENTS = TEAM.join(",");
   delete process.env.LEAD_STAGE_INTERNAL_STAGES;
@@ -408,7 +439,7 @@ describe("what the row says afterwards is what the page draws", () => {
     recipients: ["hello@aurixasystems.com.au"],
     recipient_source: "mailbox_fallback",
     to_address: "hello@aurixasystems.com.au",
-    reason: "no LEAD_STAGE_INTERNAL_RECIPIENTS set — only the sending mailbox was told",
+    reason: "no team alert recipients set — only the sending mailbox was told",
     attempts: 1,
   };
 
@@ -647,6 +678,194 @@ describe("the register is asked about the addresses that will be sent to", () =>
   });
 });
 
+describe("an applicant who corrected their address (docs/LEAD_EMAILS.md)", () => {
+  const OWNED = {
+    id: true,
+    stage1_sender: "mission_control",
+    stage2_sender: "mission_control",
+    stage3_sender: "mission_control",
+    tenant_id: null,
+    from_mailbox: null,
+    from_name: null,
+    reply_to: null,
+    internal_recipients: null,
+    internal_stages: null,
+    updated_at: "2026-10-29T00:00:00.000Z",
+    updated_by: null,
+  };
+  const fresh = (over: Record<string, unknown> = {}) => ({
+    id: "lead-1",
+    email: "jordan@firm.com.au",
+    application_id: "AX-0000000001",
+    created_at: new Date().toISOString(),
+    submitted_at: new Date().toISOString(),
+    enrichment_synced_at: new Date().toISOString(),
+    ...over,
+  });
+  const raised = () => state.upserts.flat();
+
+  it("raises the applicant email for the lead's address generation, and team alerts at 0", async () => {
+    state.settingsRow = OWNED;
+    await enqueueStageEmails({
+      leadId: "lead-1",
+      lead: fresh({ applicant_email_generation: 2 }),
+      trigger: "ingest",
+    });
+    expect(state.upsertTargets[0]).toBe("lead_id,stage,audience,generation");
+    expect(raised().find((r) => r.audience === "applicant")?.generation).toBe(2);
+    expect(raised().find((r) => r.audience === "internal")?.generation).toBe(0);
+  });
+
+  it("owes the Stage 1 email again at the corrected address, beside the one already sent", async () => {
+    state.settingsRow = OWNED;
+    await enqueueStageEmails({ leadId: "lead-1", lead: fresh(), trigger: "ingest" });
+    const second = await enqueueStageEmails({
+      leadId: "lead-1",
+      lead: fresh({ email: "jordan@firm.com", applicant_email_generation: 1 }),
+      trigger: "ingest",
+    });
+    const corrected = state.upserts[1]?.find((r) => r.audience === "applicant");
+    expect(corrected).toMatchObject({
+      status: "pending",
+      generation: 1,
+      recipients: ["jordan@firm.com"],
+    });
+    // The team alert is about the lead, not the address: not raised twice.
+    expect(second).toMatchObject({ queued: 1, existing: 1 });
+  });
+
+  it("settles an email for the old address superseded rather than sending it", async () => {
+    state.leadOver = { applicant_email_generation: 1, email: "jordan@firm.com" };
+    state.claimed = [
+      row({ audience: "applicant", recipients: ["jordan@firm.com.au"], generation: 0 }),
+    ];
+    const result = await dispatchStageEmails();
+    expect(state.sent).toHaveLength(0);
+    expect(patch()).toMatchObject({
+      status: "skipped",
+      reason: "superseded: the applicant corrected their address",
+    });
+    expect(result).toMatchObject({ claimed: 1, skipped: 1, sent: 0 });
+  });
+
+  it("closes the link and does not send when the correction lands mid-send", async () => {
+    // The batch read the lead before the correction; the re-read after the
+    // link is minted sees it.
+    state.settingsRow = OWNED;
+    state.claimed = [
+      row({ audience: "applicant", recipients: ["jordan@firm.com.au"], generation: 0 }),
+    ];
+    state.leadNow = { applicant_email_generation: 1, email: "jordan@firm.com" };
+    const result = await dispatchStageEmails();
+    expect(state.sent).toHaveLength(0);
+    expect(state.links).toHaveLength(1);
+    expect(state.linksClosed).toEqual([
+      { patch: { expires_at: expect.any(String) }, token: state.links[0]?.token_sha256 },
+    ]);
+    expect(patch()).toMatchObject({
+      status: "skipped",
+      reason: "superseded: the applicant corrected their address",
+    });
+    expect(result).toMatchObject({ sent: 0, skipped: 1 });
+  });
+
+  it("sends the email for the current address", async () => {
+    state.leadOver = { applicant_email_generation: 1, email: "jordan@firm.com" };
+    state.claimed = [
+      row({ audience: "applicant", recipients: ["jordan@firm.com"], generation: 1 }),
+    ];
+    await dispatchStageEmails();
+    expect(wire()).toEqual(["jordan@firm.com"]);
+  });
+
+  it("still raises every email under the old key while the ledger has no generation", async () => {
+    // A halted migration queue must not stop the stage emails: before
+    // 20261029170200 every row is generation 0 and the old key is the rule.
+    state.settingsRow = OWNED;
+    state.upsertErrors = [{ code: "PGRST204", message: "Could not find the 'generation' column" }];
+    const result = await enqueueStageEmails({ leadId: "lead-1", lead: fresh(), trigger: "ingest" });
+    expect(state.upsertTargets).toEqual([
+      "lead_id,stage,audience,generation",
+      "lead_id,stage,audience",
+    ]);
+    expect(state.upserts[1]?.every((r) => !("generation" in r))).toBe(true);
+    expect(result.queued).toBe(2);
+  });
+
+  it("does not raise a corrected address's email under the old key, where it would collide", async () => {
+    state.settingsRow = OWNED;
+    state.upsertErrors = [{ code: "42P10", message: "no unique or exclusion constraint" }];
+    await enqueueStageEmails({
+      leadId: "lead-1",
+      lead: fresh({ applicant_email_generation: 1 }),
+      trigger: "ingest",
+    });
+    expect(state.upserts[1]?.map((r) => r.audience)).toEqual(["internal"]);
+  });
+});
+
+describe("the team alerts set on Email → Lead emails", () => {
+  const CONSOLE_TEAM = ["admin@aurixasystems.com.au", "rugesh@aurixasystems.com.au"];
+  const settings = (over: Record<string, unknown> = {}) => ({
+    id: true,
+    stage1_sender: "mission_control",
+    stage2_sender: "mission_control",
+    stage3_sender: "mission_control",
+    tenant_id: null,
+    from_mailbox: null,
+    from_name: null,
+    reply_to: null,
+    internal_recipients: CONSOLE_TEAM,
+    internal_stages: [1, 2, 3],
+    updated_at: "2026-10-29T00:00:00.000Z",
+    updated_by: null,
+    ...over,
+  });
+  const internal = (stage: number) =>
+    state.upserts.flat().find((r) => r.audience === "internal" && r.stage === stage);
+  const fresh = (over: Record<string, unknown> = {}) => ({
+    id: "lead-1",
+    email: "applicant@firm.com.au",
+    application_id: "AX-0000000001",
+    created_at: new Date().toISOString(),
+    submitted_at: new Date().toISOString(),
+    enrichment_synced_at: new Date().toISOString(),
+    ...over,
+  });
+
+  it("raises the alert to the console's list, over the environment's", async () => {
+    state.settingsRow = settings();
+    await enqueueStageEmails({ leadId: "lead-1", lead: fresh(), trigger: "ingest" });
+    expect(internal(1)?.recipients).toEqual(CONSOLE_TEAM);
+    expect(internal(1)?.recipient_source).toBe("configured");
+  });
+
+  it("sends to the console's list, whatever the row was raised with", async () => {
+    state.settingsRow = settings();
+    state.claimed = [row({ recipients: ["hello@aurixasystems.com.au"] })];
+    await dispatchStageEmails();
+    expect(wire()).toEqual(CONSOLE_TEAM);
+  });
+
+  it("raises nothing for a stage the console switched off", async () => {
+    state.settingsRow = settings({ internal_stages: [1, 3] });
+    await enqueueStageEmails({
+      leadId: "lead-1",
+      lead: fresh({ stage2_completed_at: new Date().toISOString() }),
+      trigger: "ingest",
+    });
+    expect(internal(1)?.status).toBe("pending");
+    expect(internal(2)?.status).toBe("skipped");
+    expect(String(internal(2)?.reason)).toContain("switched off for stage 2");
+  });
+
+  it("leaves the environment's list in force until a list is saved", async () => {
+    state.settingsRow = settings({ internal_recipients: null, internal_stages: null });
+    await enqueueStageEmails({ leadId: "lead-1", lead: fresh(), trigger: "ingest" });
+    expect(internal(1)?.recipients).toEqual(TEAM);
+  });
+});
+
 describe("Mission Control sends the applicant's own email (Email → Lead emails)", () => {
   const SETTINGS = {
     id: true,
@@ -835,7 +1054,7 @@ describe("Mission Control sends the applicant's own email (Email → Lead emails
       expect(applicant(1)).toBeUndefined();
     });
 
-    it("decides nothing for the applicant when the settings cannot be read", async () => {
+    it("decides nothing, for anyone, when the settings cannot be read", async () => {
       state.settingsError = { message: "57014 statement timeout" };
       await enqueueStageEmails({
         leadId: "lead-1",
@@ -844,8 +1063,11 @@ describe("Mission Control sends the applicant's own email (Email → Lead emails
       });
       expect(applicant(1)).toBeUndefined();
       expect(applicant(2)).toBeUndefined();
-      // The team's own notification does not depend on who sends the applicant's.
-      expect(state.upserts.flat().some((r) => r.audience === "internal")).toBe(true);
+      // Who is on the team alert, and at which stages, is the console's answer
+      // too: raised now, it would go to the environment's list at stages the
+      // console may have switched off, and the ledger keeps the first raise.
+      // The sweep raises it once the settings answer.
+      expect(state.upserts.flat().some((r) => r.audience === "internal")).toBe(false);
     });
 
     it("does not invite an applicant to a questionnaire they have finished", async () => {

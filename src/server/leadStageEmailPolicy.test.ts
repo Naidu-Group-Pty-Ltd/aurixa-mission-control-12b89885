@@ -11,6 +11,7 @@ import {
   withApplicantSenders,
   stageOccurredAt,
   withSendingMailbox,
+  withTeamAlerts,
   type StageEmailEnv,
   type StageEmailSubject,
 } from "./leadStageEmailPolicy.pure";
@@ -511,6 +512,62 @@ describe("withSendingMailbox — the mailbox Email → Lead emails chose", () =>
     expect(withSendingMailbox(base, null)).toBe(base);
     expect(withSendingMailbox(base, "  ")).toBe(base);
     expect(withSendingMailbox(base, "not an address")).toBe(base);
+  });
+});
+
+describe("withTeamAlerts — the list and stages set on Email → Lead emails", () => {
+  const TEAM = [
+    "admin@aurixasystems.com.au",
+    "rugesh@aurixasystems.com.au",
+    "lavan@aurixasystems.com.au",
+  ];
+
+  it("replaces the environment's list, and the sending mailbox never displaces it", () => {
+    const env = policy({ LEAD_STAGE_INTERNAL_RECIPIENTS: "old@x.com" });
+    const set = withSendingMailbox(
+      withTeamAlerts(env, { recipients: TEAM, stages: null }),
+      "admin@aurixasystems.com.au",
+    );
+    expect(set.internalRecipients).toEqual(TEAM);
+    expect(set.internalRecipientSource).toBe("configured");
+    expect(set.internalRecipientsDropped).toEqual([]);
+    // The stages the console left unset are still the environment's.
+    expect([...set.internalStages].sort()).toEqual([1, 2, 3]);
+  });
+
+  it("turns a stage off, and every stage off says why nothing went", () => {
+    const set = withTeamAlerts(policy(), { recipients: TEAM, stages: [1, 3] });
+    expect(decideInternal(lead({ stage2_completed_at: minutesAgo(1) }), 2, set, NOW)).toEqual({
+      verdict: "skip",
+      reason: "internal email is switched off for stage 2",
+    });
+    const off = withTeamAlerts(policy(), { recipients: TEAM, stages: [] });
+    expect(off.internalStages.size).toBe(0);
+    expect(decideInternal(lead(), 1, off, NOW).verdict).toBe("skip");
+  });
+
+  it("overrides the environment's stages, which an unset console leaves in place", () => {
+    const env = policy({ LEAD_STAGE_INTERNAL_STAGES: "1" });
+    expect([...withTeamAlerts(env, { recipients: null, stages: [2, 3] }).internalStages]).toEqual([
+      2, 3,
+    ]);
+    expect([...withTeamAlerts(env, { recipients: null, stages: null }).internalStages]).toEqual([
+      1,
+    ]);
+  });
+
+  it("leaves the environment's answer whole while the console has set nothing", () => {
+    const env = policy({ LEAD_STAGE_INTERNAL_RECIPIENTS: "a@x.com, b@x.com" });
+    expect(withTeamAlerts(env, null)).toBe(env);
+    const unset = withTeamAlerts(env, { recipients: null, stages: null });
+    expect(unset.internalRecipients).toEqual(["a@x.com", "b@x.com"]);
+    expect(unset.internalRecipientSource).toBe("configured");
+    // An empty stored list is not a list: the mailbox still stands in.
+    const empty = withSendingMailbox(
+      withTeamAlerts(policy(), { recipients: [], stages: null }),
+      "admin@aurixasystems.com.au",
+    );
+    expect(empty.internalRecipientSource).toBe("mailbox_fallback");
   });
 });
 

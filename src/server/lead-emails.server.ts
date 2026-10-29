@@ -37,13 +37,23 @@ import { normaliseApplicationId } from "@/server/lead-capture.server";
 import { readTrialOfferByCode } from "@/server/trial-offers.server";
 import { normaliseOfferCode } from "@/lib/trialOffers.pure";
 import { notifyOperators, writeAuditLog } from "@/server/audit.server";
+import { REPEATED_ADDRESS, resolveInternalRecipients } from "@/server/leadStageEmailPolicy.pure";
+import { addressGeneration, SUPERSEDED_REASON } from "@/server/leadAddressCorrection.pure";
 
 type LeadRow = Database["public"]["Tables"]["waitlist_leads"]["Row"];
 
 const sha256 = (value: string) => crypto.createHash("sha256").update(value).digest("hex");
 
+// PostgREST answers a missing table `PGRST205` and a missing column `PGRST204`
+// (a write naming a column a pending migration adds — the team alerts did);
+// the Postgres codes are kept for a direct connection.
 function isSchemaPending(error: { code?: string | null } | null): boolean {
-  return error?.code === "PGRST205" || error?.code === "42P01" || error?.code === "42703";
+  return (
+    error?.code === "PGRST205" ||
+    error?.code === "PGRST204" ||
+    error?.code === "42P01" ||
+    error?.code === "42703"
+  );
 }
 
 /** How long a Stage 1 questionnaire link stays open. */
@@ -75,8 +85,19 @@ export function reviewBookingUrl(
 
 // ── Settings ────────────────────────────────────────────────────────────────
 
+/**
+ * Who receives the team's lead alerts, as set on Email → Lead emails. Null in
+ * either field: the console has not set it, and the environment decides
+ * (`LEAD_STAGE_INTERNAL_RECIPIENTS`, `LEAD_STAGE_INTERNAL_STAGES`).
+ */
+export type TeamAlertSettings = {
+  recipients: string[] | null;
+  stages: LeadStage[] | null;
+};
+
 export type LeadEmailSettings = {
   senders: Record<LeadStage, LeadEmailSender>;
+  teamAlerts: TeamAlertSettings;
   tenantId: string | null;
   fromMailbox: string | null;
   fromName: string | null;
@@ -87,6 +108,7 @@ export type LeadEmailSettings = {
 
 export const DEFAULT_LEAD_EMAIL_SETTINGS: LeadEmailSettings = {
   senders: { 1: "make", 2: "make", 3: "make" },
+  teamAlerts: { recipients: null, stages: null },
   tenantId: null,
   fromMailbox: null,
   fromName: null,
@@ -97,6 +119,18 @@ export const DEFAULT_LEAD_EMAIL_SETTINGS: LeadEmailSettings = {
 
 const sender = (value: unknown): LeadEmailSender =>
   value === "mission_control" ? "mission_control" : "make";
+
+const storedRecipients = (value: unknown): string[] | null =>
+  Array.isArray(value) && value.length
+    ? value.filter((v): v is string => typeof v === "string")
+    : null;
+
+const storedStages = (value: unknown): LeadStage[] | null =>
+  Array.isArray(value)
+    ? [
+        ...new Set(value.map(Number).filter((n): n is LeadStage => n === 1 || n === 2 || n === 3)),
+      ].sort()
+    : null;
 
 export type SettingsRead =
   | { ok: true; settings: LeadEmailSettings }
@@ -117,6 +151,10 @@ export async function readLeadEmailSettings(): Promise<SettingsRead> {
         1: sender(data.stage1_sender),
         2: sender(data.stage2_sender),
         3: sender(data.stage3_sender),
+      },
+      teamAlerts: {
+        recipients: storedRecipients(data.internal_recipients),
+        stages: storedStages(data.internal_stages),
       },
       tenantId: data.tenant_id,
       fromMailbox: data.from_mailbox,
@@ -260,6 +298,84 @@ export async function setLeadEmailSender(input: {
     metadata: { stage: input.stage, sender: input.sender },
   });
   return { ok: true };
+}
+
+/** At most this many people on the team's lead alerts (the column's own check). */
+export const TEAM_ALERT_RECIPIENT_LIMIT = 25;
+
+/**
+ * Who receives the team's lead alerts, and at which stages.
+ *
+ * Every address is read the way the sender reads it (`resolveInternalRecipients`),
+ * and a list with one entry that cannot be sent to is refused WHOLE, naming it:
+ * Graph refuses a whole message for one bad recipient, so a typo saved here
+ * would silence the alert for everybody on the list. An empty list clears the
+ * console's answer, and the environment (else the sending mailbox) decides
+ * again. Every operator is told, because the change decides who hears about a
+ * lead.
+ */
+export async function setLeadEmailTeamAlerts(input: {
+  recipients: string[];
+  stages: LeadStage[];
+  actorId: string;
+}): Promise<{ ok: true; recipients: string[] } | { ok: false; error: string }> {
+  const entries = input.recipients.map((entry) => entry.trim()).filter(Boolean);
+  const read = resolveInternalRecipients(entries, null);
+  const refused = read.dropped.filter((d) => d.reason !== REPEATED_ADDRESS);
+  if (refused.length) {
+    return {
+      ok: false,
+      error: `Not saved — ${refused.map((d) => `"${d.value}"`).join(", ")} ${refused.length === 1 ? "is" : "are"} not an address Mission Control can send to.`,
+    };
+  }
+  if (read.recipients.length > TEAM_ALERT_RECIPIENT_LIMIT) {
+    return {
+      ok: false,
+      error: `Not saved — at most ${TEAM_ALERT_RECIPIENT_LIMIT} people can receive the team alerts.`,
+    };
+  }
+  const stages = [...new Set(input.stages)].filter((s) => s === 1 || s === 2 || s === 3).sort();
+  const recipients = read.recipients;
+
+  const before = await readLeadEmailSettings();
+  const { error } = await supabaseAdmin.from("lead_email_settings").upsert(
+    {
+      id: true,
+      internal_recipients: recipients.length ? recipients : null,
+      internal_stages: stages,
+      updated_by: input.actorId,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "id" },
+  );
+  if (error) return { ok: false, error: isSchemaPending(error) ? "schema_pending" : error.message };
+
+  const previous = before.ok ? before.settings.teamAlerts : null;
+  await writeAuditLog({
+    actorUserId: input.actorId,
+    action: "lead_emails.team_alerts_set",
+    entityType: "lead_email_settings",
+    entityId: null,
+    metadata: {
+      recipients,
+      stages,
+      previous_recipients: previous?.recipients ?? null,
+      previous_stages: previous?.stages ?? null,
+    },
+  });
+  const named = recipients.length
+    ? recipients.join(", ")
+    : "nobody here — the environment's list, else the sending mailbox";
+  const at = stages.length ? stages.map((s) => STAGE_NAMES[s]).join(", ") : "no stage";
+  await notifyOperators({
+    kind: "lead_email_team_alerts_changed",
+    severity: "info",
+    title: "Who receives the team's lead alerts changed",
+    body: `Lead alerts go to ${named}, at: ${at}.`,
+    url: "/email/lead-emails",
+    metadata: { recipients, stages },
+  });
+  return { ok: true, recipients };
 }
 
 // ── Templates ───────────────────────────────────────────────────────────────
@@ -489,7 +605,9 @@ export async function mintQuestionnaireLink(input: {
   leadId: string;
   applicationId: string | null;
   now?: number;
-}): Promise<{ ok: true; url: string; expiresAt: string } | { ok: false; error: string }> {
+}): Promise<
+  { ok: true; url: string; expiresAt: string; tokenSha256: string } | { ok: false; error: string }
+> {
   const now = input.now ?? Date.now();
   const token = crypto.randomBytes(32).toString("base64url");
   const expiresAt = new Date(now + QUESTIONNAIRE_LINK_DAYS * 86_400_000).toISOString();
@@ -505,7 +623,34 @@ export async function mintQuestionnaireLink(input: {
   if (input.applicationId) url.searchParams.set("ref", input.applicationId);
   url.searchParams.set("token", token);
   url.searchParams.set("expires", expiresAt);
-  return { ok: true, url: url.toString(), expiresAt };
+  return { ok: true, url: url.toString(), expiresAt, tokenSha256: sha256(token) };
+}
+
+/**
+ * Whether the address a Stage 1 email is being composed for is still the
+ * applicant's, asked AFTER its questionnaire link is minted.
+ *
+ * The dispatcher read the lead at the start of the batch, and an address
+ * correction can land while one email is between that read and its send. The
+ * correction re-addresses the lead first and closes the lead's links second,
+ * so either it closed the link just minted (it ran after the mint) or this
+ * read sees the new generation (it ran before): there is no order in which a
+ * live link reaches the old address. A read that fails cannot say, and the
+ * email goes as it was going to — the correction's own close still applies.
+ */
+async function supersededSince(lead: LeadRow, tokenSha256: string): Promise<boolean> {
+  const { data, error } = await supabaseAdmin
+    .from("waitlist_leads")
+    .select("id, applicant_email_generation")
+    .eq("id", lead.id)
+    .maybeSingle();
+  if (error || !data || addressGeneration(data) === addressGeneration(lead)) return false;
+  const { error: closeError } = await supabaseAdmin
+    .from("lead_questionnaire_links")
+    .update({ expires_at: new Date().toISOString() })
+    .eq("token_sha256", tokenSha256);
+  if (closeError) console.error("[lead-emails] superseded link not closed:", closeError.message);
+  return true;
 }
 
 export type QuestionnaireApplicant = {
@@ -646,7 +791,9 @@ export async function composeApplicantEmail(input: {
   stage: LeadStage;
   template: LeadEmailTemplate;
   supportEmail: string;
-}): Promise<{ ok: true; rendered: RenderedLeadEmail } | { ok: false; error: string }> {
+}): Promise<
+  { ok: true; rendered: RenderedLeadEmail } | { ok: false; error: string; superseded?: boolean }
+> {
   const { lead, stage } = input;
   let questionnaireUrl: string | null = null;
   let questionnaireExpiresAt: string | null = null;
@@ -657,6 +804,9 @@ export async function composeApplicantEmail(input: {
     });
     if (!minted.ok)
       return { ok: false, error: `the questionnaire link could not be minted: ${minted.error}` };
+    if (await supersededSince(lead, minted.tokenSha256)) {
+      return { ok: false, error: SUPERSEDED_REASON, superseded: true };
+    }
     questionnaireUrl = minted.url;
     questionnaireExpiresAt = minted.expiresAt;
   }

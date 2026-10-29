@@ -56,7 +56,22 @@
 // how an applicant gets two "Questionnaire Received" emails four minutes apart,
 // and there is no undo on that.
 
-import { emailKey, unwrapAddress } from "@/lib/email/emailAddress.pure";
+import { emailKey } from "@/lib/email/emailAddress.pure";
+import {
+  addressList,
+  resolveInternalRecipients,
+  type DroppedRecipient,
+  type RecipientSource,
+} from "@/lib/email/recipientList.pure";
+
+export {
+  addressList,
+  REPEATED_ADDRESS,
+  resolveInternalRecipients,
+  type DroppedRecipient,
+  type RecipientResolution,
+  type RecipientSource,
+} from "@/lib/email/recipientList.pure";
 import { heldReason, sendGate, type GateSubject } from "@/lib/leadEmailGates.pure";
 
 export type LeadStage = 1 | 2 | 3;
@@ -118,35 +133,7 @@ export type StageEmailPolicy = {
   internalRecipientsDropped: DroppedRecipient[];
 };
 
-export type RecipientSource = "configured" | "mailbox_fallback" | "applicant" | "none";
-
-export type DroppedRecipient = { value: string; reason: string };
-
-export type RecipientResolution = {
-  recipients: string[];
-  source: RecipientSource;
-  dropped: DroppedRecipient[];
-};
-
 const DEFAULT_CONSOLE_URL = "https://mission-control.aurixasystems.com.au";
-
-/**
- * A RECIPIENT list, split on separators a person would type deliberately.
- *
- * Not `list()`, which splits on whitespace too. Whitespace is the right
- * separator for a stage list (`"1 2 3"`) and the wrong one for addresses: it
- * shreds `Rugesh Naidu <rugesh@…>` into three tokens, which is exactly how an
- * address arrives when somebody pastes a contact out of Outlook, and it makes
- * the `unwrapAddress` reading below unreachable. Splitting on comma, semicolon
- * and newline keeps the display-name form intact for `unwrapAddress` to read,
- * and a leading or trailing space is still trimmed off each entry.
- */
-function addressList(value: string | undefined): string[] {
-  return (value ?? "")
-    .split(/[,;\n]+/)
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
 
 function list(value: string | undefined): string[] {
   return (value ?? "")
@@ -164,71 +151,6 @@ function stageSet(value: string | undefined, fallback: LeadStage[]): Set<LeadSta
   if (value !== undefined && value.trim() === "") return new Set();
   if (value !== undefined && value.trim().toLowerCase() === "none") return new Set();
   return new Set(parsed.length ? parsed : fallback);
-}
-
-/**
- * Who the team's notification actually goes to, and how that was decided.
- *
- * Three things happen here that all exist because of one live defect. The
- * Airtable automation this mailer replaces carries a LEADING SPACE on four of
- * its five recipients (` rugesh@…`, ` lavan@…`, ` arvinraj@…`,
- * ` mithrubanbupathy@…`; only `admin@` is clean) and nothing anywhere records
- * whether they are trimmed before the send. If they are not, four people have
- * never received a lead alert and no surface says so.
- *
- * So: whitespace is trimmed (and a test pins that, naming the defect); an
- * address repeated in a different case is collapsed rather than mailed twice;
- * and anything that cannot be an address is dropped WITH ITS REASON rather
- * than passed to Graph to fail on — which matters more than it looks, because
- * Graph refuses the WHOLE message for one bad recipient, so a single typo in
- * this variable silences the notification for everybody on it.
- *
- * The reading of an address is `emailKey`/`unwrapAddress` and never a private
- * regex. An earlier version of this function carried its own shallow pattern,
- * and a second reading of an address is precisely the defect that lets an
- * address the SUPPRESSION REGISTER cannot key reach the wire: the register is
- * asked `emailKey(address)`, so anything this function admits that `emailKey`
- * rejects is invisible to it and is mailed however many times somebody has
- * asked us to stop. One reading, or the two disagree in the gap.
- *
- * The fallback to the sending mailbox is kept — refusing would mean nobody is
- * told, which is worse than one person being told — but it is NAMED, because
- * as the sole notifier a silent collapse from five recipients to one is the
- * same failure in a different place.
- */
-export function resolveInternalRecipients(
-  explicit: string[],
-  mailbox: string | null,
-): RecipientResolution {
-  const dropped: DroppedRecipient[] = [];
-  const seen = new Map<string, string>();
-
-  for (const entry of explicit) {
-    // `unwrapAddress` is what strips the leading space, the angle brackets a
-    // copied Outlook contact arrives in, and a `mailto:` prefix.
-    const address = unwrapAddress(entry);
-    const key = emailKey(address);
-    if (!key) {
-      dropped.push({ value: entry, reason: "not an address this deployment can send to" });
-      continue;
-    }
-    if (seen.has(key)) {
-      dropped.push({ value: entry, reason: "the same address, already listed" });
-      continue;
-    }
-    // Stored as spelled (trimmed), keyed by identity: `Rugesh@…` renders as
-    // typed and still collapses against `rugesh@…`.
-    seen.set(key, address);
-  }
-
-  const recipients = [...seen.values()];
-  if (recipients.length) return { recipients, source: "configured", dropped };
-
-  const fallback = mailbox ? unwrapAddress(mailbox) : "";
-  if (fallback && emailKey(fallback)) {
-    return { recipients: [fallback], source: "mailbox_fallback", dropped };
-  }
-  return { recipients: [], source: "none", dropped };
 }
 
 /**
@@ -360,7 +282,8 @@ export function decideInternal(
   if (policy.internalRecipients.length === 0) {
     return {
       verdict: "skip",
-      reason: "no internal recipients configured (set LEAD_STAGE_INTERNAL_RECIPIENTS)",
+      reason:
+        "no team alert recipients set (Email → Lead emails → Team alerts, or LEAD_STAGE_INTERNAL_RECIPIENTS)",
     };
   }
   return { verdict: "send" };
@@ -586,6 +509,42 @@ export function withApplicantSenders(
     if (sender === "make" || sender === "mission_control") next[stage] = sender;
   }
   return { ...policy, applicantSenders: next };
+}
+
+/**
+ * The policy with the team alerts set on Email → Lead emails.
+ *
+ * The console's answer overrides the environment's, field by field: a list set
+ * there is who is told (`configured`, so the sending mailbox never replaces
+ * it), and stages set there are when. A field the console has not set (null)
+ * leaves the environment's answer — `LEAD_STAGE_INTERNAL_RECIPIENTS` and
+ * `LEAD_STAGE_INTERNAL_STAGES` — in place. Applied before `withSendingMailbox`,
+ * which fills the fallback only where nobody configured a list.
+ */
+export function withTeamAlerts(
+  policy: StageEmailPolicy,
+  teamAlerts: { recipients: string[] | null; stages: LeadStage[] | null } | null | undefined,
+): StageEmailPolicy {
+  if (!teamAlerts) return policy;
+  let next = policy;
+  if (teamAlerts.recipients && teamAlerts.recipients.length) {
+    const resolved = resolveInternalRecipients(teamAlerts.recipients, policy.mailbox);
+    next = {
+      ...next,
+      internalRecipients: resolved.recipients,
+      internalRecipientSource: resolved.source,
+      internalRecipientsDropped: resolved.dropped,
+    };
+  }
+  if (teamAlerts.stages) {
+    next = {
+      ...next,
+      internalStages: new Set(
+        teamAlerts.stages.filter((s): s is LeadStage => s === 1 || s === 2 || s === 3),
+      ),
+    };
+  }
+  return next;
 }
 
 /**

@@ -12,6 +12,7 @@ import {
   type ParsedStageUpdate,
 } from "@/server/lead-capture.server";
 import { enqueueStageEmails } from "@/server/lead-stage-emails.server";
+import { resolveStageOneConflict } from "@/server/lead-address-correction.server";
 
 /**
  * POST /api/public/leads/capture
@@ -376,11 +377,12 @@ async function captureStageOne(
     .single();
 
   if (error) {
-    // 23505 = unique_violation on dedupe_key or application_id → the same
-    // submission already arrived via the other delivery path. That's success.
-    if (error.code === "23505") {
-      return json({ ok: true, duplicate: true }, 200, origin);
-    }
+    // 23505 = unique_violation on dedupe_key or application_id: the same
+    // application again — or the applicant correcting the address they
+    // mistyped, from the website's confirmation screen, which posts the
+    // corrected application under the same reference
+    // (src/server/lead-address-correction.server.ts).
+    if (error.code === "23505") return answerStageOneConflict(lead, channel, origin);
     console.error("waitlist_leads insert failed", error);
     return json({ ok: false, error: "storage_failed" }, 500, origin);
   }
@@ -390,6 +392,37 @@ async function captureStageOne(
   await raiseStageEmails(inserted.id, { ...lead, stage: 1 });
 
   return json({ ok: true, lead_id: inserted.id, stage: 1, duplicate: false }, 201, origin);
+}
+
+async function answerStageOneConflict(
+  lead: ParsedLead,
+  channel: Channel,
+  origin: string | null,
+): Promise<Response> {
+  const conflict = await resolveStageOneConflict({ lead, channel });
+  switch (conflict.kind) {
+    case "duplicate":
+      return json(
+        { ok: true, duplicate: true, ...(conflict.leadId ? { lead_id: conflict.leadId } : {}) },
+        200,
+        origin,
+      );
+    case "corrected":
+      // Owed again, at the address the applicant meant.
+      await raiseStageEmails(conflict.leadId);
+      return json(
+        { ok: true, lead_id: conflict.leadId, stage: 1, duplicate: false, corrected: true },
+        200,
+        origin,
+      );
+    case "refused":
+      // Not `ok`: the website must not tell the applicant their email is on
+      // its way to an address nothing will send to. The team has been told.
+      return json({ ok: false, error: "correction_refused", reason: conflict.reason }, 409, origin);
+    case "unavailable":
+      console.error("stage 1 conflict could not be resolved", conflict.error);
+      return json({ ok: false, error: "storage_failed" }, 503, origin);
+  }
 }
 
 async function advanceStage(

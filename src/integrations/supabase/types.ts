@@ -9934,6 +9934,8 @@ export type Database = {
           from_mailbox: string | null
           from_name: string | null
           id: boolean
+          internal_recipients: string[] | null
+          internal_stages: number[] | null
           reply_to: string | null
           stage1_sender: string
           stage2_sender: string
@@ -9946,6 +9948,8 @@ export type Database = {
           from_mailbox?: string | null
           from_name?: string | null
           id?: boolean
+          internal_recipients?: string[] | null
+          internal_stages?: number[] | null
           reply_to?: string | null
           stage1_sender?: string
           stage2_sender?: string
@@ -9958,6 +9962,8 @@ export type Database = {
           from_mailbox?: string | null
           from_name?: string | null
           id?: boolean
+          internal_recipients?: string[] | null
+          internal_stages?: number[] | null
           reply_to?: string | null
           stage1_sender?: string
           stage2_sender?: string
@@ -10041,6 +10047,7 @@ export type Database = {
           audience: string
           claimed_at: string | null
           created_at: string
+          generation: number
           graph_request_id: string | null
           graph_status: number | null
           id: string
@@ -10062,6 +10069,7 @@ export type Database = {
           audience: string
           claimed_at?: string | null
           created_at?: string
+          generation?: number
           graph_request_id?: string | null
           graph_status?: number | null
           id?: string
@@ -10083,6 +10091,7 @@ export type Database = {
           audience?: string
           claimed_at?: string | null
           created_at?: string
+          generation?: number
           graph_request_id?: string | null
           graph_status?: number | null
           id?: string
@@ -15650,6 +15659,7 @@ export type Database = {
           additional_notes: string | null
           airtable_record_id: string | null
           airtable_status: string | null
+          applicant_email_generation: number
           application_id: string | null
           created_at: string
           dedupe_key: string | null
@@ -15738,6 +15748,7 @@ export type Database = {
           additional_notes?: string | null
           airtable_record_id?: string | null
           airtable_status?: string | null
+          applicant_email_generation?: number
           application_id?: string | null
           created_at?: string
           dedupe_key?: string | null
@@ -15826,6 +15837,7 @@ export type Database = {
           additional_notes?: string | null
           airtable_record_id?: string | null
           airtable_status?: string | null
+          applicant_email_generation?: number
           application_id?: string | null
           created_at?: string
           dedupe_key?: string | null
@@ -17016,6 +17028,9 @@ export type Database = {
         | "deployment_bundle_identity"
         | "lead_stage_email_failed"
         | "lead_email_sender_changed"
+        | "lead_email_team_alerts_changed"
+        | "lead_address_corrected"
+        | "lead_address_correction_refused"
         | "calendar_booking_failed"
         | "crm_appointment_changed"
         | "agreement_attention"
@@ -17524,6 +17539,9 @@ export const Constants = {
         "deployment_bundle_identity",
         "lead_stage_email_failed",
         "lead_email_sender_changed",
+        "lead_email_team_alerts_changed",
+        "lead_address_corrected",
+        "lead_address_correction_refused",
         "calendar_booking_failed",
         "crm_appointment_changed",
         "agreement_attention",

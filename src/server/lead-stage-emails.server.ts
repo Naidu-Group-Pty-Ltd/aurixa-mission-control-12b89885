@@ -25,6 +25,7 @@ import { notifyOperators } from "@/server/audit.server";
 import { composeStageEmail, type StageEmailLead } from "@/server/leadStageEmail.pure";
 import type { LeadEmailTemplate } from "@/lib/leadEmailTemplates.pure";
 import { heldReason, sendGate, type GateSubject } from "@/lib/leadEmailGates.pure";
+import { addressGeneration, SUPERSEDED_REASON } from "@/server/leadAddressCorrection.pure";
 import {
   applicantMessage,
   composeApplicantEmail,
@@ -40,6 +41,7 @@ import {
   nextStepUrlFor,
   readPolicy,
   withApplicantSenders,
+  withTeamAlerts,
   withSendingMailbox,
   type ApplicantMode,
   type DroppedRecipient,
@@ -94,7 +96,7 @@ async function loadPolicy(): Promise<LoadedPolicy> {
   // deployment's. Resolved here, once, because the mailbox it lands on is also
   // the team notification's fallback recipient and the ledger's `mailbox`.
   const identity = await sendingIdentity(settings, base.mailbox);
-  const senders = withApplicantSenders(base, settings.senders);
+  const senders = withTeamAlerts(withApplicantSenders(base, settings.senders), settings.teamAlerts);
   return {
     policy: identity.ok ? withSendingMailbox(senders, identity.mailbox) : senders,
     settings,
@@ -138,12 +140,18 @@ async function enqueueWith(input: EnqueueInput, loaded: LoadedPolicy): Promise<E
   const p = loaded.policy;
   const now = Date.now();
   const lead = input.lead as StageEmailLead & Record<string, unknown>;
+  // An applicant email belongs to the address it is for: a corrected address
+  // is owed its own (docs/LEAD_EMAILS.md, "Address corrections").
+  const generation = addressGeneration(lead);
 
   const rows: LedgerInsert[] = [];
   for (const stage of STAGES) {
     for (const audience of AUDIENCES) {
-      // Who sends it is unknown this tick — see `loadPolicy`.
-      if (audience === "applicant" && !loaded.settings) continue;
+      // Who sends the applicant email, and who is on the team alert, are
+      // unknown this tick — see `loadPolicy`. A team alert raised without the
+      // console's list would go to the environment's, or the mailbox alone:
+      // fewer people told, with nothing saying so. The sweep raises it later.
+      if (!loaded.settings) continue;
       const decision =
         audience === "internal"
           ? decideInternal(lead, stage, p, now)
@@ -168,7 +176,7 @@ async function enqueueWith(input: EnqueueInput, loaded: LoadedPolicy): Promise<E
           : null;
       const note = [
         recipientSource === "mailbox_fallback"
-          ? "no LEAD_STAGE_INTERNAL_RECIPIENTS set — only the sending mailbox was told"
+          ? "no team alert recipients set — only the sending mailbox was told"
           : null,
         droppedNote ? `dropped from the recipient list: ${droppedNote}` : null,
       ]
@@ -185,6 +193,7 @@ async function enqueueWith(input: EnqueueInput, loaded: LoadedPolicy): Promise<E
         recipients,
         recipient_source: recipientSource === "none" ? null : recipientSource,
         mailbox: p.mailbox,
+        generation: audience === "applicant" ? generation : 0,
       });
       if (decision.verdict === "send") out.queued += 1;
       else out.skipped += 1;
@@ -197,10 +206,7 @@ async function enqueueWith(input: EnqueueInput, loaded: LoadedPolicy): Promise<E
   // already exists keeps whatever state it reached, including `sent`. Nothing
   // here may resurrect a discharged obligation — that is the one write that
   // could produce a duplicate email.
-  const { data, error } = await supabaseAdmin
-    .from("lead_stage_emails")
-    .upsert(rows, { onConflict: "lead_id,stage,audience", ignoreDuplicates: true })
-    .select("id, status");
+  const { data, error } = await recordObligations(rows);
 
   if (error) {
     console.error("[lead-stage-email] could not record obligations", error.message);
@@ -216,6 +222,36 @@ async function enqueueWith(input: EnqueueInput, loaded: LoadedPolicy): Promise<E
   out.queued = insertedPending;
   out.skipped = inserted.length - insertedPending;
   return out;
+}
+
+/**
+ * The ledger write, keyed by (lead, stage, audience, generation).
+ *
+ * Before `20261029170200` applies the ledger has neither the column nor the
+ * index (PostgREST answers `PGRST204` for the column, Postgres `42P10` for a
+ * conflict target no unique index matches), and a deployment whose migration
+ * queue has halted would otherwise raise no stage email at all. There, every
+ * row is generation 0 and the old key is the whole rule, so it is written
+ * under the old key; a corrected address is simply not owed again until the
+ * migration lands.
+ */
+type Recorded = {
+  data: { id: string; status: string }[] | null;
+  error: { message: string; code?: string } | null;
+};
+
+async function recordObligations(rows: LedgerInsert[]): Promise<Recorded> {
+  const write = async (values: LedgerInsert[], onConflict: string): Promise<Recorded> => {
+    const { data, error } = await supabaseAdmin
+      .from("lead_stage_emails")
+      .upsert(values, { onConflict, ignoreDuplicates: true })
+      .select("id, status");
+    return { data, error };
+  };
+  const first = await write(rows, "lead_id,stage,audience,generation");
+  if (first.error?.code !== "PGRST204" && first.error?.code !== "42P10") return first;
+  const current = rows.filter((row) => !row.generation).map(({ generation: _g, ...row }) => row);
+  return current.length ? write(current, "lead_id,stage,audience") : { data: [], error: null };
 }
 
 export type DispatchResult = {
@@ -340,7 +376,10 @@ export async function dispatchStageEmails(limit = DISPATCH_BATCH): Promise<Dispa
   if (leadReadError) {
     // Nothing in this batch can be composed without its lead, and none of it
     // is refused — the claim is released and the next tick asks again.
-    console.error("[lead-stage-email] lead read failed — holding the batch:", leadReadError.message);
+    console.error(
+      "[lead-stage-email] lead read failed — holding the batch:",
+      leadReadError.message,
+    );
     for (const row of batch) {
       await settle(row.id, {
         status: "pending",
@@ -406,6 +445,18 @@ export async function dispatchStageEmails(limit = DISPATCH_BATCH): Promise<Dispa
         reason: "the lead was read successfully and this obligation's lead was not among the rows",
       });
       out.failed += 1;
+      continue;
+    }
+
+    // An applicant email for an address the applicant has since corrected.
+    // Asked of the lead as it stands now, like the send gate: the correction
+    // settles the waiting ones, and this catches one claimed while it ran.
+    if (
+      row.audience === "applicant" &&
+      addressGeneration({ applicant_email_generation: row.generation }) !== addressGeneration(lead)
+    ) {
+      await settle(row.id, { status: "skipped", reason: SUPERSEDED_REASON });
+      out.skipped += 1;
       continue;
     }
 
@@ -476,6 +527,13 @@ export async function dispatchStageEmails(limit = DISPATCH_BATCH): Promise<Dispa
         template: templates[stage],
         supportEmail: identity.supportEmail,
       });
+      if (!built.ok && built.superseded) {
+        // The applicant corrected their address while this email was on its
+        // way to the old one: its link is closed, and it is not sent.
+        await settle(row.id, { status: "skipped", reason: SUPERSEDED_REASON });
+        out.skipped += 1;
+        continue;
+      }
       if (!built.ok) {
         // Nothing left: a link that could not be minted is a database fault
         // the next tick can recover from, so the row goes back to pending.
@@ -612,6 +670,8 @@ type ClaimedRow = {
   /** The note the obligation was raised with — preserved, never overwritten. */
   reason: string | null;
   attempts: number;
+  /** The applicant address generation it was raised for. Absent before the column. */
+  generation?: number | null;
 };
 
 type ResolvedRecipients = {
