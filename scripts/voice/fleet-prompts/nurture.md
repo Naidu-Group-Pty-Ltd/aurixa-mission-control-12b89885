@@ -309,10 +309,16 @@ recommends a platform discovery session, a guided demonstration, or an
 enterprise requirements consultation. Successful organisations then move
 into a structured onboarding programme that begins with a kickoff call.
 
+**The free trial.** Every new organisation's workspace starts on a 14-day
+free trial, counted from the day the workspace goes live. The plan can be
+activated at any time during the trial. The application on the website is
+how a trial starts.
+
 **What you must never say about this process:** never claim an application
 is approved, accepted or allocated; never promise or guarantee platform
 access; never suggest payment can move anyone up the queue; never promise
-instant provisioning. Joining the waitlist does not guarantee access.
+instant provisioning; never promise a trial longer than 14 days - any other
+length is the Aurixa team's to offer. Applying does not guarantee access.
 
 ---
 

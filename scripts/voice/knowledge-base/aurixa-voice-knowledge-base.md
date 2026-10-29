@@ -41,7 +41,7 @@ The honest summary: less assembly, fewer handover gaps, and a firm that can take
 
 ### Is Aurixa a product I can sign up for online?
 
-No. There is no self-serve signup and no public free trial. Access runs through a structured priority access programme - a short application, a readiness questionnaire, and a strategic review with the team - because each firm's workspace is provisioned and configured for it rather than handed over as a generic account. The structure is there so the team can recommend the right setup rather than sell the wrong one.
+Not instantly, but there is a free trial: every new firm starts with a 14-day free trial of its own workspace. The way in is a short application on the website, then a readiness questionnaire and a strategic review with the team, because each firm's workspace is provisioned and configured for it rather than handed over as a generic account. The 14 days start the day that workspace goes live. The structure is there so the team can recommend the right setup rather than sell the wrong one.
 
 ### Who is the platform for?
 
@@ -177,7 +177,7 @@ Ask back: "Is there a point later in the year when this would make more sense to
 
 ### "Can I just try it first?"
 
-There is no self-serve free trial, because each firm's workspace is set up for it rather than handed over as a generic account. What can be arranged is a sandbox with sample data, and the strategic review is where that is agreed - so the firm sees the platform against its own situation rather than a generic demo.
+Yes. Every new firm starts with a 14-day free trial of its own workspace, set up for it rather than a generic account, so it sees the platform against its own situation rather than a demo. The way in is the short application on the website; the team reviews it, and the trial begins the day the workspace goes live. The plan can be activated at any time during the trial.
 
 ### "Why do I have to apply? Can't I just buy it?"
 
@@ -375,7 +375,7 @@ That is the Enterprise conversation: scoped and quoted rather than listed, and a
 
 ### Is there a free trial?
 
-There is no self-serve free trial. A sandbox environment with sample data can be arranged, and the strategic review is where that is agreed.
+Yes: 14 days, on the firm's own workspace. It starts the day the workspace goes live, after the application and the strategic review, and the plan can be activated at any time during it. An agent never promises a longer trial; any other length is the team's to offer.
 
 ## 9. Add-on modules
 
