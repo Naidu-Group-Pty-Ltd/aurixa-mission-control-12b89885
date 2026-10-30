@@ -37,7 +37,10 @@ export function ReferenceDataSyncCard() {
       if (result.ok) {
         setLastResult(result);
         const failed = result.tables.filter((t) => t.status === "failed");
-        if (failed.length > 0) {
+        // A run that could not start is not a fleet with nothing waiting.
+        if (result.error) {
+          toast.error(result.error);
+        } else if (failed.length > 0) {
           toast.warning(`${failed.length} table(s) refused — see the detail below`);
         } else if (result.done) {
           toast.success(`${result.cloneName ?? "Clone"} has the full reference set`);

@@ -572,6 +572,18 @@ describe("which clone a scheduled pass takes", () => {
     expect(state.progressReads).toBe(0);
   });
 
+  it("says so when the clone an operator names cannot be taken, and touches nothing", async () => {
+    // Not ready, or claimed by a copy already running: the pick finds nobody.
+    // That is not a finished copy, and the clone page must not say it is.
+    state.candidates = [preflight()];
+    const res = await runReferenceDataSync(fakeSupabase(), { cloneId: CLONE_ID });
+    expect(res.cloneId).toBe(CLONE_ID);
+    expect(res.done).toBe(false);
+    expect(res.error).toMatch(/not ready, or a reference copy is running on it now/);
+    expect(res.tables).toEqual([]);
+    expect(state.ran).toEqual([]);
+  });
+
   it("takes a lone ready clone without reading anyone's progress", async () => {
     state.candidates = [dashboard()];
     const res = await runReferenceDataSync(fakeSupabase());

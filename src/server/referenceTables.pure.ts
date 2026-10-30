@@ -300,6 +300,21 @@ export const REFERENCE_TABLES: readonly ReferenceTable[] = [
       "20250902103046, untouched on the prime (updated_at equals created_at on every row); no " +
       "column names a person.",
   },
+  {
+    table: "dashboard_modules",
+    pageKey: "module_key",
+    conflictKey: ["module_key"],
+    rowsPerPage: 200,
+    columns: {},
+    reason:
+      "The module catalogue the product's staff permission grid is built from: 45 rows on the " +
+      "prime, seeded by fifteen migrations, and none on a clone stamped from it (the tutorial " +
+      "demo, measured 30 Oct 2026). With none, no account below superadmin can be granted a " +
+      "module, and the product's `checkModuleView` lets any signed-in member of staff through " +
+      "for a key no row holds. `user_permissions.module_id` references `id`, which travels; " +
+      "`on conflict (module_key) do nothing` keeps any row a clone holds, a module it has " +
+      "deactivated included. No column names a person.",
+  },
   // ── The AML/CTF programme, and the switches in front of it ───────────────
   //
   // Every clone held ZERO rows in `public.feature_flags` and in every `aml.*`
