@@ -32,15 +32,17 @@ function isAdmin(roles: string[]): boolean {
   return roles.includes("admin") || roles.includes("super_admin");
 }
 
-/** Current calendar period, as the rollups key it. */
-function defaultPeriod(): string {
-  const now = new Date();
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString().slice(0, 10);
-}
+/** How far back the unattributed-usage count reads when no period is asked for. */
+const GAP_WINDOW_DAYS = 31;
 
 /**
- * Fleet-wide view for one period: who spent what on our keys, broken down by
- * tenant and by provider, plus the charges already settled.
+ * Fleet-wide view: who spent what on our keys, broken down by tenant and by
+ * provider, plus the charges already settled.
+ *
+ * Asked for no period, it shows each tenant's current one. Tenants' periods
+ * start on the day each was provisioned, so the first of the calendar month
+ * this used to ask for matched none of them and the page said there was no
+ * usage while every Airtable read was metered (key audit R7).
  */
 export const getApiUsageOverview = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth])
@@ -56,11 +58,13 @@ export const getApiUsageOverview = createServerFn({ method: "GET" })
   )
   .handler(async ({ data, context }) => {
     const { supabase, user } = context as unknown as AuthContext;
-    const period = data.period_start ?? defaultPeriod();
+    // Named for the CSV: the period asked for, or the day each tenant's
+    // current period was read on.
+    const period = data.period_start ?? new Date().toISOString().slice(0, 10);
     const roles = user?.id ? await callerRoles(supabase, user.id) : [];
 
     const { data: summary, error } = await adminAny.rpc("api_usage_fleet_summary", {
-      _period_start: period,
+      _period_start: data.period_start,
     });
     if (error) return { ok: false as const, error: error.message };
 
@@ -76,12 +80,18 @@ export const getApiUsageOverview = createServerFn({ method: "GET" })
     // quietly: the first meters at zero, the second never reaches an invoice.
     // Surface both as a first-class number rather than leaving them in the tail
     // of an events table nobody opens.
-    const { data: gaps } = await adminAny
+    const gapQuery = adminAny
       .from("api_usage_events")
       .select("secret_name, billing_reason, clone_id")
-      .in("billing_reason", ["rate_missing", "unknown_secret"])
-      .gte("period_start", period)
-      .limit(2000);
+      .in("billing_reason", ["rate_missing", "unknown_secret"]);
+    const { data: gaps } = await (
+      data.period_start
+        ? gapQuery.gte("period_start", data.period_start)
+        : gapQuery.gte(
+            "occurred_at",
+            new Date(Date.now() - GAP_WINDOW_DAYS * 86_400_000).toISOString(),
+          )
+    ).limit(2000);
 
     const gapCounts = new Map<string, { secret_name: string; reason: string; count: number }>();
     for (const g of (gaps ?? []) as Array<{ secret_name: string; billing_reason: string }>) {

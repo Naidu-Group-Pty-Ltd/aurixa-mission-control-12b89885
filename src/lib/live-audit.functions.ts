@@ -2,7 +2,7 @@
 //
 // Reading is for operators and above, through their own session, so the
 // tables' row-level security is what decides (operator+, migration
-// 20261030110100). Everything that changes something — a run, a fix, a
+// 20261030133100). Everything that changes something — a run, a fix, a
 // triage, the settings — is an admin's, checked here and written with the
 // service role, because nothing grants `authenticated` a write on these
 // tables. Every such change is in the audit log, and a triage is also on the

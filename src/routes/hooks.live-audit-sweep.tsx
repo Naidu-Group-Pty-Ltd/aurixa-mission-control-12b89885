@@ -1,5 +1,5 @@
 // The live audit's sweep — invoked by pg_cron every ten minutes with
-// Bearer(cron_secret) auth (migration 20261030110100_live_audit.sql).
+// Bearer(cron_secret) auth (migration 20261030133100_live_audit.sql).
 //
 // Runs that will never report are failed and silent fixes are failed first,
 // from the database alone, whatever GitHub's window holds: a starved window

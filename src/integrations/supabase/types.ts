@@ -16877,6 +16877,13 @@ export type Database = {
         }
         Returns: Json
       }
+      api_usage_closable_periods: {
+        Args: { _limit?: number }
+        Returns: {
+          period_start: string
+          tenant_id: string
+        }[]
+      }
       api_usage_fleet_summary: {
         Args: { _period_start?: string }
         Returns: Json

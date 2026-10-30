@@ -134,8 +134,8 @@ Each can be muted under **Settings → Notifications**.
 
 1. Merge the live audit's pull requests here and on Prime (the workflow must
    be on Prime's default branch to be dispatched). Apply the two migrations
-   (`20261030110000_live_audit_notification_kinds.sql`,
-   `20261030110100_live_audit.sql`).
+   (`20261030133000_live_audit_notification_kinds.sql`,
+   `20261030133100_live_audit.sql`).
 2. On Prime: create a **view-only admin** staff account for the audit and put
    its user id in the repository variable `LIVE_AUDIT_USER_ID`. Without it,
    runs see only the signed-out pages.
@@ -166,7 +166,7 @@ key a clone's audit and fixes run on — the Codex secret sync removes
 
 | Where                                                                             | What                                                                                                                                                |
 | --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `supabase/migrations/20261030110000_…`, `…110100_live_audit.sql`                  | Notification kinds; tables, policies, bucket, `live_audit_ingest_findings`, `live_audit_finalize_run`, `live_audit_set_nightly_schedule`, cron jobs |
+| `supabase/migrations/20261030133000_…`, `…133100_live_audit.sql`                  | Notification kinds; tables, policies, bucket, `live_audit_ingest_findings`, `live_audit_finalize_run`, `live_audit_set_nightly_schedule`, cron jobs |
 | `src/lib/live-audit-policy.ts`                                                    | Where it runs, states, models, what a run is sent, fix eligibility, fix evidence                                                                    |
 | `src/lib/live-audit-contract.ts`                                                  | What the runner promises and what is accepted from it                                                                                               |
 | `src/server/live-audit-*.server.ts`                                               | Keys, dispatch, callbacks, fixes, pull request sync, sweep, alerts                                                                                  |

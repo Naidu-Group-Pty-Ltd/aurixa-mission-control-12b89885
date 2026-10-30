@@ -1384,13 +1384,22 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     ],
   },
   {
-    migration: "20261030110000_live_audit_notification_kinds.sql",
+    migration: "20261030110000_usage_files_under_its_own_period.sql",
     version: "20261030110000",
+    assertions: [
+      { kind: "rpc", fn: "api_usage_period_start" },
+      { kind: "rpc", fn: "api_usage_period_end" },
+      { kind: "rpc", fn: "api_usage_closable_periods" },
+    ],
+  },
+  {
+    migration: "20261030133000_live_audit_notification_kinds.sql",
+    version: "20261030133000",
     assertions: [{ kind: "enum", type: "notification_kind" }],
   },
   {
-    migration: "20261030110100_live_audit.sql",
-    version: "20261030110100",
+    migration: "20261030133100_live_audit.sql",
+    version: "20261030133100",
     assertions: [
       { kind: "table", table: "live_audit_settings" },
       { kind: "table", table: "live_audit_runs" },
