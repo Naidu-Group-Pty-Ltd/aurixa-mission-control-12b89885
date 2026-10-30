@@ -99,6 +99,26 @@ export function parseStoredSecretDigests(raw: unknown): Map<string, string> | nu
   return digests;
 }
 
+/**
+ * The NAMES a project's secrets list holds, from every row that carries one,
+ * whether or not it reports a digest. Null when the body is not a list.
+ *
+ * `parseStoredSecretDigests` drops a row without a digest, which is right for
+ * proving a value already held and wrong for asking whether a name is there:
+ * a dropped row would read as an absent name, and a minter would then write
+ * over a value it never saw.
+ */
+export function parseStoredSecretNames(raw: unknown): Set<string> | null {
+  if (!Array.isArray(raw)) return null;
+  const names = new Set<string>();
+  for (const row of raw) {
+    if (!row || typeof row !== "object") continue;
+    const { name } = row as { name?: unknown };
+    if (typeof name === "string" && name.length > 0) names.add(name);
+  }
+  return names;
+}
+
 /** Every digest form a stored copy of `value` may be reported under, as lowercase hex. */
 export function valueDigests(projectRef: string, value: string): readonly string[] {
   return [

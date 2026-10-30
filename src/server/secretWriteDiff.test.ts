@@ -3,6 +3,7 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
   parseStoredSecretDigests,
+  parseStoredSecretNames,
   planSecretWrite,
   valueDigests,
   type SecretEntry,
@@ -282,5 +283,26 @@ describe("every per-pass secret write goes through the digest check", () => {
     expect(found.length).toBeGreaterThan(0);
     for (const site of found)
       expect(allowed, `${site} POSTs secrets without the digest check`).toContain(site);
+  });
+});
+
+describe("parseStoredSecretNames", () => {
+  it("counts every named row, digest or not, so no held name reads as absent", () => {
+    const names = parseStoredSecretNames([
+      { name: "SESSION_TOKEN_PEPPER", value: "ab12" },
+      { name: "MFA_TOTP_ENCRYPTION_KEY" },
+      { name: "STEP_UP_TOKEN_PEPPER", value: "" },
+      { value: "orphan" },
+      null,
+    ]);
+    expect(names).toEqual(
+      new Set(["SESSION_TOKEN_PEPPER", "MFA_TOTP_ENCRYPTION_KEY", "STEP_UP_TOKEN_PEPPER"]),
+    );
+  });
+
+  it("answers null for a body that is not a list, and an empty set for an empty one", () => {
+    expect(parseStoredSecretNames({ error: "unauthorised" })).toBeNull();
+    expect(parseStoredSecretNames(null)).toBeNull();
+    expect(parseStoredSecretNames([])).toEqual(new Set());
   });
 });

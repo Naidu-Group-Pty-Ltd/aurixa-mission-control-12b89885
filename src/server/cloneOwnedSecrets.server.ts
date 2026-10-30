@@ -135,7 +135,7 @@ export async function ensureOwnedSecrets(
   specs: readonly OwnedSecretSpec[],
   primeShape: PrimeShape | null,
 ): Promise<EnsureOwnedSecretsResult> {
-  const { runSqlOnProject, sqlLiteral, setCloneSecretValues } =
+  const { runSqlOnProject, sqlLiteral, setCloneSecretValues, readStoredSecretNames } =
     await import("./backend-provisioning.server");
 
   const vaultNames = ownedSecretVaultNames(specs);
@@ -155,12 +155,22 @@ export async function ensureOwnedSecrets(
     return { ok: false, stage: "mirror_read", error: `Could not read the project's mirror: ${msg(e)}` };
   }
 
+  // The environment's NAMES, for a spec minted only where the project holds
+  // none. Null when the list could not be read, and the planner then mints
+  // nothing for those specs: a failed read is not an absent value.
+  const envNames = specs.some((s) => s.kind === "random" && s.onlyWhereAbsent)
+    ? await readStoredSecretNames(projectRef)
+    : null;
+
   let plan: OwnedSecretsPlan;
   try {
     plan = planOwnedSecrets(
       specs,
-      { vault, primeShape },
-      { random: (bytes) => randomBytes(bytes).toString("hex"), vapid: mintVapidKeyPair },
+      { vault, primeShape, envNames },
+      {
+        random: (bytes, encoding) => randomBytes(bytes).toString(encoding === "base64url" ? "base64url" : "hex"),
+        vapid: mintVapidKeyPair,
+      },
     );
   } catch (e) {
     return { ok: false, stage: "plan", error: msg(e) };
