@@ -156,6 +156,9 @@ export const retryCloneDeployment = createServerFn({ method: "POST" })
       .from("clone_deployments")
       .update({
         status: row.project_id ? resume : "pending",
+        // Whoever moves the status owns its clock (redeployStatusSince): a
+        // retried row's next wait is measured from now, not from its failure.
+        status_since: new Date().toISOString(),
         attempts: 0,
         error_message: null,
         status_detail: "Re-queued by an operator.",
