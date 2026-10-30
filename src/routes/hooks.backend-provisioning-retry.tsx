@@ -12,6 +12,14 @@
 // (`enqueueCloneBackendProvisioning` — one implementation, three callers,
 // because the upsert IS the contract with the drain).
 //
+// But only where the minted password replaces nothing. The seed writes it
+// over an existing admin account's, so on a backend whose seed had already run
+// this lever locked out whoever held the admin's password. The account is read
+// on the clone's own project first (`chooseFailedRequeue`): present, the
+// backend is converged as a REPAIR and the account left alone; unreadable, the
+// retry is refused and the clone page's retry, which takes the admin's own
+// password, is the way.
+//
 // Auth: CRON_SECRET bearer, the credential every scheduled worker here uses.
 // Deliberately NOT on a timer — an automatic retry of a failed provisioning
 // is a decision, not a schedule; this route is the decision's lever.
@@ -25,7 +33,9 @@ import { verifyCronAuth } from "@/server/cron-auth.server";
 import {
   enqueueCloneBackendProvisioning,
   generateSecurePassword,
+  readAdminAccountPresence,
 } from "@/server/backend-provisioning.server";
+import { chooseFailedRequeue } from "@/server/failedBackendRequeue.pure";
 import { writeAuditLog } from "@/server/audit.server";
 
 const admin = supabaseAdmin;
@@ -55,7 +65,9 @@ export const Route = createFileRoute("/hooks/backend-provisioning-retry")({
         try {
           const { data: row, error: rowErr } = await admin
             .from("clone_backends")
-            .select("clone_id, status, region, admin_email, queued_module_ids, enqueued_by")
+            .select(
+              "clone_id, status, region, admin_email, queued_module_ids, enqueued_by, supabase_project_ref",
+            )
             .eq("clone_id", cloneId)
             .maybeSingle();
           if (rowErr) {
@@ -105,12 +117,25 @@ export const Route = createFileRoute("/hooks/backend-provisioning-retry")({
           if (cloneErr) throw new Error(`could not read clones: ${cloneErr.message}`);
           if (!clone) return json({ success: false, error: "clone not found" }, 404);
 
+          const projectRef = row.supabase_project_ref ?? null;
+          const choice = chooseFailedRequeue({
+            projectRef,
+            adminPresence: projectRef
+              ? await readAdminAccountPresence(projectRef, row.admin_email)
+              : null,
+          });
+          if (choice.kind === "refuse") {
+            return json({ success: false, error: choice.why }, 409);
+          }
+          const repair = choice.kind === "repair";
           const enq = await enqueueCloneBackendProvisioning(admin, attributedTo, {
             cloneId,
             cloneName: clone.name,
             region: row.region ?? undefined,
             adminEmail: row.admin_email,
-            adminPassword: generateSecurePassword(),
+            adminPassword: repair ? null : generateSecurePassword(),
+            repair,
+            repairOfFailed: repair,
             moduleIds: (row.queued_module_ids as string[] | null) ?? [],
           });
           if (!enq.ok) return json({ success: false, error: enq.error }, 409);
@@ -123,11 +148,14 @@ export const Route = createFileRoute("/hooks/backend-provisioning-retry")({
               via: "hooks/backend-provisioning-retry",
               // Said rather than silently absent: a reader can tell "nobody
               // recorded who first asked" from "this person asked again".
-              attributed_to: attributedTo ?? "unknown — the backend row records no original enqueuer",
+              attributed_to:
+                attributedTo ?? "unknown — the backend row records no original enqueuer",
+              requeued_as: choice.kind,
+              why: choice.why,
             },
           });
 
-          return json({ success: true, queued: true, cloneId });
+          return json({ success: true, queued: true, cloneId, requeuedAs: choice.kind });
         } catch (e) {
           const msg = e instanceof Error ? e.message : "retry_failed";
           console.error("backend-provisioning-retry failed:", msg);
