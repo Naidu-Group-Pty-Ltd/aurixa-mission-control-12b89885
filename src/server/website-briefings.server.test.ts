@@ -208,7 +208,7 @@ v1080/playlist.m3u8
 const VARIANT =
   "#EXTM3U\n#EXTINF:4.000,\nseg-00000.m4s\n#EXTINF:4.000,\nseg-00001.m4s\n#EXTINF:3.4,\nseg-00002.m4s\n";
 
-function bucket(files: Record<string, string | Uint8Array>) {
+function bucket(files: Record<string, string | Uint8Array<ArrayBuffer>>) {
   vi.stubGlobal("fetch", async (url: string) => {
     const path = String(url).replace(`${ORIGIN}/`, "");
     return path in files
@@ -535,7 +535,7 @@ describe("the last production build that read the listings", () => {
 });
 
 /** The first bytes of a baseline JPEG of this size, as a browser's encoder writes them. */
-function jpeg(width: number, height: number): Uint8Array {
+function jpeg(width: number, height: number): Uint8Array<ArrayBuffer> {
   const app0 = [0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 1, 1, 0, 0, 1, 0, 1, 0, 0];
   const sof = [0xff, 0xc0, 0x00, 0x11, 8, height >> 8, height & 255, width >> 8, width & 255, 3];
   return Uint8Array.from([0xff, 0xd8, ...app0, ...sof, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1]);
