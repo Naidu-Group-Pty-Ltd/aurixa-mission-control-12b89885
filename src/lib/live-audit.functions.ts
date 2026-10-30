@@ -767,17 +767,22 @@ export const getLiveAuditEngineHealth = createServerFn({ method: "GET" })
             ? undefined
             : "Create a view-only admin account on Prime for the audit, and put its user id in the repository variable LIVE_AUDIT_USER_ID.",
         });
-        const serviceKey = names(setup.productionSecrets, "SUPABASE_SERVICE_ROLE_KEY");
+        // The session job reads the environment's copy first and the
+        // repository's otherwise (Prime's DEPLOYMENT_PROTECTION.md moves it
+        // into the environment alone), so either one mints.
+        const inEnvironment = names(setup.productionSecrets, "SUPABASE_SERVICE_ROLE_KEY");
+        const inRepository = names(setup.repoSecrets, "SUPABASE_SERVICE_ROLE_KEY");
         checks.push({
           key: "session_minting",
           label: "Session minting (supabase-production)",
-          status: serviceKey === null ? "warn" : serviceKey ? "ok" : "warn",
-          detail:
-            serviceKey === null
-              ? "The supabase-production environment's secret names could not be read"
-              : serviceKey
-                ? "The session job can mint and revoke the audit's session"
-                : "The supabase-production environment holds no SUPABASE_SERVICE_ROLE_KEY: runs stay signed out",
+          status: inEnvironment || inRepository ? "ok" : "warn",
+          detail: inEnvironment
+            ? "The session job can mint and revoke the audit's session"
+            : inRepository
+              ? "The session job can mint and revoke the audit's session, from the repository's copy of SUPABASE_SERVICE_ROLE_KEY"
+              : inEnvironment === null || inRepository === null
+                ? "Where SUPABASE_SERVICE_ROLE_KEY is kept could not be read"
+                : "Neither the supabase-production environment nor the repository holds SUPABASE_SERVICE_ROLE_KEY: runs stay signed out",
         });
       }
     }
