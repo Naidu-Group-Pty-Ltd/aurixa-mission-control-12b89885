@@ -162,26 +162,53 @@ describe("whatKeptSpecLacks — can prime's copy run on the line?", () => {
 });
 
 describe("describeKeptSpecsLeftBehind — the proposal's list", () => {
-  it("names each spec, what crossed and what prime's copy lacks, in path order", () => {
-    const text = describeKeptSpecsLeftBehind([
-      {
-        spec: PARITY_SPEC,
-        touchedBy: ["src/lib/agent/askAgent.ts"],
-        lacks: ["src/lib/agent/parityRegister.ts"],
-      },
-      {
-        spec: "src/lib/agent/__tests__/a.spec.ts",
-        touchedBy: ["a.ts", "b.ts", "c.ts", "d.ts", "e.ts"],
-        lacks: ["src/lib/agent/parityRegister.ts"],
-      },
-    ]);
-    const lines = text.split("\n");
-    expect(lines).toHaveLength(2);
-    expect(lines[0]).toContain("`src/lib/agent/__tests__/a.spec.ts`");
-    expect(lines[0]).toContain("`a.ts`, `b.ts`, `c.ts` and 2 more");
-    expect(lines[1]).toContain(`\`${PARITY_SPEC}\``);
-    expect(lines[1]).toContain("needs `src/lib/agent/parityRegister.ts`");
-    expect(lines[1]).toContain("updated here");
+  const PARITY = "src/lib/agent/parityRegister.ts";
+  const GHL = "supabase/functions/ghl-calendar/index.ts";
+  const left = [
+    { spec: PARITY_SPEC, touchedBy: ["src/lib/agent/askAgent.ts"], lacks: [PARITY] },
+    {
+      spec: "src/lib/agent/__tests__/a.spec.ts",
+      touchedBy: ["a.ts", "b.ts", "c.ts", "d.ts", "e.ts"],
+      lacks: [PARITY],
+    },
+    { spec: "src/lib/agent/__tests__/z.spec.ts", touchedBy: ["z.ts"], lacks: [GHL, PARITY] },
+  ];
+
+  it("says how many in one line, and what prime's copies need, most needed first", () => {
+    const [summary] = describeKeptSpecsLeftBehind(left).split("\n");
+    expect(summary).toBe(
+      `**3 specs** stay this line's own. Prime's copies need \`${PARITY}\` (3 specs), ` +
+        `\`${GHL}\` (1 spec), which this line does not carry.`,
+    );
+  });
+
+  it("folds every spec beneath it, in path order", () => {
+    const text = describeKeptSpecsLeftBehind(left);
+    const folded = text.slice(text.indexOf("<details>"), text.indexOf("</details>"));
+    const items = folded.split("\n").filter((l) => l.startsWith("- "));
+    expect(items).toHaveLength(3);
+    expect(items[0]).toContain("`src/lib/agent/__tests__/a.spec.ts`");
+    expect(items[0]).toContain("`a.ts`, `b.ts`, `c.ts` and 2 more");
+    expect(items[1]).toContain(`\`${PARITY_SPEC}\``);
+    expect(items[1]).toContain(`needs \`${PARITY}\``);
+    expect(items[2]).toContain(`needs \`${GHL}\`, \`${PARITY}\``);
+  });
+
+  it("leaves the blank lines GitHub needs to render the folded list as a list", () => {
+    const text = describeKeptSpecsLeftBehind(left);
+    expect(text).toMatch(/<\/summary>\n\n- /);
+    expect(text).toMatch(/\.\n\n<\/details>$/);
+  });
+
+  it("names three missing files and counts the rest", () => {
+    const many = ["w", "x", "y", "z"].map((n) => ({
+      spec: `src/lib/agent/__tests__/${n}.spec.ts`,
+      touchedBy: [`${n}.ts`],
+      lacks: [`src/lib/agent/${n}.ts`],
+    }));
+    const [summary] = describeKeptSpecsLeftBehind(many).split("\n");
+    expect(summary).toContain("**4 specs**");
+    expect(summary).toContain("`src/lib/agent/y.ts` (1 spec) and 1 more file(s)");
   });
 
   it("is empty for none, so the section is left out", () => {

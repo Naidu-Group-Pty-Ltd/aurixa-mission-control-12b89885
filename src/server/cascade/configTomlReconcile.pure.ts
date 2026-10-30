@@ -152,6 +152,15 @@ function projectIdLine(toml: string): { line: string; value: string } | null {
   return found.length === 1 ? found[0] : null;
 }
 
+/**
+ * The project a config.toml names, read the way the reconcile reads it, or
+ * null where it does not name exactly one. For the files beside this one that
+ * also need to know whose deployment they are in (`gitleaksReconcile.pure.ts`).
+ */
+export function projectIdOf(toml: string): string | null {
+  return projectIdLine(toml)?.value ?? null;
+}
+
 /** A Supabase project ref is exactly twenty lowercase letters. */
 function isProjectRef(value: string): boolean {
   return /^[a-z]{20}$/.test(value);

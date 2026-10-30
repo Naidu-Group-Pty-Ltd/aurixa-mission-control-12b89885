@@ -195,6 +195,7 @@ describe("a reconcile pump's decision is not reopened by the carry", () => {
     ["CONFIG_TOML_PATH", "reconcileConfigToml"],
     ["SECURITY_REGISTRY_PATH", "reconcileSecurityRegistry"],
     ["DEPLOY_WORKFLOW_PATH", "reconcileDeployWorkflow"],
+    ["GITLEAKS_CONFIG_PATH", "reconcileGitleaksToml"],
   ] as const;
 
   it.each(PUMPS)("records that it decided %s", (constant) => {

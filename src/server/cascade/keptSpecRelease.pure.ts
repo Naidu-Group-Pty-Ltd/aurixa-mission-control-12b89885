@@ -153,18 +153,42 @@ function nameFew(paths: readonly string[]): string {
   return rest > 0 ? `${shown.join(", ")} and ${rest} more` : shown.join(", ");
 }
 
+const specs = (n: number) => `${n} spec${n === 1 ? "" : "s"}`;
+
 /**
  * The proposal's section for kept specs that stay the line's while a file
- * they test crosses. Empty when there are none, so the section is omitted.
+ * they test crosses: one line that says how many and what prime's copies
+ * need, then every spec folded beneath it. Empty when there are none, so the
+ * section is omitted.
+ *
+ * Folded because the list is long and mostly one reason. Replayed on cascade
+ * PR #160 it named thirteen specs, twelve of them for the same missing file,
+ * and a section that long on every pass is one readers learn to scroll past.
+ * The summary names each missing file once, with how many specs need it, most
+ * first; a spec that needs two is counted under both.
  */
-export function describeKeptSpecsLeftBehind(specs: readonly KeptSpecLeftBehind[]): string {
-  return [...specs]
-    .sort((a, b) => a.spec.localeCompare(b.spec))
-    .map(
+export function describeKeptSpecsLeftBehind(left: readonly KeptSpecLeftBehind[]): string {
+  if (left.length === 0) return "";
+  const sorted = [...left].sort((a, b) => a.spec.localeCompare(b.spec));
+  const needed = new Map<string, number>();
+  for (const s of sorted) for (const p of s.lacks) needed.set(p, (needed.get(p) ?? 0) + 1);
+  const byNeed = [...needed].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const named = byNeed.slice(0, MAX_NAMED).map(([p, n]) => `\`${p}\` (${specs(n)})`);
+  const unnamed = byNeed.length - named.length;
+  const needs = unnamed > 0 ? `${named.join(", ")} and ${unnamed} more file(s)` : named.join(", ");
+  return [
+    `**${specs(sorted.length)}** stay this line's own. Prime's copies need ${needs}, which this ` +
+      `line does not carry.`,
+    "",
+    "<details>",
+    `<summary>Each spec, the files it tests that this delivery changes, and what prime's copy ` +
+      `needs</summary>`,
+    "",
+    ...sorted.map(
       (s) =>
-        `- \`${s.spec}\` — tests ${nameFew(s.touchedBy)}, which this delivery changes; ` +
-        `prime's copy needs ${nameFew(s.lacks)}, which this line does not carry, so the line's ` +
-        `copy stays and runs its older assertions against the new file(s) until it is updated here.`,
-    )
-    .join("\n");
+        `- \`${s.spec}\` — tests ${nameFew(s.touchedBy)}; prime's copy needs ${nameFew(s.lacks)}.`,
+    ),
+    "",
+    "</details>",
+  ].join("\n");
 }

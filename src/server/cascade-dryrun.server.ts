@@ -231,6 +231,7 @@ export async function runCascadeDryRun(
           default_branch: clone.default_branch || "main",
           sync_scope: clone.sync_scope,
           crm_mode: clone.crm_mode ?? null,
+          last_synced_sha: clone.last_synced_sha ?? null,
         },
         supabase,
         scopeFilter: null,

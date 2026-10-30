@@ -166,6 +166,9 @@ const LATENCY: Record<string, (x: { bytes?: number; entries?: number; n?: number
   "git.getCommit": () => 250,
   "repos.getCommit": () => 300,
   "repos.listCommits": () => 450,
+  // Not on the 20 Oct trace, which predates the question; a guess on the
+  // shape of the others.
+  "repos.compareCommitsWithBasehead": ({ entries = 0 }) => 600 + entries * 2,
   "graphql:blob": ({ bytes = 0 }) => 450 + bytes / 1000,
   "graphql:version": ({ n = 0 }) => 600 + n * 8,
   "git.createBlob": ({ bytes = 0 }) => 350 + bytes / 4000,
@@ -272,6 +275,33 @@ function fakeOctokit(openPr: A | null) {
             status: 422,
           });
         }
+      },
+      async compareCommitsWithBasehead(a) {
+        begin();
+        const repo = repoOf(a.owner, a.repo);
+        const [baseRef, headRef] = (s(a, "basehead") ?? "").split("...");
+        const head = resolve(repo, headRef);
+        // Three dots: from where the two meet, as GitHub compares.
+        const base = git(repo, ["merge-base", resolve(repo, baseRef), head])
+          .toString()
+          .trim();
+        const files = git(repo, ["diff", "--name-status", "-M", base, head])
+          .toString("utf8")
+          .split("\n")
+          .filter(Boolean)
+          .map((line) => {
+            const [status, first, second] = line.split("\t");
+            return status.startsWith("R")
+              ? { filename: second, previous_filename: first, status: "renamed" }
+              : { filename: first, status };
+          });
+        await charge(
+          "repos.compareCommitsWithBasehead",
+          { entries: files.length },
+          `${repo.name} ${base.slice(0, 7)}...${head.slice(0, 7)}`,
+        );
+        // GitHub lists at most 300 files for a whole comparison.
+        return { data: { files: files.slice(0, 300) } };
       },
       async listCommits(a) {
         begin();

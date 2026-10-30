@@ -170,8 +170,22 @@ import {
 import {
   CONFIG_TOML_PATH,
   declaredFunctionCount,
+  projectIdOf,
   reconcileConfigToml,
 } from "./cascade/configTomlReconcile.pure";
+import {
+  describeGitleaksReconcile,
+  GITLEAKS_CONFIG_PATH,
+  reconcileGitleaksToml,
+} from "./cascade/gitleaksReconcile.pure";
+import {
+  COMPARE_FILE_CEILING,
+  describeProtectedChanges,
+  MAX_PROTECTED_PROBES,
+  protectedOwnCopies,
+  readComparison,
+  type ProtectedChanges,
+} from "./cascade/protectedChanges.pure";
 import { withheldPrimeOnlyFunctions } from "./primeOnlyFeatures.pure";
 import {
   describeWithheldAcrossRegisters,
@@ -1109,7 +1123,7 @@ export async function executeCascade(
     // same way and with the same failure classification.
     let readRef: RepoRef = primeRef;
     let readSha: string = sourceSha;
-    let provenance: { label: string; deliveredSha: string } | undefined;
+    let provenance: { label: string; deliveredSha: string; primeRepo?: RepoRef } | undefined;
 
     if (sourceDecision.kind === "parent") {
       try {
@@ -1120,7 +1134,7 @@ export async function executeCascade(
         });
         readRef = sourceDecision.ref;
         readSha = parentBranch.commit.sha;
-        provenance = { label: sourceDecision.label, deliveredSha: sourceSha };
+        provenance = { label: sourceDecision.label, deliveredSha: sourceSha, primeRepo: primeRef };
       } catch (e) {
         // A source that cannot be READ is not a source that is empty. Holding
         // costs a tick; falling through to prime would deliver prime's whole
@@ -1692,7 +1706,7 @@ export type CloneReadSource =
       /** The head of `ref`: prime's commit, or the parent's branch head. */
       sha: string;
       /** Set only when the parent supplies the tree. See `processClone`. */
-      provenance?: { label: string; deliveredSha: string };
+      provenance?: { label: string; deliveredSha: string; primeRepo?: RepoRef };
     }
   | { kind: "hold"; why: string };
 
@@ -1735,16 +1749,13 @@ export async function resolveCloneReadSource(args: {
     primeSha,
   });
   if (decision.kind === "hold") return decision;
+  const primeRepo: RepoRef = {
+    owner: prime.github_owner,
+    repo: prime.github_repo,
+    branch: prime.default_branch || "main",
+  };
   if (decision.kind === "prime") {
-    return {
-      kind: "read",
-      ref: {
-        owner: prime.github_owner,
-        repo: prime.github_repo,
-        branch: prime.default_branch || "main",
-      },
-      sha: primeSha,
-    };
+    return { kind: "read", ref: primeRepo, sha: primeSha };
   }
 
   try {
@@ -1757,7 +1768,7 @@ export async function resolveCloneReadSource(args: {
       kind: "read",
       ref: decision.ref,
       sha: parentBranch.commit.sha,
-      provenance: { label: decision.label, deliveredSha: primeSha },
+      provenance: { label: decision.label, deliveredSha: primeSha, primeRepo },
     };
   } catch (e) {
     return {
@@ -1785,6 +1796,8 @@ export type ProposalRebuild = {
     default_branch: string;
     sync_scope: string | null;
     crm_mode: string | null;
+    /** The prime revision it last took; see `processClone`'s `clone`. */
+    last_synced_sha: string | null;
   };
 };
 
@@ -1857,6 +1870,7 @@ export async function prepareProposalRebuild(args: {
         default_branch: clone.default_branch || "main",
         sync_scope: clone.sync_scope,
         crm_mode: clone.crm_mode ?? null,
+        last_synced_sha: clone.last_synced_sha ?? null,
       },
     },
   };
@@ -1936,6 +1950,12 @@ export async function processClone(args: {
      * this clone's membrane — see `membraneInto` — and nothing else here.
      */
     crm_mode?: string | null;
+    /**
+     * `clones.last_synced_sha`: the prime revision this clone last took. Read
+     * only to name the protected files prime changed since
+     * (`protectedChanges.pure.ts`); absent, that question is said not asked.
+     */
+    last_synced_sha?: string | null;
   };
   supabase: SupabaseLike;
   scopeFilter: Record<string, unknown> | null;
@@ -1989,6 +2009,12 @@ export async function processClone(args: {
     label: string;
     /** The PRIME commit this delivery carries, whatever repo it was read from. */
     deliveredSha: string;
+    /**
+     * The prime's repository, which `deliveredSha` is a commit of. Asked only
+     * which files PRIME changed (`protectedChanges.pure.ts`); absent, a
+     * child's proposal says that question was not asked.
+     */
+    primeRepo?: RepoRef;
   };
   /**
    * Build a CRM conversion instead of a cascade. See `ConversionDelivery`.
@@ -3890,6 +3916,11 @@ export async function processClone(args: {
   // repository that will not exist.
   let mergedToml: string | null = null;
   let mergedRegistryJson: string | null = null;
+  // The two config.toml files as read below, kept for the secret scan's
+  // reconcile, which has to know whose deployment each side is. Null where a
+  // read failed, which that reconcile refuses on rather than guesses past.
+  let sourceConfigText: string | null = null;
+  let cloneConfigText: string | null = null;
   /**
    * Paths a reconcile pump DECIDED, whether or not it wrote one.
    *
@@ -4006,6 +4037,8 @@ export async function processClone(args: {
         getFileContent(octokit, primeRef, CONFIG_TOML_PATH),
         getFileContent(octokit, cloneRef, CONFIG_TOML_PATH),
       ]);
+      if (primeCfg && !primeCfg.binary) sourceConfigText = primeCfg.content;
+      if (cloneCfg && !cloneCfg.binary) cloneConfigText = cloneCfg.content;
       if (primeCfg && cloneCfg && !primeCfg.binary && !cloneCfg.binary) {
         const verdict = reconcileConfigToml({
           primeToml: primeCfg.content,
@@ -4602,6 +4635,88 @@ export async function processClone(args: {
       // cascade before this one left it in.
       console.warn(
         `[cascade] deploy workflow reconcile skipped for clone ${clone.id}: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+    }
+  }
+
+  // ── the secret scan's config: the source's allowances, this clone's key ──
+  //
+  // `.gitleaks.toml` is protected for the one line that is this deployment's:
+  // the allowance for its own anon key. The exclusion froze the rest with it,
+  // which is the record of what the scan may let through. On 30 Oct 2026 prime
+  // swapped a planted key and its allowance in one commit, the script crossed
+  // and the allowance could not, and `security` went red on all five clones'
+  // proposals with nothing in any of them pointing at the file.
+  //
+  // So, like `config.toml`, the row stays and this writes the file: the
+  // source's text, less this deployment's own allowance and a parent's, plus
+  // this deployment's key (`gitleaksReconcile.pure.ts`, the owner's decision
+  // of 30 Oct). Whose deployment each side is comes from its own
+  // `config.toml`, read above. A refusal is held and named like any other.
+  let gitleaksReconcileNote: string | null = null;
+  if (mode !== "notify") {
+    try {
+      const [sourceScan, cloneScan] = await Promise.all([
+        getFileContent(octokit, primeRef, GITLEAKS_CONFIG_PATH),
+        getFileContent(octokit, cloneRef, GITLEAKS_CONFIG_PATH),
+      ]);
+      if (sourceScan && cloneScan && !sourceScan.binary && !cloneScan.binary) {
+        const verdict = reconcileGitleaksToml({
+          sourceToml: sourceScan.content,
+          cloneToml: cloneScan.content,
+          ownRef: cloneConfigText === null ? null : projectIdOf(cloneConfigText),
+          registeredRef: ownProjectRef,
+          // A lineage child reads its parent, whose own key is the parent's
+          // identity; every other pass reads the prime.
+          source:
+            args.provenance === undefined
+              ? { kind: "prime" }
+              : {
+                  kind: "deployment",
+                  ownRef: sourceConfigText === null ? null : projectIdOf(sourceConfigText),
+                },
+        });
+        if (verdict.ok) reconciledPaths.add(GITLEAKS_CONFIG_PATH);
+        if (!verdict.ok) {
+          const held = {
+            path: GITLEAKS_CONFIG_PATH,
+            pattern: "(content: this deployment's own key)",
+            reason: "manual_reconcile" as const,
+            note: `The secret scan's allowances were not brought across: ${verdict.reason}.`,
+          };
+          partition.held.push(held);
+          needsReconcile.push(held);
+        } else if (verdict.changed) {
+          gitleaksReconcileNote = describeGitleaksReconcile(
+            verdict,
+            baselineSourceWords(sourceLabel).possessive,
+          );
+          reconcileWrites.add(GITLEAKS_CONFIG_PATH);
+          if (dryRun) rehearsedWrites.add(GITLEAKS_CONFIG_PATH);
+          if (!dryRun) {
+            const { data: scanBlob } = await octokit.git.createBlob({
+              owner: cloneRef.owner,
+              repo: cloneRef.repo,
+              content: Buffer.from(verdict.merged, "utf8").toString("base64"),
+              encoding: "base64",
+            });
+            treeEntries.push({
+              path: GITLEAKS_CONFIG_PATH,
+              mode: "100644",
+              type: "blob",
+              sha: scanBlob.sha,
+            });
+            deliveredSource[GITLEAKS_CONFIG_PATH] = verdict.merged;
+          }
+        }
+      }
+    } catch (e) {
+      // Never fails the pass: the clone keeps the config it had a moment ago,
+      // which is what every cascade before this one left it with.
+      console.warn(
+        `[cascade] .gitleaks.toml reconcile skipped for clone ${clone.id}: ${
           e instanceof Error ? e.message : String(e)
         }`,
       );
@@ -6454,6 +6569,113 @@ export async function processClone(args: {
       : `chore(aurixa): cascade ${treeEntries.length} file(s) from ${sourceLabel}@${shortSha(sourceSha)}\n\n`) +
     treeEntries.map((t) => `- ${t.sha === null ? "DELETE " : ""}${t.path}`).join("\n");
 
+  // ── never silent: the files this clone keeps that prime changed ─────────
+  //
+  // `protectedChanges.pure.ts`. A path a protected exclusion row withheld and
+  // prime changed in the range this proposal delivers is named rather than
+  // counted. Asked of PRIME's history, which for a lineage child is not the
+  // repository it reads. One comparison, and the paths a comparison at its
+  // ceiling cannot vouch for are asked by their blob at each end.
+  const ownCopies = protectedOwnCopies(
+    partition.held,
+    reconciledPaths,
+    new Set(needsReconcile.map((h) => h.path)),
+  );
+  const lastSynced = clone.last_synced_sha ?? null;
+  let protectedChanges: ProtectedChanges | null = null;
+  if (ownCopies.length > 0 && !conversion && lastSynced !== deliveredSha) {
+    const primeRepo =
+      args.provenance === undefined ? primeRef : (args.provenance.primeRepo ?? null);
+    const notAsked = (why: string): ProtectedChanges => ({
+      base: lastSynced ?? deliveredSha,
+      head: deliveredSha,
+      changed: [],
+      notAsked: ownCopies,
+      why,
+    });
+    if (lastSynced === null) {
+      protectedChanges = notAsked("this clone has no recorded prime revision to compare from");
+    } else if (primeRepo === null) {
+      protectedChanges = notAsked("this pass was not told which repository is the prime's");
+    } else {
+      const blobShaAt = async (path: string, ref: string): Promise<string | null> => {
+        try {
+          const { data } = await octokit.repos.getContent({
+            owner: primeRepo.owner,
+            repo: primeRepo.repo,
+            path,
+            ref,
+          });
+          if (Array.isArray(data)) throw new Error(`${path} is a directory at ${ref}`);
+          return (data as { sha: string }).sha;
+        } catch (e) {
+          // Absent at one end is an answer: the file was added or removed.
+          if ((e as { status?: number }).status === 404) return null;
+          throw e;
+        }
+      };
+      try {
+        const { data } = await octokit.repos.compareCommitsWithBasehead({
+          owner: primeRepo.owner,
+          repo: primeRepo.repo,
+          basehead: `${lastSynced}...${deliveredSha}`,
+          // The file list rides on the first page whatever its size; one
+          // commit per page keeps the rest of the answer small.
+          per_page: 1,
+        });
+        const listed = data.files ?? [];
+        const read = readComparison({
+          candidates: ownCopies,
+          files: listed.flatMap((f) =>
+            f.previous_filename ? [f.filename, f.previous_filename] : [f.filename],
+          ),
+          truncated: listed.length >= COMPARE_FILE_CEILING,
+        });
+        const changed = [...read.changed];
+        const unknown: HeldPath[] = [];
+        let probes = 0;
+        for (const h of read.unseen) {
+          if (probes >= MAX_PROTECTED_PROBES || resume?.budget?.isPastDeadline(0)) {
+            unknown.push(h);
+            continue;
+          }
+          probes += 1;
+          try {
+            const [was, now] = await Promise.all([
+              blobShaAt(h.path, lastSynced),
+              blobShaAt(h.path, deliveredSha),
+            ]);
+            if (was !== now) changed.push(h);
+          } catch {
+            unknown.push(h);
+          }
+        }
+        protectedChanges = {
+          base: lastSynced,
+          head: deliveredSha,
+          changed: changed.sort((a, b) => a.path.localeCompare(b.path)),
+          notAsked: unknown,
+          why:
+            unknown.length > 0
+              ? `GitHub lists at most ${COMPARE_FILE_CEILING} changed files for one comparison, ` +
+                `this one reached that, and ${unknown.length === 1 ? "this path was" : "these were"} ` +
+                `not asked one by one`
+              : null,
+        };
+      } catch (e) {
+        protectedChanges = notAsked(
+          `the comparison could not be read (${e instanceof Error ? e.message : String(e)})`,
+        );
+      }
+    }
+  }
+  const protectedSection = describeProtectedChanges(protectedChanges);
+  const protectedNamed = protectedSection
+    ? (protectedChanges?.changed.length ?? 0) + (protectedChanges?.notAsked.length ?? 0)
+    : 0;
+  const withheldUncommented =
+    partition.held.length - needsReconcile.length - keptStaying.length - protectedNamed;
+
   // What the pull request has to say beyond the file list. `manual_reconcile`
   // paths are the reason this section exists: withholding them silently is how
   // a clone stops learning about new routes without anyone noticing.
@@ -6549,6 +6771,17 @@ export async function processClone(args: {
             `refused rather than carried.\n\n` +
             `- ${deployWorkflowNote}`
           : "") +
+        (gitleaksReconcileNote
+          ? `\n\n### The secret scan's config was derived, not copied\n\n` +
+            `\`${GITLEAKS_CONFIG_PATH}\` is a **protected** exclusion and ${
+              baselineSourceWords(sourceLabel).possessive
+            } copy was not written as it stands. What travelled is that file with this ` +
+            `deployment's own Supabase anon key put back as one literal, so a change to what ` +
+            `the scan may let through arrives on the same pass as the files it is about. Anything ` +
+            `this clone's copy allowed that the result does not is named below; if this ` +
+            `proposal's secret scan fails, start there.\n\n` +
+            `- ${gitleaksReconcileNote}`
+          : "") +
         (variantOutcomes.length > 0
           ? `\n\n### This line's own copies, merged with prime\n\n` +
             `These files are held because this line's copy carries work prime does not. Each was ` +
@@ -6595,9 +6828,9 @@ export async function processClone(args: {
           : "") +
         (keptStaying.length > 0
           ? `\n\n### Kept by this line, and left behind by the files they test\n\n` +
-            `This line keeps these specs as its own, and prime's copies need files the line does ` +
-            `not carry, so they cannot travel. This delivery changes the files they assert about, ` +
-            `so their older assertions now run against the new files: update each here, in the ` +
+            `This delivery changes files these specs assert about. This line keeps the specs as ` +
+            `its own, and prime's copies cannot travel without files the line does not carry, so ` +
+            `the line's older assertions now run against the new files: update each here, in the ` +
             `line's own copy.\n\n` +
             describeKeptSpecsLeftBehind(keptStaying)
           : "") +
@@ -6607,8 +6840,11 @@ export async function processClone(args: {
             `Prime has moved; someone has to decide what to carry across.\n\n` +
             needsReconcile.map((h) => `- \`${h.path}\`${h.note ? ` — ${h.note}` : ""}`).join("\n")
           : "") +
-        (partition.held.length - needsReconcile.length - keptStaying.length > 0
-          ? `\n\n_${partition.held.length - needsReconcile.length - keptStaying.length} further path(s) are owned by this clone and were withheld without comment._`
+        (protectedSection
+          ? `\n\n### Prime changed files this clone keeps as its own\n\n${protectedSection}`
+          : "") +
+        (withheldUncommented > 0
+          ? `\n\n_${withheldUncommented} further path(s) are owned by this clone and were withheld without comment._`
           : "") +
         (conversion
           ? (describeConversionDeletions(deletionPlan, conversion.leaving.label)

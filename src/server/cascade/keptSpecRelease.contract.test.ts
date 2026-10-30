@@ -107,9 +107,10 @@ describe("a kept spec prime's copy cannot run on stays the line's, and is said",
 
   it("has its own section in the proposal, and is not counted as withheld without comment", () => {
     expect(engine).toContain("describeKeptSpecsLeftBehind(keptStaying)");
-    expect(engine).toContain(
-      "partition.held.length - needsReconcile.length - keptStaying.length > 0",
+    expect(engine).toMatch(
+      /const withheldUncommented =\s*partition\.held\.length - needsReconcile\.length - keptStaying\.length - protectedNamed;/,
     );
+    expect(engine).toContain("(withheldUncommented > 0");
   });
 });
 
