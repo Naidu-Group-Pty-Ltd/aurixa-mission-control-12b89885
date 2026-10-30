@@ -266,3 +266,56 @@ describe("the allowance each period gets", () => {
     );
   });
 });
+
+/**
+ * Didit is priced in AUD, so a period closes into one AUD charge (the owner's
+ * decision, 30 Oct 2026). It was the only rate in USD, and absorbed, so every
+ * period holding it closed a second, empty USD charge: three on 30 Oct.
+ */
+describe("Didit priced in AUD", () => {
+  const sql = readFileSync("supabase/migrations/20261030210000_didit_is_priced_in_aud.sql", "utf8");
+  // RBA F11.1, 30 Oct 2026: A$1 = US$0.7040.
+  const USD_PER_AUD = 0.704;
+
+  it("cites the rate it converts at, and says it is re-set by hand", () => {
+    expect(sql).toContain("A$1 = US$0.7040 on 30 Oct 2026");
+    expect(sql).toContain("Reserve Bank of Australia, statistical table F11.1");
+    expect(sql).toContain("_usd_per_aud constant numeric := 0.7040;");
+    expect(sql).toContain("it is re-set by hand");
+  });
+
+  it("rounds the price up to the cent, and converts the cost to the micro", () => {
+    const rounded = "ceil(resale_micros_per_unit / _usd_per_aud / 10000) * 10000";
+    const cost = "round(cost_micros_per_unit / _usd_per_aud)";
+    // The row and its three per-operation overrides, each.
+    expect(sql.split(rounded)).toHaveLength(3);
+    expect(sql.split(cost)).toHaveLength(3);
+    expect(sql).not.toContain("ceil(cost_micros_per_unit");
+    // Only while the row still reads USD, so a second run converts nothing twice.
+    expect(sql).toContain("where secret_name = 'DIDIT_API_KEY' and currency = 'USD'");
+    expect(sql).toMatch(/where secret_name = 'DIDIT_API_KEY'\n\s+and currency = 'USD';/);
+  });
+
+  it("states the figures its arithmetic gives for what 30 Oct measured", () => {
+    const idVerification = Math.round(200_000 / USD_PER_AUD);
+    const fiveCents = Math.round(50_000 / USD_PER_AUD);
+    expect([idVerification, fiveCents]).toEqual([284_091, 71_023]);
+    expect(sql).toContain(`AUD 0.${idVerification}`);
+    expect(sql).toContain(`AUD 0.0${fiveCents}`);
+    expect(sql).toContain(`AUD 0.${idVerification + 2 * fiveCents}`);
+    // Resale is 0 and stays 0: Didit is still absorbed.
+    expect(Math.ceil(0 / USD_PER_AUD / 10_000) * 10_000).toBe(0);
+    expect(sql).not.toMatch(/\babsorbed\s*=/);
+  });
+
+  it("moves only USD Didit usage in a period not yet closed in USD, and proves it by effect", () => {
+    expect(sql).toContain(
+      "lock table public.api_usage_events, public.api_usage_rollups in share row exclusive mode;",
+    );
+    expect(sql).toContain("and c.currency = 'USD' and c.status <> 'open');");
+    expect(sql).toContain("raise exception 'Didit is priced in %, not AUD'");
+    expect(sql).toContain(
+      "raise exception '% Didit rollup(s) in USD remain in a period still to close'",
+    );
+  });
+});

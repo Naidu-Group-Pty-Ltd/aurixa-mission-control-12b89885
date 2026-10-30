@@ -1438,4 +1438,15 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20261030193300",
     assertions: [{ kind: "column", table: "live_audit_settings", column: "audit_account" }],
   },
+  {
+    migration: "20261030210000_didit_is_priced_in_aud.sql",
+    version: "20261030210000",
+    assertions: [
+      { kind: "none", reason: "re-prices one catalog row and its three per-operation rows," },
+      { kind: "none", reason: "and creates no object a claim could probe; every table here" },
+      { kind: "none", reason: "already holds rows, so `rows:` would pass whether or not this" },
+      { kind: "none", reason: "ran. The block at the end fails the migration unless Didit" },
+      { kind: "none", reason: "reads in AUD and no period still to close holds it in USD." },
+    ],
+  },
 ];
