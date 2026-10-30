@@ -1290,8 +1290,9 @@ function NewClone() {
               <div className="text-sm font-medium">Start this clone&apos;s sending identity</div>
               <div className="text-xs text-muted-foreground">
                 Registers the sending domain now so its DNS can propagate; the email drain mints the
-                scoped key once it verifies. The drain only ADVANCES an identity — nothing else in
-                the platform starts one, so an unstarted clone stays unable to send.
+                scoped key once it verifies. Left unticked, the email drain starts one on the domain
+                derived from this clone&apos;s subdomain once its backend is ready, so ticking it
+                buys the DNS that head start, or a domain of your choosing.
               </div>
               <CapabilityNote
                 readiness={readiness}
@@ -1311,8 +1312,10 @@ function NewClone() {
                 placeholder="mail.clientdomain.com.au — blank derives it from the clone"
               />
               <p className="text-xs text-muted-foreground">
-                Leave blank to use the platform default. Whatever is set here is the domain the
-                clone&apos;s mail is sent as, and it is what has to verify in DNS.
+                Leave blank to derive it from the subdomain reserved above (send.&lt;subdomain&gt;);
+                with no subdomain there is nothing to derive from, and the start is refused.
+                Whatever is set here is the domain the clone&apos;s mail is sent as, and it is what
+                has to verify in DNS.
               </p>
             </div>
           )}
