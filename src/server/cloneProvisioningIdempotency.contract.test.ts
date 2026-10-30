@@ -75,7 +75,7 @@ describe("an idempotent retry reconciles the side effects it asked for", () => {
   it("the reservation travels back, because the deployment attaches that name", () => {
     expect(bare).toMatch(/subdomain:\s*reservedSubdomain,\s*fqdn:\s*reservedFqdn/);
     expect(bare).toMatch(
-      /const \{ subdomain: reservedSubdomain, fqdn: reservedFqdn \}\s*=\s*await startRequestedSideEffects\(/,
+      /const \{\s*subdomain: reservedSubdomain,\s*fqdn: reservedFqdn,[^}]*\}\s*=\s*await startRequestedSideEffects\(/,
     );
   });
 });
