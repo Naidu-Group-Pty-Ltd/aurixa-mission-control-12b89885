@@ -3,37 +3,7 @@ import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { ensureTenant, jsonResponse, resolveCloneApiKey } from "@/server/clone-api-keys.server";
 import { checkRateLimit } from "@/server/token-rate-limit.server";
 import { EXPIRY_WARNING_DAYS, TOKEN_EXPIRY_DAYS } from "@/server/token-lots.server";
-import { balanceEntitlements } from "@/server/balanceEntitlements.pure";
-
-/**
- * The clone's contract exclusions, or `null` when they could not be read.
- *
- * A row that is not there is a failed read as well. The key's foreign key
- * cascades on delete, so a key naming a clone always has a row, and "the read
- * found nothing" can only mean the read did not say.
- */
-async function readContractExclusions(cloneId: string): Promise<string[] | null> {
-  try {
-    const { data, error } = await supabaseAdmin
-      .from("clones")
-      .select("contract_excluded_module_slugs")
-      .eq("id", cloneId)
-      .maybeSingle();
-    if (error) {
-      console.warn("[tokens/balance] contract exclusions unavailable", error.message);
-      return null;
-    }
-    const slugs = data?.contract_excluded_module_slugs;
-    if (!Array.isArray(slugs)) {
-      console.warn("[tokens/balance] contract exclusions unavailable: no readable row", cloneId);
-      return null;
-    }
-    return slugs;
-  } catch (err) {
-    console.warn("[tokens/balance] contract exclusions unavailable", err);
-    return null;
-  }
-}
+import { heldEntitlements, type HeldEntitlementsTenant } from "@/server/heldEntitlements.server";
 
 export const Route = createFileRoute("/api/public/tokens/balance")({
   server: {
@@ -116,9 +86,6 @@ export const Route = createFileRoute("/api/public/tokens/balance")({
         // lock out a workspace that had paid for it. That leaves add-ons
         // effectively ungated on the clone. Supplying them here is what closes
         // it — the balance call is the one request every clone already makes.
-        //
-        // `past_due` still entitles, matching how the reconciler treats it: a
-        // failed card should not strip a feature mid-period.
         // Best-effort, like the expiry schedule above — a balance read must not
         // fail because the entitlement query did, and an empty list degrades to
         // exactly the behaviour clones have today.
@@ -128,55 +95,33 @@ export const Route = createFileRoute("/api/public/tokens/balance")({
         // form: `.eq("clone_id", null)` asks PostgREST for `clone_id = NULL`, which
         // no row satisfies, so the empty answer was right by accident rather than by
         // rule.
-        let addonSlugs: string[] = [];
-        const addonCloneId = key.clone_id;
-        if (addonCloneId) {
-          try {
-            const { data: addons } = await supabaseAdmin
-              .from("clone_addon_purchases")
-              .select("addon_slug")
-              .eq("clone_id", addonCloneId)
-              .in("status", ["active", "past_due"]);
-            addonSlugs = [
-              ...new Set(
-                ((addons ?? []) as Array<{ addon_slug: string }>).map((a) => a.addon_slug),
-              ),
-            ].sort();
-          } catch (err) {
-            console.warn("[tokens/balance] add-on entitlements unavailable", err);
-          }
-        }
-
+        //
         // The contract's exclusions (D18), price-list slugs read off the
         // clone. Clones gate on this response alone, so this is the only way
         // an exclusion reaches one. Best-effort like the reads above: a failed
         // read never fails the balance. It leaves `excluded` out, and the
         // clone keeps the exclusions it last knew. A platform-level key has
         // no clone, so no agreement and nothing excluded.
-        const contractExcluded = addonCloneId ? await readContractExclusions(addonCloneId) : [];
-
+        //
         // AML/CTF is entitled by the purchased SKU, never by tier membership.
         // Every tier's headline SKU — the one Stripe charges — includes the
         // module (TIER_INCLUDES_AML), so a tenant on a known tier is entitled
         // unless a without-AML SKU is recorded or the contract excludes it.
         // Stating it HERE makes this response the authoritative answer;
         // clones no longer have to assume. A future without-AML SKU sets
-        // tenants.metadata.aml_excluded and this stops adding the slug.
+        // tenants.metadata.aml_excluded and this stops adding the slug. Where
+        // AML/CTF is held, so is every partner portal it brings (29 Oct 2026).
         //
         // A billing-exempt tenant holds every module on the price list (D17),
         // so the prime's last-known-good cache keeps what its exemption grants
         // through an outage of this endpoint.
-        const tenantRow = ten.data as {
-          billing_exempt?: boolean | null;
-          billing_plans?: { slug?: string | null } | null;
-          metadata?: Record<string, unknown> | null;
-        } | null;
-        const entitlements = balanceEntitlements({
-          addonSlugs,
-          planSlug: tenantRow?.billing_plans?.slug ?? null,
-          amlExcluded: Boolean(tenantRow?.metadata?.aml_excluded),
-          contractExcluded,
-          billingExempt: tenantRow?.billing_exempt === true,
+        //
+        // The storefront handoff derives the same answer through the same
+        // helper, so a workspace reads one answer in its app and on the site.
+        const entitlements = await heldEntitlements({
+          tenant: ten.data as HeldEntitlementsTenant,
+          cloneId: key.clone_id,
+          logTag: "tokens/balance",
         });
 
         return jsonResponse({

@@ -26,11 +26,17 @@
 //     it is on the page for the roadmap with no agreed price, the Builder /
 //     Developer Portal because it is priced but sold directly. Neither may
 //     reach Stripe. Skipped loudly, in the plan, rather than silently dropped.
+//     A module whose price is undecided (the Accountant Portal, 29 Oct 2026)
+//     is skipped too, and its row is never linked, so no checkout can sell its
+//     placeholder. Its Stripe product was created at the A$1 placeholder by
+//     the owner's decision; once it is priced, the product search below finds
+//     that product by its `aurixa_module` metadata and adds the real price.
 import Stripe from "stripe";
 import { getStripe } from "@/server/stripe.server";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { describeRefresh, refreshStorefrontMirror } from "@/server/storefront-refresh.server";
 import {
+  AML_BUNDLED_MODULES,
   AML_MODULE_SLUG,
   MODULES,
   PURCHASABLE_MODULES,
@@ -61,6 +67,8 @@ export type ModuleOp = {
   gstComponent: number;
   /** Tier slugs that already bundle this module at no extra cost. */
   includedIn: readonly string[];
+  /** Whether any plan that includes AML/CTF brings it at no extra cost. */
+  includedWithAml: boolean;
   /** Whether the catalog row is already selling at this price. */
   alreadyLive: boolean;
 };
@@ -76,7 +84,11 @@ export type ModuleSyncPlan = {
 
 /** "Launch, Growth and Scale" — not "Launch and Growth and Scale". */
 function tierList(slugs: readonly string[]): string {
-  const names = slugs.map((s) => s[0].toUpperCase() + s.slice(1));
+  return nameList(slugs.map((s) => s[0].toUpperCase() + s.slice(1)));
+}
+
+/** A spoken list of names: "A, B and C". */
+function nameList(names: readonly string[]): string {
   if (names.length <= 1) return names.join("");
   return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 }
@@ -103,11 +115,18 @@ export function moduleProductShape(mod: PricedModule): {
   metadata: Record<string, string>;
 } {
   const bundledInEveryTier = mod.slug === AML_MODULE_SLUG && TIER_INCLUDES_AML;
+  // The owner's decision of 29 Oct 2026: AML/CTF brings every partner portal,
+  // so each says so on its own invoice line, and so does AML/CTF.
   const included = bundledInEveryTier
-    ? "Already contained in every tier's headline price — needed only alongside a tier bought without it."
-    : mod.includedIn.length
-      ? `Included with ${tierList(mod.includedIn)}.`
-      : "Available on every tier as an add-on.";
+    ? "Already contained in every tier's headline price — needed only alongside a tier bought without it. " +
+      `Brings the ${nameList(AML_BUNDLED_MODULES.map((m) => m.name))} at no extra cost.`
+    : mod.includedWithAml
+      ? mod.includedIn.length
+        ? `Included with ${tierList(mod.includedIn)}, and with any plan that includes AML/CTF Compliance.`
+        : "Included with any plan that includes AML/CTF Compliance; otherwise available on every tier as an add-on."
+      : mod.includedIn.length
+        ? `Included with ${tierList(mod.includedIn)}.`
+        : "Available on every tier as an add-on.";
   return {
     // Two modules are already branded — "Aurixa Intelligence Hub", "Aurixa
     // Agent" — and prefixing those produces "Aurixa Aurixa Agent" on the
@@ -121,6 +140,13 @@ export function moduleProductShape(mod: PricedModule): {
       // empty one differently on update, and a module losing its last bundled
       // tier must actually clear the field rather than keep the stale list.
       included_in: mod.includedIn.join(","),
+      // The marker the Accountant Portal's placeholder product was created
+      // with (29 Oct 2026). The sync shapes only modules it sells, so this
+      // clears the marker the first time it adopts that product, once priced.
+      pricing_status: mod.priceUndecided ? "undecided" : "",
+      // Empty rather than absent, as `included_in` is, so a module that leaves
+      // the bundle clears it.
+      included_with_aml: mod.includedWithAml ? "true" : "",
     },
   };
 }
@@ -145,6 +171,7 @@ export function planModuleSync(rows: readonly ModuleRow[]): ModuleSyncPlan {
       unitAmount: mod.monthlyInclGstCents,
       gstComponent: gstComponentCents(mod.monthlyInclGstCents),
       includedIn: mod.includedIn,
+      includedWithAml: mod.includedWithAml === true,
       alreadyLive:
         row.is_active && row.price_min_cents === mod.monthlyInclGstCents && !!row.stripe_price_id,
     });
@@ -346,10 +373,13 @@ export async function applyModuleSync(
           stripe_product_id: productId,
           stripe_price_id: price.id,
           is_active: true,
+          // Replaced whole on every run, so a fact the catalogue states about
+          // the row is written here too or the run erases it.
           metadata: {
             tax_inclusive: true,
             gst_included: true,
             gst_component_cents: gstComponentCents(mod.monthlyInclGstCents),
+            ...(mod.includedWithAml ? { included_with_aml: true } : {}),
           },
         })
         .eq("slug", mod.slug);

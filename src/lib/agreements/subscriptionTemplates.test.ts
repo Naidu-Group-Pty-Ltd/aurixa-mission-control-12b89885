@@ -37,6 +37,7 @@ import {
   A5_PACKS,
   catalogA5Packs,
   expectedA3Rows,
+  isIncludedWithAml,
   purchasableItems,
   SUBSCRIPTION_TEMPLATES,
   SUBSCRIPTION_TIER_SLUGS,
@@ -242,6 +243,20 @@ describe("the manifest against the commercial catalogue", () => {
       }
     }
     expect(new Set(differences)).toEqual(KNOWN_INCLUSION_DIFFERENCES);
+  });
+
+  it("offers no partner portal as a line where the offer takes AML/CTF (29 Oct 2026)", () => {
+    for (const tier of SUBSCRIPTION_TIER_SLUGS) {
+      const withAml = purchasableItems(tier, { withAml: true }).map((i) => i.key);
+      expect(withAml, tier).not.toContain("finance-portal");
+      expect(withAml, tier).not.toContain("solicitor-portal");
+      const without = purchasableItems(tier).map((i) => i.key);
+      expect(without.filter((k) => !withAml.includes(k)).every(isIncludedWithAml), tier).toBe(true);
+    }
+    expect(purchasableItems("launch").map((i) => i.key)).toContain("solicitor-portal");
+    expect(isIncludedWithAml("builder-developer-portal")).toBe(true);
+    expect(isIncludedWithAml("model-hub")).toBe(false);
+    expect(isIncludedWithAml("additional-user-seat")).toBe(false);
   });
 
   it("offers as additional lines only optional modules the tier does not include", () => {

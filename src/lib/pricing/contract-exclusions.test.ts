@@ -55,16 +55,27 @@ describe("validateContractExclusions", () => {
 describe("excludableModules", () => {
   const slugs = (plan: string | null) => excludableModules(plan).map((m) => m.slug);
 
-  it("offers what each tier includes, and AML/CTF on every tier", () => {
+  it("offers what each tier includes, and AML/CTF with every portal it brings, on every tier", () => {
     for (const tier of ["launch", "growth", "scale"]) {
-      const expected = MODULES.filter((m) => m.includedIn.includes(tier)).map((m) => m.slug);
+      const expected = MODULES.filter(
+        (m) => m.includedIn.includes(tier) || m.includedWithAml === true,
+      ).map((m) => m.slug);
       expect(slugs(tier).filter((s) => s !== AML_MODULE_SLUG)).toEqual(expected);
       expect(slugs(tier)).toContain(AML_MODULE_SLUG);
     }
   });
 
-  it("offers Launch only Client Forms and AML/CTF", () => {
-    expect(slugs("launch").sort()).toEqual(["aml-ctf", "client-forms"]);
+  it("offers Launch Client Forms, AML/CTF and the four portals AML/CTF brings", () => {
+    // The owner's decision of 29 Oct 2026: a contract can negotiate out one
+    // portal, or AML/CTF and so all four.
+    expect(slugs("launch").sort()).toEqual([
+      "accountant-portal",
+      "aml-ctf",
+      "builder-developer-portal",
+      "client-forms",
+      "finance-portal",
+      "solicitor-portal",
+    ]);
   });
 
   it("offers nothing without a plan, and no AML for a plan that is not a tier", () => {
@@ -78,17 +89,21 @@ describe("exclusionChoices", () => {
     expect(exclusionChoices({ planSlug: "launch", saved: [], selected: [] })).toEqual([
       { slug: "client-forms", name: "Client Forms", note: null },
       { slug: "aml-ctf", name: "AML / CTF Compliance", note: null },
+      { slug: "finance-portal", name: "Finance Portal", note: null },
+      { slug: "solicitor-portal", name: "Solicitor Portal", note: null },
+      { slug: "accountant-portal", name: "Accountant Portal", note: null },
+      { slug: "builder-developer-portal", name: "Builder / Developer Portal", note: null },
     ]);
   });
 
   it("still lists a saved exclusion the plan does not offer, so it can be removed", () => {
     const rows = exclusionChoices({
       planSlug: "launch",
-      saved: ["finance-portal", "retired-module"],
-      selected: ["finance-portal"],
+      saved: ["marketing", "retired-module"],
+      selected: ["marketing"],
     });
-    expect(rows.slice(2)).toEqual([
-      { slug: "finance-portal", name: "Finance Portal", note: "not in this tier" },
+    expect(rows.slice(6)).toEqual([
+      { slug: "marketing", name: "Marketing", note: "not in this tier" },
       { slug: "retired-module", name: "retired-module", note: "not on the price list" },
     ]);
   });
@@ -96,10 +111,18 @@ describe("exclusionChoices", () => {
   it("keeps an unticked saved one listed, and lists each slug once", () => {
     const rows = exclusionChoices({
       planSlug: "launch",
-      saved: ["finance-portal", "aml-ctf"],
+      saved: ["marketing", "aml-ctf"],
       selected: ["aml-ctf"],
     });
-    expect(rows.map((r) => r.slug)).toEqual(["client-forms", "aml-ctf", "finance-portal"]);
+    expect(rows.map((r) => r.slug)).toEqual([
+      "client-forms",
+      "aml-ctf",
+      "finance-portal",
+      "solicitor-portal",
+      "accountant-portal",
+      "builder-developer-portal",
+      "marketing",
+    ]);
   });
 
   it("lists only what is saved or ticked when no plan is picked", () => {

@@ -3,6 +3,7 @@ import { completeOffer, RATE_CARD } from "./subscriptionFixtures";
 import {
   AGREEMENT_ID_CUSTOM_FIELD,
   agreementColumnsFromOffer,
+  amlExclusionConflict,
   buildIssuedSnapshot,
   buildSubscriptionEnvelopeDefinition,
   DOCUSIGN_SUBJECT_MAX,
@@ -377,6 +378,34 @@ describe("what a signature provisions", () => {
       ];
     });
     expect(provisioningSelectionFromOffer(offer).addonSlugs).toEqual([]);
+  });
+
+  it("never sells a portal the offer's AML/CTF brings (29 Oct 2026)", () => {
+    const withAml = completeOffer("launch", (o) => {
+      o.addons = [line("finance-portal"), line("solicitor-portal"), line("email-copilot")];
+    });
+    expect(provisioningSelectionFromOffer(withAml).addonSlugs).toEqual(["email-copilot"]);
+    const withoutAml = completeOffer("launch", (o) => {
+      o.aml = "without";
+      o.addons = [line("finance-portal"), line("solicitor-portal")];
+    });
+    expect(provisioningSelectionFromOffer(withoutAml).addonSlugs).toEqual([
+      "finance-portal",
+      "solicitor-portal",
+    ]);
+  });
+
+  it("follows the offer's AML choice into the exclusions a signature provisions", () => {
+    const withAml = completeOffer("growth");
+    const withoutAml = completeOffer("growth", (o) => (o.aml = "without"));
+    expect(amlExclusionConflict(withAml, [])).toBeNull();
+    expect(amlExclusionConflict(withAml, ["market-updates"])).toBeNull();
+    expect(amlExclusionConflict(withAml, ["aml-ctf"])).toMatch(/cannot be excluded/);
+    expect(amlExclusionConflict(withoutAml, ["aml-ctf"])).toBeNull();
+    // Left unticked, a Without AML signature provisioned AML/CTF and, with it,
+    // every partner portal.
+    expect(amlExclusionConflict(withoutAml, [])).toMatch(/Exclude AML\/CTF Compliance/);
+    expect(amlExclusionConflict(withoutAml, null)).toMatch(/Without AML/);
   });
 
   it("compares a row's selection as sets", () => {

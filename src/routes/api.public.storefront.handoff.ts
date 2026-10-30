@@ -2,7 +2,39 @@ import { createFileRoute } from "@tanstack/react-router";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { loadValidHandoff } from "@/server/purchases.server";
 import { storefrontJson, storefrontPreflight } from "@/server/storefront-cors.server";
-import { planForTenant } from "@/server/current-plan.server";
+import { heldEntitlements, type HeldEntitlementsTenant } from "@/server/heldEntitlements.server";
+
+type HandoffTenant = NonNullable<HeldEntitlementsTenant> & {
+  display_name?: string | null;
+  external_ref?: string | null;
+  billing_plans?: { slug?: string | null; name?: string | null } | null;
+};
+
+/**
+ * The handoff's tenant, read once for everything the page shows: its name, its
+ * plan, and what the balance response derives entitlements from. `null` when
+ * there is none or the read failed, which shows less, never more.
+ */
+async function readHandoffTenant(tenantId: string | null): Promise<HandoffTenant | null> {
+  if (!tenantId) return null;
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("tenants")
+      .select(
+        "display_name, external_ref, billing_exempt, metadata, billing_plans:plan_id(slug, name)",
+      )
+      .eq("id", tenantId)
+      .maybeSingle();
+    if (error) {
+      console.warn("[storefront/handoff] tenant unavailable", error.message);
+      return null;
+    }
+    return (data ?? null) as HandoffTenant;
+  } catch (err) {
+    console.warn("[storefront/handoff] tenant unavailable", err);
+    return null;
+  }
+}
 
 /**
  * GET /api/public/storefront/handoff?h=<uuid>
@@ -27,6 +59,8 @@ export const Route = createFileRoute("/api/public/storefront/handoff")({
         const handoff = await loadValidHandoff(h);
         if (!handoff) return storefrontJson({ ok: false, error: "handoff_invalid" }, 404);
 
+        const tenant = await readHandoffTenant(handoff.tenant_id);
+
         // Workspace display name: the clone's name when the handoff belongs to
         // a clone, else the tenant's display name — prime-install handoffs have
         // clone_id NULL but always carry tenant_id, and returning null here
@@ -40,46 +74,37 @@ export const Route = createFileRoute("/api/public/storefront/handoff")({
             .maybeSingle();
           cloneName = clone?.name ?? clone?.slug ?? null;
         }
-        if (!cloneName && handoff.tenant_id) {
-          const { data: tenant } = await supabaseAdmin
-            .from("tenants")
-            .select("display_name, external_ref")
-            .eq("id", handoff.tenant_id)
-            .maybeSingle();
-          cloneName = tenant?.display_name ?? tenant?.external_ref ?? null;
-        }
+        if (!cloneName) cloneName = tenant?.display_name ?? tenant?.external_ref ?? null;
 
-        const plan = await planForTenant(handoff.tenant_id).catch(() => null);
+        const plan = tenant?.billing_plans?.slug
+          ? { slug: tenant.billing_plans.slug, name: tenant.billing_plans.name ?? null }
+          : null;
 
-        // Add-ons held, so the storefront can gate documentation the same way
-        // the clone's own user guide does. Tier alone cannot answer it: a
-        // separately-sold module carries an empty tier list, so a Launch
-        // workspace that bought Market Updates looks identical to one that did
-        // not unless the add-ons travel too.
+        // What the workspace holds, so the storefront can gate documentation
+        // and its add-on buttons the way the workspace's own app is gated. Tier
+        // alone cannot answer it: a separately-sold module carries an empty
+        // tier list, so a Launch workspace that bought Market Updates looks
+        // identical to one that did not unless the add-ons travel too. Nor can
+        // the purchases alone: AML/CTF comes with a tier's headline SKU, the
+        // partner portals come with AML/CTF (29 Oct 2026), and a contract can
+        // exclude any of it.
         //
-        // Wrapped like the balance endpoint's copy of this query: a docs page
-        // is not worth failing a handoff resolution over. An empty list means
-        // "none known", which the gate treats as no add-ons rather than as an
-        // error — the tier entitlements still resolve normally.
-        let addonSlugs: string[] = [];
-        if (handoff.clone_id) {
-          try {
-            const { data: addons } = await supabaseAdmin
-              .from("clone_addon_purchases")
-              .select("addon_slug")
-              .eq("clone_id", handoff.clone_id)
-              .in("status", ["active", "past_due"]);
-            addonSlugs = [...new Set((addons ?? []).map((a) => a.addon_slug))].sort();
-          } catch (err) {
-            console.warn("[storefront/handoff] add-on entitlements unavailable", err);
-          }
-        }
+        // So it is the balance response's own answer, through the same helper.
+        // Best-effort as there: a docs page is not worth failing a handoff
+        // resolution over. A failed add-on read is "none known", which shows
+        // less; failed exclusions are `null`, said as unknown rather than none.
+        const entitlements = await heldEntitlements({
+          tenant,
+          cloneId: handoff.clone_id,
+          logTag: "storefront/handoff",
+        });
 
         return storefrontJson({
           ok: true,
           current_plan_slug: plan?.slug ?? null,
           current_plan_name: plan?.name ?? null,
-          addon_slugs: addonSlugs,
+          addon_slugs: entitlements.addons,
+          excluded_slugs: entitlements.excluded ?? null,
           handoff_id: handoff.id,
           clone_name: cloneName,
           origin_username: handoff.origin_username,

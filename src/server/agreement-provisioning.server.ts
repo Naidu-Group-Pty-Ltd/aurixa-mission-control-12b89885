@@ -28,9 +28,11 @@ import {
   decideProvisionOnSignature,
   deriveCloneIdentity,
   effectiveModuleIds,
+  provisionedExclusions,
   uniqueSlug,
   type AgreementProvisionFacts,
 } from "./agreementProvisioning.pure";
+import { subscriptionOfferSchema } from "@/lib/agreements/subscriptionOffer.pure";
 import { HOURS_PER_DAY } from "@/lib/clonePaymentGate.pure";
 
 export type ProvisionFromAgreementResult =
@@ -41,7 +43,7 @@ export type ProvisionFromAgreementResult =
 const AGREEMENT_SELECT =
   "id, status, client_name, client_email, client_org, provision_on_signature, provision_status, " +
   "plan_slug, module_ids, addon_slugs, excluded_module_slugs, admin_email, provision_region, created_by, " +
-  "document_kind, signed_record_path";
+  "document_kind, signed_record_path, offer";
 
 /**
  * Provision the clone an agreement describes. `trigger: "signature"` is the
@@ -96,6 +98,26 @@ export async function provisionCloneFromAgreement(
   }
   if (decision.action === "skip") {
     return { ok: true, skipped: true, reason: decision.reason, detail: decision.detail };
+  }
+
+  // A Subscription Agreement's offer decides AML/CTF, and with it the partner
+  // portals: a Without AML offer provisions with AML/CTF excluded, whatever
+  // was recorded (`provisionedExclusions`). An offer that cannot be read
+  // leaves what was sold unknown, so nothing is provisioned from it.
+  if (agreement.document_kind === "subscription") {
+    const offer = subscriptionOfferSchema.safeParse((data as { offer?: unknown }).offer);
+    if (!offer.success) {
+      return {
+        ok: true,
+        skipped: true,
+        reason: "offer_unreadable",
+        detail: "The agreement's offer could not be read, so what it sold is unknown",
+      };
+    }
+    agreement.excluded_module_slugs = provisionedExclusions(
+      agreement.excluded_module_slugs ?? [],
+      offer.data.aml,
+    );
   }
 
   // ── Claim: armed|none|failed → provisioning, exactly one winner ──────

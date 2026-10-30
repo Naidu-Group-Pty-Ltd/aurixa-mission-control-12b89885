@@ -25,7 +25,7 @@
  *  - **Schedule A5 and the token allowance**, for the same reason: the
  *    agreement states them, so the tests hold them to the catalogue.
  */
-import { TIERS, TOPUP_PACKS } from "@/lib/pricing/aurixa-catalog";
+import { TIERS, TOPUP_PACKS, includedWithAml } from "@/lib/pricing/aurixa-catalog";
 
 export type SubscriptionTierSlug = "launch" | "growth" | "scale";
 
@@ -368,12 +368,32 @@ export function isIncludedInTier(tier: SubscriptionTierSlug, key: string): boole
 }
 
 /**
- * The items an operator may add as an additional line for a tier: optional
- * modules the tier does not already include. Seats go through the seat count;
- * independent-contract and not-for-sale rows never appear.
+ * Whether AML/CTF brings this row's module at no separate access fee: the
+ * partner portals, by the owner's decision of 29 Oct 2026
+ * (`AML_BUNDLED_MODULES`). An offer taken With AML includes them, and one
+ * taken Without AML prices them as Schedule A3 does.
  */
-export function purchasableItems(tier: SubscriptionTierSlug): readonly A3Item[] {
-  return A3_ITEMS.filter((i) => i.kind === "module" && !isIncludedInTier(tier, i.key));
+export function isIncludedWithAml(key: string): boolean {
+  const slug = a3Item(key)?.catalogSlug;
+  return slug ? includedWithAml(slug) : false;
+}
+
+/**
+ * The items an operator may add as an additional line for a tier: optional
+ * modules the tier does not already include, nor AML/CTF where the offer
+ * takes it. Seats go through the seat count; independent-contract and
+ * not-for-sale rows never appear.
+ */
+export function purchasableItems(
+  tier: SubscriptionTierSlug,
+  opts: { withAml?: boolean } = {},
+): readonly A3Item[] {
+  return A3_ITEMS.filter(
+    (i) =>
+      i.kind === "module" &&
+      !isIncludedInTier(tier, i.key) &&
+      !(opts.withAml && isIncludedWithAml(i.key)),
+  );
 }
 
 /**

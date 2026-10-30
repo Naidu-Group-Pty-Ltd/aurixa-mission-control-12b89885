@@ -15,6 +15,8 @@
  *    exclusions map to — exclusions are recorded facts of the negotiation,
  *    never re-derived.
  */
+import { AML_MODULE_SLUG } from "@/lib/pricing/aurixa-catalog";
+import { sortedUniqueSlugs } from "@/lib/pricing/contract-exclusions";
 import { libraryModulesExcludedBy } from "@/lib/pricing/module-mapping";
 
 /** The Connect payload facts the pipeline acts on. */
@@ -243,6 +245,25 @@ export function effectiveModuleIds(
     const slug = slugOf.get(id);
     return !slug || !withheld.has(slug);
   });
+}
+
+/**
+ * The exclusions a signature provisions with: the ones recorded on the
+ * agreement, and AML/CTF wherever a Subscription Agreement's offer was taken
+ * Without AML.
+ *
+ * The offer is what the customer signed, and AML/CTF brings the partner
+ * portals (29 Oct 2026), so a Without AML signature provisions neither.
+ * `configureAgreementProvisioning` refuses a selection that disagrees with the
+ * offer, but the operator's button arms a signed agreement nobody configured,
+ * and one armed before that check had only an operator's tick between it and
+ * AML/CTF. An offer taken With AML adds nothing.
+ */
+export function provisionedExclusions(
+  recorded: readonly string[],
+  offerAml: "with" | "without" | null | undefined,
+): string[] {
+  return sortedUniqueSlugs([...recorded, ...(offerAml === "without" ? [AML_MODULE_SLUG] : [])]);
 }
 
 /* ───────────────────────────── clone identity ───────────────────────────── */

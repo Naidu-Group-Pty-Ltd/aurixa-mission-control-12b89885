@@ -4,6 +4,7 @@ import {
   deriveCloneIdentity,
   effectiveModuleIds,
   parseConnectPayload,
+  provisionedExclusions,
   slugifyCloneName,
   summarizeConnectPayload,
   uniqueSlug,
@@ -201,6 +202,25 @@ describe("effectiveModuleIds", () => {
 
   it("empty exclusions change nothing", () => {
     expect(effectiveModuleIds(["m1", "m2"], [], { modules: [] })).toEqual(["m1", "m2"]);
+  });
+});
+
+describe("provisionedExclusions", () => {
+  it("excludes AML/CTF from a signature on an offer taken Without AML", () => {
+    // Left to the operator's tick, a Without AML signature provisioned AML/CTF
+    // and, since 29 Oct 2026, every partner portal it brings.
+    expect(provisionedExclusions([], "without")).toEqual(["aml-ctf"]);
+    expect(provisionedExclusions(["market-updates"], "without")).toEqual([
+      "aml-ctf",
+      "market-updates",
+    ]);
+    expect(provisionedExclusions(["aml-ctf"], "without")).toEqual(["aml-ctf"]);
+  });
+
+  it("adds nothing for an offer taken With AML, or for an agreement with no offer", () => {
+    expect(provisionedExclusions(["market-updates"], "with")).toEqual(["market-updates"]);
+    expect(provisionedExclusions([], null)).toEqual([]);
+    expect(provisionedExclusions([], undefined)).toEqual([]);
   });
 });
 

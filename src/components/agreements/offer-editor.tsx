@@ -1007,11 +1007,15 @@ function AddLinePicker({
   // to its placeholder rather than showing the line just added.
   const [round, setRound] = useState(0);
   const taken = new Set(offer.addons.map((l) => l.itemKey));
-  const options = purchasableItems(offer.tier).filter((i) => !taken.has(i.key));
+  // With AML, the partner portals come with it and are not sold as lines.
+  const options = purchasableItems(offer.tier, { withAml: offer.aml === "with" }).filter(
+    (i) => !taken.has(i.key),
+  );
   if (options.length === 0) {
     return (
       <p className="text-xs text-muted-foreground">
-        Every optional module is already on this offer or included in the tier.
+        Every optional module is already on this offer or included in the tier
+        {offer.aml === "with" ? " or with AML" : ""}.
       </p>
     );
   }

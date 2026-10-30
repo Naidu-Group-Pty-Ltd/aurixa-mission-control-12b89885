@@ -36,7 +36,7 @@ import {
   type BackendInventory,
   type ModuleBackendManifest,
 } from "./backend-detection.server";
-import { buildFeatureModules, type PartitionStats } from "./feature-detection.server";
+import { buildFeatureModules, isTestFile, type PartitionStats } from "./feature-detection.server";
 import { describeDbError } from "./libraryApproval.pure";
 import crypto from "crypto";
 
@@ -719,7 +719,7 @@ function traceImports(
 
 // ─── Route Detection ────────────────────────────────────────────────
 
-function identifyRouteFiles(files: string[]): string[] {
+export function identifyRouteFiles(files: string[]): string[] {
   return files
     .filter((f) => {
       // Match common route patterns
@@ -734,6 +734,8 @@ function identifyRouteFiles(files: string[]): string[] {
       if (name.startsWith("__root")) return false;
       if (name === "routeTree.gen.ts") return false;
       if (name.startsWith("_")) return false;
+      // A spec beside a page is not a route (`isTestFile`).
+      if (isTestFile(f)) return false;
       return true;
     });
 }
