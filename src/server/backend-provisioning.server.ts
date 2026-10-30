@@ -7081,5 +7081,18 @@ export async function enqueueCloneBackendProvisioning(
   );
   if (upsertErr) return { ok: false, error: upsertErr.message };
 
+  // A deployment that failed waiting on this backend waits on it again now,
+  // rather than reading "will not retry without an operator" over a backend
+  // that is being built. See deploymentRearm.pure.ts. Never fails the enqueue.
+  try {
+    const { rearmDeploymentBlockedOnBackend } = await import("./hosting/deploymentRearm.server");
+    await rearmDeploymentBlockedOnBackend(input.cloneId);
+  } catch (e) {
+    console.error(
+      `[enqueueCloneBackendProvisioning] deployment re-arm for ${input.cloneId} failed:`,
+      e instanceof Error ? e.message : String(e),
+    );
+  }
+
   return { ok: true, queued: true };
 }

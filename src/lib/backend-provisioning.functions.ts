@@ -1365,6 +1365,22 @@ export const retryBackendProvisioning = createServerFn({ method: "POST" })
 
       if (upsertErr) return { ok: false, error: upsertErr.message };
 
+      // This retry writes the queue row itself rather than through
+      // `enqueueCloneBackendProvisioning`, so it re-arms the deployment itself
+      // too: one that failed waiting on this backend waits on it again. See
+      // deploymentRearm.pure.ts. Never fails the retry.
+      try {
+        const { rearmDeploymentBlockedOnBackend } = await import(
+          /* @vite-ignore */ "@/server/hosting/deploymentRearm.server"
+        );
+        await rearmDeploymentBlockedOnBackend(data.cloneId);
+      } catch (e) {
+        console.error(
+          `[retryBackendProvisioning] deployment re-arm for ${data.cloneId} failed:`,
+          e instanceof Error ? e.message : String(e),
+        );
+      }
+
       return { ok: true, queued: true };
     },
   );
