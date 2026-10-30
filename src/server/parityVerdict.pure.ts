@@ -41,6 +41,11 @@ export function paritySurplusLine(surplusTotal: number, cloneId: string): string
   return `Backend is ready — every object the prime has is present, and ${surplusTotal} the prime does NOT have are also on the clone (prime-dropped or tenant-added; nothing was removed). Review at /clones/${cloneId}`;
 }
 
+/** A blocking issue that is only credentials the clone was not given (`missing_secrets:N`). */
+export function isCredentialGap(issue: string): boolean {
+  return issue.startsWith("missing_secrets:");
+}
+
 /** The line for a backend that matches the prime. */
 export const PARITY_VERIFIED_LINE = "Backend is ready — verified against the prime";
 
@@ -49,7 +54,13 @@ export const PARITY_VERIFIED_LINE = "Backend is ready — verified against the p
  * an operator must be told.
  *
  * - **A mismatch** is written whatever stands, as the finishing pass leads
- *   with it, and raised: nobody was watching when it was found.
+ *   with it. It is raised when it is a gap in what was replicated — a table,
+ *   a function, a policy — because nobody was watching when it was found.
+ *   Credentials alone are not raised: `missing_secrets` is blocking on every
+ *   clone in the fleet (measured 30 Oct 2026: 4, 58, 58, 72 and 72 — the
+ *   prime's own vendor keys, which each tenant supplies or goes without), so
+ *   an alarm on it would fire for every clone and be read as noise. They are
+ *   on the line, and on the clone's secrets page.
  * - **A match** replaces only the unverified line. Any other line belongs to
  *   whoever wrote it since, and a match has nothing to retract there.
  */
@@ -61,7 +72,10 @@ export function lateParityVerdict(input: {
   standing: string | null;
 }): { detail: string | null; raise: boolean } {
   if (input.blockingIssues.length > 0) {
-    return { detail: parityMismatchLine(input.blockingIssues, input.cloneId), raise: true };
+    return {
+      detail: parityMismatchLine(input.blockingIssues, input.cloneId),
+      raise: input.blockingIssues.some((issue) => !isCredentialGap(issue)),
+    };
   }
   if (!(input.standing ?? "").startsWith(PARITY_UNVERIFIED_PREFIX)) {
     return { detail: null, raise: false };

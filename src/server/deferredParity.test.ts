@@ -42,6 +42,27 @@ describe("the verdict a comparison run after the fact may write", () => {
     }
   });
 
+  it("writes a credentials-only mismatch but raises nothing: every clone has one", () => {
+    // Measured 30 Oct 2026: missing_secrets blocks on all five clones.
+    expect(
+      lateParityVerdict({
+        blockingIssues: ["missing_secrets:58"],
+        surplusTotal: 0,
+        cloneId: "c1",
+        standing: DEFERRED,
+      }),
+    ).toEqual({ detail: parityMismatchLine(["missing_secrets:58"], "c1"), raise: false });
+    // A gap in what was replicated is raised, credentials beside it or not.
+    expect(
+      lateParityVerdict({
+        blockingIssues: ["missing_tables:1", "missing_secrets:58"],
+        surplusTotal: 0,
+        cloneId: "c1",
+        standing: DEFERRED,
+      }).raise,
+    ).toBe(true);
+  });
+
   it("leaves another writer's line alone when there is nothing to retract", () => {
     for (const standing of ["Synced to 20270210090000", "Backend is ready — modules added", null]) {
       expect(
