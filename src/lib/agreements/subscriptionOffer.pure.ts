@@ -566,6 +566,15 @@ export function composeSubscriptionOffer(
       );
       return;
     }
+    if (item.kind === "with_aml_only") {
+      gap(
+        where,
+        withAml
+          ? `${item.label} comes with AML/CTF, which this offer includes — an included item has no separate access fee.`
+          : `${item.label} comes only with AML/CTF — it cannot be ordered as a line under a tier agreement.`,
+      );
+      return;
+    }
     if (item.kind === "not_for_sale" || item.referenceMonthlyCents === null) {
       gap(where, `${item.label} is not for sale.`);
       return;

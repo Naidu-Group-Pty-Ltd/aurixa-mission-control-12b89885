@@ -13,9 +13,11 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
+  AML_BUNDLED_MODULES,
   COMMITMENT_DISCOUNT_BPS,
   MODULES,
   TIERS,
+  moduleBySlug,
   moduleSaleBlock,
 } from "@/lib/pricing/aurixa-catalog";
 import { documentText, inventoryControls } from "./docxFill.pure";
@@ -37,6 +39,7 @@ import {
   A5_PACKS,
   catalogA5Packs,
   expectedA3Rows,
+  isIncludedInTier,
   isIncludedWithAml,
   purchasableItems,
   SUBSCRIPTION_TEMPLATES,
@@ -219,6 +222,35 @@ describe("the manifest against the commercial catalogue", () => {
     const kinds = Object.fromEntries(A3_ITEMS.map((i) => [i.key, i.kind]));
     expect(kinds.lenders).toBe("not_for_sale");
     expect(kinds["builder-developer-portal"]).toBe("independent_contract");
+    // The catalogue sells it as an add-on at a placeholder price nobody may
+    // quote or charge, so the agreement prints no price and never orders it.
+    expect(moduleBySlug("accountant-portal")?.priceUndecided).toBe(true);
+    expect(kinds["accountant-portal"]).toBe("with_aml_only");
+  });
+
+  it("prints no price for a module whose price is undecided", () => {
+    for (const item of A3_ITEMS) {
+      if (!item.catalogSlug || !moduleBySlug(item.catalogSlug)?.priceUndecided) continue;
+      expect(item.referenceMonthlyCents, item.key).toBeNull();
+    }
+  });
+
+  it("shows every module AML/CTF brings, as included with it, in every tier (Version 9)", () => {
+    // The owner's decision of 30 Oct 2026. A portal added to the AML bundle
+    // without a row here fails, rather than the agreement pricing it as an
+    // extra while the platform includes it.
+    const rows = new Set(A3_ITEMS.map((i) => i.catalogSlug));
+    for (const m of AML_BUNDLED_MODULES) expect(rows.has(m.slug), m.slug).toBe(true);
+    for (const tier of SUBSCRIPTION_TIER_SLUGS) {
+      for (const row of expectedA3Rows(tier)) {
+        const item = A3_ITEMS.find((i) => i.label === row.label);
+        if (!item || !isIncludedWithAml(item.key)) continue;
+        const says = `${row.thisTier} · ${row.fee}`;
+        if (isIncludedInTier(tier, item.key))
+          expect(says, `${tier}: ${row.label}`).toMatch(/^Included ·/);
+        else expect(says, `${tier}: ${row.label}`).toMatch(/included with AML\/CTF/i);
+      }
+    }
   });
 
   /**

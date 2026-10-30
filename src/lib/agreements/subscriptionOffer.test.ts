@@ -338,6 +338,20 @@ describe("what an additional line may not be", () => {
     expect(compose(without).lines.map((l) => l.key)).toEqual(["solicitor-portal"]);
   });
 
+  it("never orders the Accountant Portal as a line: it comes only with AML/CTF (Version 9)", () => {
+    expect(messages(withLine("accountant-portal"))).toMatch(
+      /Accountant Portal comes with AML\/CTF, which this offer includes/,
+    );
+    const without = withLine("accountant-portal");
+    without.aml = "without";
+    without.usage.amlAllowance = "";
+    without.usage.amlBasis = "";
+    expect(messages(without)).toMatch(
+      /Accountant Portal comes only with AML\/CTF — it cannot be ordered as a line/,
+    );
+    expect(compose(without).lines).toEqual([]);
+  });
+
   it("refuses a committed line on a flexible term and a discount above the charge", () => {
     expect(messages(withLine("email-copilot", { term: "committed" }))).toMatch(
       /only a 12-month committed term/,

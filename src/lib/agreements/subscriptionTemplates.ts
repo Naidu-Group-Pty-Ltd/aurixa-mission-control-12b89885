@@ -55,34 +55,39 @@ export type SubscriptionTemplate = {
  * The committed templates. Replacing a file means replacing its digest here in
  * the same change — and re-running the tests, which re-read every control and
  * the A3/A5 tables out of the new file.
+ *
+ * Version 9 (30 Oct 2026, the owner's decision) amends Schedule A3 alone: it
+ * shows the four partner portals AML/CTF brings as included with it, adds the
+ * Accountant Portal's row, and says so in A3's opening paragraph. Every other
+ * clause is Version 8's, word for word.
  */
 export const SUBSCRIPTION_TEMPLATES: Readonly<Record<SubscriptionTierSlug, SubscriptionTemplate>> =
   {
     launch: {
       tier: "launch",
       tierName: "Launch",
-      id: "aurixa-subscription-launch-v8",
-      version: "Version 8",
+      id: "aurixa-subscription-launch-v9",
+      version: "Version 9",
       path: "/agreements/subscription/aurixa-launch-subscription-agreement.docx",
-      sha256: "f2fcd6258a523c580383e7ed70a15ee0892a8a70f26f8f7809edf633cd264cd6",
+      sha256: "29c67b23d75c5549ccc7e73cf98b3e7b2ae98b66041d93cfcf0c5be20ad8195d",
       includedTokensPerCycle: 7_000,
     },
     growth: {
       tier: "growth",
       tierName: "Growth",
-      id: "aurixa-subscription-growth-v8",
-      version: "Version 8",
+      id: "aurixa-subscription-growth-v9",
+      version: "Version 9",
       path: "/agreements/subscription/aurixa-growth-subscription-agreement.docx",
-      sha256: "cd14a5e13d18be3cdb838c33f5636a590450caff73f10957d39d6b6c05df0147",
+      sha256: "be040710d0377654f09a3ed4516259d30f1bd624040a66b539f8c1a092a6b83a",
       includedTokensPerCycle: 35_000,
     },
     scale: {
       tier: "scale",
       tierName: "Scale",
-      id: "aurixa-subscription-scale-v8",
-      version: "Version 8",
+      id: "aurixa-subscription-scale-v9",
+      version: "Version 9",
       path: "/agreements/subscription/aurixa-scale-subscription-agreement.docx",
-      sha256: "d8c6d20d0ca29019f499682da5ee996db1d81e15ae66b106aeb9bf8ea673dd95",
+      sha256: "7c90e797211b3883ed17a7799c8c5b2070c1de25f97e1b3a6087750400861f57",
       includedTokensPerCycle: 75_000,
     },
   };
@@ -114,10 +119,19 @@ export const SUBSCRIPTION_ANCHOR_LIST: readonly string[] = Object.values(SUBSCRI
  *    never as a free-standing line, so one seat cannot be charged twice.
  *  - `independent_contract` — Builder / Developer Portal: "requires its own
  *    purchaser and paid agreement; the $699 reference is not an order under
- *    this tier".
+ *    this tier". With AML/CTF the workspace's access is included; each
+ *    builder still contracts and pays under its own agreement.
+ *  - `with_aml_only` — Accountant Portal: included with AML/CTF and never an
+ *    order line. Its price is undecided (`priceUndecided` in the catalogue),
+ *    and an agreement never prints a price nobody may charge.
  *  - `not_for_sale` — Lenders.
  */
-export type A3ItemKind = "module" | "seat" | "independent_contract" | "not_for_sale";
+export type A3ItemKind =
+  | "module"
+  | "seat"
+  | "independent_contract"
+  | "with_aml_only"
+  | "not_for_sale";
 
 export type A3Item = {
   /** Stable key used by offers. */
@@ -125,7 +139,7 @@ export type A3Item = {
   /** Exactly as the template's A3 table prints it. */
   label: string;
   kind: A3ItemKind;
-  /** AUD/month incl. GST as A3 prints it; null for "Not for sale". */
+  /** AUD/month incl. GST as A3 prints it; null where it prints none. */
   referenceMonthlyCents: number | null;
   /** The commercial catalogue module this row is, or null where there is none. */
   catalogSlug: string | null;
@@ -305,6 +319,14 @@ export const A3_ITEMS: readonly A3Item[] = [
     catalogSlug: "solicitor-portal",
   },
   {
+    // Version 9: Schedule A3 shows every partner portal AML/CTF brings.
+    key: "accountant-portal",
+    label: "Accountant Portal",
+    kind: "with_aml_only",
+    referenceMonthlyCents: null,
+    catalogSlug: "accountant-portal",
+  },
+  {
     key: "aurixa-agent",
     label: "Aurixa Agent",
     kind: "module",
@@ -399,23 +421,43 @@ export function purchasableItems(
 /**
  * The A3 table as the template prints it — the text of the "This tier" and
  * "Monthly fee" columns — so a test can compare it with the committed file.
+ *
+ * A row AML/CTF brings says so wherever the tier does not already include it
+ * (Version 9): the reference fee is what it costs without AML/CTF.
  */
 export function expectedA3Rows(
   tier: SubscriptionTierSlug,
 ): Array<{ label: string; thisTier: string; fee: string }> {
   return A3_ITEMS.map((item) => {
     const included = isIncludedInTier(tier, item.key);
-    let thisTier: string;
-    if (item.kind === "independent_contract") thisTier = "Independent contract only";
-    else if (item.kind === "seat") thisTier = "Approved additional seats only";
-    else if (item.kind === "not_for_sale") thisTier = "Excluded / coming soon";
-    else thisTier = included ? "Included" : "Optional; not in base";
-    const fee =
+    const withAml = !included && isIncludedWithAml(item.key);
+    const price =
       item.referenceMonthlyCents === null
-        ? "Not for sale"
-        : included
-          ? "Included; no separate access fee"
-          : `$${(item.referenceMonthlyCents / 100).toFixed(2)}`;
+        ? null
+        : `$${(item.referenceMonthlyCents / 100).toFixed(2)}`;
+    let thisTier: string;
+    let fee: string;
+    if (item.kind === "independent_contract") {
+      thisTier = withAml
+        ? "Workspace access included with AML/CTF; each builder contracts separately"
+        : "Independent contract only";
+      fee = withAml ? `${price} per builder, under its own agreement` : `${price}`;
+    } else if (item.kind === "with_aml_only") {
+      thisTier = "Included with AML/CTF only";
+      fee = "Included with AML/CTF; no separate access fee";
+    } else if (item.kind === "seat") {
+      thisTier = "Approved additional seats only";
+      fee = `${price}`;
+    } else if (item.kind === "not_for_sale") {
+      thisTier = "Excluded / coming soon";
+      fee = "Not for sale";
+    } else if (included) {
+      thisTier = "Included";
+      fee = "Included; no separate access fee";
+    } else {
+      thisTier = withAml ? "Included with AML/CTF; otherwise optional" : "Optional; not in base";
+      fee = withAml ? `${price} without AML/CTF` : `${price}`;
+    }
     return { label: item.label, thisTier, fee };
   });
 }

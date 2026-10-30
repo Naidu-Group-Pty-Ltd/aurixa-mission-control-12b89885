@@ -358,12 +358,12 @@ button, which arms a signed agreement nobody configured, provisions it the same
 way, and an offer that cannot be read provisions nothing. It used to rest on an
 operator ticking the exclusion.
 
-Two things stay open. The Builder / Developer Portal's own fee is charged to
-builders under the Builder Partner Agreement (`builderPortalPayment.pure.ts`);
-whether a builder admitted by a workspace with AML/CTF still pays it is a
-separate decision, and nothing here waives it. And Schedule A3 in the three
-subscription templates still prints each portal's reference fee; the order
-form's AML scope is what states the inclusion until the templates are revised.
+Both questions left open were decided on 30 Oct 2026. Builders still pay
+their own Builder / Developer Portal fee, charged under the Builder Partner
+Agreement (`builderPortalPayment.pure.ts`); a workspace with AML/CTF includes
+its own access to the portal, not the builder's contract. And Schedule A3 of
+the three subscription templates now shows the four portals as included with
+AML/CTF (Version 9, `docs/agreements.md`).
 
 ## Guardrails inventory (where each lives)
 
