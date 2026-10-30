@@ -963,11 +963,33 @@ describe("the edge-function fetch is budgeted like everything else", () => {
     const snapAt = src.indexOf("await fetchPrimeBackendSnapshot(");
     expect(askAt).toBeGreaterThan(-1);
     expect(askAt).toBeLessThan(snapAt);
-    expect(src).toMatch(/skipFunctionSlugs: liveFunctionSlugs/);
+    expect(src).toMatch(/skipFunctionSlugs: \[\.\.\.liveFunctionSlugs, /);
     expect(src).toMatch(/functionLimit: EDGE_FUNCTION_FETCH_LIMIT/);
     /* A failed listing must not be read as "the clone holds everything" — it
        resolves to an empty skip list, which fetches more, never less. */
     expect(src).toMatch(/\.catch\(\(\) => \[\]\)/);
+  });
+
+  it("the runner never selects from the prime what the clone's CRM line does not take from it", () => {
+    /* On the independent line the withheld GoHighLevel functions are never
+       live, so a pass that skipped only live functions selected and held them
+       on every pass and dropped them after. The line is read BEFORE the
+       snapshot, and both of its sets go into the skip list. */
+    const src = runner();
+    const lineAt = src.indexOf("crmLineWithheldFunctionNames(crmMode)");
+    const snapAt = src.indexOf("await fetchPrimeBackendSnapshot(");
+    expect(lineAt).toBeGreaterThan(-1);
+    expect(lineAt).toBeLessThan(snapAt);
+    expect(src).toMatch(
+      /skipFunctionSlugs: \[\.\.\.liveFunctionSlugs, \.\.\.lineWithheld, \.\.\.lineVariants\]/,
+    );
+    /* Read once: a second read after the snapshot could disagree with it. */
+    expect(src.match(/crmLineWithheldFunctionNames\(crmMode\)/g)).toHaveLength(1);
+    /* And a snapshot spliced from the cache is still narrowed by the line —
+       the cache records what the PRIME declares. */
+    const after = src.slice(snapAt);
+    expect(after).toMatch(/!lineWithheld\.has\(fn\.slug\) && !lineVariants\.has\(fn\.slug\)/);
+    expect(after).toMatch(/\(slug\) => !lineWithheld\.has\(slug\)/);
   });
 
   it("a truncated pass can never mark the clone ready", () => {

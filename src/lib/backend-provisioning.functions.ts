@@ -171,6 +171,35 @@ async function runBackendProvisioning(
         ? await listProjectEdgeFunctionSlugs(existingRow.supabase_project_ref).catch(() => [])
         : [];
 
+    // What this clone's CRM line does not carry is out of the snapshot from
+    // here on, so the deploy set, the declared contract and parity agree —
+    // the rule `withoutPrimeOnlyFunctions` applies to the prime's own
+    // feature (`crmLineFeatures.pure.ts`). `*` so a deployment without
+    // `crm_mode` reads it as absent and withholds nothing.
+    //
+    // Read BEFORE the snapshot, because what the line withholds and what it
+    // carries as its own copies are never deployed from the prime's source —
+    // so the snapshot must not select or hold them either. Read after it, they
+    // were fetched and held on every pass and then dropped: on the independent
+    // line the clone never holds its withheld functions, so every pass looked
+    // like one with bundles left to deploy.
+    const { data: cloneLineRow } = await supabase
+      .from("clones")
+      .select("*")
+      .eq("id", input.cloneId)
+      .maybeSingle();
+    const crmMode = ((cloneLineRow as { crm_mode?: string | null } | null)?.crm_mode ?? null) as
+      | string
+      | null;
+    const { crmLineVariantFunctionNames, crmLineWithheldFunctionNames } = await import(
+      /* @vite-ignore */ "@/server/crmLineFeatures.pure"
+    );
+    const lineWithheld = new Set(crmLineWithheldFunctionNames(crmMode));
+    // The line's own copies are carried, so they stay declared, but their
+    // bundles come from the clone's tree (`deployCloneOwnedFunctions`, run
+    // once the repository points at the new project), never the prime's.
+    const lineVariants = new Set(crmLineVariantFunctionNames(crmMode));
+
     await updateStatus(
       "provisioning",
       `Snapshotting backend architecture from ${source.owner}/${source.repo}@${source.branch}...`,
@@ -237,8 +266,8 @@ async function runBackendProvisioning(
       // Do not pay for bundles the target already holds. The deploy step has
       // always skipped live functions — but only AFTER the snapshot had
       // fetched every one of them, so the work was bought and discarded on
-      // every pass.
-      skipFunctionSlugs: liveFunctionSlugs,
+      // every pass. Nor for the ones the line never takes from the prime.
+      skipFunctionSlugs: [...liveFunctionSlugs, ...lineWithheld, ...lineVariants],
       // And cap what remains. 423 bundles over ~1,033 files does not fit one
       // invocation's share of the installation's hourly quota: the pass that
       // needed the whole set was refused on every attempt, so the pipeline
@@ -296,27 +325,9 @@ async function runBackendProvisioning(
           }
         : rawSnapshot;
 
-    // What this clone's CRM line does not carry is out of the snapshot from
-    // here on, so the deploy set, the declared contract and parity agree —
-    // the rule `withoutPrimeOnlyFunctions` applies to the prime's own
-    // feature (`crmLineFeatures.pure.ts`). `*` so a deployment without
-    // `crm_mode` reads it as absent and withholds nothing.
-    const { data: cloneLineRow } = await supabase
-      .from("clones")
-      .select("*")
-      .eq("id", input.cloneId)
-      .maybeSingle();
-    const crmMode = ((cloneLineRow as { crm_mode?: string | null } | null)?.crm_mode ?? null) as
-      | string
-      | null;
-    const { crmLineVariantFunctionNames, crmLineWithheldFunctionNames } = await import(
-      /* @vite-ignore */ "@/server/crmLineFeatures.pure"
-    );
-    const lineWithheld = new Set(crmLineWithheldFunctionNames(crmMode));
-    // The line's own copies are carried, so they stay declared, but their
-    // bundles come from the clone's tree (`deployCloneOwnedFunctions`, run
-    // once the repository points at the new project), never the prime's.
-    const lineVariants = new Set(crmLineVariantFunctionNames(crmMode));
+    // The line's withheld functions and its own copies leave the snapshot here
+    // too (see `lineWithheld` above): the fetch no longer selects them, and a
+    // snapshot spliced from the cache still lists what the line withholds.
     const snapshot: typeof rawSnapshot =
       lineWithheld.size === 0 && lineVariants.size === 0
         ? splicedSnapshot
