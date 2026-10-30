@@ -36,7 +36,12 @@ import {
   decideTurnstileSweep,
   deriveWidgetDomains,
   deriveWidgetName,
+  isTestSiteKey,
   secretLast4,
+  testPairRefusal,
+  TURNSTILE_TEST_PAIR_NAME,
+  TURNSTILE_TEST_SECRET,
+  TURNSTILE_TEST_SITE_KEY,
   turnstileReadiness,
   type TurnstileIdentityRow,
   type TurnstileReadiness,
@@ -304,7 +309,15 @@ export type ProvisionResult = (TurnstileIdentityState & { advanced: string[] }) 
 export async function provisionTurnstileIdentity(
   supabase: Db,
   cloneId: string,
-  opts: { mode: "provision" | "refresh"; actorUserId?: string | null },
+  opts: {
+    mode: "provision" | "refresh";
+    actorUserId?: string | null;
+    /**
+     * Replace Cloudflare's test pair with a real widget. Only an operator asks
+     * this; the drain and the sweep keep the pair (`switchToTurnstileTestPair`).
+     */
+    restoreRealWidget?: boolean;
+  },
 ): Promise<ProvisionResult> {
   if (!isCloudflareConfigured()) {
     return fail(
@@ -327,6 +340,44 @@ export async function provisionTurnstileIdentity(
     }
 
     let row = await readIdentity(supabase, cloneId);
+
+    /*
+     * CLOUDFLARE'S TEST PAIR STANDS UNTIL AN OPERATOR RESTORES A REAL WIDGET.
+     *
+     * The drain calls this in `syncing_env` for the site key the build must
+     * carry, and the sweep calls it to keep an identity current. For the pair
+     * the answer is the pair, with no vendor call: there is no widget at
+     * Cloudflare to adopt, and minting one here would take a clone off the
+     * pair that an operator put it on.
+     *
+     * Restoring forgets the pair first — the key, its publication and its
+     * secret — so the flow below mints, publishes the new key, and only then
+     * writes the new secret: the order that keeps sign-in open throughout.
+     */
+    if (row && isTestSiteKey(row.site_key)) {
+      if (opts.mode === "refresh") {
+        return fail(
+          "This clone is on Cloudflare's test pair, which has no widget at Cloudflare to " +
+            "re-check. Restore a real widget instead.",
+        );
+      }
+      if (!opts.restoreRealWidget) {
+        const kept = await getTurnstileIdentityState(supabase, cloneId);
+        return kept.ok ? { ...kept, advanced } : kept;
+      }
+      await persist(supabase, cloneId, {
+        site_key: null,
+        widget_name: null,
+        site_key_published_at: null,
+        secret_written_at: null,
+        secret_last4: null,
+        status: "unprovisioned",
+        last_error: null,
+      });
+      advanced.push("test_pair_retired");
+      row = await readIdentity(supabase, cloneId);
+    }
+
     const domains = row?.domains?.length ? row.domains : deriveWidgetDomains(clone);
     if (domains.length === 0) {
       return fail(
@@ -529,6 +580,140 @@ export async function provisionTurnstileIdentity(
     }).catch(() => {});
     return fail(error);
   }
+}
+
+/**
+ * Put a demo clone on Cloudflare's always-pass test pair, so the recorder can
+ * sign in to it (`TURNSTILE_TEST_SITE_KEY`).
+ *
+ * Refused for the prime and for anything a customer signs in to
+ * (`testPairRefusal`). Done in the order provisioning keeps:
+ *
+ *  1. the test site key is published to the clone's hosting project;
+ *  2. the test secret is written to its backend, through the same delivery a
+ *     minted one takes — `resolveCloneSecretTarget` refuses the prime there,
+ *     and `REQUIRE_TURNSTILE` stays true;
+ *  3. only then is the real widget deleted at Cloudflare, since nothing will
+ *     verify against its secret again;
+ *  4. a rebuild is asked for, because Vite inlines `VITE_*` at build time.
+ *
+ * A secret that cannot be delivered puts the real key back, so the clone is
+ * never left drawing the test widget against the real secret.
+ */
+export async function switchToTurnstileTestPair(
+  supabase: Db,
+  cloneId: string,
+  actorUserId: string | null,
+): Promise<ProvisionResult> {
+  const advanced: string[] = [];
+  try {
+    const { data: clone, error } = await supabase
+      .from("clones")
+      .select(
+        "slug, subdomain_fqdn, deploy_url, billing_stripe_customer_id, entitled_plan_slug, tags",
+      )
+      .eq("id", cloneId)
+      .maybeSingle();
+    if (error) return fail(`Could not read clone ${cloneId}: ${error.message}`);
+    if (!clone) return fail(`Clone ${cloneId} not found`);
+    const refusal = testPairRefusal(clone);
+    if (refusal) return fail(refusal);
+    // Where the secret would go, asked before anything is published: the
+    // prime, and anything else `resolveCloneSecretTarget` refuses, is refused
+    // here with nothing touched.
+    try {
+      await resolveCloneSecretTarget(supabase, cloneId);
+    } catch (e) {
+      return fail(`The test pair cannot be written to this clone: ${msg(e)}`);
+    }
+
+    const row = await readIdentity(supabase, cloneId);
+    if (!isTestSiteKey(row?.site_key)) {
+      const published = await publishSiteKey(supabase, cloneId, TURNSTILE_TEST_SITE_KEY);
+      if (!published.ok) {
+        return fail(`The test site key could not be published: ${published.detail}`);
+      }
+      const now = new Date().toISOString();
+      await persist(supabase, cloneId, {
+        site_key: TURNSTILE_TEST_SITE_KEY,
+        widget_name: TURNSTILE_TEST_PAIR_NAME,
+        domains: deriveWidgetDomains(clone),
+        mode: "managed",
+        status: "provisioned",
+        site_key_published_at: now,
+        created_by: actorUserId,
+        last_error: null,
+      });
+      advanced.push("site_key_published");
+
+      const delivered = await deliverSecret(supabase, cloneId, TURNSTILE_TEST_SECRET, actorUserId);
+      if (!delivered.ok) {
+        // Back to what the clone had: its own widget, whose secret is still the
+        // one on it, or no widget, which provisioning then arms as it would.
+        if (row?.site_key) await publishSiteKey(supabase, cloneId, row.site_key);
+        await persist(supabase, cloneId, {
+          site_key: row?.site_key ?? null,
+          widget_name: row?.widget_name ?? null,
+          domains: row?.domains ?? [],
+          site_key_published_at: row?.site_key ? row.site_key_published_at : null,
+          status: row?.status ?? "unprovisioned",
+          last_error: `The test pair was not applied: ${delivered.error}`,
+        });
+        return delivered;
+      }
+      advanced.push("secret_written");
+
+      if (row?.site_key && isCloudflareConfigured()) {
+        const accountId = await readAccountId(supabase).catch(() => null);
+        if (accountId) {
+          const { cloudflareApi } = await import("./cloudflare/client");
+          await cloudflareApi.deleteTurnstileWidget(accountId, row.site_key).catch(() => {});
+          advanced.push("widget_deleted");
+        }
+      }
+
+      const { requestEnvResync } = await import("./hosting/redeploy.server");
+      const asked = await requestEnvResync({
+        cloneId,
+        reason: "Turnstile test pair published",
+      });
+      advanced.push(asked.queued ? "redeploy_queued" : `redeploy_skipped: ${asked.reason}`);
+    }
+    const state = await getTurnstileIdentityState(supabase, cloneId);
+    return state.ok ? { ...state, advanced } : state;
+  } catch (e) {
+    return fail(msg(e));
+  }
+}
+
+/**
+ * Replace Cloudflare's test pair with a real widget, and ask for the rebuild
+ * that puts its key in the bundle. The order is provisioning's own: the new
+ * key is published before its secret is written. Until the rebuild is live
+ * the bundle still draws the test widget, whose token the new secret refuses,
+ * so sign-in waits on that build — minutes, on a clone the recorder alone
+ * signs in to.
+ */
+export async function restoreTurnstileWidget(
+  supabase: Db,
+  cloneId: string,
+  actorUserId: string | null,
+): Promise<ProvisionResult> {
+  const res = await provisionTurnstileIdentity(supabase, cloneId, {
+    mode: "provision",
+    actorUserId,
+    restoreRealWidget: true,
+  });
+  if (!res.ok || !res.advanced.includes("site_key_published")) return res;
+  const { requestEnvResync } = await import("./hosting/redeploy.server");
+  const asked = await requestEnvResync({ cloneId, reason: "Turnstile widget restored" });
+  return {
+    ...res,
+    advanced: [
+      ...res.advanced,
+      asked.queued ? "redeploy_queued" : `redeploy_skipped: ${asked.reason}`,
+    ],
+  };
 }
 
 /**

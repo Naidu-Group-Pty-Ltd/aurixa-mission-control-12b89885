@@ -5,15 +5,25 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { CopyButton } from "@/components/copy-button";
-import { CheckCircle2, Circle, CircleDot, KeyRound, RefreshCw, ShieldCheck } from "lucide-react";
+import {
+  CheckCircle2,
+  Circle,
+  CircleDot,
+  FlaskConical,
+  KeyRound,
+  RefreshCw,
+  ShieldCheck,
+} from "lucide-react";
 import { toast } from "sonner";
 import {
   getCloneTurnstileIdentity,
   probeCloneTurnstileAccess,
   provisionCloneTurnstile,
   refreshCloneTurnstile,
+  restoreCloneTurnstileWidget,
   revokeCloneTurnstile,
   rotateCloneTurnstileSecret,
+  switchCloneTurnstileToTestPair,
 } from "@/lib/turnstile-identity.functions";
 
 type StepState = "done" | "open" | "blocked";
@@ -47,6 +57,8 @@ export function CloneTurnstileCard({ cloneId }: { cloneId: string }) {
   const refreshFn = useServerFn(refreshCloneTurnstile);
   const rotateFn = useServerFn(rotateCloneTurnstileSecret);
   const revokeFn = useServerFn(revokeCloneTurnstile);
+  const testPairFn = useServerFn(switchCloneTurnstileToTestPair);
+  const restoreFn = useServerFn(restoreCloneTurnstileWidget);
 
   const [busy, setBusy] = useState(false);
   const { data, isLoading, refetch } = useQuery({
@@ -71,6 +83,8 @@ export function CloneTurnstileCard({ cloneId }: { cloneId: string }) {
   const row = state?.row ?? null;
   const steps: Step[] = state?.readiness.steps ?? [];
   const live = state?.readiness.live ?? false;
+  // On Cloudflare's always-pass test pair: live, and no security check at all.
+  const testPair = state?.readiness.testPair ?? false;
   const tokenPresent = tokenQ.data?.tokenPresent ?? state?.cloudflareConfigured ?? false;
   const tokenError = tokenQ.data?.error ?? null;
   const tokenValid = tokenQ.data?.tokenValid ?? false;
@@ -106,7 +120,9 @@ export function CloneTurnstileCard({ cloneId }: { cloneId: string }) {
               a token farmed from one tenant's login page satisfy the check on every other.
             </CardDescription>
           </div>
-          {live ? (
+          {testPair ? (
+            <Badge variant="destructive">Test pair — no check</Badge>
+          ) : live ? (
             <Badge variant="default">Own widget live</Badge>
           ) : row?.site_key ? (
             <Badge variant="secondary">In progress</Badge>
@@ -183,6 +199,17 @@ export function CloneTurnstileCard({ cloneId }: { cloneId: string }) {
               ))}
             </ol>
 
+            {testPair && (
+              <div className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
+                <p className="font-medium">This clone has no sign-in security check</p>
+                <p className="text-muted-foreground">
+                  It is on Cloudflare's published test pair, so every sign-in passes, automated or
+                  not. It exists so a recorder can sign in to a demo. Restore a real widget before
+                  anyone else signs in to this clone.
+                </p>
+              </div>
+            )}
+
             {row?.last_error && (
               <p className="text-sm text-destructive">Last error: {row.last_error}</p>
             )}
@@ -198,60 +225,101 @@ export function CloneTurnstileCard({ cloneId }: { cloneId: string }) {
               </p>
             )}
 
-            <div className="flex flex-wrap items-center gap-2">
-              <Button
-                size="sm"
-                disabled={busy || !cloudflareReady}
-                onClick={() => run("Provision", () => provisionFn({ data: { cloneId } }))}
-              >
-                {row?.site_key ? "Advance" : "Provision own widget"}
-              </Button>
-              {row?.site_key && (
-                <>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={busy || !cloudflareReady}
-                    onClick={() => run("Re-check", () => refreshFn({ data: { cloneId } }))}
-                  >
-                    <RefreshCw className="mr-1 h-3.5 w-3.5" aria-hidden /> Re-check
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={busy || !cloudflareReady}
-                    onClick={() => {
-                      if (
-                        !window.confirm(
-                          "Rotate this widget's secret? The old one stops verifying immediately, and the new one is written to the clone in the same step.",
-                        )
+            {testPair ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  size="sm"
+                  disabled={busy || !cloudflareReady}
+                  onClick={() => {
+                    if (
+                      !window.confirm(
+                        "Restore a real widget? A new widget is minted and its key published, then its secret is written. Sign-in waits for the rebuild that carries the new key.",
                       )
-                        return;
-                      void run("Rotate secret", () => rotateFn({ data: { cloneId } }));
-                    }}
-                  >
-                    <KeyRound className="mr-1 h-3.5 w-3.5" aria-hidden /> Rotate secret
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="text-destructive"
-                    disabled={busy || !cloudflareReady}
-                    onClick={() => {
-                      if (
-                        !window.confirm(
-                          "Delete this clone's Turnstile widget? Its secret stops verifying, and sign-in then depends on REQUIRE_TURNSTILE.",
+                    )
+                      return;
+                    void run("Restore", () => restoreFn({ data: { cloneId } }));
+                  }}
+                >
+                  <ShieldCheck className="mr-1 h-3.5 w-3.5" aria-hidden /> Restore a real widget
+                </Button>
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  size="sm"
+                  disabled={busy || !cloudflareReady}
+                  onClick={() => run("Provision", () => provisionFn({ data: { cloneId } }))}
+                >
+                  {row?.site_key ? "Advance" : "Provision own widget"}
+                </Button>
+                {row?.site_key && (
+                  <>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={busy || !cloudflareReady}
+                      onClick={() => run("Re-check", () => refreshFn({ data: { cloneId } }))}
+                    >
+                      <RefreshCw className="mr-1 h-3.5 w-3.5" aria-hidden /> Re-check
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={busy || !cloudflareReady}
+                      onClick={() => {
+                        if (
+                          !window.confirm(
+                            "Rotate this widget's secret? The old one stops verifying immediately, and the new one is written to the clone in the same step.",
+                          )
                         )
+                          return;
+                        void run("Rotate secret", () => rotateFn({ data: { cloneId } }));
+                      }}
+                    >
+                      <KeyRound className="mr-1 h-3.5 w-3.5" aria-hidden /> Rotate secret
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="text-destructive"
+                      disabled={busy || !cloudflareReady}
+                      onClick={() => {
+                        if (
+                          !window.confirm(
+                            "Delete this clone's Turnstile widget? Its secret stops verifying, and sign-in then depends on REQUIRE_TURNSTILE.",
+                          )
+                        )
+                          return;
+                        void run("Revoke", () => revokeFn({ data: { cloneId } }));
+                      }}
+                    >
+                      Revoke
+                    </Button>
+                  </>
+                )}
+                {/*
+                Offered on every clone and refused by the server for the prime
+                and for anything a customer signs in to (`testPairRefusal`):
+                the rule lives in one place, and the refusal says why.
+              */}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={busy}
+                  onClick={() => {
+                    if (
+                      !window.confirm(
+                        "Put this clone on Cloudflare's always-pass test pair? Its sign-in then has no security check, for anyone, until a real widget is restored. Only a demo clone may use it.",
                       )
-                        return;
-                      void run("Revoke", () => revokeFn({ data: { cloneId } }));
-                    }}
-                  >
-                    Revoke
-                  </Button>
-                </>
-              )}
-            </div>
+                    )
+                      return;
+                    void run("Test pair", () => testPairFn({ data: { cloneId } }));
+                  }}
+                >
+                  <FlaskConical className="mr-1 h-3.5 w-3.5" aria-hidden /> Use the test pair
+                </Button>
+              </div>
+            )}
           </>
         )}
       </CardContent>
