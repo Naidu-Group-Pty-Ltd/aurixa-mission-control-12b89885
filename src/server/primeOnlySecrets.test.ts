@@ -5,6 +5,7 @@ import {
   primeOnlyRefusal,
   prohibitedHoldings,
   PRIME_ONLY_SECRETS,
+  absentProhibitedClaims,
 } from "./primeOnlySecrets.pure";
 import { classifySecret } from "./prime-backend.server";
 import { classRefusalFor, decideFleetForward, refusalFor } from "./cloneSecretForward.pure";
@@ -189,5 +190,27 @@ describe("Mission Control's control-plane secrets never sit on a tenant's projec
     ]) {
       expect(isPrimeOnlySecret(n), n).toBe(false);
     }
+  });
+});
+
+describe("absentProhibitedClaims", () => {
+  it("names the prime-only claims the project does not bear out, once and sorted", () => {
+    expect(
+      absentProhibitedClaims(
+        [
+          { name: "VAPI_API_KEY", status: "inherited" },
+          { name: "GITHUB_WEBHOOK_SECRET", status: "inherited" },
+          { name: "GITHUB_WEBHOOK_SECRET", status: "inherited" },
+          { name: "SB_MANAGEMENT_ACCESS_TOKEN", status: "withheld" },
+          { name: "OPENAI_API_KEY", status: "inherited" },
+        ],
+        ["VAPI_API_KEY"],
+      ),
+    ).toEqual(["GITHUB_WEBHOOK_SECRET"]);
+  });
+
+  it("has nothing to say about a ledger the project agrees with", () => {
+    expect(absentProhibitedClaims([{ name: "VAPI_API_KEY", status: "inherited" }], ["VAPI_API_KEY"])).toEqual([]);
+    expect(absentProhibitedClaims([], [])).toEqual([]);
   });
 });
