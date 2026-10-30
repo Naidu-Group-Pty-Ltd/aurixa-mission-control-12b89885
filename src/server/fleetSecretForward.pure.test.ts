@@ -538,7 +538,11 @@ describe("a withheld name is taken OFF the project, not merely left unwritten", 
   });
 
   it("stamps the removal, because a null last_set_at is what never-enforced looked like", () => {
-    expect(server()).toMatch(/status: WITHHELD,\s*\n\s*last_set_at: now/);
+    // As what each name is: a federated one stays federated
+    // (`fleetSecretForward.server.test.ts` drives it).
+    expect(server()).toMatch(
+      /status: federatedNames\.has\(name\) \? FEDERATED : WITHHELD,\s*\n\s*last_set_at: now/,
+    );
   });
 
   it("never takes the sweep down over one clone's stale name", () => {
