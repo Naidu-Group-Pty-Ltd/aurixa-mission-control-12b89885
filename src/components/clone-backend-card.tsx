@@ -14,6 +14,7 @@ import {
   GitBranch,
   Zap,
   KeyRound,
+  Library,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useServerFn } from "@tanstack/react-start";
@@ -22,6 +23,7 @@ import {
   retryBackendProvisioning,
 } from "@/lib/backend-provisioning.functions";
 import { getCloneMigrationStatus, syncCloneMigrations } from "@/server/migration-sync.functions";
+import { syncCloneReferenceData } from "@/server/reference-data.functions";
 import { cn } from "@/lib/utils";
 
 type BackendStatus = Awaited<ReturnType<typeof getCloneBackendStatus>>["backend"];
@@ -53,11 +55,13 @@ export function CloneBackendCard({ cloneId }: { cloneId: string }) {
   const [retryEmail, setRetryEmail] = useState("");
   const [retryPassword, setRetryPassword] = useState("");
   const [retrying, setRetrying] = useState(false);
+  const [seeding, setSeeding] = useState(false);
 
   const fetchBackendStatus = useServerFn(getCloneBackendStatus);
   const fetchMigrationStatus = useServerFn(getCloneMigrationStatus);
   const syncMigrations = useServerFn(syncCloneMigrations);
   const requeueBackend = useServerFn(retryBackendProvisioning);
+  const seedReference = useServerFn(syncCloneReferenceData);
 
   const load = async () => {
     setLoading(true);
@@ -140,6 +144,36 @@ export function CloneBackendCard({ cloneId }: { cloneId: string }) {
     }
     setRetrying(false);
     load();
+  };
+
+  // This clone's reference copy, now. The hourly pass takes the clone that has
+  // waited longest and the fleet card seeds whichever clone is waiting, so a
+  // clone owed a newly allow-listed table could wait hours behind the rest.
+  // Same engine and allow-list, this clone only.
+  const handleSeedReference = async () => {
+    setSeeding(true);
+    try {
+      const result = await seedReference({ data: { cloneId } });
+      if (!result.ok) {
+        toast.error(result.error);
+      } else if (result.error) {
+        toast.error(result.error);
+      } else {
+        const failed = result.tables.filter((t) => t.status === "failed");
+        if (failed.length > 0) {
+          toast.warning(`Refused: ${failed.map((t) => t.table).join(", ")}`);
+        } else if (result.done) {
+          toast.success(`Reference data complete; ${result.rowsCopied} row(s) copied now`);
+        } else if (result.budgetExhausted) {
+          toast.info(`${result.rowsCopied} row(s) copied; press again to continue`);
+        } else {
+          toast.info("A reference copy holds this clone now; try again in a minute");
+        }
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Reference copy failed");
+    }
+    setSeeding(false);
   };
 
   // The skeleton is for the FIRST read only. The card re-reads every five
@@ -579,6 +613,27 @@ export function CloneBackendCard({ cloneId }: { cloneId: string }) {
               </Button>
             )}
           </div>
+        )}
+
+        {/* The reference copy reads a ready backend only, as the hourly pass does. */}
+        {backend.status === "ready" && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={handleSeedReference}
+            disabled={seeding}
+            className="w-full"
+          >
+            {seeding ? (
+              <>
+                <Loader2 className="mr-2 h-3 w-3 animate-spin" /> Copying reference data...
+              </>
+            ) : (
+              <>
+                <Library className="mr-2 h-3 w-3" /> Copy reference data to this clone
+              </>
+            )}
+          </Button>
         )}
       </CardContent>
     </Card>

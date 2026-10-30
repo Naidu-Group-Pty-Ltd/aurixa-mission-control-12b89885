@@ -112,6 +112,43 @@ describe("the allow-list", () => {
   });
 });
 
+describe("the module catalogue", () => {
+  // Measured 30 Oct 2026: the prime holds 45 rows, the tutorial demo none, so
+  // no account below superadmin could be granted a module there.
+  it("travels, keyed on the module key every grant and check names", () => {
+    const e = entry("dashboard_modules");
+    expect(isReferenceTable("dashboard_modules")).toBe(true);
+    // `UNIQUE (module_key)` on the prime and on a clone stamped from it; the
+    // surrogate id would miss a row both sides seeded with different ids.
+    expect(e.conflictKey).toEqual(["module_key"]);
+    expect(e.pageKey).toBe("module_key");
+  });
+
+  it("carries the id the grid references and nulls nothing, since no column names a person", () => {
+    const plan = planColumns(entry("dashboard_modules"), [
+      "id",
+      "module_key",
+      "module_name",
+      "description",
+      "category",
+      "icon",
+      "route",
+      "is_active",
+      "sort_order",
+      "created_at",
+    ]);
+    if (!plan.ok) throw new Error(plan.refusal);
+    expect(plan.copy).toContain("id");
+    expect(plan.nulled).toEqual([]);
+  });
+
+  it("never brings the grants themselves: a tenant's staff access stays the tenant's", () => {
+    for (const denied of ["user_permissions", "user_roles", "profiles"]) {
+      expect(isReferenceTable(denied), denied).toBe(false);
+    }
+  });
+});
+
 describe("the aml entries", () => {
   it("qualifies every aml entry's name and leaves public names bare", () => {
     for (const t of REFERENCE_TABLES) {

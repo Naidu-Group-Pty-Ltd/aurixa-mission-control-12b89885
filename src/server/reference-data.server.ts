@@ -319,7 +319,19 @@ export async function runReferenceDataSync(
     }
     backend = pickReferenceSyncCandidate(candidates, progress.rows) ?? undefined;
   }
-  if (!backend?.supabase_project_ref) return { ...EMPTY, done: true };
+  if (!backend?.supabase_project_ref) {
+    // A clone an operator named and could not take is not a fleet with
+    // nothing to do, and must not read as a finished copy.
+    if (opts?.cloneId) {
+      return {
+        ...EMPTY,
+        cloneId: opts.cloneId,
+        error:
+          "Not copied: this clone's backend is not ready, or a reference copy is running on it now",
+      };
+    }
+    return { ...EMPTY, done: true };
+  }
 
   const cloneId = backend.clone_id;
   const cloneRef = backend.supabase_project_ref;

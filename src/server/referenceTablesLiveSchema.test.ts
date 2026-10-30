@@ -39,6 +39,11 @@ const LIVE: Record<string, string[]> = {
   // Read 28 Oct 2026 from dduzbchuswwbefdunfct.
   chart_configurations: "id,chart_type,template_name,quickchart_config,default_styling,created_at,updated_at".split(","),
   suburb_directory: "id,suburb,state,postcode,created_at".split(","),
+  // Read 30 Oct 2026 from dduzbchuswwbefdunfct.
+  dashboard_modules:
+    "id,module_key,module_name,description,category,icon,route,is_active,sort_order,created_at".split(
+      ",",
+    ),
   template_library_entries: "id,family_id,slug,version,name,description,long_description,category,report_type,tier,variant,industry,tags,style,orientation,page_size,page_count,schema,config,custom_css,engine,preview_schema,thumbnail_path,preview_image_paths,supported_modules,required_bindings,brand_safe,production_ready,compatibility_version,status,access_tier,visibility,agency_id,source_template_id,created_by_user_id,created_at,updated_at,published_at,deprecated_at,usage_count,last_used_at,design_meta".split(","),
   feature_flags: "key,value,description,updated_by,created_at,updated_at".split(","),
   "aml.plan_tiers": "id,key,label,description,entitlements,monthly_price_cents,sort_order,active,created_at,updated_at".split(","),
