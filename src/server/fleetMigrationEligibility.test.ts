@@ -18,6 +18,7 @@ import { stripComments } from "./sourceComments.pure";
 
 const HEALTHY: BackendFacts = {
   supabaseProjectRef: "abcdefghijklmnopqrst",
+  supabaseUrl: "https://abcdefghijklmnopqrst.supabase.co",
   status: "ready",
   workerStartedAt: null,
   migrationBlockedAt: null,
@@ -42,6 +43,47 @@ describe("migrationEligibility", () => {
   */
   it("admits a failed backend that this lane did not block", () => {
     expect(migrationEligibility({ ...HEALTHY, status: "failed" })).toEqual({ eligible: true });
+  });
+
+  /*
+    The other `failed`: a FIRST BUILD that never finished.
+
+    `tutorial-demo-orrimere-c158c7`, 29 Oct 2026: failed by the provisioning
+    drain before its ledger was stamped, taken by this lane at 21:00 as a
+    `failed` row with no block, replayed from the corpus's first file onto an
+    introspected schema and refused at `20250912170521`. After the next
+    provisioning failure the block was discharged and the replay ran again.
+    The two September clones above had finished their builds; this one had not,
+    and only a finished build writes `supabase_url`.
+  */
+  it("refuses a backend whose first build never finished, failed or not", () => {
+    for (const status of ["failed", "ready"]) {
+      const v = migrationEligibility({ ...HEALTHY, status, supabaseUrl: null });
+      expect(v.eligible).toBe(false);
+      if (v.eligible) throw new Error("unreachable");
+      expect(v.reason).toBe("provisioning_incomplete");
+      expect(v.detail).toMatch(/retry provisioning from the clone page/);
+    }
+  });
+
+  it("asks about the unfinished build BEFORE the block, so that block cannot be discharged into a replay", () => {
+    const v = migrationEligibility({
+      ...HEALTHY,
+      status: "failed",
+      supabaseUrl: null,
+      migrationBlockedAt: "2026-10-29T23:00:48.834Z",
+      migrationBlockedReason:
+        '20250912170521_208618a7-d33a-4e4b-96c2-455f4efcf772.sql: relation "investment_reports" already exists',
+    });
+    if (v.eligible) throw new Error("unreachable");
+    // The discharge sweep only reconsiders `migration_blocked` verdicts.
+    expect(v.reason).toBe("provisioning_incomplete");
+  });
+
+  it("keeps the in-flight verdict for a build still running, whatever the URL says", () => {
+    const v = migrationEligibility({ ...HEALTHY, status: "migrating", supabaseUrl: null });
+    if (v.eligible) throw new Error("unreachable");
+    expect(v.reason).toBe("provisioning_in_flight");
   });
 
   it("refuses a backend this lane blocked, and says which migration", () => {

@@ -56,6 +56,42 @@ describe("resolveBillingReason", () => {
     expect(resolveBillingReason({ ...base, callStatus: "error" })).toBe("error_call");
   });
 
+  it("bills a key minted for the clone, or federated, as Aurixa's money", () => {
+    // `resolve_api_key_billability` maps both to `inherited`. The mirror rated
+    // them `no_key` until 29 Oct 2026, so the suite vouched for a rule the
+    // money did not follow: every minted Resend and model key.
+    for (const secretStatus of ["minted", "federated"] as const) {
+      const reason = resolveBillingReason({ ...base, secretStatus });
+      expect(reason, secretStatus).toBe("inherited");
+      expect(isBillable(reason)).toBe(true);
+      expect(
+        resolveBillingReason({ ...base, secretStatus, rateAbsorbed: true }),
+        secretStatus,
+      ).toBe("absorbed");
+    }
+  });
+
+  it("calls every failed call error_call, as the SQL does, whoever's key it ran on", () => {
+    // `record_api_usage_event` asks `_call_status = 'error'` of every reason.
+    // The mirror used to keep a tenant's own key `byok` and the prime's
+    // `no_key` when the call failed, so it described a rule nothing applied.
+    expect(resolveBillingReason({ ...base, secretStatus: "set", callStatus: "error" })).toBe(
+      "error_call",
+    );
+    expect(resolveBillingReason({ ...base, cloneId: null, callStatus: "error" })).toBe(
+      "error_call",
+    );
+    expect(resolveBillingReason({ ...base, secretStatus: null, callStatus: "error" })).toBe(
+      "error_call",
+    );
+    // Still free: nothing was delivered.
+    expect(isBillable("error_call")).toBe(false);
+  });
+
+  it("takes the broker's word only for a clone, as the SQL does", () => {
+    expect(resolveBillingReason({ ...base, cloneId: null, brokered: true })).toBe("no_key");
+  });
+
   it("does not charge for keys flagged as platform overhead", () => {
     expect(resolveBillingReason({ ...base, rateIsBillable: false })).toBe("not_billable");
   });
@@ -198,7 +234,10 @@ describe("resolveBillingReason", () => {
     // a fact about the call; absorption is a fact about the money model.
     expect(
       resolveBillingReason({
-        ...base, secretStatus: "withheld", rateAbsorbed: true, callStatus: "error",
+        ...base,
+        secretStatus: "withheld",
+        rateAbsorbed: true,
+        callStatus: "error",
       }),
     ).toBe("error_call");
   });
@@ -206,18 +245,18 @@ describe("resolveBillingReason", () => {
   it("changes nothing for a vendor that is not absorbed", () => {
     // The flag defaults off on every other rate row in the catalog.
     expect(resolveBillingReason({ ...base, secretStatus: "inherited" })).toBe("inherited");
-    expect(
-      resolveBillingReason({ ...base, secretStatus: "inherited", rateAbsorbed: false }),
-    ).toBe("inherited");
+    expect(resolveBillingReason({ ...base, secretStatus: "inherited", rateAbsorbed: false })).toBe(
+      "inherited",
+    );
   });
 
   it("does not let a rate-less or unbillable secret become chargeable by route", () => {
-    expect(
-      resolveBillingReason({ ...base, secretStatus: "withheld", rateExists: false }),
-    ).toBe("rate_missing");
-    expect(
-      resolveBillingReason({ ...base, brokered: true, rateIsBillable: false }),
-    ).toBe("not_billable");
+    expect(resolveBillingReason({ ...base, secretStatus: "withheld", rateExists: false })).toBe(
+      "rate_missing",
+    );
+    expect(resolveBillingReason({ ...base, brokered: true, rateIsBillable: false })).toBe(
+      "not_billable",
+    );
   });
 });
 

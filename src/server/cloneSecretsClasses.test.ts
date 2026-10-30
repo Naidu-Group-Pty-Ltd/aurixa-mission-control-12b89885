@@ -161,7 +161,7 @@ describe("derived deployment config — this clone's own hostnames and name", ()
 });
 
 describe("settled names — written by another step, read here", () => {
-  it("records a settled name `set` at the time that step wrote it, and writes nothing", () => {
+  it("records a settled name at the time that step wrote it, and writes nothing", () => {
     const { toWrite, results } = planCloneSecrets(
       ["TURNSTILE_SECRET_KEY", "REQUIRE_TURNSTILE", "RESEND_API_KEY"],
       { RESEND_API_KEY: "the-primes-key" },
@@ -186,7 +186,8 @@ describe("settled names — written by another step, read here", () => {
       settledAt: "2026-09-03T15:50:24.773Z",
     });
     expect(results.get("REQUIRE_TURNSTILE")?.status).toBe("set");
-    expect(results.get("RESEND_API_KEY")?.status).toBe("set");
+    // Minted on Aurixa's Resend account: Aurixa's money, so `minted`, not `set`.
+    expect(results.get("RESEND_API_KEY")?.status).toBe("minted");
   });
 
   it("an unsettled identity name still reads as it did", () => {
@@ -220,5 +221,28 @@ describe("the owned and linked values reach the batch as this clone's own", () =
   it("an undecided reset pepper is still minted, because a random one is valid", () => {
     const { toWrite } = planCloneSecrets(["RESET_TOKEN_PEPPER"], { RESET_TOKEN_PEPPER: "the-primes" }, gen);
     expect(toWrite).toEqual([{ name: "RESET_TOKEN_PEPPER", value: "GENERATED" }]);
+  });
+});
+
+describe("a prime-only name never reaches a clone at provisioning", () => {
+  it("is withheld, not inherited, even with a fleet value and an authorised forward", () => {
+    // Provisioning reads the fleet's inherited values from every row marked
+    // `inherit` without asking the class, so the planner is where the class
+    // has to hold (key audit S1 and S2: both names were on all five clones).
+    const names = ["GITHUB_WEBHOOK_SECRET", "VAPI_API_KEY", "SB_MANAGEMENT_ACCESS_TOKEN"];
+    const values = Object.fromEntries(names.map((n) => [n, `the-control-plane-${n}`]));
+    const { toWrite, results } = planCloneSecrets(
+      names,
+      values,
+      gen,
+      null,
+      undefined,
+      undefined,
+      new Set(names),
+    );
+    expect(toWrite).toEqual([]);
+    for (const name of names) {
+      expect(results.get(name), name).toEqual({ name, status: "withheld", success: true });
+    }
   });
 });

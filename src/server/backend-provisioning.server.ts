@@ -18,6 +18,7 @@ import type { AdminSeedReport } from "./cloneAdminIdentity.pure";
 import type { PrimeBackendSnapshot } from "./prime-backend.server";
 import type { StageName, StageResult } from "./schema-introspection.server";
 import { resolveMissionControlOrigin } from "./missionControlLink.pure";
+import { settledLedgerStatus } from "./cloneEmailIdentity.pure";
 import {
   cursorAppliesToBody,
   cursorRanPastEnd,
@@ -4827,6 +4828,12 @@ export async function deployEdgeFunctions(
 
 export type SecretShellStatus =
   | "set"
+  /**
+   * Written by another step with a credential minted for this clone on
+   * Aurixa's account (the email identity's Resend key). Aurixa's money, so
+   * billable, which `set` is not (`settledLedgerStatus`).
+   */
+  | "minted"
   | "missing"
   | "failed"
   | "inherited"
@@ -4948,12 +4955,13 @@ export function planCloneSecrets(
   for (const name of names) {
     // Written by another step that owns it — the Turnstile identity, the
     // email identity — and READ here rather than re-decided. The ledger says
-    // `set` at the time that step wrote it; the alternative was `missing` for
-    // a secret that is there, which is what every clone's secret page read for
-    // its CAPTCHA and its sender.
+    // what that step wrote at the time it wrote it (`settledLedgerStatus`:
+    // the minted Resend key `minted`, everything else `set`); the alternative
+    // was `missing` for a secret that is there, which is what every clone's
+    // secret page read for its CAPTCHA and its sender.
     const settledAt = facts?.settled?.get(name);
     if (settledAt) {
-      results.set(name, { name, status: "set", success: true, settledAt });
+      results.set(name, { name, status: settledLedgerStatus(name), success: true, settledAt });
       continue;
     }
     // A name the clone holds a dedicated credential for is never inherited —
@@ -4968,6 +4976,16 @@ export function planCloneSecrets(
 
     if (kind === "platform") {
       results.set(name, { name, status: "skipped_platform", success: true });
+      continue;
+    }
+    if (kind === "prime_only") {
+      // Never on a tenant's project, whatever a fleet row says: the fleet's
+      // inherited values are read from every row marked `inherit` without
+      // asking the class, so without this a Supabase management token or one
+      // of Mission Control's own control-plane secrets (`primeOnlySecrets.pure.ts`)
+      // reached a new clone on nothing but a data row. `withheld`, as the
+      // reconcile sweep stamps one it removes: deliberately absent, never owed.
+      results.set(name, { name, status: "withheld", success: true });
       continue;
     }
     if (kind === "brokered") {

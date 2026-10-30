@@ -57,6 +57,7 @@ import {
   mayAlignSenderAddress,
   missingKeyPatch,
   identityLedgerFromListing,
+  settledLedgerStatus,
   IDENTITY_SECRET_NAMES,
   CLONE_RESEND_SECRET,
   CLONE_RESEND_FROM_SECRET,
@@ -1393,12 +1394,13 @@ async function mintAndWriteKey(
     last_error: null,
   });
   // Both rows: the two were written in one request, and stamping only the key
-  // left every clone's RESEND_FROM_EMAIL row reading `missing` beside it.
+  // left every clone's RESEND_FROM_EMAIL row reading `missing` beside it. The
+  // key is `minted` (Aurixa's Resend account), the address `set`.
   const { error: trackErr } = await supabase.from("clone_backend_secrets").upsert(
     [CLONE_RESEND_SECRET, CLONE_RESEND_FROM_SECRET].map((name) => ({
       clone_id: cloneId,
       name,
-      status: "set",
+      status: settledLedgerStatus(name),
       last_set_at: now,
       last_error: null,
       set_by: actorUserId,

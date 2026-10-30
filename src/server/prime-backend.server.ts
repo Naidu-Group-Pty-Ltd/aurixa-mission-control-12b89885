@@ -2151,6 +2151,18 @@ export async function fetchPrimeBackendSnapshot(
   };
 
   /*
+    What each file imports, read ONCE per file and kept without its text.
+
+    Both prunes below go through it. The deploy prune used to pass `textOf`
+    alone, which keeps every file it decodes: measured 29 Oct 2026 on the
+    prime's tree (402 bundles, 2,395 files, 44 MB of base64 held by the blob
+    cache), pruning one pass's 60 bundles that way kept 855 decoded files live,
+    43.5 MB on top of the cache. Through the specifier memo it keeps none, and
+    the 402 bundles prune to exactly the same keep lists either way.
+  */
+  const specifiersOf = memoisedSpecifiers(decodedText);
+
+  /*
     Every bundle's digest at THIS commit, for a caller planning its skip list
     from this read (`planSkip`).
 
@@ -2164,7 +2176,6 @@ export async function fetchPrimeBackendSnapshot(
   const prunedBySlug = new Map<string, PruneOutcome>();
   let bundleDigests: Map<string, string> | undefined;
   if (opts?.planSkip) {
-    const specifiersOf = memoisedSpecifiers(decodedText);
     bundleDigests = new Map();
     for (const { slug, bundlePaths, entrypointPath, importMapPath } of allBundles) {
       const outcome = pruneBundleToReachable({
@@ -2219,6 +2230,7 @@ export async function fetchPrimeBackendSnapshot(
           files: bundlePaths.map((path) => ({ path })),
           importMapPath,
           textOf,
+          specifiersOf,
         });
       if (!prune.pruned) {
         // Loud, because a bundle carrying the whole tree is one the deploy API
@@ -2248,11 +2260,24 @@ export async function fetchPrimeBackendSnapshot(
   // than the timeouts every earlier build produced). The answer is the same
   // set of secret names: a name found in a file is found whichever bundles
   // that file happens to travel in.
-  const textSources: string[] = [];
+  //
+  // And ONE FILE AT A TIME. Collecting every decoded file into an array before
+  // scanning held the whole tree twice — once as the cache's base64, once as
+  // text — and the tree has doubled since this scan was written. Measured 29 Oct
+  // 2026 on the prime's 2,395 files: 79.3 MB live on top of the 44 MB cache,
+  // and the runtime killed three edge-function passes in a row on
+  // `tutorial-demo-orrimere-c158c7` (22:13, 22:28, 22:44 UTC) with a bare 502.
+  // `extractSecretNames` matches within one source, so scanning each file as
+  // it is decoded names exactly the same set (169, identical) at a peak of
+  // one file.
+  const secretNameSet = new Set<string>();
   for (const [rel, f] of fileByPath) {
-    if (isTextFile(rel)) textSources.push(decodeBase64Utf8(f.contentBase64));
+    if (!isTextFile(rel)) continue;
+    for (const name of extractSecretNames([decodeBase64Utf8(f.contentBase64)])) {
+      secretNameSet.add(name);
+    }
   }
-  const secretNames = extractSecretNames(textSources);
+  const secretNames = Array.from(secretNameSet).sort();
 
   return {
     sourceRepo: `${ref.owner}/${ref.repo}`,
