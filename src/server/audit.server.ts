@@ -53,8 +53,13 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
  * such row whole — on 19 Oct 2026 the nightly retraction of Prime's stray
  * digest pull request did its work and left no row behind it. A reference that
  * is not a uuid now travels in `metadata.entity_ref` instead, so the row lands.
+ *
+ * Says whether the row LANDED, for the same reason `notifyOperators` does: a
+ * caller that decides from the audit history (the backend drain hands a dead
+ * pass's attempt back only once the death is on record) must not take a
+ * swallowed insert for a recorded one. Every other caller ignores the answer.
  */
-export async function writeAuditLog(entry: AuditEntry): Promise<void> {
+export async function writeAuditLog(entry: AuditEntry): Promise<boolean> {
   const ref = entry.entityId ?? null;
   const isUuid = ref !== null && UUID.test(ref);
   const metadata = ref === null || isUuid ? entry.metadata : { ...entry.metadata, entity_ref: ref };
@@ -70,7 +75,9 @@ export async function writeAuditLog(entry: AuditEntry): Promise<void> {
       `[audit] failed to record "${entry.action}" on ${entry.entityType}:`,
       error.message,
     );
+    return false;
   }
+  return true;
 }
 
 /** Raise an operator notification. Never throws; a failed write is logged. */
