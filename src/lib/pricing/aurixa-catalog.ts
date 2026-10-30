@@ -243,6 +243,14 @@ export type PricedModule = {
    * product, adds the real price and links the row.
    */
   priceUndecided?: boolean;
+  /**
+   * Included at no extra cost wherever the plan includes AML/CTF Compliance:
+   * the owner's decision of 29 Oct 2026 that a tenant who takes AML has every
+   * partner portal the Compliance Passport travels through. Without AML the
+   * module keeps its own pricing (`includedIn`, its add-on price, or a direct
+   * sale). See `AML_BUNDLED_MODULES`.
+   */
+  includedWithAml?: boolean;
   note?: string;
 };
 
@@ -430,6 +438,7 @@ export const MODULES: readonly PricedModule[] = [
     category: "Administration",
     monthlyInclGstCents: 34900,
     includedIn: ["scale"],
+    includedWithAml: true,
     note: "Also unlocks client Send To Finance and Finance Messages.",
   },
   {
@@ -453,6 +462,7 @@ export const MODULES: readonly PricedModule[] = [
     category: "Administration",
     monthlyInclGstCents: 29900,
     includedIn: [],
+    includedWithAml: true,
     note: "Partner hand-off portal. A portal fee buys that portal's own scope and never grants AML/CTF.",
   },
   {
@@ -465,6 +475,7 @@ export const MODULES: readonly PricedModule[] = [
     category: "Administration",
     monthlyInclGstCents: 100,
     includedIn: [],
+    includedWithAml: true,
     priceUndecided: true,
     note: "Partner hand-off portal for the client's accountant. A portal fee buys that portal's own scope and never grants AML/CTF.",
   },
@@ -477,6 +488,7 @@ export const MODULES: readonly PricedModule[] = [
     category: "Administration",
     monthlyInclGstCents: 69900,
     includedIn: [],
+    includedWithAml: true,
     directSale: true,
     note: "Sold separately, not as a tier add-on. A portal fee buys that portal's own scope and never grants AML/CTF.",
   },
@@ -645,6 +657,30 @@ export const AML_MODULE_SLUG = "aml-ctf";
  */
 export const TIER_INCLUDES_AML = true;
 
+/**
+ * What AML/CTF Compliance brings with it: every partner portal.
+ *
+ * The owner's decision of 29 Oct 2026. A tenant on any plan who takes AML/CTF
+ * (the headline with-AML price, or the module added later) has full
+ * multi-portal access at no extra cost: the Finance, Solicitor, Accountant and
+ * Builder / Developer portals, the four the Compliance Passport is shared
+ * through. A tenant without it follows the price list as it stands: the Finance
+ * Portal with Scale or as an add-on, the Solicitor and Accountant portals as
+ * add-ons, and the Builder / Developer Portal sold directly.
+ *
+ * Held means what the balance response decides (`balanceEntitlements`): AML/CTF
+ * is entitled, by the tier's headline SKU or by purchase, and no contract
+ * excludes it. A contract can still negotiate out a single portal, and
+ * excluding AML/CTF withdraws the whole bundle (`applyContractExclusions`).
+ */
+export const AML_BUNDLED_MODULES: readonly PricedModule[] = MODULES.filter(
+  (m) => m.includedWithAml,
+);
+
+/** Whether holding AML/CTF includes a module at no extra cost. */
+export const includedWithAml = (slug: string): boolean =>
+  moduleBySlug(slug)?.includedWithAml === true;
+
 /** The headline price for a tier — what the sheet titles it with, and what Stripe charges. */
 export function tierHeadlineCents(tier: Tier, period: BillingPeriod = "monthly"): number {
   return tierPriceCents(tier, { period, withAml: TIER_INCLUDES_AML });
@@ -752,19 +788,28 @@ export type PresentedAddon<T extends AddonPriceColumns> = Omit<
  * undecided keeps its placeholder there, and anywhere else that figure would
  * read as what the module costs. So it is presented with no price, and says
  * why in `metadata.price_undecided`; the catalogue's own flag decides, never
- * the figure the row happens to hold. Every other row passes through as it is.
+ * the figure the row happens to hold.
+ *
+ * A module AML/CTF brings says so in `metadata.included_with_aml`, from the
+ * catalogue's flag as well, so a price list outside this repository (the
+ * storefront) can say where it is included without keeping a copy of the
+ * list. Every other row passes through as it is.
  */
 export function presentAddonRow<T extends AddonPriceColumns>(row: T): PresentedAddon<T> {
-  if (!moduleBySlug(row.slug)?.priceUndecided) return row;
+  const mod = moduleBySlug(row.slug);
+  if (!mod?.priceUndecided && !mod?.includedWithAml) return row;
   const metadata =
     row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata)
       ? row.metadata
       : {};
   return {
     ...row,
-    price_min_cents: null,
-    price_max_cents: null,
-    metadata: { ...metadata, price_undecided: true },
+    ...(mod.priceUndecided ? { price_min_cents: null, price_max_cents: null } : {}),
+    metadata: {
+      ...metadata,
+      ...(mod.priceUndecided ? { price_undecided: true } : {}),
+      ...(mod.includedWithAml ? { included_with_aml: true } : {}),
+    },
   };
 }
 

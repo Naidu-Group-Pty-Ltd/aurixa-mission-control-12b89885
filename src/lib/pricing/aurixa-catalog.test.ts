@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   ANNUAL_DISCOUNT,
+  AML_BUNDLED_MODULES,
   AML_CORE_BUNDLE_DISCOUNT_CENTS,
   AML_MODULE_SLUG,
   AML_NET_UPLIFT_CENTS,
   AML_REFERENCE_COMPONENT_CENTS,
   MODULES,
   PURCHASABLE_MODULES,
+  includedWithAml,
   isModuleGrantable,
   isModulePurchasable,
   moduleSaleBlock,
@@ -197,6 +199,42 @@ describe("the AML component, the conditional discount and the net uplift", () =>
   });
 });
 
+describe("the partner portals AML/CTF brings (29 Oct 2026)", () => {
+  it("are the four portals the Compliance Passport is shared through, and nothing else", () => {
+    expect(AML_BUNDLED_MODULES.map((m) => m.slug).sort()).toEqual([
+      "accountant-portal",
+      "builder-developer-portal",
+      "finance-portal",
+      "solicitor-portal",
+    ]);
+    for (const m of MODULES) {
+      expect(includedWithAml(m.slug), m.slug).toBe(AML_BUNDLED_MODULES.includes(m));
+    }
+    expect(includedWithAml(AML_MODULE_SLUG)).toBe(false);
+    expect(includedWithAml("no-such-module")).toBe(false);
+  });
+
+  it("change no price: the AML uplift stays $150, and each portal keeps its own figure", () => {
+    // Without AML/CTF a portal follows the price list as it stands, so its
+    // price, its tiers and its sale block are what they were.
+    expect(moduleBySlug("finance-portal")).toMatchObject({
+      monthlyInclGstCents: $(349),
+      includedIn: ["scale"],
+    });
+    expect(moduleBySlug("solicitor-portal")).toMatchObject({
+      monthlyInclGstCents: $(299),
+      includedIn: [],
+    });
+    expect(moduleSaleBlock("accountant-portal")).toBe("price_undecided");
+    expect(moduleSaleBlock("builder-developer-portal")).toBe("direct_sale");
+    for (const tier of TIERS) {
+      expect(tierPriceCents(tier, { withAml: true }) - tierPriceCents(tier, { withAml: false })).toBe(
+        AML_NET_UPLIFT_CENTS,
+      );
+    }
+  });
+});
+
 describe("module catalogue", () => {
   it("carries the pricing model's 25 priced modules, and the Accountant Portal", () => {
     // The Accountant Portal is the owner's addition of 29 Oct 2026, after the
@@ -335,16 +373,39 @@ describe("what may be sold through a checkout", () => {
       slug: "accountant-portal",
       price_min_cents: null,
       price_max_cents: null,
-      metadata: { tax_inclusive: true, price_undecided: true },
+      metadata: { tax_inclusive: true, price_undecided: true, included_with_aml: true },
     });
     // A row with no metadata column selected still says why its price is absent.
     expect(
       presentAddonRow({ slug: "accountant-portal", price_min_cents: 100, price_max_cents: 100 })
         .metadata,
-    ).toEqual({ price_undecided: true });
+    ).toEqual({ price_undecided: true, included_with_aml: true });
     // Every other row passes through untouched, figure and all.
-    const priced = { slug: "solicitor-portal", price_min_cents: 29900, price_max_cents: 29900 };
+    const priced = { slug: "market-updates", price_min_cents: 7900, price_max_cents: 7900 };
     expect(presentAddonRow(priced)).toBe(priced);
+  });
+
+  it("says which modules AML/CTF brings, and keeps their price", () => {
+    // The storefront labels these from the row alone (29 Oct 2026).
+    expect(
+      presentAddonRow({ slug: "solicitor-portal", price_min_cents: 29900, price_max_cents: 29900 }),
+    ).toEqual({
+      slug: "solicitor-portal",
+      price_min_cents: 29900,
+      price_max_cents: 29900,
+      metadata: { included_with_aml: true },
+    });
+    expect(
+      presentAddonRow({
+        slug: "finance-portal",
+        price_min_cents: 34900,
+        price_max_cents: 34900,
+        metadata: { gst_component_cents: 3173 },
+      }).metadata,
+    ).toEqual({ gst_component_cents: 3173, included_with_aml: true });
+    // AML/CTF itself is not one of the modules it brings.
+    const aml = { slug: "aml-ctf", price_min_cents: 15000, price_max_cents: 15000 };
+    expect(presentAddonRow(aml)).toBe(aml);
   });
 
   it("keeps a withheld module priced and listed rather than hidden", () => {

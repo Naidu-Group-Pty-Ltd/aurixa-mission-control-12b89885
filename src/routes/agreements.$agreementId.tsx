@@ -365,7 +365,7 @@ function SubscriptionOfferPage({
     if (res.disarmed) {
       toast.warning("Provisioning was disarmed", {
         description:
-          "The offer now sells a different plan or add-ons than provisioning was armed for. Re-arm it once the offer is final.",
+          "The offer now sells a different plan, add-ons or AML choice than provisioning was armed for. Re-arm it once the offer is final.",
         duration: 12_000,
       });
     }

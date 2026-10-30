@@ -39,7 +39,16 @@
  * Pure and dependency-free so the whole table can be asserted in tests.
  */
 
-import { MODULES, TIERS, moduleBySlug, type PricedModule } from "./aurixa-catalog";
+import {
+  AML_BUNDLED_MODULES,
+  AML_MODULE_SLUG,
+  MODULES,
+  TIERS,
+  TIER_INCLUDES_AML,
+  moduleBySlug,
+  tierBySlug,
+  type PricedModule,
+} from "./aurixa-catalog";
 import { sortedUniqueSlugs, unknownExclusionSlugs } from "./contract-exclusions";
 import { SUB_MODULE_MATRIX, tierEnablesSubModule } from "./sub-module-matrix";
 import { TIER_FEATURES } from "./tier-features";
@@ -569,6 +578,11 @@ export type EntitlementResolution = {
   includedModules: string[];
   /** Priced items bought on top of the tier. */
   addonModules: string[];
+  /**
+   * Priced items AML/CTF brings, neither included by the tier nor bought: the
+   * partner portals (`AML_BUNDLED_MODULES`), wherever AML/CTF is held.
+   */
+  amlBundled: string[];
   /** Priced items that could not be mapped — surfaced, never silently dropped. */
   unmapped: Array<{ sourceSlug: string; sourceName: string; reason: string }>;
 };
@@ -619,18 +633,10 @@ export function resolveEntitledModules(args: {
     }
   }
 
-  // ── Priced modules: included by tier, or explicitly purchased ──
-  const purchased = new Set(purchasedAddons);
-  for (const pm of MODULES) {
-    const includedByTier = pm.includedIn.includes(planSlug);
-    const boughtSeparately = purchased.has(pm.slug);
-    if (!includedByTier && !boughtSeparately) continue;
-
-    if (includedByTier) includedModules.push(pm.slug);
-    else addonModules.push(pm.slug);
-
-    if (applyOverride(`module:${pm.slug}`)) continue;
-
+  // What one priced module in effect installs: the operator's override when
+  // there is one, else the derived mapping.
+  const installPriced = (pm: PricedModule): void => {
+    if (applyOverride(`module:${pm.slug}`)) return;
     const mapping = mapPricedModule(pm, knownModules);
     if (mapping.kind === "installs") {
       for (const s of mapping.moduleSlugs) modules.add(s);
@@ -641,7 +647,35 @@ export function resolveEntitledModules(args: {
         reason: mapping.reason,
       });
     }
-    // "entitlement" installs nothing by design.
+    // "entitlement" installs nothing by design, and "external" is served by
+    // another deployment.
+  };
+
+  // ── Priced modules: included by tier, or explicitly purchased ──
+  const purchased = new Set(purchasedAddons);
+  for (const pm of MODULES) {
+    const includedByTier = pm.includedIn.includes(planSlug);
+    const boughtSeparately = purchased.has(pm.slug);
+    if (!includedByTier && !boughtSeparately) continue;
+
+    if (includedByTier) includedModules.push(pm.slug);
+    else addonModules.push(pm.slug);
+    installPriced(pm);
+  }
+
+  // ── What AML/CTF brings: every partner portal ──
+  // Held where the tier's headline SKU carries it or it was bought, as the
+  // balance response decides; a contract that excludes it takes the portals
+  // with it (`applyContractExclusions`).
+  const amlBundled: string[] = [];
+  const amlHeld =
+    (TIER_INCLUDES_AML && Boolean(tierBySlug(planSlug))) || purchased.has(AML_MODULE_SLUG);
+  if (amlHeld) {
+    for (const pm of AML_BUNDLED_MODULES) {
+      if (includedModules.includes(pm.slug) || addonModules.includes(pm.slug)) continue;
+      amlBundled.push(pm.slug);
+      installPriced(pm);
+    }
   }
 
   const entitlementKeys = SUB_MODULE_MATRIX.filter((r) =>
@@ -662,6 +696,7 @@ export function resolveEntitledModules(args: {
     entitlementKeys: entitlementKeys.sort(),
     includedModules: includedModules.sort(),
     addonModules: addonModules.sort(),
+    amlBundled: amlBundled.sort(),
     unmapped,
   };
 }
@@ -766,13 +801,32 @@ export function unplacedModules(
 }
 
 /**
+ * The library modules the partner portals AML/CTF brings put on a clone: each
+ * bundled module's `libraryModulesOf`. What holding AML/CTF installs beyond its
+ * own modules, and what excluding it withdraws.
+ */
+export function libraryModulesOfAmlBundle(
+  knownModules: ReadonlySet<string>,
+  overrides: Readonly<Record<string, readonly string[]>> = {},
+): string[] {
+  const out = new Set<string>();
+  for (const pm of AML_BUNDLED_MODULES) {
+    for (const s of libraryModulesOf(pm, knownModules, overrides)) out.add(s);
+  }
+  return [...out].sort();
+}
+
+/**
  * Every library module the excluded price-list slugs map to, through
- * `libraryModulesOf`. A slug the price list does not know maps to nothing.
+ * `libraryModulesOf`, and, for an excluded AML/CTF, the portals it brings
+ * (`libraryModulesOfAmlBundle`). A slug the price list does not know maps to
+ * nothing.
  *
  * Provisioning drops these from the modules picked for a new clone
  * (`effectiveModuleIds`). Whether one of them stays because another priced
  * module needs it is the reconcile's decision (`applyContractExclusions`), and
- * the reconcile reinstalls what it keeps.
+ * the reconcile reinstalls what it keeps: the Finance Portal a Scale tier
+ * includes stays though AML/CTF is excluded.
  */
 export function libraryModulesExcludedBy(
   excludedSlugs: readonly string[],
@@ -784,6 +838,9 @@ export function libraryModulesExcludedBy(
     const pm = moduleBySlug(slug);
     if (!pm) continue;
     for (const s of libraryModulesOf(pm, knownModules, overrides)) out.add(s);
+    if (slug === AML_MODULE_SLUG) {
+      for (const s of libraryModulesOfAmlBundle(knownModules, overrides)) out.add(s);
+    }
   }
   return [...out].sort();
 }
@@ -814,7 +871,9 @@ export type ContractExclusionOutcome = {
  * An exclusion is a price-list slug (`contract-exclusions.ts`). For each one
  * the price list knows:
  *
- *  - it leaves `includedModules` and `addonModules`;
+ *  - it leaves `includedModules`, `addonModules` and `amlBundled`. Excluding
+ *    `aml-ctf` empties `amlBundled`: the partner portals come with AML/CTF and
+ *    go with it, unless the tier includes one or the clone bought it;
  *  - the library modules it maps to (`libraryModulesOf`) leave `moduleSlugs`,
  *    except one that a priced module still in effect also maps to. That one
  *    stays and is reported in `sharedModulesKept`. A tier's baseline features
@@ -847,6 +906,13 @@ export function applyContractExclusions(
 
   const includedModules = resolution.includedModules.filter((s) => !excluded.has(s));
   const addonModules = resolution.addonModules.filter((s) => !excluded.has(s));
+  // Excluding AML/CTF withdraws every portal it brought; excluding one portal
+  // withdraws that one. A portal the tier includes or the clone bought is in
+  // the lists above, not here, so it stays.
+  const amlBundled = excluded.has(AML_MODULE_SLUG)
+    ? []
+    : resolution.amlBundled.filter((s) => !excluded.has(s));
+  const bundleWithdrawn = resolution.amlBundled.filter((s) => !amlBundled.includes(s));
 
   // Library module → the priced modules mapping to it, on each side.
   const mappedBy = (slugs: readonly string[]): Map<string, string[]> => {
@@ -860,8 +926,8 @@ export function applyContractExclusions(
     }
     return out;
   };
-  const withheld = mappedBy(contractExcluded);
-  const stillNeeded = mappedBy([...includedModules, ...addonModules]);
+  const withheld = mappedBy([...contractExcluded, ...bundleWithdrawn]);
+  const stillNeeded = mappedBy([...includedModules, ...addonModules, ...amlBundled]);
 
   const sharedModulesKept: ContractExclusionOutcome["sharedModulesKept"] = [];
   const moduleSlugs = resolution.moduleSlugs.filter((lib) => {
@@ -887,6 +953,7 @@ export function applyContractExclusions(
     entitlementKeys: resolution.entitlementKeys.filter((k) => !withheldKeys.has(k)),
     includedModules,
     addonModules,
+    amlBundled,
     contractExcluded,
     unknownExclusions,
     sharedModulesKept,

@@ -361,13 +361,13 @@ Past 30 seats it becomes an Enterprise conversation. The right plan is worked ou
 
 ### What does each plan include?
 
-- Launch includes Overview, Calendar, Reports, Generated Reports (Investment), Quantitative Reports, Cash Flow Analysis (10 Year Cash Flow), Report Requests, Clients, Client Tracker, Reminders, Checklist, Game Plan, User Guide, Billing & Usage, Settings, User Management, Branding, Templates, Auto Report Generation, Error Logs, Activity Logs, Client Portal and AML/CTF Compliance.
+- Launch includes Overview, Calendar, Reports, Generated Reports (Investment), Quantitative Reports, Cash Flow Analysis (10 Year Cash Flow), Report Requests, Clients, Client Tracker, Reminders, Checklist, Game Plan, User Guide, Billing & Usage, Settings, User Management, Branding, Templates, Auto Report Generation, Error Logs, Activity Logs, Client Portal and AML/CTF Compliance (Finance Portal, Solicitor Portal, Accountant Portal and Builder / Developer Portal).
 - Growth includes everything in Launch, plus Generated Reports (Comparisons), Cash Flow Analysis (Comparisons), Clients (Deals) and Deal Pipeline.
 - Scale includes everything in Growth, plus Market Updates, Commercial / Industrial, Opportunity Marketplace, Clients (Send To Finance, Portfolio Analysis, Send Portfolio To Client, Send Agreement, Conversations, Appointments, Finance Messages, Borrowing Capacity and AI), Agreements (Agreement Templates, Partner Referrals, Loan Writer Undertakings and Partner Compliance), Marketing, Model Hub, Finance Portal and API Usage.
 
 ### Why does each plan have two prices?
 
-The gap between a tier's two prices is always A$150 a month, which is what the AML/CTF Compliance module costs. It is described as a A$400 reference component less a A$250 Core Platform discount that applies only while AML/CTF is selected - but A$150 is the only amount ever charged, whether it is added to a plan or dropped from one. Never quote the A$400 figure as a price.
+The gap between a tier's two prices is always A$150 a month, which is what the AML/CTF Compliance module costs. It is described as a A$400 reference component less a A$250 Core Platform discount that applies only while AML/CTF is selected - but A$150 is the only amount ever charged, whether it is added to a plan or dropped from one. Never quote the A$400 figure as a price. A plan that includes AML/CTF Compliance also includes every partner portal at no extra cost: the Finance Portal, Solicitor Portal, Accountant Portal and Builder / Developer Portal. A plan without it pays for a portal as the module list below prices it.
 
 ### What if we need more than 30 seats?
 
@@ -417,12 +417,12 @@ Each module is its own monthly subscription in Australian dollars including GST,
 ### Administration
 
 - Model Hub - A$249 a month. Included at no extra cost on Scale.
-- Finance Portal - A$349 a month. Included at no extra cost on Scale. Also unlocks client Send To Finance and Finance Messages.
+- Finance Portal - A$349 a month. Included at no extra cost on Scale, and with any plan that includes AML/CTF Compliance. Also unlocks client Send To Finance and Finance Messages.
 - Integrations - A$199 a month. Subject to the client integrating their own APIs.
 - API Usage - A$199 a month. Included at no extra cost on Scale.
-- Solicitor Portal - A$299 a month. Partner hand-off portal. A portal fee buys that portal's own scope and never grants AML/CTF.
-- Accountant Portal - an add-on whose price has not been set yet; the team enables it on request. Partner hand-off portal for the client's accountant. A portal fee buys that portal's own scope and never grants AML/CTF.
-- Builder / Developer Portal - A$699 a month. Sold directly by the team rather than through a checkout. Sold separately, not as a tier add-on. A portal fee buys that portal's own scope and never grants AML/CTF.
+- Solicitor Portal - A$299 a month. Included at no extra cost with any plan that includes AML/CTF Compliance. Partner hand-off portal. A portal fee buys that portal's own scope and never grants AML/CTF.
+- Accountant Portal - an add-on whose price has not been set yet; the team enables it on request. Included at no extra cost with any plan that includes AML/CTF Compliance. Partner hand-off portal for the client's accountant. A portal fee buys that portal's own scope and never grants AML/CTF.
+- Builder / Developer Portal - A$699 a month. Included at no extra cost with any plan that includes AML/CTF Compliance. Sold directly by the team rather than through a checkout. Sold separately, not as a tier add-on. A portal fee buys that portal's own scope and never grants AML/CTF.
 
 ### AI Assistant
 

@@ -142,18 +142,38 @@ describe("moduleProductShape", () => {
     expect(moduleProductShape(accountant)).toEqual({
       name: "Aurixa Accountant Portal",
       description:
-        "Partner hand-off portal for the client's accountant. A portal fee buys that portal's own scope and never grants AML/CTF. Available on every tier as an add-on.",
+        "Partner hand-off portal for the client's accountant. A portal fee buys that portal's own scope and never grants AML/CTF. Included with any plan that includes AML/CTF Compliance; otherwise available on every tier as an add-on.",
       metadata: {
         aurixa_module: "accountant-portal",
         module_category: "Administration",
         included_in: "",
         pricing_status: "undecided",
+        included_with_aml: "true",
       },
     });
     // Priced, the same module is shaped with the marker emptied, which is how
     // Stripe is told to drop it.
     const priced = { ...accountant, priceUndecided: false };
     expect(moduleProductShape(priced).metadata.pricing_status).toBe("");
+  });
+
+  it("says on each portal's invoice line that AML/CTF brings it, and on AML/CTF's which portals", () => {
+    // The owner's decision of 29 Oct 2026. prod_* objects in Stripe were set to
+    // these words the same day, so the next Apply changes nothing.
+    expect(moduleProductShape(moduleBySlug("finance-portal")!).description).toBe(
+      "Also unlocks client Send To Finance and Finance Messages. Included with Scale, and with any plan that includes AML/CTF Compliance.",
+    );
+    expect(moduleProductShape(moduleBySlug("solicitor-portal")!).description).toBe(
+      "Partner hand-off portal. A portal fee buys that portal's own scope and never grants AML/CTF. Included with any plan that includes AML/CTF Compliance; otherwise available on every tier as an add-on.",
+    );
+    expect(moduleProductShape(moduleBySlug("aml-ctf")!).description).toBe(
+      "Includes a $400 AML reference component less a $250 conditional Core Platform bundle discount. Already contained in every tier's headline price — needed only alongside a tier bought without it. Brings the Finance Portal, Solicitor Portal, Accountant Portal and Builder / Developer Portal at no extra cost.",
+    );
+    expect(moduleProductShape(moduleBySlug("finance-portal")!).metadata.included_with_aml).toBe(
+      "true",
+    );
+    // Empty, not absent, on a module outside the bundle, so it can be cleared.
+    expect(moduleProductShape(moduleBySlug("marketing")!).metadata.included_with_aml).toBe("");
   });
 
   it("never plans to sell the Accountant Portal while its price is undecided", () => {

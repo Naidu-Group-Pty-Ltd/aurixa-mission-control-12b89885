@@ -1355,4 +1355,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20261029190000",
     assertions: [{ kind: "rows", table: "addon_modules", atLeast: 33 }],
   },
+  {
+    migration: "20261030090000_aml_brings_partner_portals.sql",
+    version: "20261030090000",
+    assertions: [{ kind: "rows", table: "addon_modules", atLeast: 33 }],
+  },
 ];

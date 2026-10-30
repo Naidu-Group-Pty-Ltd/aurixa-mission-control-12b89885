@@ -8,7 +8,7 @@
  * the exclusions it last knew. `addons` never carries an excluded slug.
  */
 import { describe, expect, it } from "vitest";
-import { MODULES, isModulePurchasable } from "@/lib/pricing/aurixa-catalog";
+import { AML_BUNDLED_MODULES, MODULES, isModulePurchasable } from "@/lib/pricing/aurixa-catalog";
 import { balanceEntitlements } from "./balanceEntitlements.pure";
 
 const base = {
@@ -20,6 +20,13 @@ const base = {
 };
 
 const priceList = MODULES.map((m) => m.slug).sort();
+
+/**
+ * AML/CTF and every partner portal it brings (the owner's decision of 29 Oct
+ * 2026): what a tenant on a tier's headline SKU holds before buying anything.
+ */
+const withAml = ["aml-ctf", ...AML_BUNDLED_MODULES.map((m) => m.slug)].sort();
+const plus = (...slugs: string[]) => [...new Set([...withAml, ...slugs])].sort();
 
 describe("excluded", () => {
   it("is present, sorted and de-duplicated, when the clone's row was read", () => {
@@ -34,19 +41,26 @@ describe("excluded", () => {
     // The route passes [] for a platform-level key: no clone, no agreement.
     const r = balanceEntitlements({ ...base, contractExcluded: [] });
     expect(r).toHaveProperty("excluded", []);
-    expect(JSON.parse(JSON.stringify(r))).toEqual({ addons: ["aml-ctf"], excluded: [] });
+    expect(JSON.parse(JSON.stringify(r))).toEqual({ addons: withAml, excluded: [] });
   });
 
   it("is ABSENT when the read failed, never sent as an empty list", () => {
     const r = balanceEntitlements({ ...base, contractExcluded: null });
     expect("excluded" in r).toBe(false);
-    expect(JSON.parse(JSON.stringify(r))).toEqual({ addons: ["aml-ctf"] });
+    expect(JSON.parse(JSON.stringify(r))).toEqual({ addons: withAml });
   });
 });
 
 describe("addons", () => {
-  it("adds AML/CTF for a tenant on a known tier, as before", () => {
-    expect(balanceEntitlements(base).addons).toEqual(["aml-ctf"]);
+  it("adds AML/CTF, and every partner portal it brings, for a tenant on a known tier", () => {
+    expect(balanceEntitlements(base).addons).toEqual(withAml);
+    expect(withAml).toEqual([
+      "accountant-portal",
+      "aml-ctf",
+      "builder-developer-portal",
+      "finance-portal",
+      "solicitor-portal",
+    ]);
   });
 
   it("never adds AML/CTF when the contract excludes it", () => {
@@ -70,7 +84,7 @@ describe("addons", () => {
       addonSlugs: ["market-updates", "call-logs"],
       contractExcluded: ["market-updates"],
     });
-    expect(r.addons).toEqual(["aml-ctf", "call-logs"]);
+    expect(r.addons).toEqual(plus("call-logs"));
     expect(r.addons).not.toContain("market-updates");
   });
 
@@ -81,7 +95,7 @@ describe("addons", () => {
       addonSlugs: ["call-logs"],
       contractExcluded: null,
     });
-    expect(r.addons).toEqual(["aml-ctf", "call-logs"]);
+    expect(r.addons).toEqual(plus("call-logs"));
   });
 
   it("adds no AML/CTF for a without-AML SKU or for a plan that is not a tier", () => {
@@ -95,7 +109,39 @@ describe("addons", () => {
       ...base,
       addonSlugs: ["integrations", "aml-ctf", "call-logs", "integrations"],
     });
-    expect(r.addons).toEqual(["aml-ctf", "call-logs", "integrations"]);
+    expect(r.addons).toEqual(plus("call-logs", "integrations"));
+  });
+});
+
+describe("the partner portals AML/CTF brings (29 Oct 2026)", () => {
+  it("come with AML/CTF however it is held: by the tier's SKU, or bought", () => {
+    expect(balanceEntitlements(base).addons).toEqual(withAml);
+    // A without-AML SKU that bought AML/CTF back, and a plan that is no tier.
+    expect(
+      balanceEntitlements({ ...base, amlExcluded: true, addonSlugs: ["aml-ctf"] }).addons,
+    ).toEqual(withAml);
+    expect(
+      balanceEntitlements({ ...base, planSlug: null, addonSlugs: ["aml-ctf"] }).addons,
+    ).toEqual(withAml);
+  });
+
+  it("follow today's pricing without AML/CTF: only what was bought", () => {
+    const r = balanceEntitlements({ ...base, amlExcluded: true, addonSlugs: ["solicitor-portal"] });
+    expect(r.addons).toEqual(["solicitor-portal"]);
+  });
+
+  it("lose the one portal a contract excludes, and keep the rest", () => {
+    const r = balanceEntitlements({ ...base, contractExcluded: ["solicitor-portal"] });
+    expect(r.addons).toEqual(withAml.filter((s) => s !== "solicitor-portal"));
+  });
+
+  it("all go with an excluded AML/CTF, but a portal the tenant bought stays", () => {
+    const r = balanceEntitlements({
+      ...base,
+      addonSlugs: ["finance-portal"],
+      contractExcluded: ["aml-ctf"],
+    });
+    expect(r.addons).toEqual(["finance-portal"]);
   });
 });
 
@@ -152,6 +198,6 @@ describe("a billing-exempt tenant (D17)", () => {
 
   it("leaves a tenant that is not exempt with what it bought", () => {
     const r = balanceEntitlements({ ...base, planSlug: "scale", addonSlugs: ["call-logs"] });
-    expect(r.addons).toEqual(["aml-ctf", "call-logs"]);
+    expect(r.addons).toEqual(plus("call-logs"));
   });
 });

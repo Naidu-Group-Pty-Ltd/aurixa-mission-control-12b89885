@@ -18,6 +18,7 @@
 // "the listed figure is historical and is not a current price", and a
 // historical figure spoken aloud is a quote.
 import {
+  AML_BUNDLED_MODULES,
   AML_CORE_BUNDLE_DISCOUNT_CENTS,
   AML_NET_UPLIFT_CENTS,
   AML_REFERENCE_COMPONENT_CENTS,
@@ -70,7 +71,10 @@ export function amlSentence() {
     `${money(AML_CORE_BUNDLE_DISCOUNT_CENTS)} Core Platform discount that applies only while ` +
     `AML/CTF is selected — but ${money(AML_NET_UPLIFT_CENTS)} is the only amount ever charged, ` +
     `whether it is added to a plan or dropped from one. Never quote the ` +
-    `${money(AML_REFERENCE_COMPONENT_CENTS)} figure as a price.`
+    `${money(AML_REFERENCE_COMPONENT_CENTS)} figure as a price. ` +
+    `A plan that includes AML/CTF Compliance also includes every partner portal at no extra ` +
+    `cost: the ${listOf(AML_BUNDLED_MODULES.map((m) => m.name))}. A plan without it pays ` +
+    `for a portal as the module list below prices it.`
   );
 }
 
@@ -153,14 +157,18 @@ function moduleBullet(m) {
   if (m.comingSoon) return `${m.name} — not yet available for purchase, and not priced.`;
   // Nor is a module whose price is undecided: its figure is the placeholder a
   // Stripe price had to be created at, and spoken aloud it is a quote.
+  // Where it comes at no extra cost: the tiers that include it, and, for a
+  // partner portal, any plan that includes AML/CTF (29 Oct 2026).
+  const where = [
+    m.includedIn.length ? `on ${listOf(m.includedIn.map(tierName))}` : "",
+    m.includedWithAml ? "with any plan that includes AML/CTF Compliance" : "",
+  ].filter(Boolean);
+  const included = where.length ? ` Included at no extra cost ${where.join(", and ")}.` : "";
   if (m.priceUndecided) {
     const note = m.note ? ` ${m.note}` : "";
-    return `${m.name} — an add-on whose price has not been set yet; the team enables it on request.${note}`;
+    return `${m.name} — an add-on whose price has not been set yet; the team enables it on request.${included}${note}`;
   }
   const price = `${money(m.monthlyInclGstCents)} a month`;
-  const included = m.includedIn.length
-    ? ` Included at no extra cost on ${listOf(m.includedIn.map(tierName))}.`
-    : "";
   const direct = m.directSale ? " Sold directly by the team rather than through a checkout." : "";
   // The AML row's note restates the reference component in raw dollars, and
   // amlSentence() already explains that pairing properly. Repeating it here

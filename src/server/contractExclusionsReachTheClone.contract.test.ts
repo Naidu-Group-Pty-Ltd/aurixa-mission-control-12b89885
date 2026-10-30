@@ -24,6 +24,8 @@ const wizard = read("src/server/clone-provisioning.functions.ts");
 const agreement = read("src/server/agreement-provisioning.server.ts");
 const reconcile = read("src/server/entitlement-modules.server.ts");
 const balance = read("src/routes/api.public.tokens.balance.ts");
+const held = read("src/server/heldEntitlements.server.ts");
+const handoff = read("src/routes/api.public.storefront.handoff.ts");
 
 describe("provisionCloneCore", () => {
   const insertAt = core.indexOf('.from("clones")\n    .insert({');
@@ -98,19 +100,21 @@ describe("the reconcile", () => {
 
 describe("the balance response", () => {
   it("reads the clone's exclusions", () => {
-    expect(balance).toMatch(
+    expect(held).toMatch(
       /\.from\("clones"\)\s*\.select\("contract_excluded_module_slugs"\)\s*\.eq\("id", cloneId\)/,
     );
   });
 
   it("answers a key with no clone with no exclusions, not with a read", () => {
-    expect(balance).toMatch(
-      /const contractExcluded = addonCloneId \? await readContractExclusions\(addonCloneId\) : \[\];/,
+    expect(held).toMatch(
+      /cloneId\s*\?\s*await Promise\.all\(\[\s*readPurchasedAddonSlugs\(cloneId, logTag\),\s*readContractExclusions\(cloneId, logTag\),\s*\]\)\s*:\s*\[\[\] as string\[\], \[\] as string\[\]\];/,
     );
+    expect(balance).toMatch(/cloneId: key\.clone_id,/);
   });
 
   it("sends the helper's entitlements, never a hand-built list", () => {
-    expect(balance).toMatch(/const entitlements = balanceEntitlements\(\{/);
+    expect(held).toMatch(/return balanceEntitlements\(\{/);
+    expect(balance).toMatch(/const entitlements = await heldEntitlements\(\{/);
     expect(balance).toMatch(/\n\s*entitlements,\n/);
     expect(balance).not.toMatch(/entitlements: \{/);
   });
@@ -118,8 +122,26 @@ describe("the balance response", () => {
   it("hands the helper the tenant's billing exemption, from the tenant it read (D17)", () => {
     const select = balance.slice(balance.indexOf('.from("tenants")'));
     expect(select.slice(0, 400)).toMatch(/billing_exempt/);
-    const call = balance.slice(balance.indexOf("balanceEntitlements({"));
-    expect(call.slice(0, 400)).toMatch(/billingExempt: tenantRow\?\.billing_exempt === true,/);
+    const call = balance.slice(balance.indexOf("heldEntitlements({"));
+    expect(call.slice(0, 200)).toMatch(/tenant: ten\.data as HeldEntitlementsTenant,/);
+    const derive = held.slice(held.indexOf("balanceEntitlements({"));
+    expect(derive.slice(0, 400)).toMatch(/billingExempt: tenant\?\.billing_exempt === true,/);
+  });
+});
+
+describe("the storefront handoff", () => {
+  // The storefront gates its documentation and its add-on buttons on this
+  // answer, so it is the balance response's answer, not the raw purchases.
+  it("derives what the workspace holds through the balance response's own helper", () => {
+    expect(handoff).toMatch(/await heldEntitlements\(\{/);
+    expect(handoff).toMatch(/cloneId: handoff\.clone_id,/);
+    expect(handoff).toMatch(/addon_slugs: entitlements\.addons,/);
+    expect(handoff).not.toMatch(/clone_addon_purchases/);
+  });
+
+  it("reads the tenant's billing exemption and AML SKU, as the balance response does", () => {
+    const select = handoff.slice(handoff.indexOf('.from("tenants")'));
+    expect(select.slice(0, 300)).toMatch(/billing_exempt, metadata/);
   });
 });
 

@@ -48,6 +48,24 @@ measured against the live Mission Control database on 2026-08-28.
 > quotes or charges, and until it is priced a workspace has it by an operator's
 > grant only (`priceUndecided`, `isModuleGrantable`).
 
+> **29 Oct 2026: AML/CTF brings every partner portal.**
+>
+> The owner's decision: a workspace on any plan that includes AML/CTF
+> Compliance has the Finance, Solicitor, Accountant and Builder / Developer
+> portals at no extra cost, the four the Compliance Passport is shared
+> through. One without AML/CTF keeps the price list as it stands: the Finance
+> Portal with Scale or as an add-on, the Solicitor and Accountant portals as
+> add-ons, the Builder / Developer Portal sold directly. No price and no tier
+> changed (`includedWithAml`, `AML_BUNDLED_MODULES`).
+>
+> AML/CTF is held where the tier's headline SKU carries it or it was bought,
+> and no contract excludes it. There, the balance response names the four
+> portals in `entitlements.addons` (`balanceEntitlements`), and the reconcile
+> installs their library modules (`resolveEntitledModules`, `amlBundled`). A
+> contract can exclude one portal; excluding `aml-ctf` withdraws all four,
+> except one the tier includes or the clone bought. See
+> [AML/CTF and the partner portals](#amlctf-and-the-partner-portals).
+
 > **D18: a contract's exclusions are price-list slugs, and they reach the
 > clone.**
 >
@@ -293,6 +311,37 @@ entitlements: { addons: string[], excluded?: string[] }
 
 A failed read never fails the balance call. The derivation is
 `balanceEntitlements.pure.ts`.
+
+### AML/CTF and the partner portals
+
+What AML/CTF brings (the owner's decision of 29 Oct 2026) travels with it
+through every step above:
+
+| step | where | what happens |
+| --- | --- | --- |
+| the balance response | `balanceEntitlements` | Where `aml-ctf` ends up in `addons`, so does each portal, unless the contract excludes that portal. |
+| the reconcile | `resolveEntitledModules`, `applyContractExclusions` | The portals a plan neither includes nor bought are `amlBundled`, and their library modules install. Excluding `aml-ctf` empties `amlBundled`; excluding a portal removes that one. |
+| exclusions offered | `excludableModules` | On a tier, the four portals are offered beside AML/CTF. |
+| provisioning picks | `libraryModulesExcludedBy` | An excluded `aml-ctf` also drops the portals' library modules; the reconcile reinstalls any one the plan still holds, such as Scale's Finance Portal. |
+| the storefront | `/api/public/storefront/handoff` | `addon_slugs` is the balance response's `addons`, through the same helper (`heldEntitlements.server.ts`), and `excluded_slugs` its `excluded`, so the site gates its documentation and add-on buttons as the workspace's own app is gated. |
+| the catalogue | `presentAddonRow` | Each portal's row carries `metadata.included_with_aml`, from the catalogue's flag. |
+| Stripe | `moduleProductShape` | Each portal's product says where it is included, and carries `metadata.included_with_aml`. |
+
+**A subscription offer's AML choice decides it.** An offer taken With AML
+cannot sell a portal as a line (`purchasableItems`, the composer's gap), and
+its order form names the portals in its AML scope. An offer taken Without AML
+provisions neither AML/CTF nor the portals only when `aml-ctf` is excluded, so
+`configureAgreementProvisioning` refuses exclusions that disagree with the
+offer (`amlExclusionConflict`), and saving an offer whose AML choice no longer
+matches the armed exclusions disarms provisioning. It used to rest on an
+operator ticking the exclusion.
+
+Two things stay open. The Builder / Developer Portal's own fee is charged to
+builders under the Builder Partner Agreement (`builderPortalPayment.pure.ts`);
+whether a builder admitted by a workspace with AML/CTF still pays it is a
+separate decision, and nothing here waives it. And Schedule A3 in the three
+subscription templates still prints each portal's reference fee; the order
+form's AML scope is what states the inclusion until the templates are revised.
 
 ## Guardrails inventory (where each lives)
 

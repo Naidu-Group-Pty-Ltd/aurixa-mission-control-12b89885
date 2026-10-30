@@ -21,6 +21,12 @@
 // Agreements (Scale) were added on 29 Oct 2026, each where the prime already
 // opens it, so placing those modules on a tier states what a workspace on it
 // has rather than changing it.
+//
+// AML/CTF Compliance lists the four partner portals it brings, the owner's
+// decision of 29 Oct 2026 (`AML_BUNDLED_MODULES`), so a card shows them with
+// the module they come with and the without-AML price leaves them out with it.
+// Display only: `mapTierBaseline` reads an item's name, never its subs, and
+// what a clone installs for the portals is `resolveEntitledModules`'s.
 
 export type FeatureItem = { name: string; subs?: string[] };
 export type FeatureGroup = { heading: string; items: FeatureItem[] };
@@ -100,7 +106,17 @@ export const TIER_FEATURES: Record<string, TierFeatures> = {
       },
       {
         heading: "AML / CTF Compliance",
-        items: [{ name: "AML/CTF Compliance" }],
+        items: [
+          {
+            name: "AML/CTF Compliance",
+            subs: [
+              "Finance Portal",
+              "Solicitor Portal",
+              "Accountant Portal",
+              "Builder / Developer Portal",
+            ],
+          },
+        ],
       },
     ],
   },

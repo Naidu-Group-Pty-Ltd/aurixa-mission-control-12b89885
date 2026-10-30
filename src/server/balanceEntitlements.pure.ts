@@ -19,6 +19,12 @@
  *    "no exclusions".
  *  - `addons` never contains an excluded slug, and the AML derivation never
  *    adds `aml-ctf` for a clone whose contract excludes it.
+ *  - Where `aml-ctf` is held, `addons` also names every partner portal it
+ *    brings (`AML_BUNDLED_MODULES`, the owner's decision of 29 Oct 2026): the
+ *    Finance, Solicitor, Accountant and Builder / Developer portals, each
+ *    unless the contract excludes it. The prime gates each portal on its slug,
+ *    so this is how a tenant with AML/CTF has them, and how a tenant without it
+ *    keeps today's pricing.
  *  - A billing-exempt tenant's `addons` is every module on the price list,
  *    less its exclusions (D17). The prime's gate already passes an exempt
  *    workspace on a live answer, but its last-known-good cache records only
@@ -33,6 +39,7 @@
  * Pure, so every case above is asserted without a database.
  */
 import {
+  AML_BUNDLED_MODULES,
   AML_MODULE_SLUG,
   MODULES,
   TIER_INCLUDES_AML,
@@ -81,6 +88,12 @@ export function balanceEntitlements(input: {
     !withheld.has(AML_MODULE_SLUG)
   ) {
     addons.add(AML_MODULE_SLUG);
+  }
+  // AML/CTF, held by the SKU or bought, brings every partner portal. Asked
+  // after the derivation above, so a contract that excludes AML/CTF withdraws
+  // the portals with it, and the filter below withdraws any one it excludes.
+  if (addons.has(AML_MODULE_SLUG) && !withheld.has(AML_MODULE_SLUG)) {
+    for (const m of AML_BUNDLED_MODULES) addons.add(m.slug);
   }
 
   const allowed = sortedUniqueSlugs([...addons].filter((s) => !withheld.has(s)));

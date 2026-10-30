@@ -49,6 +49,7 @@ import {
   catalogTier,
   EXTRA_SEAT_KEY,
   isIncludedInTier,
+  isIncludedWithAml,
   SUBSCRIPTION_ANCHORS,
   SUBSCRIPTION_TEMPLATES,
   type SubscriptionTierSlug,
@@ -576,6 +577,13 @@ export function composeSubscriptionOffer(
       );
       return;
     }
+    if (withAml && isIncludedWithAml(item.key)) {
+      gap(
+        where,
+        `${item.label} comes with AML/CTF, which this offer includes — an included item has no separate access fee.`,
+      );
+      return;
+    }
     if (seen.has(item.key)) {
       gap(where, `${item.label} is listed twice — combine the lines and set a quantity.`);
       return;
@@ -892,7 +900,7 @@ export function composeSubscriptionOffer(
     "seats.summary": `${catalog.seatMax} included + ${offer.extraSeats} purchased = ${catalog.seatMax + offer.extraSeats} named internal users; approved capacity ${catalog.seatMax + offer.extraSeats}`,
     "scope.selected_addons": selectedAddons,
     "scope.aml_summary": withAml
-      ? `With AML — compliance workflow, case and evidence records, permitted verification and screening connections, monitoring and Compliance Passport within Schedule A2. Checks and monitoring: ${u.amlAllowance.trim()}`
+      ? `With AML — compliance workflow, case and evidence records, permitted verification and screening connections, monitoring and Compliance Passport within Schedule A2, and the Customer's access to the Finance, Solicitor, Accountant and Builder / Developer portals with no separate access fee. Checks and monitoring: ${u.amlAllowance.trim()}`
       : `Without AML — the AML capabilities in Schedule A2 are not supplied; all other ${tierName} entitlements remain`,
     "credits.cycle_display": dates
       ? `${formatCount(template.includedTokensPerCycle)} Subscription Tokens granted at paid activation for the first Billing Cycle (${long(dates.activation)} to ${long(dates.firstCycleEnd)}); the next grant is on ${long(dates.nextRenewal)}, then each monthly cycle — including when the base is prepaid`
