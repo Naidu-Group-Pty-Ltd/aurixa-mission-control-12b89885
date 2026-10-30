@@ -1375,4 +1375,12 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "rpc", fn: "close_api_usage_period" },
     ],
   },
+  {
+    migration: "20261030100000_website_briefing_images.sql",
+    version: "20261030100000",
+    assertions: [
+      { kind: "column", table: "website_briefings", column: "media_thumbnail" },
+      { kind: "column", table: "website_briefing_uploads", column: "kind" },
+    ],
+  },
 ];

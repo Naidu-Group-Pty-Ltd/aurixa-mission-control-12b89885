@@ -42,13 +42,17 @@ vi.mock("@tanstack/react-start", () => ({ useServerFn: () => async () => undefin
 vi.mock("@/server/website-briefings.functions", () => {
   const fn = async () => undefined;
   return {
+    createBriefingPicturesUploadFn: fn,
     createBriefingUploadFn: fn,
     createWebsiteBriefingFn: fn,
     deleteDraftWebsiteBriefingFn: fn,
+    finalizeBriefingPicturesUploadFn: fn,
     finalizeBriefingUploadFn: fn,
     getWebsiteBriefingFn: fn,
     listWebsiteBriefingsFn: fn,
+    reorderWebsiteBriefingsFn: fn,
     requestWebsiteRebuildFn: fn,
+    resetBriefingPictureFn: fn,
     saveWebsiteBriefingFn: fn,
     setWebsiteBriefingStatusFn: fn,
   };
@@ -87,6 +91,7 @@ const LIVE = {
   media_poster: "videos/borrowing-capacity/v1/poster.jpg",
   media_card: "videos/borrowing-capacity/v1/card-2.jpg",
   media_captions: null,
+  media_thumbnail: "videos/borrowing-capacity/v2/thumbnail.jpg",
   duration_seconds: 147,
   published_on: "2026-10-28",
   sort_order: 30,
@@ -107,6 +112,7 @@ const DRAFT = {
   media_mp4: null,
   media_poster: null,
   media_card: null,
+  media_thumbnail: null,
   duration_seconds: null,
   published_on: null,
 };
@@ -123,6 +129,7 @@ describe("Website → Videos", () => {
       error: null,
       mediaOrigin: ORIGIN,
       rebuild: { configured: false, last: null },
+      codes: { "borrowing-capacity": "BRF-03" },
     });
     const html = render(ListRoute);
     expect(html).toContain("Website videos");
@@ -130,8 +137,27 @@ describe("Website → Videos", () => {
     expect(html).toContain("live on the website");
     expect(html).toContain("/watch/client-reporting");
     expect(html).toContain("no media yet");
-    expect(html).toContain(`${ORIGIN}/videos/borrowing-capacity/v1/poster.jpg`);
+    // A designed thumbnail stands for the video in the list, wearing its code on the website.
+    expect(html).toContain(`${ORIGIN}/videos/borrowing-capacity/v2/thumbnail.jpg`);
+    expect(html).toContain("BRF-03");
     expect(html).toContain("WEBSITE_DEPLOY_HOOK_URL");
+    // Filters with counts, and the order controls.
+    expect(html).toMatch(/Drafts<span[^>]*>1</);
+    expect(html).toContain('aria-label="Move Borrowing Capacity, in Moments up"');
+    expect(html).toMatch(/things? before it can be published/);
+  });
+
+  it("shows a listing with only a poster by its poster", () => {
+    h.queries.set(JSON.stringify(["website-briefings"]), {
+      rows: [{ ...LIVE, media_thumbnail: null }],
+      error: null,
+      mediaOrigin: ORIGIN,
+      rebuild: { configured: false, last: null },
+      codes: {},
+    });
+    const html = render(ListRoute);
+    expect(html).toContain(`${ORIGIN}/videos/borrowing-capacity/v1/poster.jpg`);
+    expect(html).not.toContain("thumbnail.jpg");
   });
 
   it("opens a live video with its copy, chapters, transcript and media", () => {
@@ -142,6 +168,7 @@ describe("Website → Videos", () => {
       premiereProblems: [],
       mediaOrigin: ORIGIN,
       rebuildConfigured: true,
+      libraryCode: "BRF-03",
     });
     const html = render(EditorRoute);
     expect(html).toContain("Borrowing Capacity, in Moments");
@@ -152,6 +179,23 @@ describe("Website → Videos", () => {
     expect(html).toContain("card-2.jpg");
     expect(html).toContain("Return to draft");
     expect(html).not.toContain(">Publish<");
+    // The video plays in the editor, from its progressive fallback.
+    expect(html).toMatch(
+      /<video[^>]+src="https:\/\/bucket\.test\/public\/videos\/borrowing-capacity\/v1\/fallback-720p\.mp4"/,
+    );
+    // Its pictures: each slot in its shape, where it came from, and the website's previews.
+    expect(html).toContain("Pictures");
+    expect(html).toContain("16:9 · 1920×1080 JPEG");
+    expect(html).toContain("9:16 · 1080×1920 JPEG");
+    expect(html).toContain("1.91:1 · 1200×630 JPEG");
+    expect(html).toContain("uploaded on its own");
+    expect(html).toContain("from the video");
+    expect(html).toContain("Library card");
+    expect(html).toContain("BRF-03");
+    expect(html).toContain("2:27");
+    expect(html).toContain("aurixasystems.com.au");
+    // The shape is measured from the video once there is one.
+    expect(html).toContain("Measured from the video");
   });
 
   it("shows a draft what stands between it and Publish", () => {
@@ -169,5 +213,7 @@ describe("Website → Videos", () => {
     expect(html).toMatch(/summary is 10 characters/);
     expect(html).toContain("Delete draft");
     expect(html).toContain("No video yet.");
+    expect(html).toContain("None: the cards show the poster");
+    expect(html).toContain("Not published: the website shows a premiere");
   });
 });

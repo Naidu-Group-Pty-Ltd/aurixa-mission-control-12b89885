@@ -7,7 +7,9 @@
  * bucket answers for every file, that publishing stamps a date once, and that
  * a refused act writes nothing. The fake evaluates its filters against stored
  * rows rather than recording them, so a write that lands on the wrong row
- * fails here the way it would against Postgres.
+ * fails here the way it would against Postgres. A column a migration has not
+ * added yet (`db.missing`) is absent from what is read, and a write naming it
+ * is answered PGRST204, as PostgREST answers it.
  */
 import crypto from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -16,7 +18,9 @@ type Row = Record<string, unknown>;
 
 const db = vi.hoisted(() => ({
   tables: {} as Record<string, Row[]>,
-  audit: [] as Array<{ action: string }>,
+  audit: [] as Array<{ action: string; metadata?: Record<string, unknown> }>,
+  /** "table.column" for each column whose migration has not applied. */
+  missing: new Set<string>(),
 }));
 
 vi.mock("@/integrations/supabase/client.server", () => {
@@ -29,6 +33,17 @@ vi.mock("@/integrations/supabase/client.server", () => {
     const run = (kind: "many" | "maybe" | "single") => {
       const rows = (db.tables[table] ??= []);
       let result: Row[];
+      const written = mode === "insert" ? inserts : mode === "update" ? [patch] : [];
+      const absent = written.flatMap(Object.keys).find((c) => db.missing.has(`${table}.${c}`));
+      if (absent) {
+        return {
+          data: null,
+          error: {
+            code: "PGRST204",
+            message: `Could not find the '${absent}' column of '${table}' in the schema cache`,
+          },
+        };
+      }
       if (mode === "insert") {
         for (const r of inserts) {
           if (
@@ -38,7 +53,16 @@ vi.mock("@/integrations/supabase/client.server", () => {
             return { data: null, error: { code: "23505", message: "duplicate" } };
           }
         }
-        result = inserts.map((r) => ({ id: crypto.randomUUID(), completed_at: null, ...r }));
+        const defaults: Row =
+          table === "website_briefing_uploads" && !db.missing.has(`${table}.kind`)
+            ? { kind: "package" }
+            : {};
+        result = inserts.map((r) => ({
+          id: crypto.randomUUID(),
+          completed_at: null,
+          ...defaults,
+          ...r,
+        }));
         rows.push(...result);
       } else {
         const matched = rows.filter((r) => filters.every((f) => f(r)));
@@ -56,6 +80,9 @@ vi.mock("@/integrations/supabase/client.server", () => {
             : null,
         }));
       }
+      result = result.map((r) =>
+        Object.fromEntries(Object.entries(r).filter(([c]) => !db.missing.has(`${table}.${c}`))),
+      );
       if (kind === "many") return { data: result, error: null };
       if (kind === "single" && result.length !== 1)
         return { data: null, error: { code: "PGRST116", message: "not one row" } };
@@ -110,13 +137,19 @@ vi.mock("./audit.server", () => ({
 }));
 
 const {
+  PICTURES_MIGRATION,
   REBUILD_TIMEOUT_MS,
   buildAnnouncementFrom,
   createUploadGrant,
+  deleteDraftWebsiteBriefing,
+  finalizePicturesUpload,
   finalizeUpload,
   lastWebsiteBuildRead,
   listPublicListings,
+  reorderWebsiteBriefings,
   requestWebsiteRebuild,
+  resetBriefingPicture,
+  saveWebsiteBriefing,
   setWebsiteBriefingStatus,
   verifyUploadGrant,
 } = await import("./website-briefings.server");
@@ -148,6 +181,7 @@ const briefing = (over: Row = {}): Row => ({
   media_poster: null,
   media_card: null,
   media_captions: null,
+  media_thumbnail: null,
   duration_seconds: null,
   published_on: null,
   sort_order: 40,
@@ -174,7 +208,7 @@ v1080/playlist.m3u8
 const VARIANT =
   "#EXTM3U\n#EXTINF:4.000,\nseg-00000.m4s\n#EXTINF:4.000,\nseg-00001.m4s\n#EXTINF:3.4,\nseg-00002.m4s\n";
 
-function bucket(files: Record<string, string>) {
+function bucket(files: Record<string, string | Uint8Array<ArrayBuffer>>) {
   vi.stubGlobal("fetch", async (url: string) => {
     const path = String(url).replace(`${ORIGIN}/`, "");
     return path in files
@@ -186,6 +220,7 @@ function bucket(files: Record<string, string>) {
 beforeEach(() => {
   db.tables = { website_briefings: [briefing()], website_briefing_uploads: [] };
   db.audit = [];
+  db.missing = new Set();
   vi.stubEnv("WEBSITE_MEDIA_ORIGIN", ORIGIN);
   vi.stubEnv("WEBSITE_DEPLOY_HOOK_URL", "");
 });
@@ -496,5 +531,277 @@ describe("the last production build that read the listings", () => {
       read("2026-10-29T05:00:00.000Z", { env: "preview", build: "dpl_p", ok: true, listings: 3 }),
     ];
     expect(await lastWebsiteBuildRead()).toBeNull();
+  });
+});
+
+/** The first bytes of a baseline JPEG of this size, as a browser's encoder writes them. */
+function jpeg(width: number, height: number): Uint8Array<ArrayBuffer> {
+  const app0 = [0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 1, 1, 0, 0, 1, 0, 1, 0, 0];
+  const sof = [0xff, 0xc0, 0x00, 0x11, 8, height >> 8, height & 255, width >> 8, width & 255, 3];
+  return Uint8Array.from([0xff, 0xd8, ...app0, ...sof, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1]);
+}
+
+const LIVE_MEDIA = {
+  status: "published",
+  published_on: "2026-10-28",
+  media_version: "v1",
+  media_hls: "videos/client-reporting/v1/master.m3u8",
+  media_mp4: "videos/client-reporting/v1/fallback-720p.mp4",
+  media_poster: "videos/client-reporting/v1/poster.jpg",
+  media_card: "videos/client-reporting/v1/card.jpg",
+  duration_seconds: 95,
+  orientation: "portrait",
+};
+const at = (version: string, file: string) => `videos/client-reporting/${version}/${file}`;
+
+describe("pictures on their own", () => {
+  async function picturesGrant(paths: string[]) {
+    const grant = await createUploadGrant({
+      briefingId: "b1",
+      paths,
+      actorId: ACTOR,
+      kind: "images",
+    });
+    if (!grant.ok) throw new Error(grant.error);
+    return grant;
+  }
+
+  it("grant the next version folder for pictures alone, and nothing else", async () => {
+    Object.assign(db.tables.website_briefings[0], LIVE_MEDIA);
+    const grant = await picturesGrant(["thumbnail.jpg", "poster.jpg"]);
+    expect(grant.version).toBe("v2");
+    expect(db.tables.website_briefing_uploads[0]).toMatchObject({ kind: "images" });
+    const refused = await createUploadGrant({
+      briefingId: "b1",
+      paths: ["thumbnail.jpg", "master.m3u8"],
+      actorId: ACTOR,
+      kind: "images",
+    });
+    expect(refused.ok).toBe(false);
+    expect(db.tables.website_briefing_uploads).toHaveLength(1);
+  });
+
+  it("point a live listing at the pictures once their sizes check out, and leave the stream", async () => {
+    Object.assign(db.tables.website_briefings[0], LIVE_MEDIA);
+    const grant = await picturesGrant(["thumbnail.jpg", "poster.jpg", "card.jpg"]);
+    bucket({
+      [at("v2", "thumbnail.jpg")]: jpeg(1920, 1080),
+      [at("v2", "poster.jpg")]: jpeg(1080, 1920),
+      [at("v2", "card.jpg")]: jpeg(1200, 630),
+    });
+    const done = await finalizePicturesUpload({ uploadId: grant.uploadId, actorId: ACTOR });
+    expect(done).toMatchObject({
+      ok: true,
+      pictures: ["thumbnail", "poster", "card"],
+      rebuild: { requested: false, reason: "not_configured" },
+    });
+    expect(db.tables.website_briefings[0]).toMatchObject({
+      media_version: "v1",
+      media_hls: at("v1", "master.m3u8"),
+      media_thumbnail: at("v2", "thumbnail.jpg"),
+      media_poster: at("v2", "poster.jpg"),
+      media_card: at("v2", "card.jpg"),
+    });
+    expect(db.tables.website_briefing_uploads[0].completed_at).toBeTruthy();
+    expect(db.audit.find((a) => a.action === "website_briefing.pictures_uploaded")).toMatchObject({
+      metadata: { version: "v2", replaced: { poster: at("v1", "poster.jpg") } },
+    });
+    // The website is served the thumbnail with the stream it already had.
+    const listed = await listPublicListings();
+    expect(listed.ok && listed.listings[0].media).toMatchObject({
+      hls: at("v1", "master.m3u8"),
+      thumbnail: at("v2", "thumbnail.jpg"),
+    });
+  });
+
+  it("change nothing when a picture is the wrong size, is not a JPEG, or did not land", async () => {
+    Object.assign(db.tables.website_briefings[0], LIVE_MEDIA);
+    const grant = await picturesGrant(["thumbnail.jpg", "poster.jpg", "card.jpg"]);
+    bucket({
+      [at("v2", "thumbnail.jpg")]: jpeg(1919, 1080),
+      // A portrait video's poster in the landscape shape would letterbox in the theatre.
+      [at("v2", "poster.jpg")]: jpeg(1920, 1080),
+      [at("v2", "card.jpg")]: "<html>not a picture</html>",
+    });
+    const done = await finalizePicturesUpload({ uploadId: grant.uploadId, actorId: ACTOR });
+    expect(done.ok).toBe(false);
+    if (done.ok) return;
+    expect(done.problems).toEqual([
+      "thumbnail.jpg is 1919×1080; the thumbnail is 1920×1080.",
+      "poster.jpg is 1920×1080; the poster is 1080×1920.",
+      "card.jpg is not a JPEG.",
+    ]);
+    bucket({});
+    const missing = await finalizePicturesUpload({ uploadId: grant.uploadId, actorId: ACTOR });
+    expect(missing.ok || missing.problems?.[0]).toBe("thumbnail.jpg does not answer (HTTP 404).");
+    expect(db.tables.website_briefings[0].media_poster).toBe(at("v1", "poster.jpg"));
+    expect(db.tables.website_briefing_uploads[0].completed_at).toBeNull();
+  });
+
+  it("each kind of upload is finished only by its own act", async () => {
+    const pictures = await picturesGrant(["thumbnail.jpg"]);
+    const video = await createUploadGrant({ briefingId: "b1", paths: PACKAGE, actorId: ACTOR });
+    if (!video.ok) throw new Error("no grant");
+    expect(await finalizeUpload({ uploadId: pictures.uploadId, actorId: ACTOR })).toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/holds pictures/),
+    });
+    expect(
+      await finalizePicturesUpload({ uploadId: video.uploadId, actorId: ACTOR }),
+    ).toMatchObject({ ok: false, error: expect.stringMatching(/video package/) });
+    expect(db.tables.website_briefing_uploads.every((u) => u.completed_at === null)).toBe(true);
+  });
+
+  it("before the migration applies, say so — and the video still uploads", async () => {
+    db.missing = new Set(["website_briefing_uploads.kind", "website_briefings.media_thumbnail"]);
+    const refused = await createUploadGrant({
+      briefingId: "b1",
+      paths: ["thumbnail.jpg"],
+      actorId: ACTOR,
+      kind: "images",
+    });
+    expect(refused).toMatchObject({
+      ok: false,
+      error: expect.stringContaining(PICTURES_MIGRATION),
+    });
+    expect(db.tables.website_briefing_uploads).toHaveLength(0);
+
+    const grant = await createUploadGrant({ briefingId: "b1", paths: PACKAGE, actorId: ACTOR });
+    if (!grant.ok) throw new Error(grant.error);
+    const v1 = (path: string) => at("v1", path);
+    bucket({
+      [v1("master.m3u8")]: MASTER,
+      [v1("v240/playlist.m3u8")]: VARIANT,
+      [v1("v1080/playlist.m3u8")]: VARIANT,
+      [v1("poster.jpg")]: "jpg",
+      [v1("card.jpg")]: "jpg",
+      [v1("fallback-720p.mp4")]: "mp4",
+    });
+    const done = await finalizeUpload({ uploadId: grant.uploadId, actorId: ACTOR });
+    expect(done.ok).toBe(true);
+    expect(db.tables.website_briefings[0]).toMatchObject({ media_version: "v1" });
+  });
+
+  it("a new video keeps the pictures uploaded on their own, and says so", async () => {
+    Object.assign(db.tables.website_briefings[0], LIVE_MEDIA, {
+      media_thumbnail: at("v2", "thumbnail.jpg"),
+      media_poster: at("v2", "poster.jpg"),
+    });
+    db.tables.website_briefing_uploads.push({
+      id: "u-v2",
+      briefing_id: "b1",
+      version: "v2",
+      kind: "images",
+      paths: ["thumbnail.jpg", "poster.jpg"],
+      completed_at: "2026-10-29T00:00:00Z",
+    });
+    const grant = await createUploadGrant({ briefingId: "b1", paths: PACKAGE, actorId: ACTOR });
+    if (!grant.ok) throw new Error(grant.error);
+    expect(grant.version).toBe("v3");
+    const v3 = (path: string) => at("v3", path);
+    bucket({
+      [v3("master.m3u8")]: MASTER,
+      [v3("v240/playlist.m3u8")]: VARIANT,
+      [v3("v1080/playlist.m3u8")]: VARIANT,
+      [v3("poster.jpg")]: "jpg",
+      [v3("card.jpg")]: "jpg",
+      [v3("fallback-720p.mp4")]: "mp4",
+    });
+    const done = await finalizeUpload({ uploadId: grant.uploadId, actorId: ACTOR });
+    expect(done).toMatchObject({ ok: true, kept: ["thumbnail", "poster"] });
+    expect(db.tables.website_briefings[0]).toMatchObject({
+      media_version: "v3",
+      media_hls: v3("master.m3u8"),
+      media_thumbnail: at("v2", "thumbnail.jpg"),
+      media_poster: at("v2", "poster.jpg"),
+      media_card: v3("card.jpg"),
+    });
+  });
+
+  it("remove the thumbnail, or go back to the video's own poster once it answers", async () => {
+    Object.assign(db.tables.website_briefings[0], LIVE_MEDIA, {
+      media_thumbnail: at("v2", "thumbnail.jpg"),
+      media_poster: at("v2", "poster.jpg"),
+    });
+    const removed = await resetBriefingPicture({ id: "b1", picture: "thumbnail", actorId: ACTOR });
+    expect(removed).toMatchObject({ ok: true, path: null });
+    expect(db.tables.website_briefings[0].media_thumbnail).toBeNull();
+
+    // The seeded listings have no grant for their stream: the encoder's own name is used.
+    bucket({});
+    const gone = await resetBriefingPicture({ id: "b1", picture: "poster", actorId: ACTOR });
+    expect(gone).toMatchObject({ ok: false, error: expect.stringMatching(/not in its folder/) });
+    expect(db.tables.website_briefings[0].media_poster).toBe(at("v2", "poster.jpg"));
+
+    bucket({ [at("v1", "poster.jpg")]: "jpg" });
+    const back = await resetBriefingPicture({ id: "b1", picture: "poster", actorId: ACTOR });
+    expect(back).toMatchObject({ ok: true, path: at("v1", "poster.jpg") });
+    expect(db.tables.website_briefings[0].media_poster).toBe(at("v1", "poster.jpg"));
+    expect(db.audit.filter((a) => a.action === "website_briefing.picture_reset")).toHaveLength(2);
+  });
+
+  it("the video's own card is the one its package held, or none", async () => {
+    Object.assign(db.tables.website_briefings[0], LIVE_MEDIA, {
+      media_card: at("v2", "card.jpg"),
+    });
+    db.tables.website_briefing_uploads.push({
+      id: "u-v1",
+      briefing_id: "b1",
+      version: "v1",
+      kind: "package",
+      paths: ["master.m3u8", "poster.jpg"],
+      completed_at: "2026-10-28T00:00:00Z",
+    });
+    const result = await resetBriefingPicture({ id: "b1", picture: "card", actorId: ACTOR });
+    expect(result).toMatchObject({ ok: true, path: null });
+    expect(db.tables.website_briefings[0].media_card).toBeNull();
+  });
+
+  it("a thumbnail alone fixes the slug and keeps a draft from being deleted", async () => {
+    db.tables.website_briefings[0].media_thumbnail = at("v1", "thumbnail.jpg");
+    const saved = await saveWebsiteBriefing({
+      id: "b1",
+      slug: "another-name",
+      copy: {} as never,
+      actorId: ACTOR,
+    });
+    expect(saved).toMatchObject({ ok: false, error: expect.stringMatching(/slug is fixed/) });
+    expect(await deleteDraftWebsiteBriefing({ id: "b1", actorId: ACTOR })).toMatchObject({
+      ok: false,
+    });
+    expect(db.tables.website_briefings).toHaveLength(1);
+  });
+});
+
+describe("the library's order", () => {
+  beforeEach(() => {
+    db.tables.website_briefings = [
+      briefing({ id: "a", slug: "a", ...LIVE_MEDIA, sort_order: 10 }),
+      briefing({ id: "b", slug: "b", status: "draft", sort_order: 20 }),
+      briefing({ id: "c", slug: "c", status: "premiere", sort_order: 30 }),
+    ];
+  });
+  const order = () =>
+    Object.fromEntries(db.tables.website_briefings.map((r) => [r.id, r.sort_order]));
+
+  it("renumbers the listings, and rebuilds when the website's order changed", async () => {
+    const result = await reorderWebsiteBriefings({ order: ["c", "a", "b"], actorId: ACTOR });
+    expect(result).toMatchObject({ ok: true, rebuild: { reason: "not_configured" } });
+    expect(order()).toEqual({ c: 10, a: 20, b: 30 });
+    expect(db.audit.find((a) => a.action === "website_briefing.reordered")).toMatchObject({
+      metadata: { live_before: ["a", "c"], live_after: ["c", "a"] },
+    });
+  });
+
+  it("does not rebuild for a draft moving among live listings it is not shown with", async () => {
+    const result = await reorderWebsiteBriefings({ order: ["b", "a", "c"], actorId: ACTOR });
+    expect(result).toEqual({ ok: true, rebuild: null });
+    expect(order()).toEqual({ b: 10, a: 20, c: 30 });
+  });
+
+  it("refuses an order that has lost or invented a listing, and writes nothing", async () => {
+    const result = await reorderWebsiteBriefings({ order: ["a", "b"], actorId: ACTOR });
+    expect(result.ok).toBe(false);
+    expect(order()).toEqual({ a: 10, b: 20, c: 30 });
   });
 });
