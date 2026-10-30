@@ -1357,4 +1357,14 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "none", reason: "updates two prime_secret_forwards rows, creates no object" },
     ],
   },
+  {
+    migration: "20261030080000_billing_functions_service_role_only.sql",
+    version: "20261030080000",
+    assertions: [
+      {
+        kind: "none",
+        reason: "revokes EXECUTE on eleven functions from the browser roles, creates no object",
+      },
+    ],
+  },
 ];
