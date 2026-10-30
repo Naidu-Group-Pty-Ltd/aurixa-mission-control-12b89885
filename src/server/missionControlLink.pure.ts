@@ -118,6 +118,31 @@ export type LinkKeyFact = {
   scopes: string[];
 };
 
+/** The columns `linkKeyFactFrom` reads, as `clone_api_keys` stores them. */
+export const LINK_KEY_COLUMNS = "id, label, scopes, revoked_at, revoke_at, delivered_project_ref, delivered_env_at";
+
+/** A `clone_api_keys` row as the plan reads it. */
+export function linkKeyFactFrom(k: unknown): LinkKeyFact {
+  const row = k as {
+    id: string;
+    label?: string | null;
+    scopes?: string[] | null;
+    revoked_at?: string | null;
+    revoke_at?: string | null;
+    delivered_project_ref?: string | null;
+    delivered_env_at?: string | null;
+  };
+  return {
+    id: row.id,
+    label: row.label ?? null,
+    scopes: row.scopes ?? [],
+    revokedAt: row.revoked_at ?? null,
+    revokeAt: row.revoke_at ?? null,
+    deliveredProjectRef: row.delivered_project_ref ?? null,
+    deliveredEnvAt: row.delivered_env_at ?? null,
+  };
+}
+
 export type LinkEndpointFact = {
   id: string;
   url: string;
@@ -175,6 +200,14 @@ export function isLinkKeyLive(key: LinkKeyFact, now: number): boolean {
 
 function deliveredHere(key: LinkKeyFact, projectRef: string): boolean {
   return key.deliveredProjectRef === projectRef && Boolean(key.deliveredEnvAt);
+}
+
+/**
+ * Whether Mission Control's own record says a live link key was delivered to
+ * this project — the same test the plan uses before it declines to mint.
+ */
+export function hasDeliveredLinkKey(keys: readonly LinkKeyFact[], projectRef: string, now: number): boolean {
+  return keys.some((k) => isLinkKeyLive(k, now) && deliveredHere(k, projectRef));
 }
 
 export function planMissionControlLink(facts: MissionControlLinkFacts): MissionControlLinkPlan {

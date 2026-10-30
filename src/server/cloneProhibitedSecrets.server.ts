@@ -45,6 +45,14 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import { absentProhibitedClaims, prohibitedHoldings } from "./primeOnlySecrets.pure";
+import { deliveredNameCorrections } from "./deliveredSecretClaims.pure";
+import { CLONE_TURNSTILE_SECRET } from "./turnstile-identity.server";
+import {
+  ENV_MISSION_CONTROL_CLONE_API_KEY,
+  LINK_KEY_COLUMNS,
+  hasDeliveredLinkKey,
+  linkKeyFactFrom,
+} from "./missionControlLink.pure";
 import { deleteCloneSecretValues } from "./backend-provisioning.server";
 import { resolveCloneSecretTarget, CloneSecretTargetError } from "./cloneAllowedOrigins.server";
 
@@ -131,12 +139,17 @@ export async function sweepCloneProhibitedSecrets(
   // Ledger claims the project contradicts: stamped below, never blocking the
   // removal (`staleProhibitedClaims` answers [] on a failed read, and says so).
   const stale = await staleProhibitedClaims(supabase, cloneId, held.names);
+  // And the two names Mission Control delivers itself, which no later pass
+  // re-sends, set right against the same list (`deliveredSecretClaims.pure.ts`).
+  // Written here; answers [] on any failed read, and never blocks the removal.
+  const delivered = await correctDeliveredClaims(supabase, cloneId, projectRef, held.names);
 
   const prohibited = prohibitedHoldings(held.names);
   if (prohibited.length === 0) {
     await recordWithheld(supabase, cloneId, stale);
-    return stale.length > 0
-      ? { clone: cloneName, state: "clean", ledgerCorrected: stale }
+    const corrected = [...stale, ...delivered];
+    return corrected.length > 0
+      ? { clone: cloneName, state: "clean", ledgerCorrected: corrected }
       : { clone: cloneName, state: "clean" };
   }
 
@@ -162,9 +175,69 @@ export async function sweepCloneProhibitedSecrets(
   }
 
   await recordWithheld(supabase, cloneId, [...prohibited, ...stale]);
-  return stale.length > 0
-    ? { clone: cloneName, state: "removed", names: prohibited, ledgerCorrected: stale }
+  const corrected = [...stale, ...delivered];
+  return corrected.length > 0
+    ? { clone: cloneName, state: "removed", names: prohibited, ledgerCorrected: corrected }
     : { clone: cloneName, state: "removed", names: prohibited };
+}
+
+/**
+ * Correct the ledger rows of the link key and the Turnstile secret against
+ * the project's list, where Mission Control's own record says it delivered
+ * them here. Returns the names corrected; [] on any failed read or write,
+ * logged, because a failure here is bookkeeping and must not read as a
+ * correction.
+ */
+async function correctDeliveredClaims(
+  supabase: Db,
+  cloneId: string,
+  projectRef: string,
+  heldNames: readonly string[],
+): Promise<string[]> {
+  try {
+    const [keys, turnstile, ledger] = await Promise.all([
+      supabase.from("clone_api_keys").select(LINK_KEY_COLUMNS).eq("clone_id", cloneId),
+      supabase.from("clone_turnstile_identities").select("secret_written_at").eq("clone_id", cloneId).maybeSingle(),
+      supabase
+        .from("clone_backend_secrets")
+        .select("name, status")
+        .eq("clone_id", cloneId)
+        .in("name", [ENV_MISSION_CONTROL_CLONE_API_KEY, CLONE_TURNSTILE_SECRET]),
+    ]);
+    const readErr = keys.error ?? turnstile.error ?? ledger.error;
+    if (readErr) {
+      console.error("[prohibited-secrets] delivered claims not checked", { cloneId, error: readErr.message });
+      return [];
+    }
+    const delivered: string[] = [];
+    if (hasDeliveredLinkKey((keys.data ?? []).map(linkKeyFactFrom), projectRef, Date.now())) {
+      delivered.push(ENV_MISSION_CONTROL_CLONE_API_KEY);
+    }
+    if ((turnstile.data as { secret_written_at?: string | null } | null)?.secret_written_at) {
+      delivered.push(CLONE_TURNSTILE_SECRET);
+    }
+    const corrections = deliveredNameCorrections({
+      ledger: (ledger.data ?? []) as Array<{ name: string; status: string | null }>,
+      delivered,
+      held: heldNames,
+    });
+    if (corrections.length === 0) return [];
+    const { error } = await supabase.from("clone_backend_secrets").upsert(
+      corrections.map((c) => ({ clone_id: cloneId, name: c.name, status: c.status, last_error: c.last_error })),
+      { onConflict: "clone_id,name" },
+    );
+    if (error) {
+      console.error("[prohibited-secrets] delivered claims not corrected", { cloneId, error: error.message });
+      return [];
+    }
+    return corrections.map((c) => c.name);
+  } catch (e) {
+    console.error("[prohibited-secrets] delivered claims not checked", {
+      cloneId,
+      error: e instanceof Error ? e.message : String(e),
+    });
+    return [];
+  }
 }
 
 /**
