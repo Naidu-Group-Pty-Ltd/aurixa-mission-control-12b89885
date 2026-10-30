@@ -1584,11 +1584,15 @@ describe("a backend that is already ready can be converged onto a fixed engine",
     return drainSrc.slice(from, to);
   };
 
-  it("takes a READY row and refuses every other status", () => {
+  it("takes a READY row, or a FAILED one whose admin account was read present, and refuses every other status", () => {
     // The mirror of the retry hook's `failed` guard: between the two levers
-    // every terminal state has one, and neither can claim a row in flight.
+    // every terminal state has one, and neither can claim a row in flight. A
+    // failed row is repaired only for a lever that read the account and found
+    // it (`chooseFailedRequeue`): a repair seeds nobody.
     expect(enqueue).toMatch(/if \(input\.repair\) \{/);
-    expect(enqueue).toMatch(/existing\.status !== "ready"/);
+    expect(enqueue).toMatch(
+      /const repairable =\s*existing\.status === "ready" \|\|\s*\(existing\.status === "failed" && input\.repairOfFailed === true\);\s*if \(!repairable\)/,
+    );
     expect(enqueue).toMatch(/This clone has no backend to repair/);
   });
 
@@ -1738,7 +1742,11 @@ describe("the queue row has exactly one writer, and the bulk button is not a sec
 
   it("picks the lever by status: repair a ready one, retry a failed one", () => {
     expect(body).toMatch(/const repair = row\.status === "ready"/);
-    expect(body).toMatch(/adminPassword: repair \? null : generateSecurePassword\(\)/);
+    // A failed one is re-queued without minting over a held password: see
+    // `chooseFailedRequeue` and failedBackendRequeue.pure.test.ts.
+    expect(body).toMatch(
+      /adminPassword: repair \|\| repairOfFailed \? null : generateSecurePassword\(\)/,
+    );
   });
 
   it("never clobbers a backend that is in flight", () => {
