@@ -27,7 +27,7 @@ primeOnlyFeatures.mjs` on Prime), so the cascade never carries it to a clone.
 | Tab           | What it holds                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Findings      | Every defect, ranked by severity. A finding opens to how a person reaches it (the recorded steps), the screenshot, the console, the stack and the requests, the files and lines Claude's reading of the code points at, its fixes and its whole history. An admin asks Claude for a fix, re-tests it (a run with the finding's page first), triages it, or changes its severity — a person's severity sticks across later runs. |
-| Runs          | Each run: what it covered, what the guard held back (by endpoint, so the guard can be tuned), which model it ran on and whether a person chose it, what it spent, and its timeline. An admin cancels a run in flight.                                                                                                                                                                                                           |
+| Runs          | Each run: what it covered, what the guard held back (by call, with why, so the guard can be tuned — an admin allows a line, after a confirmation, as exactly the entry the runner named for it), which model it ran on and whether a person chose it, what it spent, and its timeline. An admin cancels a run in flight.                                                                                                        |
 | Fixes         | Every fix Claude drafted, its pull request, and whether a later complete run confirmed the defect gone.                                                                                                                                                                                                                                                                                                                         |
 | Settings      | Models, effort per phase, the nightly switch and time, budget and limits, viewports, screenshots, the guard's allow and block lists, automatic fixes.                                                                                                                                                                                                                                                                           |
 | Engine health | Every piece the audit needs and whether it is there, with what to do when it is not. Presence only, never a value.                                                                                                                                                                                                                                                                                                              |
@@ -150,8 +150,16 @@ Each can be muted under **Settings → Notifications**.
    its user id in the repository variable `LIVE_AUDIT_USER_ID`. Without it,
    runs see only the signed-out pages.
 3. Run one by hand, read **Runs → Held back by the guard**, and allow any
-   function there you know only reads. Runs work without Claude: they crawl
-   every reachable page and report what the browser saw.
+   call there you know only reads. Each line is a call as
+   `fn:<function>:<action>` (`-` when it names none), why the guard held it
+   back, and an **Allow** that adds exactly that entry (`allowLiveAuditGuardEntry`,
+   audited as `live_audit.guard_entry_allowed`). Under **Settings → The guard**
+   an entry is a function's name (every call), `name:action` or `name:-`, the
+   runner's own `GUARD_ENTRY` (`src/lib/live-audit-contract.ts`); a block wins,
+   and nothing allows a call that asks to write on the way (`mark_read: true`).
+   A page whose reads were held back and that then failed is counted
+   `degraded`, not covered. Runs work without Claude: they crawl every
+   reachable page and report what the browser saw.
 4. When the owner provisions the live audit's workspace-scoped Anthropic key:
    set it as `ANTHROPIC_API_KEY` in Mission Control (replacing the org-scoped
    one), publish, run the Actions secret sync for Prime, choose the audit and

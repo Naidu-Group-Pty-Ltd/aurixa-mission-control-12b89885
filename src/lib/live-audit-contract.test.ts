@@ -3,9 +3,11 @@
 // either side that breaks the other fails here first.
 import { describe, expect, it } from "vitest";
 import {
+  GUARD_ENTRY,
   LiveAuditFindingSchema,
   RunCallbackSchema,
   coveredTemplates,
+  heldBackOf,
   runWasComplete,
 } from "./live-audit-contract";
 
@@ -159,5 +161,66 @@ describe("resolving by absence rests on what the runner said it covered", () => 
     ).toEqual(["/a", "/b/:id"]);
     expect(coveredTemplates({ coverage: { templates_covered: "/a" } })).toEqual([]);
     expect(coveredTemplates(undefined)).toEqual([]);
+  });
+});
+
+describe("the guard's held-back list, in the form a run obeys", () => {
+  it("accepts a name, name:action and name:-, as the runner's GUARD_ENTRY does", () => {
+    for (const e of ["messaging-hub", "messaging-hub:hub_state", "airtable-proxy:-"]) {
+      expect(GUARD_ENTRY.test(e)).toBe(true);
+    }
+    for (const e of ["Messaging-hub", "x:", "a:b:c", "fn:x y", "messaging-hub:*", ""]) {
+      expect(GUARD_ENTRY.test(e)).toBe(false);
+    }
+  });
+
+  it("reads each line's reason and allowing entry, and offers no entry a run would ignore", () => {
+    // The runner's own shape (GuardLedger.summary on Prime).
+    const lines = heldBackOf({
+      guard: {
+        allowed: 120,
+        withheld: 9,
+        byKind: { send: 4, write: 5 },
+        top: [
+          {
+            endpoint: "POST fn:mission-control-gate:-",
+            count: 2,
+            why: "mission-control-gate writes and the call names no read action",
+            kind: "write",
+            entry: "mission-control-gate:-",
+          },
+          {
+            endpoint: "POST fn:messaging-hub:hub_state",
+            count: 4,
+            why: "messaging-hub: action hub_state is not a read (send)",
+            kind: "send",
+            entry: "messaging-hub:hub_state",
+          },
+          {
+            endpoint: "POST fn:internal-messaging:get_thread",
+            count: 1,
+            why: "internal-messaging: the call sets mark_read",
+            kind: "write",
+            entry: null,
+          },
+          { endpoint: "POST fn:x:y", count: 1, why: "x", kind: "write", entry: "X:y; drop" },
+          { endpoint: 5, count: 1 },
+          null,
+        ],
+      },
+    });
+    expect(lines.map((l) => [l.endpoint, l.count, l.entry])).toEqual([
+      ["POST fn:messaging-hub:hub_state", 4, "messaging-hub:hub_state"],
+      ["POST fn:mission-control-gate:-", 2, "mission-control-gate:-"],
+      ["POST fn:internal-messaging:get_thread", 1, null],
+      ["POST fn:x:y", 1, null],
+    ]);
+    expect(lines[0].why).toMatch(/hub_state is not a read/);
+    // A summary from before the runner named entries still lists its lines.
+    expect(heldBackOf({ guard: { top: [{ endpoint: "POST fn:a", count: 3 }] } })).toEqual([
+      { endpoint: "POST fn:a", count: 3, why: null, kind: null, entry: null },
+    ]);
+    expect(heldBackOf({})).toEqual([]);
+    expect(heldBackOf(null)).toEqual([]);
   });
 });
