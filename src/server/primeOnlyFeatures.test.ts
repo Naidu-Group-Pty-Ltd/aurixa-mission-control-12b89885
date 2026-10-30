@@ -215,3 +215,52 @@ describe("naming a withheld set in a sentence", () => {
     expect(describeWithheldFunctions([])).toBe("");
   });
 });
+
+describe("a directory held whole", () => {
+  const tutorial = PRIME_ONLY_FEATURES.find((f) => f.key === "tutorial-programme")!;
+
+  it("holds the tutorial audit and programme by their two folders, and nothing else", () => {
+    expect(tutorial.directories).toEqual(["docs/tutorial-audit/", "docs/tutorial-programme/"]);
+    expect(tutorial.files).toEqual([]);
+    expect(tutorial.functions).toEqual([]);
+    expect(tutorial.cronJobs).toEqual([]);
+    expect(tutorial.buckets).toEqual([]);
+    expect(tutorial.reason.length).toBeLessThanOrEqual(100);
+  });
+
+  it("matches every file under a held folder, at any depth", () => {
+    for (const p of [
+      "docs/tutorial-audit/AUDIT_REPORT.md",
+      "docs/tutorial-audit/evidence/README.md",
+      "docs/tutorial-programme/START_HERE.md",
+      "docs/tutorial-programme/tools/demo_brand/make_brand.py",
+    ]) {
+      expect(primeOnlyFeatureForPath(p)?.key, p).toBe("tutorial-programme");
+    }
+  });
+
+  it("leaves the folder's look-alikes and the rest of docs/ alone", () => {
+    for (const p of [
+      "docs/tutorial-audit",
+      "docs/tutorial-audit-v2/AUDIT_REPORT.md",
+      "docs/tutorial-programme.md",
+      "docs/tutorials/README.md",
+      "docs/operations/CI_SCOPE.md",
+      "src/docs/tutorial-audit/AUDIT_REPORT.md",
+    ]) {
+      expect(isPrimeOnlyPath(p), p).toBe(false);
+    }
+  });
+
+  it("holds only safe trees outside supabase/, each named with its trailing slash", () => {
+    // A folder under `supabase/` would withhold a migration (a ledger hole every
+    // later migration waits behind) or a function by path instead of by name.
+    for (const feature of PRIME_ONLY_FEATURES) {
+      for (const d of feature.directories) {
+        expect(d.endsWith("/"), d).toBe(true);
+        expect(isSafeRepoPath(`${d}README.md`), d).toBe(true);
+        expect(d.startsWith("supabase/"), d).toBe(false);
+      }
+    }
+  });
+});
