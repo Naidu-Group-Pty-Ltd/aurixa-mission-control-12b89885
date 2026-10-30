@@ -158,6 +158,13 @@ export type PrimeBackendSnapshot = {
    * (`planSkip`), because computing it prunes every bundle the commit defines.
    */
   bundleDigests?: ReadonlyMap<string, string>;
+  /**
+   * True when `secretNames` came from the caller's cached scan of exactly this
+   * commit (`cachedScan`) rather than from a scan this read performed. Such a
+   * snapshot read no bundle it was not going to deploy, so it is not a scan
+   * and must never be written back to the cache as one.
+   */
+  secretScanFromCache?: boolean;
 };
 
 // ─── Pure helpers (unit-tested) ──────────────────────────────────────
@@ -1938,6 +1945,14 @@ export async function fetchPrimeBackendSnapshot(
       readonly commitSha: string;
       readonly bundleDigests: ReadonlyMap<string, string>;
     }) => readonly string[];
+    /**
+     * A COMPLETE secret scan the caller holds for a commit
+     * (`prime_snapshot_scans`). When its commit is the one this read lands
+     * on, the scan is not repeated: the names are taken from it, and only the
+     * bundles this pass deploys are fetched. Any other commit is a miss and
+     * the read scans as before — a cache is consulted only where it is exact.
+     */
+    cachedScan?: { readonly gitSha: string; readonly secretNames: readonly string[] } | null;
   },
 ): Promise<PrimeBackendSnapshot> {
   const { blobs, commitSha } = await listSupabaseBlobs(octokit, ref);
@@ -2094,7 +2109,44 @@ export async function fetchPrimeBackendSnapshot(
     if (!sha) throw new Error(`Blob not found for ${rel}`);
     return { rel, sha };
   });
-  const contentCache = await fetchBlobTextsForCommit(octokit, ref, commitSha, neededEntries);
+
+  /*
+    What this pass may DEPLOY, decided BEFORE any byte is read wherever nothing
+    needs the bundles' contents to decide it — so only those bundles are read
+    into the commit cache, and the rest of the scan set is streamed through
+    the scan below and never held. A planner (`planSkip`) does need every
+    bundle's contents, so its selection waits for the fetch, as it always has.
+
+    The scan set is unchanged: every bundle the prime defines. What changed is
+    how much of it is HELD. Measured 29 Oct 2026, the prime merged three times
+    in ninety minutes; each new commit missed the scan cache, the pass that
+    read it held all 2,395 files (44 MB of base64) beside the app, and the
+    runtime killed it — three provisioning passes on
+    `tutorial-demo-orrimere-c158c7` (23:47, 00:02, 00:19 UTC), each one a
+    15-minute stall.
+  */
+  const decideSelection = (skip: ReadonlySet<string>) => {
+    const deployable = inDeployOrder(
+      allBundles.filter((b) => !skip.has(b.slug)),
+      opts?.deployOrder,
+    );
+    const limit = opts?.functionLimit;
+    const truncated = typeof limit === "number" && deployable.length > limit;
+    return { deployable, truncated, selected: truncated ? deployable.slice(0, limit) : deployable };
+  };
+  const earlySelection = opts?.planSkip
+    ? null
+    : decideSelection(new Set(opts?.skipFunctionSlugs ?? []));
+  const heldRels = earlySelection
+    ? Array.from(new Set(earlySelection.selected.flatMap((b) => b.bundlePaths)))
+    : neededRels;
+  const heldSet = new Set(heldRels);
+  const contentCache = await fetchBlobTextsForCommit(
+    octokit,
+    ref,
+    commitSha,
+    neededEntries.filter((e) => heldSet.has(e.rel)),
+  );
 
   // ONE file object per distinct path, shared BY REFERENCE across every bundle
   // that carries it. Every bundle includes the whole `_shared` tree by
@@ -2102,7 +2154,7 @@ export async function fetchPrimeBackendSnapshot(
   // objects for 1,033 distinct files (423 bundles × 516 files) — tens of
   // megabytes of pure allocation overhead before a single byte of payload.
   const fileByPath = new Map<string, PrimeFunctionFile>();
-  for (const rel of neededRels) {
+  for (const rel of heldRels) {
     const contentBase64 = contentCache.get(rel);
     if (contentBase64 === undefined) throw new Error(`Blob not found for ${rel}`);
     fileByPath.set(rel, { path: rel, contentBase64 });
@@ -2203,23 +2255,23 @@ export async function fetchPrimeBackendSnapshot(
   }
 
   // What this pass may DEPLOY: minus whatever the project already holds.
-  const skip = new Set([
-    ...(opts?.skipFunctionSlugs ?? []),
-    ...(opts?.planSkip && bundleDigests ? opts.planSkip({ commitSha, bundleDigests }) : []),
-  ]);
   // In the caller's order, else alphabetical (`allBundles` is sorted above).
   // Either way the order is deterministic, so a pass never re-fetches what
   // the last one landed: that is skipped, not merely reordered. But "the same
   // prefix on every pass" holds only while the skip list grows, and the
   // redeploy lane's empties on every prime merge. That lane orders by the
   // clone's own staleness rather than by name — see `deployOrder`.
-  const deployable = inDeployOrder(
-    allBundles.filter((b) => !skip.has(b.slug)),
-    opts?.deployOrder,
+  const {
+    deployable,
+    truncated: functionSourceTruncated,
+    selected,
+  } = earlySelection ??
+  decideSelection(
+    new Set([
+      ...(opts?.skipFunctionSlugs ?? []),
+      ...(opts?.planSkip && bundleDigests ? opts.planSkip({ commitSha, bundleDigests }) : []),
+    ]),
   );
-  const limit = opts?.functionLimit;
-  const functionSourceTruncated = typeof limit === "number" && deployable.length > limit;
-  const selected = functionSourceTruncated ? deployable.slice(0, limit) : deployable;
 
   const functions: PrimeEdgeFunction[] = selected.map(
     ({ slug, bundlePaths, entrypointPath, importMapPath }) => {
@@ -2270,14 +2322,37 @@ export async function fetchPrimeBackendSnapshot(
   // `extractSecretNames` matches within one source, so scanning each file as
   // it is decoded names exactly the same set (169, identical) at a peak of
   // one file.
-  const secretNameSet = new Set<string>();
-  for (const [rel, f] of fileByPath) {
-    if (!isTextFile(rel)) continue;
-    for (const name of extractSecretNames([decodeBase64Utf8(f.contentBase64)])) {
-      secretNameSet.add(name);
+  //
+  // And not at all when the caller holds a complete scan of THIS commit
+  // (`cachedScan`): the names are a property of the commit, so a second scan
+  // could only read them again. A cache for any other commit is a miss.
+  const scanFromCache =
+    opts?.cachedScan &&
+    opts.cachedScan.gitSha === commitSha &&
+    opts.cachedScan.secretNames.length > 0
+      ? opts.cachedScan
+      : null;
+  let secretNames: string[];
+  if (scanFromCache) {
+    secretNames = [...scanFromCache.secretNames].sort();
+  } else {
+    const secretNameSet = new Set<string>();
+    for (const [rel, f] of fileByPath) {
+      if (!isTextFile(rel)) continue;
+      for (const name of extractSecretNames([decodeBase64Utf8(f.contentBase64)])) {
+        secretNameSet.add(name);
+      }
     }
+    // The rest of the scan set — every bundle this pass does not deploy —
+    // streamed through and dropped, never held (see `earlySelection`).
+    await scanBlobsForSecretNames(
+      octokit,
+      ref,
+      neededEntries.filter((e) => !heldSet.has(e.rel)),
+      secretNameSet,
+    );
+    secretNames = Array.from(secretNameSet).sort();
   }
-  const secretNames = Array.from(secretNameSet).sort();
 
   return {
     sourceRepo: `${ref.owner}/${ref.repo}`,
@@ -2292,7 +2367,38 @@ export async function fetchPrimeBackendSnapshot(
     functionSourceTruncated,
     deployableCount: deployable.length,
     ...(bundleDigests ? { bundleDigests } : {}),
+    ...(scanFromCache ? { secretScanFromCache: true } : {}),
   };
+}
+
+/**
+ * Blob bodies streamed through the secret scan, one fetch window at a time,
+ * and dropped once scanned.
+ *
+ * The same GraphQL batches the cached read makes — so the same requests
+ * against the installation's quota — but nothing is kept: a window is at most
+ * one round of concurrent batches (~4 MB of base64), where holding the scan
+ * set held the whole tree (44 MB on 29 Oct 2026). Strict like the read it
+ * replaces: a body that does not come back is an error, never a file that
+ * happened to reference no secrets.
+ */
+async function scanBlobsForSecretNames(
+  octokit: Octokit,
+  ref: RepoRef,
+  entries: Array<{ rel: string; sha: string }>,
+  into: Set<string>,
+): Promise<void> {
+  const window = GRAPHQL_BLOB_BATCH * GRAPHQL_BATCH_CONCURRENCY;
+  for (let i = 0; i < entries.length; i += window) {
+    const slice = entries.slice(i, i + window);
+    const bodies = await fetchBlobTextsBatched(octokit, ref, slice);
+    for (const { rel } of slice) {
+      const b64 = bodies.get(rel);
+      if (b64 === undefined) throw new Error(`Blob not found for ${rel}`);
+      if (!isTextFile(rel)) continue;
+      for (const name of extractSecretNames([decodeBase64Utf8(b64)])) into.add(name);
+    }
+  }
 }
 
 // ─── A clone's OWN functions ─────────────────────────────────────────
