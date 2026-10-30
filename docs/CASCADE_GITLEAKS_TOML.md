@@ -25,6 +25,11 @@ edited by hand on its cascade branch, swapping the one allowlisted literal
 exactly as prime had (176e535, 842b6efd, 1dd653a, 87a8511, db06be9).
 
 The next prime change to that file will do the same thing again, five times.
+It nearly did the same morning. Mission Control #460 withheld prime's new
+tutorial records from every clone, and gave two reasons. The first is what the
+records say. The second is that two phrases in their CSVs pass gitleaks only
+under prime's `.gitleaks.toml` allowance, so delivered, they would have turned
+every clone's secret scan red.
 
 ## Why the file is protected, and why that is wider than it needs to be
 
