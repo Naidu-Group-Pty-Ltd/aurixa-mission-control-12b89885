@@ -10,6 +10,9 @@
  * file that has not landed, and a file already there from an earlier,
  * interrupted attempt is skipped rather than refused.
  *
+ * Pictures uploaded on their own (`planPicturesUpload`) go the same way, under
+ * a grant of their own kind.
+ *
  * `fetch` is injected so the whole sequence is tested without a network.
  */
 import { planUpload, type UploadFile } from "./websiteBriefings.pure";
@@ -52,13 +55,15 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 export async function uploadPackage(input: {
   files: ReadonlyMap<string, Blobish & BodyInit>;
   grant: UploadGrant;
+  /** What the files must be: an encoded package unless said otherwise. */
+  plan?: (paths: readonly string[]) => ReturnType<typeof planUpload>;
   onProgress?: (progress: UploadProgress) => void;
   fetchImpl?: Fetch;
   retryDelayMs?: number;
 }): Promise<UploadOutcome> {
   const doFetch = input.fetchImpl ?? fetch;
   const retryDelay = input.retryDelayMs ?? 1500;
-  const plan = planUpload([...input.files.keys()]);
+  const plan = (input.plan ?? planUpload)([...input.files.keys()]);
   if (!plan.ok) return { ok: false, error: plan.problems.join(" "), failed: [] };
 
   const bytesTotal = plan.files.reduce((sum, f) => sum + (input.files.get(f.path)?.size ?? 0), 0);

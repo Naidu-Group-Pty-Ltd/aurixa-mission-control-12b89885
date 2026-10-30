@@ -89,6 +89,8 @@ export type BriefingFacts = {
   media_poster: string | null;
   media_card: string | null;
   media_captions: string | null;
+  /** Absent on a row read before the migration that adds it has applied. */
+  media_thumbnail?: string | null;
   duration_seconds: number | null;
   published_on: string | null;
 };
@@ -216,6 +218,7 @@ export function publishProblems(b: BriefingFacts): string[] {
     ["poster", b.media_poster],
     ["card", b.media_card],
     ["captions", b.media_captions],
+    ["thumbnail", b.media_thumbnail ?? null],
   ] as const) {
     if (value && !value.startsWith(`videos/${b.slug}/v`))
       problems.push(`The ${field} file is outside this video's own folder.`);
@@ -258,6 +261,8 @@ export type PublicListing = {
     poster: string | null;
     card: string | null;
     captions: string | null;
+    /** The 16:9 thumbnail designed for the video: the library and up-next cards. */
+    thumbnail: string | null;
   } | null;
   duration_seconds: number | null;
   published_on: string | null;
@@ -294,11 +299,52 @@ export function toPublicListing(b: BriefingFacts): PublicListing | null {
           poster: b.media_poster,
           card: b.media_card,
           captions: b.media_captions,
+          thumbnail: b.media_thumbnail ?? null,
         }
       : null,
     duration_seconds: published ? b.duration_seconds : null,
     published_on: published ? b.published_on : null,
   };
+}
+
+/**
+ * The library positions for a new order: 10, 20, 30 … in the order given, so
+ * a listing can later be slotted between two without renumbering the rest.
+ * Only the listings whose position changes are returned.
+ */
+export function reorderPlan(
+  rows: ReadonlyArray<{ id: string; sort_order: number }>,
+  order: readonly string[],
+): { ok: true; changes: Array<{ id: string; sort_order: number }> } | { ok: false } {
+  const ids = new Set(rows.map((r) => r.id));
+  if (order.length !== ids.size || new Set(order).size !== order.length) return { ok: false };
+  if (!order.every((id) => ids.has(id))) return { ok: false };
+  const current = new Map(rows.map((r) => [r.id, r.sort_order]));
+  const changes = order
+    .map((id, index) => ({ id, sort_order: (index + 1) * 10 }))
+    .filter((c) => current.get(c.id) !== c.sort_order);
+  return { ok: true, changes };
+}
+
+/** The live listings' slugs in library order: what the website's library shows, top to bottom. */
+export function liveOrder(
+  rows: ReadonlyArray<{ slug: string; status: string; sort_order: number }>,
+): string[] {
+  return rows
+    .filter((r) => (LIVE_STATUSES as readonly string[]).includes(r.status))
+    .map((r, index) => ({ r, index }))
+    .sort((a, b) => a.r.sort_order - b.r.sort_order || a.index - b.index)
+    .map(({ r }) => r.slug);
+}
+
+/**
+ * The code tag the website's library card wears — BRF-01 for the first
+ * listing it shows — read from the order the website is served (aurixa-systems
+ * `codeFor` in src/pages/Watch.tsx). Null when the listing is not in the library.
+ */
+export function libraryCode(servedSlugs: readonly string[], slug: string): string | null {
+  const index = servedSlugs.indexOf(slug);
+  return index < 0 ? null : `BRF-${String(index + 1).padStart(2, "0")}`;
 }
 
 /** Does a change to this listing change what the website shows? */
@@ -422,7 +468,244 @@ export function mediaFieldsFor(prefix: string, paths: readonly string[]) {
       "captions.en.vtt",
       root.find((p) => p.endsWith(".vtt")),
     ),
+    media_thumbnail: pick("thumbnail.jpg"),
   };
+}
+
+// ── Pictures ────────────────────────────────────────────────────────────────
+
+/**
+ * A listing's three pictures, which can be uploaded on their own, without the
+ * stream: the 16:9 thumbnail designed for the video (the website's library and
+ * up-next cards), the poster the theatre shows before play (in the video's own
+ * shape), and the link-preview card. The browser writes each as a JPEG at
+ * exactly its shape's size, so the website never scales a picture it did not
+ * expect; the server reads the size back from the uploaded bytes.
+ */
+export const PICTURES = ["thumbnail", "poster", "card"] as const;
+export type Picture = (typeof PICTURES)[number];
+
+export const PICTURE_FILE: Record<Picture, string> = {
+  thumbnail: "thumbnail.jpg",
+  poster: "poster.jpg",
+  card: "card.jpg",
+};
+
+export const PICTURE_FIELD = {
+  thumbnail: "media_thumbnail",
+  poster: "media_poster",
+  card: "media_card",
+} as const satisfies Record<Picture, keyof BriefingFacts>;
+
+export const PICTURE_LABEL: Record<Picture, string> = {
+  thumbnail: "thumbnail",
+  poster: "poster",
+  card: "link-preview card",
+};
+
+export type PictureShape = {
+  width: number;
+  height: number;
+  ratio: string;
+  minWidth: number;
+  minHeight: number;
+};
+
+/**
+ * The size each picture is written at. The card is the 1200×630 the website's
+ * pages declare as their og:image; the poster takes the video's shape, because
+ * the theatre shows it in the player's frame before the first frame plays.
+ */
+export function pictureShape(picture: Picture, orientation: string): PictureShape {
+  if (picture === "card")
+    return { width: 1200, height: 630, ratio: "1.91:1", minWidth: 1200, minHeight: 630 };
+  if (picture === "poster" && orientation === "portrait")
+    return { width: 1080, height: 1920, ratio: "9:16", minWidth: 720, minHeight: 1280 };
+  return { width: 1920, height: 1080, ratio: "16:9", minWidth: 1280, minHeight: 720 };
+}
+
+/** How far a picked image's shape may stray from its slot's before it is refused rather than cropped. */
+export const PICTURE_ASPECT_TOLERANCE = 0.01;
+
+/**
+ * Why an image of this size cannot be this picture, or null when it can. A
+ * picture is designed for its shape — its type and logo sit where the website
+ * leaves room for them — so an image of another shape is refused, never
+ * cropped to fit.
+ */
+export function pictureSizeProblem(
+  picture: Picture,
+  orientation: string,
+  size: { width: number; height: number },
+): string | null {
+  const shape = pictureShape(picture, orientation);
+  const label = PICTURE_LABEL[picture];
+  const want = shape.width / shape.height;
+  const got = size.width / size.height;
+  if (
+    !(size.width > 0 && size.height > 0) ||
+    Math.abs(got - want) / want > PICTURE_ASPECT_TOLERANCE
+  )
+    return `This image is ${size.width}×${size.height}; the ${label} is ${shape.ratio} (${shape.width}×${shape.height}).`;
+  if (size.width < shape.minWidth || size.height < shape.minHeight)
+    return `This image is ${size.width}×${size.height}; the ${label} must be at least ${shape.minWidth}×${shape.minHeight}.`;
+  return null;
+}
+
+/**
+ * The part of a source image that fills a target shape, centred: the whole
+ * width or the whole height, whichever runs out first. How the link-preview
+ * card is made from the thumbnail (16:9 to 1.91:1 trims 3.4% off the top and
+ * the bottom).
+ */
+export function coverCrop(
+  source: { width: number; height: number },
+  target: { width: number; height: number },
+): { sx: number; sy: number; sw: number; sh: number } {
+  const scale = Math.max(target.width / source.width, target.height / source.height);
+  const sw = Math.min(source.width, Math.round(target.width / scale));
+  const sh = Math.min(source.height, Math.round(target.height / scale));
+  return {
+    sx: Math.round((source.width - sw) / 2),
+    sy: Math.round((source.height - sh) / 2),
+    sw,
+    sh,
+  };
+}
+
+/** The files of a pictures-only upload, checked: one or more of thumbnail.jpg, poster.jpg and card.jpg. */
+export function planPicturesUpload(
+  paths: readonly string[],
+): { ok: true; files: UploadFile[] } | { ok: false; problems: string[] } {
+  const unique = [...new Set(paths)];
+  const allowed = new Set(Object.values(PICTURE_FILE));
+  const problems: string[] = [];
+  if (unique.length === 0) problems.push("Pick at least one picture.");
+  const bad = unique.filter((p) => !allowed.has(p));
+  if (bad.length > 0)
+    problems.push(
+      `Only thumbnail.jpg, poster.jpg and card.jpg are uploaded on their own, not ${bad.slice(0, 3).join(", ")}.`,
+    );
+  if (problems.length > 0) return { ok: false, problems };
+  return {
+    ok: true,
+    files: unique.sort().map((path) => ({
+      path,
+      contentType: CONTENT_TYPES.jpg,
+      cacheControl: IMMUTABLE,
+      phase: 0,
+    })),
+  };
+}
+
+/** The media fields a pictures-only upload fills: only the pictures it holds. */
+export function pictureFieldsFor(
+  prefix: string,
+  paths: readonly string[],
+): Partial<Record<(typeof PICTURE_FIELD)[Picture], string>> {
+  const out: Partial<Record<(typeof PICTURE_FIELD)[Picture], string>> = {};
+  for (const picture of PICTURES) {
+    if (paths.includes(PICTURE_FILE[picture]))
+      out[PICTURE_FIELD[picture]] = `${prefix}${PICTURE_FILE[picture]}`;
+  }
+  return out;
+}
+
+type PictureFacts = Pick<
+  BriefingFacts,
+  "slug" | "media_version" | "media_poster" | "media_card" | "media_thumbnail"
+>;
+
+/**
+ * Where a listing's picture came from: `own` when it was uploaded on its own,
+ * `video` when it came with the stream now playing (or another of its
+ * packages), `none` when there is none.
+ */
+export function pictureSource(row: PictureFacts, picture: Picture): "own" | "video" | "none" {
+  const path = row[PICTURE_FIELD[picture]] ?? null;
+  if (!path) return "none";
+  const stream = row.media_version ? `videos/${row.slug}/${row.media_version}/` : null;
+  return stream && path.startsWith(stream) ? "video" : "own";
+}
+
+/**
+ * The pictures once a new stream lands. A picture that came with the old
+ * stream gives way to the new package's. One uploaded on its own was chosen
+ * for the listing rather than taken from a render, so it stays — except a
+ * poster when the video changed shape, which would no longer fit the frame.
+ */
+export function picturesAfterPackage(
+  before: PictureFacts & { orientation: string },
+  incoming: ReturnType<typeof mediaFieldsFor>,
+  orientation: string,
+): {
+  fields: {
+    media_poster: string | null;
+    media_card: string | null;
+    media_thumbnail: string | null;
+  };
+  kept: Picture[];
+} {
+  const kept: Picture[] = [];
+  const fields = {
+    media_poster: incoming.media_poster,
+    media_card: incoming.media_card,
+    media_thumbnail: incoming.media_thumbnail,
+  };
+  for (const picture of PICTURES) {
+    if (pictureSource(before, picture) !== "own") continue;
+    if (picture === "poster" && orientation !== before.orientation) continue;
+    fields[PICTURE_FIELD[picture]] = before[PICTURE_FIELD[picture]] ?? null;
+    kept.push(picture);
+  }
+  return { fields, kept };
+}
+
+/**
+ * The pixel size a JPEG declares in its frame header, or null when these
+ * bytes hold none. A browser's encoder writes the frame header within the
+ * first few hundred bytes, so the first 64 KB of the file is plenty.
+ */
+export function jpegSize(bytes: Uint8Array): { width: number; height: number } | null {
+  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return null;
+  let i = 2;
+  while (i + 3 < bytes.length) {
+    if (bytes[i] !== 0xff) return null;
+    const marker = bytes[i + 1];
+    if (marker === 0xff) {
+      i += 1;
+      continue;
+    }
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd8)) {
+      i += 2;
+      continue;
+    }
+    if (marker === 0xd9 || marker === 0xda) return null;
+    const length = (bytes[i + 2] << 8) | bytes[i + 3];
+    const frame = marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker);
+    if (frame) {
+      if (i + 8 >= bytes.length) return null;
+      return {
+        height: (bytes[i + 5] << 8) | bytes[i + 6],
+        width: (bytes[i + 7] << 8) | bytes[i + 8],
+      };
+    }
+    i += 2 + length;
+  }
+  return null;
+}
+
+/** A listing holds media once any of it has been uploaded: its slug then names a folder in the bucket. */
+export function hasMedia(row: Partial<BriefingFacts>): boolean {
+  return Boolean(
+    row.media_version ||
+    row.media_hls ||
+    row.media_mp4 ||
+    row.media_poster ||
+    row.media_card ||
+    row.media_captions ||
+    row.media_thumbnail,
+  );
 }
 
 // ── Reading the stream back ─────────────────────────────────────────────────

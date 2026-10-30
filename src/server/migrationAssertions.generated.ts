@@ -1376,13 +1376,21 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     ],
   },
   {
-    migration: "20261030100000_live_audit_notification_kinds.sql",
+    migration: "20261030100000_website_briefing_images.sql",
     version: "20261030100000",
+    assertions: [
+      { kind: "column", table: "website_briefings", column: "media_thumbnail" },
+      { kind: "column", table: "website_briefing_uploads", column: "kind" },
+    ],
+  },
+  {
+    migration: "20261030110000_live_audit_notification_kinds.sql",
+    version: "20261030110000",
     assertions: [{ kind: "enum", type: "notification_kind" }],
   },
   {
-    migration: "20261030100100_live_audit.sql",
-    version: "20261030100100",
+    migration: "20261030110100_live_audit.sql",
+    version: "20261030110100",
     assertions: [
       { kind: "table", table: "live_audit_settings" },
       { kind: "table", table: "live_audit_runs" },

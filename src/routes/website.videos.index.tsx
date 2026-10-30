@@ -6,13 +6,17 @@
  * page; a published listing is a watchable page with its own link preview.
  * The website renders its pages at build time, so publishing — or editing a
  * live listing — asks Vercel to rebuild it (docs/WEBSITE_VIDEOS.md).
+ *
+ * The list is the library's order: moving a listing up or down here moves its
+ * card on the website, and each live listing wears the code tag its card
+ * shows there (BRF-01 …).
  */
 import { useState } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import { toast } from "sonner";
-import { ExternalLink, Film, Plus, RefreshCw } from "lucide-react";
+import { ArrowDown, ArrowUp, ExternalLink, Film, Plus, RefreshCw } from "lucide-react";
 import { ProtectedRoute } from "@/components/protected-route";
 import { RouteError } from "@/components/route-error";
 import { PageHeader } from "@/components/page-header";
@@ -32,16 +36,29 @@ import {
 import {
   createWebsiteBriefingFn,
   listWebsiteBriefingsFn,
+  reorderWebsiteBriefingsFn,
   requestWebsiteRebuildFn,
 } from "@/server/website-briefings.functions";
 import { STATUS_COPY, rebuildLine } from "@/components/website-video-status";
 import {
   BRIEFING_SERIES,
+  BRIEFING_STATUSES,
   SLUG_PATTERN,
   briefingPageUrl,
   formatChapterTime,
+  premiereProblems,
+  publishProblems,
   slugify,
+  type BriefingStatus,
 } from "@/lib/websiteBriefings.pure";
+
+const FILTERS: Array<{ value: "all" | BriefingStatus; label: string }> = [
+  { value: "all", label: "All" },
+  { value: "published", label: "Live" },
+  { value: "premiere", label: "Premiering" },
+  { value: "draft", label: "Drafts" },
+  { value: "archived", label: "Archived" },
+];
 
 export const Route = createFileRoute("/website/videos/")({
   component: () => (
@@ -56,13 +73,49 @@ export const Route = createFileRoute("/website/videos/")({
 function WebsiteVideosPage() {
   const listFn = useServerFn(listWebsiteBriefingsFn);
   const rebuildFn = useServerFn(requestWebsiteRebuildFn);
+  const reorderFn = useServerFn(reorderWebsiteBriefingsFn);
   const qc = useQueryClient();
   const query = useQuery({ queryKey: ["website-briefings"], queryFn: () => listFn() });
   const [creating, setCreating] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
+  const [moving, setMoving] = useState(false);
+  const [filter, setFilter] = useState<(typeof FILTERS)[number]["value"]>("all");
 
   const rows = query.data?.rows ?? [];
   const origin = query.data?.mediaOrigin ?? "";
+  const codes: Record<string, string> = query.data?.codes ?? {};
+  const counts = Object.fromEntries(
+    BRIEFING_STATUSES.map((s) => [s, rows.filter((r) => r.status === s).length]),
+  ) as Record<BriefingStatus, number>;
+  const shown = filter === "all" ? rows : rows.filter((r) => r.status === filter);
+
+  /** Move one listing up or down the library, and save the whole order. */
+  async function move(index: number, by: -1 | 1) {
+    const order = rows.map((r) => r.id);
+    const target = index + by;
+    if (target < 0 || target >= order.length) return;
+    [order[index], order[target]] = [order[target], order[index]];
+    setMoving(true);
+    try {
+      const result = await reorderFn({ data: { order } });
+      if (!result.ok) {
+        toast.error(result.error);
+      } else if (result.rebuild?.requested) {
+        toast.success("Reordered. The website is rebuilding with the new order.");
+      } else if (result.rebuild && result.rebuild.reason === "not_configured") {
+        toast.success("Reordered. It reaches the website on its next deploy.");
+      } else if (result.rebuild && result.rebuild.reason === "failed") {
+        toast.warning(
+          `Reordered, but the rebuild request failed (${result.rebuild.detail ?? "unknown"}) — use Rebuild website.`,
+        );
+      }
+      await qc.invalidateQueries({ queryKey: ["website-briefings"] });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not reorder");
+    } finally {
+      setMoving(false);
+    }
+  }
 
   async function rebuild() {
     setRebuilding(true);
@@ -116,6 +169,25 @@ function WebsiteVideosPage() {
         <p className="text-sm text-destructive">The videos could not be read: {query.data.error}</p>
       )}
 
+      {rows.length > 0 && (
+        <div className="flex flex-wrap gap-1" role="toolbar" aria-label="Filter by status">
+          {FILTERS.map((f) => (
+            <Button
+              key={f.value}
+              size="sm"
+              variant={filter === f.value ? "secondary" : "ghost"}
+              aria-pressed={filter === f.value}
+              onClick={() => setFilter(f.value)}
+            >
+              {f.label}
+              <span className="ml-1.5 font-mono text-[11px] text-muted-foreground">
+                {f.value === "all" ? rows.length : counts[f.value]}
+              </span>
+            </Button>
+          ))}
+        </div>
+      )}
+
       {query.isSuccess && rows.length === 0 && !query.data?.error && (
         <EmptyState
           icon={<Film />}
@@ -125,15 +197,56 @@ function WebsiteVideosPage() {
         />
       )}
 
-      {rows.length > 0 && (
+      {rows.length > 0 && shown.length === 0 && (
+        <p className="text-sm text-muted-foreground">
+          No {FILTERS.find((f) => f.value === filter)?.label.toLowerCase()} videos.
+        </p>
+      )}
+
+      {shown.length > 0 && (
         <ul className="divide-y divide-border/60 border border-border/60">
-          {rows.map((row) => {
+          {shown.map((row) => {
             const status = STATUS_COPY[row.status] ?? STATUS_COPY.draft;
+            const thumbnail = row.media_thumbnail ? `${origin}/${row.media_thumbnail}` : null;
             const poster = row.media_poster ? `${origin}/${row.media_poster}` : null;
+            const index = rows.indexOf(row);
+            const toFix = row.status === "archived" ? 0 : publishProblems(row).length;
+            const premiereReady = row.status === "draft" && premiereProblems(row).length === 0;
             return (
               <li key={row.id} className="flex items-center gap-4 p-3">
-                <div className="flex h-16 w-28 shrink-0 items-center justify-center overflow-hidden bg-muted/40">
-                  {poster ? (
+                {filter === "all" && (
+                  <div className="flex shrink-0 flex-col">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6"
+                      aria-label={`Move ${row.title} up`}
+                      disabled={moving || index === 0}
+                      onClick={() => void move(index, -1)}
+                    >
+                      <ArrowUp className="h-3 w-3" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6"
+                      aria-label={`Move ${row.title} down`}
+                      disabled={moving || index === rows.length - 1}
+                      onClick={() => void move(index, 1)}
+                    >
+                      <ArrowDown className="h-3 w-3" />
+                    </Button>
+                  </div>
+                )}
+                <div className="relative flex h-16 w-28 shrink-0 items-center justify-center overflow-hidden bg-muted/40">
+                  {thumbnail ? (
+                    <img
+                      src={thumbnail}
+                      alt=""
+                      className="h-full w-full object-cover"
+                      loading="lazy"
+                    />
+                  ) : poster ? (
                     <img
                       src={poster}
                       alt=""
@@ -142,6 +255,11 @@ function WebsiteVideosPage() {
                     />
                   ) : (
                     <Film className="h-5 w-5 text-muted-foreground" />
+                  )}
+                  {codes[row.slug] && (
+                    <span className="absolute left-1 top-1 bg-black/70 px-1 font-mono text-[9px] font-bold tracking-wider text-white">
+                      {codes[row.slug]}
+                    </span>
                   )}
                 </div>
                 <div className="min-w-0 flex-1 space-y-1">
@@ -161,7 +279,21 @@ function WebsiteVideosPage() {
                     {row.duration_seconds ? ` · ${formatChapterTime(row.duration_seconds)}` : ""}
                     {row.published_on ? ` · published ${row.published_on}` : ""}
                     {row.media_version ? ` · media ${row.media_version}` : " · no media yet"}
+                    {row.media_thumbnail ? " · thumbnail" : ""}
                   </p>
+                  {toFix > 0 && (
+                    <p
+                      className={
+                        row.status === "published"
+                          ? "text-[11px] text-destructive"
+                          : "text-[11px] text-muted-foreground"
+                      }
+                    >
+                      {row.status === "published"
+                        ? `Breaks ${toFix === 1 ? "a website rule" : `${toFix} website rules`}: the website's build leaves it out. Open it to see why.`
+                        : `${toFix} ${toFix === 1 ? "thing" : "things"} before it can be published${premiereReady ? "; ready to show as a premiere" : ""}`}
+                    </p>
+                  )}
                 </div>
                 {row.status === "published" && (
                   <a
