@@ -117,7 +117,9 @@ describe("the engine stamps delivery on every terminal claim about a revision", 
     expect(engine).toContain(
       "const deliveredSha = args.provenance?.deliveredSha ?? sourceSha;",
     );
-    expect(engine).toContain("provenance = { label: sourceDecision.label, deliveredSha: sourceSha };");
+    expect(engine).toContain(
+      "provenance = { label: sourceDecision.label, deliveredSha: sourceSha, primeRepo: primeRef };",
+    );
   });
 
   it("a label names the repository the bytes came from, never prime by default", () => {

@@ -136,7 +136,12 @@ describe("resolveCloneReadSource", () => {
       // The parent's own head: that is the tree the child copies…
       sha: PARENT_HEAD,
       // …while the ledger records prime's commit, and the labels the parent.
-      provenance: { label: "NPC Client Dashboard", deliveredSha: PRIME_SHA },
+      provenance: {
+        label: "NPC Client Dashboard",
+        deliveredSha: PRIME_SHA,
+        // …and what PRIME changed is asked of the prime's own repository.
+        primeRepo: { owner: PRIME.github_owner, repo: PRIME.github_repo, branch: "main" },
+      },
     });
   });
 
@@ -210,6 +215,7 @@ describe("prepareProposalRebuild", () => {
     sync_scope: "mirror",
     parent_clone_id: "cd",
     crm_mode: "dependent",
+    last_synced_sha: "d".repeat(40),
   };
 
   it("rebuilds a routed child from its parent, carrying the clone's recorded CRM", async () => {
@@ -234,6 +240,9 @@ describe("prepareProposalRebuild", () => {
       default_branch: "main",
       sync_scope: "mirror",
       crm_mode: "dependent",
+      // The prime revision it last took, so the rebuilt proposal can name
+      // the protected files prime changed since.
+      last_synced_sha: "d".repeat(40),
     });
   });
 

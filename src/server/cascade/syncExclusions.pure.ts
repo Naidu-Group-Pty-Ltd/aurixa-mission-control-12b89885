@@ -113,6 +113,13 @@ export type SyncExclusion = {
   note?: string | null;
 };
 
+/**
+ * How a hold under the independent line's kept trees (`CRM_LINE_KEPT_PATTERNS`)
+ * spells its pattern. One spelling, read back by `isCrmLineKeptHold`, so the
+ * engine can tell the line's kept copy of a spec from every other hold.
+ */
+export const CRM_LINE_KEPT_HOLD_PREFIX = "(crm-line kept: ";
+
 export type HeldPath = {
   path: string;
   pattern: string;
@@ -226,6 +233,16 @@ export function partitionCascadePaths(
      * from its history reaches one.
      */
     fromAnotherDeployment?: boolean;
+    /**
+     * Paths the line's kept trees (`CRM_LINE_KEPT_PATTERNS`) do not hold on
+     * this call: a kept spec this pass owes because the file it tests crossed,
+     * prime's copy needs nothing the line will not have, and prime's history
+     * shows the line's copy is an older version of prime's or an operator
+     * approved prime's copy (`keptSpecRelease.pure.ts`). Only the kept rule
+     * steps aside — every exclusion row, the prime-only register and the
+     * line's own variants still apply to the path exactly as before.
+     */
+    travelsPastKept?: ReadonlySet<string>;
   } = {},
 ): CascadePartition {
   const holdPrimeOnly = (opts.purpose ?? "write") === "write";
@@ -291,11 +308,12 @@ export function partitionCascadePaths(
       });
       continue;
     }
-    const kept = keptMode ? crmLineKeptPattern(path, keptMode) : null;
+    const kept =
+      keptMode && !opts.travelsPastKept?.has(path) ? crmLineKeptPattern(path, keptMode) : null;
     if (kept) {
       held.push({
         path,
-        pattern: `(crm-line kept: ${kept})`,
+        pattern: `${CRM_LINE_KEPT_HOLD_PREFIX}${kept})`,
         reason: "protected",
         note: CRM_LINE_KEPT_NOTE,
       });

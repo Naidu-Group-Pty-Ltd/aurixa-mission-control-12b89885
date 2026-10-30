@@ -152,7 +152,11 @@ What it does not model:
   would not. That is a hypothesis, not a measurement.
 - **Rate limits, server errors, and GitHub's own variance.**
 - **Every GitHub shape.** A request it does not model throws, naming the
-  method, so the gap is visible rather than silent.
+  method, so the gap is visible rather than silent. The comparison a proposal
+  uses to name the protected files prime changed
+  (`repos.compareCommitsWithBasehead`) is answered from `git diff` against the
+  merge base and cut at 300 files, as GitHub cuts it. Its latency is a guess:
+  no trace has measured it.
 
 ## 6. What it found (F29)
 

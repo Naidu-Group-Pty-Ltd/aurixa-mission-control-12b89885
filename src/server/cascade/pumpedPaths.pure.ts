@@ -3,12 +3,12 @@
  *
  * ## What a pump is
  *
- * Seven files state something about THIS repository's own function set, its
- * own backend or its own type errors, so prime's copy is wrong on a clone
- * whose set differs. The engine reconciles each one from both sides — prime's
+ * Eight files state something about THIS repository's own function set, its
+ * own backend, its own type errors or its own anon key, so prime's copy is
+ * wrong on a clone whose set differs. The engine reconciles each one from both sides — prime's
  * additions merged into the clone's own copy — and writes the result in place
  * of prime's bytes. Each reconciler names its path and exports it; this is
- * where the seven are gathered, from those exports and never retyped.
+ * where the eight are gathered, from those exports and never retyped.
  *
  * ## Why the list lives here and not inside the engine
  *
@@ -38,6 +38,7 @@ import { API_SURFACE_PATH } from "./apiSurfaceReconcile.pure";
 import { CONFIG_TOML_PATH } from "./configTomlReconcile.pure";
 import { DEPLOY_WORKFLOW_PATH } from "./deployWorkflowReconcile.pure";
 import { EDGE_TYPECHECK_BASELINE_PATH } from "./edgeTypecheckBaselineReconcile.pure";
+import { GITLEAKS_CONFIG_PATH } from "./gitleaksReconcile.pure";
 import { SECURITY_REGISTRY_PATH } from "./securityRegistryReconcile.pure";
 import { FUNCTION_COUNT_RATCHET_PATH, SECURITY_INVENTORY_PATH } from "./securityInventoryHold.pure";
 
@@ -50,4 +51,5 @@ export const PUMPED_PATHS: ReadonlySet<string> = new Set([
   API_SURFACE_PATH,
   DEPLOY_WORKFLOW_PATH,
   EDGE_TYPECHECK_BASELINE_PATH,
+  GITLEAKS_CONFIG_PATH,
 ]);

@@ -73,6 +73,11 @@
 
 import { getAppOctokit } from "./github-app.server";
 import {
+  appendOwnKeyAllowlist,
+  GITLEAKS_CONFIG_PATH,
+  gitleaksAllowsKey,
+} from "./cascade/gitleaksReconcile.pure";
+import {
   PARENT_DEPLOYMENT_OWN_FILES,
   PARENT_DEPLOYMENT_OWN_TREES,
 } from "./cascade/syncExclusions.pure";
@@ -203,7 +208,7 @@ export function ciRunsIdentityGuard(yaml: string): boolean {
  * the prime's literal is still load-bearing: it appears in the applied
  * migrations a clone inherits, which cannot be edited without breaking replay.
  */
-export const GITLEAKS_CONFIG_PATH = ".gitleaks.toml";
+export { GITLEAKS_CONFIG_PATH };
 
 /**
  * The isolation spec a clone of the CRM-dependent line inherits, naming its
@@ -377,46 +382,10 @@ export function backendPairNamesForeignProject(text: string, cloneRef: string): 
   return false;
 }
 
-/** Whether the scan config already names this key as allowed. */
-export function gitleaksAllowsKey(toml: string, cloneAnonKey: string): boolean {
-  return toml.includes(cloneAnonKey);
-}
-
-/**
- * Teach the secret scan this deployment's own anon key.
- *
- * Appended rather than substituted: appending cannot corrupt the blocks
- * already there, where an in-place rewrite of a TOML array can, and the
- * prime's literal has to stay for the inherited migrations.
- *
- * Idempotent — a config that already names the key is returned unchanged, so
- * re-running provisioning does not stack duplicate blocks.
- */
-export function appendOwnKeyAllowlist(
-  toml: string,
-  cloneRef: string,
-  cloneAnonKey: string,
-): string {
-  if (gitleaksAllowsKey(toml, cloneAnonKey)) return toml;
-  const description =
-    `This deployment's own Supabase anon (publishable) key, for project ${cloneRef}. ` +
-    "Written by provisioning: the config arrives from the prime naming the PRIME's key as " +
-    "this project's own, which would fail this repository's first pull request the moment a " +
-    "shipped file carried its own. An anon key is publishable and every row it reaches is " +
-    "decided by RLS; it is allowed as ONE literal, so a rotated key, another project's key " +
-    "or a service_role key all still fail.";
-  const q = "'''";
-  const block = [
-    "",
-    "[[allowlists]]",
-    `description = ${JSON.stringify(description)}`,
-    "regexes = [",
-    `  ${q}${cloneAnonKey}${q},`,
-    "]",
-    "",
-  ].join("\n");
-  return `${toml.replace(/\s*$/, "")}\n${block}`;
-}
+// The scan config's two helpers live with the cascade's reconcile of the same
+// file (`cascade/gitleaksReconcile.pure.ts`), so provisioning and every cascade
+// write one block, worded once.
+export { appendOwnKeyAllowlist, gitleaksAllowsKey };
 
 // ─── Applying it ─────────────────────────────────────────────────────
 
