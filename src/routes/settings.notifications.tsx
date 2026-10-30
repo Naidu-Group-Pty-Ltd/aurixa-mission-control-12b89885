@@ -20,6 +20,9 @@ import {
   Monitor,
   Loader2,
   UserPlus,
+  ScanSearch,
+  Bug,
+  Wrench,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -137,6 +140,24 @@ const KINDS: {
     label: "Lead captured",
     description: "A new waitlist lead came in from the Aurixa Systems website.",
     icon: UserPlus,
+  },
+  {
+    value: "live_audit_findings_detected",
+    label: "Live audit — new defects",
+    description: "A live audit of Prime found new high or critical defects, or one came back.",
+    icon: Bug,
+  },
+  {
+    value: "live_audit_run_failed",
+    label: "Live audit — failing",
+    description: "The live audit of Prime has failed three runs in a row.",
+    icon: ScanSearch,
+  },
+  {
+    value: "live_audit_fix_ready",
+    label: "Live audit — fix ready",
+    description: "Claude drafted a fix for a live-audit defect and it waits for review.",
+    icon: Wrench,
   },
 ];
 

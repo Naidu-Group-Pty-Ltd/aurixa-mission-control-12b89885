@@ -577,7 +577,9 @@ export async function syncRepoSecrets(input: SyncSecretsInput): Promise<SyncSecr
  * The workflows receive their callback URL and a per-run callback key as
  * workflow_dispatch inputs, so all they genuinely need from the repository is
  * the two model keys: OpenAI's for Codex (P2-and-below fixes and the scan's
- * reasoning pass), Anthropic's for Claude (P0/P1 fixes).
+ * reasoning pass), Anthropic's for Claude (P0/P1 fixes). The live audit reads
+ * the same Anthropic key, for its scoping, exploring and triage and for every
+ * defect it fixes, whatever its severity (docs/LIVE_AUDIT.md).
  */
 export async function buildCodexRepoSecrets(): Promise<Record<string, string | undefined>> {
   const { remediationCallbackUrl, scanCallbackUrl } =
@@ -636,7 +638,7 @@ const SECRET_PURPOSES: Record<string, { purpose: string; required: boolean }> = 
     required: false,
   },
   ANTHROPIC_API_KEY: {
-    purpose: "Claude Code auth — P0/P1 fixes",
+    purpose: "Claude — P0/P1 security fixes, the live audit, and every live-audit fix",
     required: true,
   },
   CODEX_CALLBACK_URL: {

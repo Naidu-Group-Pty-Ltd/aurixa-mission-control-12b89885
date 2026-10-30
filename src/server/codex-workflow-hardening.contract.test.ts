@@ -284,8 +284,10 @@ describe("the remediation workflow", () => {
     expect(notify).toContain('verification.ci = read("ci.json"');
   });
 
-  it("only ever pushes a codex/fix- branch", () => {
-    expect(REMEDIATION.steps[0]?.run).toContain("'^codex/fix-[A-Za-z0-9._-]{1,180}$'");
+  it("only ever pushes a codex/fix- or live-audit/fix- branch", () => {
+    // Version 5 fixes live-audit defects too, on their own prefix; what each
+    // prefix may carry is held by live-audit-remediation.contract.test.ts.
+    expect(REMEDIATION.steps[0]?.run).toContain("'^(codex|live-audit)/fix-[A-Za-z0-9._-]{1,180}$'");
   });
 
   it("reports the head commit it pushed", () => {

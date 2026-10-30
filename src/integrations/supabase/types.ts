@@ -4496,6 +4496,587 @@ export type Database = {
           },
         ]
       }
+      live_audit_callback_receipts: {
+        Row: {
+          digest: string
+          kind: string
+          received_at: string
+          subject_id: string | null
+        }
+        Insert: {
+          digest: string
+          kind: string
+          received_at?: string
+          subject_id?: string | null
+        }
+        Update: {
+          digest?: string
+          kind?: string
+          received_at?: string
+          subject_id?: string | null
+        }
+        Relationships: []
+      }
+      live_audit_events: {
+        Row: {
+          actor: string | null
+          created_at: string
+          event_type: string
+          finding_id: string | null
+          fix_id: string | null
+          from_state: string | null
+          id: string
+          payload: Json
+          reason: string | null
+          run_id: string | null
+          to_state: string | null
+        }
+        Insert: {
+          actor?: string | null
+          created_at?: string
+          event_type: string
+          finding_id?: string | null
+          fix_id?: string | null
+          from_state?: string | null
+          id?: string
+          payload?: Json
+          reason?: string | null
+          run_id?: string | null
+          to_state?: string | null
+        }
+        Update: {
+          actor?: string | null
+          created_at?: string
+          event_type?: string
+          finding_id?: string | null
+          fix_id?: string | null
+          from_state?: string | null
+          id?: string
+          payload?: Json
+          reason?: string | null
+          run_id?: string | null
+          to_state?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "live_audit_events_finding_id_fkey"
+            columns: ["finding_id"]
+            isOneToOne: false
+            referencedRelation: "live_audit_findings"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "live_audit_events_fix_id_fkey"
+            columns: ["fix_id"]
+            isOneToOne: false
+            referencedRelation: "live_audit_fixes"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "live_audit_events_run_id_fkey"
+            columns: ["run_id"]
+            isOneToOne: false
+            referencedRelation: "live_audit_runs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      live_audit_findings: {
+        Row: {
+          absent_since: string | null
+          assigned_to: string | null
+          category: string
+          confidence: number | null
+          created_at: string
+          description: string | null
+          detector: string
+          deterministic: boolean
+          evidence: Json
+          fingerprint: string
+          first_seen_at: string
+          first_seen_run_id: string | null
+          fix_attempts: number
+          fix_hint: string | null
+          id: string
+          judged_by: string | null
+          last_fix_at: string | null
+          last_seen_at: string
+          last_seen_run_id: string | null
+          missed_runs: number
+          occurrences: number
+          repro_steps: Json
+          reproduced: boolean | null
+          resolution: string | null
+          resolved_at: string | null
+          resolved_by_run_id: string | null
+          route: string | null
+          route_template: string | null
+          runs_seen: number
+          screenshot_path: string | null
+          severity: string
+          state: string
+          suspected_files: Json
+          target_key: string
+          title: string
+          triage_reason: string | null
+          triaged_at: string | null
+          triaged_by: string | null
+          updated_at: string
+        }
+        Insert: {
+          absent_since?: string | null
+          assigned_to?: string | null
+          category: string
+          confidence?: number | null
+          created_at?: string
+          description?: string | null
+          detector: string
+          deterministic?: boolean
+          evidence?: Json
+          fingerprint: string
+          first_seen_at?: string
+          first_seen_run_id?: string | null
+          fix_attempts?: number
+          fix_hint?: string | null
+          id?: string
+          judged_by?: string | null
+          last_fix_at?: string | null
+          last_seen_at?: string
+          last_seen_run_id?: string | null
+          missed_runs?: number
+          occurrences?: number
+          repro_steps?: Json
+          reproduced?: boolean | null
+          resolution?: string | null
+          resolved_at?: string | null
+          resolved_by_run_id?: string | null
+          route?: string | null
+          route_template?: string | null
+          runs_seen?: number
+          screenshot_path?: string | null
+          severity: string
+          state?: string
+          suspected_files?: Json
+          target_key?: string
+          title: string
+          triage_reason?: string | null
+          triaged_at?: string | null
+          triaged_by?: string | null
+          updated_at?: string
+        }
+        Update: {
+          absent_since?: string | null
+          assigned_to?: string | null
+          category?: string
+          confidence?: number | null
+          created_at?: string
+          description?: string | null
+          detector?: string
+          deterministic?: boolean
+          evidence?: Json
+          fingerprint?: string
+          first_seen_at?: string
+          first_seen_run_id?: string | null
+          fix_attempts?: number
+          fix_hint?: string | null
+          id?: string
+          judged_by?: string | null
+          last_fix_at?: string | null
+          last_seen_at?: string
+          last_seen_run_id?: string | null
+          missed_runs?: number
+          occurrences?: number
+          repro_steps?: Json
+          reproduced?: boolean | null
+          resolution?: string | null
+          resolved_at?: string | null
+          resolved_by_run_id?: string | null
+          route?: string | null
+          route_template?: string | null
+          runs_seen?: number
+          screenshot_path?: string | null
+          severity?: string
+          state?: string
+          suspected_files?: Json
+          target_key?: string
+          title?: string
+          triage_reason?: string | null
+          triaged_at?: string | null
+          triaged_by?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "live_audit_findings_first_seen_run_id_fkey"
+            columns: ["first_seen_run_id"]
+            isOneToOne: false
+            referencedRelation: "live_audit_runs"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "live_audit_findings_last_seen_run_id_fkey"
+            columns: ["last_seen_run_id"]
+            isOneToOne: false
+            referencedRelation: "live_audit_runs"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "live_audit_findings_resolved_by_run_id_fkey"
+            columns: ["resolved_by_run_id"]
+            isOneToOne: false
+            referencedRelation: "live_audit_runs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      live_audit_fixes: {
+        Row: {
+          base_ref: string
+          branch_name: string
+          completed_at: string | null
+          created_at: string
+          dispatch_payload: Json
+          dispatched_at: string | null
+          engine: string
+          files_changed: number | null
+          finding_id: string
+          fix_confirmed_at: string | null
+          head_sha: string | null
+          id: string
+          last_error: string | null
+          lines_added: number | null
+          lines_removed: number | null
+          merged_at: string | null
+          model: string | null
+          pr_checked_at: string | null
+          pr_number: number | null
+          pr_url: string | null
+          repo_full_name: string
+          requested_by: string | null
+          run_id: string | null
+          source: string
+          status: string
+          summary: string | null
+          updated_at: string
+          verification: Json | null
+          workflow_run_id: number | null
+          workflow_run_url: string | null
+        }
+        Insert: {
+          base_ref: string
+          branch_name: string
+          completed_at?: string | null
+          created_at?: string
+          dispatch_payload?: Json
+          dispatched_at?: string | null
+          engine?: string
+          files_changed?: number | null
+          finding_id: string
+          fix_confirmed_at?: string | null
+          head_sha?: string | null
+          id?: string
+          last_error?: string | null
+          lines_added?: number | null
+          lines_removed?: number | null
+          merged_at?: string | null
+          model?: string | null
+          pr_checked_at?: string | null
+          pr_number?: number | null
+          pr_url?: string | null
+          repo_full_name: string
+          requested_by?: string | null
+          run_id?: string | null
+          source?: string
+          status?: string
+          summary?: string | null
+          updated_at?: string
+          verification?: Json | null
+          workflow_run_id?: number | null
+          workflow_run_url?: string | null
+        }
+        Update: {
+          base_ref?: string
+          branch_name?: string
+          completed_at?: string | null
+          created_at?: string
+          dispatch_payload?: Json
+          dispatched_at?: string | null
+          engine?: string
+          files_changed?: number | null
+          finding_id?: string
+          fix_confirmed_at?: string | null
+          head_sha?: string | null
+          id?: string
+          last_error?: string | null
+          lines_added?: number | null
+          lines_removed?: number | null
+          merged_at?: string | null
+          model?: string | null
+          pr_checked_at?: string | null
+          pr_number?: number | null
+          pr_url?: string | null
+          repo_full_name?: string
+          requested_by?: string | null
+          run_id?: string | null
+          source?: string
+          status?: string
+          summary?: string | null
+          updated_at?: string
+          verification?: Json | null
+          workflow_run_id?: number | null
+          workflow_run_url?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "live_audit_fixes_finding_id_fkey"
+            columns: ["finding_id"]
+            isOneToOne: false
+            referencedRelation: "live_audit_findings"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "live_audit_fixes_run_id_fkey"
+            columns: ["run_id"]
+            isOneToOne: false
+            referencedRelation: "live_audit_runs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      live_audit_observations: {
+        Row: {
+          finding_id: string
+          observed_at: string
+          occurrences: number
+          run_id: string
+        }
+        Insert: {
+          finding_id: string
+          observed_at?: string
+          occurrences?: number
+          run_id: string
+        }
+        Update: {
+          finding_id?: string
+          observed_at?: string
+          occurrences?: number
+          run_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "live_audit_observations_finding_id_fkey"
+            columns: ["finding_id"]
+            isOneToOne: false
+            referencedRelation: "live_audit_findings"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "live_audit_observations_run_id_fkey"
+            columns: ["run_id"]
+            isOneToOne: false
+            referencedRelation: "live_audit_runs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      live_audit_runs: {
+        Row: {
+          anthropic: Json | null
+          auth_state: string | null
+          batches_received: number
+          callback_key_version: string
+          complete: boolean | null
+          completed_at: string | null
+          cost_usd: number | null
+          created_at: string
+          dispatch_attempts: number
+          dispatch_ref: string
+          dispatched_at: string | null
+          findings_new: number
+          findings_reported: number
+          findings_resolved: number
+          id: string
+          kind: string
+          last_error: string | null
+          mode: string
+          next_attempt_at: string | null
+          phases: Json
+          ref: string | null
+          regressions: number
+          repo_full_name: string
+          requested_by: string | null
+          runner_version: number | null
+          settings: Json
+          started_at: string | null
+          status: string
+          summary: Json | null
+          target_key: string
+          target_url: string
+          updated_at: string
+          workflow_run_id: number | null
+          workflow_run_url: string | null
+        }
+        Insert: {
+          anthropic?: Json | null
+          auth_state?: string | null
+          batches_received?: number
+          callback_key_version?: string
+          complete?: boolean | null
+          completed_at?: string | null
+          cost_usd?: number | null
+          created_at?: string
+          dispatch_attempts?: number
+          dispatch_ref?: string
+          dispatched_at?: string | null
+          findings_new?: number
+          findings_reported?: number
+          findings_resolved?: number
+          id?: string
+          kind: string
+          last_error?: string | null
+          mode?: string
+          next_attempt_at?: string | null
+          phases?: Json
+          ref?: string | null
+          regressions?: number
+          repo_full_name: string
+          requested_by?: string | null
+          runner_version?: number | null
+          settings?: Json
+          started_at?: string | null
+          status?: string
+          summary?: Json | null
+          target_key?: string
+          target_url: string
+          updated_at?: string
+          workflow_run_id?: number | null
+          workflow_run_url?: string | null
+        }
+        Update: {
+          anthropic?: Json | null
+          auth_state?: string | null
+          batches_received?: number
+          callback_key_version?: string
+          complete?: boolean | null
+          completed_at?: string | null
+          cost_usd?: number | null
+          created_at?: string
+          dispatch_attempts?: number
+          dispatch_ref?: string
+          dispatched_at?: string | null
+          findings_new?: number
+          findings_reported?: number
+          findings_resolved?: number
+          id?: string
+          kind?: string
+          last_error?: string | null
+          mode?: string
+          next_attempt_at?: string | null
+          phases?: Json
+          ref?: string | null
+          regressions?: number
+          repo_full_name?: string
+          requested_by?: string | null
+          runner_version?: number | null
+          settings?: Json
+          started_at?: string | null
+          status?: string
+          summary?: Json | null
+          target_key?: string
+          target_url?: string
+          updated_at?: string
+          workflow_run_id?: number | null
+          workflow_run_url?: string | null
+        }
+        Relationships: []
+      }
+      live_audit_settings: {
+        Row: {
+          audit_model: string | null
+          autofix_enabled: boolean
+          autofix_max_per_run: number
+          autofix_min_confidence: number
+          budget_usd: number
+          created_at: string
+          effort_explore: string
+          effort_scope: string
+          effort_triage: string
+          fix_effort: string
+          fix_model: string | null
+          guard_allow_functions: string[]
+          guard_block_functions: string[]
+          max_journeys: number
+          max_pages: number
+          max_steps: number
+          mode: string
+          nightly_cron: string
+          nightly_enabled: boolean
+          screenshots: string
+          target_key: string
+          target_url: string
+          time_budget_minutes: number
+          updated_at: string
+          updated_by: string | null
+          viewports: string[]
+        }
+        Insert: {
+          audit_model?: string | null
+          autofix_enabled?: boolean
+          autofix_max_per_run?: number
+          autofix_min_confidence?: number
+          budget_usd?: number
+          created_at?: string
+          effort_explore?: string
+          effort_scope?: string
+          effort_triage?: string
+          fix_effort?: string
+          fix_model?: string | null
+          guard_allow_functions?: string[]
+          guard_block_functions?: string[]
+          max_journeys?: number
+          max_pages?: number
+          max_steps?: number
+          mode?: string
+          nightly_cron?: string
+          nightly_enabled?: boolean
+          screenshots?: string
+          target_key?: string
+          target_url?: string
+          time_budget_minutes?: number
+          updated_at?: string
+          updated_by?: string | null
+          viewports?: string[]
+        }
+        Update: {
+          audit_model?: string | null
+          autofix_enabled?: boolean
+          autofix_max_per_run?: number
+          autofix_min_confidence?: number
+          budget_usd?: number
+          created_at?: string
+          effort_explore?: string
+          effort_scope?: string
+          effort_triage?: string
+          fix_effort?: string
+          fix_model?: string | null
+          guard_allow_functions?: string[]
+          guard_block_functions?: string[]
+          max_journeys?: number
+          max_pages?: number
+          max_steps?: number
+          mode?: string
+          nightly_cron?: string
+          nightly_enabled?: boolean
+          screenshots?: string
+          target_key?: string
+          target_url?: string
+          time_budget_minutes?: number
+          updated_at?: string
+          updated_by?: string | null
+          viewports?: string[]
+        }
+        Relationships: []
+      }
       microsoft_tenants: {
         Row: {
           client_hint: string
@@ -16585,6 +17166,23 @@ export type Database = {
         Args: { _period_start?: string; _tenant_id: string }
         Returns: Json
       }
+      live_audit_finalize_run: {
+        Args: {
+          p_complete: boolean
+          p_covered: string[]
+          p_run_id: string
+          p_summary: Json
+        }
+        Returns: Json
+      }
+      live_audit_ingest_findings: {
+        Args: { p_findings: Json; p_run_id: string }
+        Returns: Json
+      }
+      live_audit_set_nightly_schedule: {
+        Args: { p_cron: string }
+        Returns: Json
+      }
       mark_feedback_forwarded: {
         Args: { _error?: string; _ok: boolean; _submission_id: string }
         Returns: undefined
@@ -17051,6 +17649,9 @@ export type Database = {
         | "codex_scanner_failing"
         | "codex_findings_overdue"
         | "clone_ci_attention"
+        | "live_audit_findings_detected"
+        | "live_audit_run_failed"
+        | "live_audit_fix_ready"
       notification_severity: "info" | "success" | "warning" | "error"
       overage_policy: "block" | "topup_only" | "pay_as_you_go"
       provisioning_method: "fork" | "template" | "clone"
@@ -17562,6 +18163,9 @@ export const Constants = {
         "codex_scanner_failing",
         "codex_findings_overdue",
         "clone_ci_attention",
+        "live_audit_findings_detected",
+        "live_audit_run_failed",
+        "live_audit_fix_ready",
       ],
       notification_severity: ["info", "success", "warning", "error"],
       overage_policy: ["block", "topup_only", "pay_as_you_go"],

@@ -45,6 +45,9 @@ export const NOTIFICATION_KIND_LABELS: Readonly<Partial<Record<NotificationKind,
   device_registered: "Device registered",
   device_released: "Device released",
   lead_captured: "Lead captured",
+  live_audit_findings_detected: "Live audit — new defects",
+  live_audit_run_failed: "Live audit — failing",
+  live_audit_fix_ready: "Live audit — fix ready",
 };
 
 /** Words a kind's name spells in lower case that a person writes another way. */

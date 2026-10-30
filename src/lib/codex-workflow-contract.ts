@@ -29,10 +29,17 @@
 //     package.json scripts or where packages come from;
 //   - names the repository's CI (`verification.ci`), which Mission Control
 //     runs on the fix before merging it.
+// Remediation version 5 is the first that:
+//   - fixes a live-audit defect (`kind: "bug"`, with the audit's `evidence`)
+//     as well as a security finding, Claude only, on a `live-audit/fix-…`
+//     branch, with the model and effort Mission Control chose for it
+//     (src/server/live-audit-fix.server.ts);
+//   - says on such a pull request that a person merges it.
+// A security finding's prompt and behaviour are unchanged by version 5.
 // The contract test keeps these constants equal to the YAML.
 
 export const CODEX_SCAN_WORKFLOW_VERSION = 3;
-export const CODEX_REMEDIATION_WORKFLOW_VERSION = 4;
+export const CODEX_REMEDIATION_WORKFLOW_VERSION = 5;
 
 /** The version a scan reported, or 1 for workflows that predate versioning. */
 export function reportedWorkflowVersion(summary: unknown): number {

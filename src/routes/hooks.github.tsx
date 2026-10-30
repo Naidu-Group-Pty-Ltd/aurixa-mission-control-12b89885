@@ -9,6 +9,7 @@ import {
   noteRemediationPullRequestHead,
   syncRemediationPullRequestClosed,
 } from "@/server/codex-pr-sync.server";
+import { syncLiveAuditFixPullRequest } from "@/server/live-audit-pr-sync.server";
 import {
   REVIEWED_REMEDIATION_MERGE_TITLE,
   SELF_HEALING_MERGE_TITLE,
@@ -114,6 +115,21 @@ export const Route = createFileRoute("/hooks/github")({
             } catch (err) {
               console.error("[hooks/github] codex PR bookkeeping failed:", err);
             }
+            // A live-audit fix's pull request, on its own `live-audit/fix-…`
+            // branch: merged waits on the next audit to confirm, closed opens
+            // the finding again. Database only, and nothing for any other
+            // branch (live-audit-pr-sync.server.ts).
+            await syncLiveAuditFixPullRequest({
+              repoFullName,
+              prNumber: prNumberForCodex,
+              headRef: prPayload?.pull_request?.head?.ref ?? null,
+              action,
+              merged: prPayload?.pull_request?.merged === true,
+              headSha: prPayload?.pull_request?.head?.sha ?? null,
+              mergedAt: prPayload?.pull_request?.merged_at ?? null,
+            }).catch((err) =>
+              console.error("[hooks/github] live-audit fix bookkeeping failed:", err),
+            );
           }
 
           // ── A merged pull request is prime moving ──────────────────────────

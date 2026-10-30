@@ -54,6 +54,16 @@ export type DispatchRemediationInput = {
      * workflow ignores the field and uses Codex.
      */
     engine?: "claude" | "codex";
+    /**
+     * Version 5 on: what kind of finding this is. `bug` is a live-audit
+     * defect — Claude only, on a `live-audit/fix-…` branch — and carries what
+     * the audit saw (`evidence`) and the model and effort Mission Control
+     * chose for it. Absent for a security finding, whose payload is unchanged.
+     */
+    kind?: "bug";
+    evidence?: string | null;
+    model?: string | null;
+    effort?: string | null;
   };
   callbackUrl: string;
   callbackSecret: string;
@@ -90,6 +100,14 @@ export function buildFindingInput(finding: DispatchRemediationInput["finding"]):
     ruleId: finding.ruleId ?? "",
     snippet: (finding.snippet ?? "").slice(0, 2000),
     engine: finding.engine ?? "codex",
+    ...(finding.kind === "bug"
+      ? {
+          kind: "bug",
+          evidence: (finding.evidence ?? "").slice(0, 6000),
+          ...(finding.model ? { model: finding.model } : {}),
+          ...(finding.effort ? { effort: finding.effort } : {}),
+        }
+      : {}),
   });
 }
 

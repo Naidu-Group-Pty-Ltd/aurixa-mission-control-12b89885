@@ -61,6 +61,7 @@ import {
   Waves,
   PhoneCall,
   Clapperboard,
+  ScanSearch,
 } from "lucide-react";
 
 export type NavItem = {
@@ -171,6 +172,16 @@ export const NAV_SECTIONS: NavSection[] = [
         keywords:
           "sql migrations idempotent idempotency re-run rerun twice safe apply schema " +
           "held back withheld blocked duplicate version rollback undo prime supabase",
+      },
+      // The prime's own running application, driven in a browser: the third
+      // reading of the tree the fleet is copied from.
+      {
+        to: "/live-audit",
+        label: "Live Audit",
+        icon: ScanSearch,
+        keywords:
+          "live audit playwright chromium browser bugs errors crashes defects claude anthropic " +
+          "prime production qa regression fix pull request",
       },
       { to: "/health", label: "Health", icon: Activity, shortcut: "h", keywords: "uptime status" },
       { to: "/metrics", label: "Metrics", icon: BarChart3, shortcut: "i" },
