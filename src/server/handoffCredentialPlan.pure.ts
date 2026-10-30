@@ -19,11 +19,26 @@
  * for, and nothing here deletes or rotates a value. Each row is bookkeeping
  * and closes on the operator's evidence (the `other` target's rule): skipped,
  * recording that the key is kept and billed, or, where the client has
- * supplied its own value, what replaced Aurixa's and how Aurixa's was
- * withdrawn.
+ * supplied its own value through the clone's Integrations page, what replaced
+ * Aurixa's and how Aurixa's was withdrawn.
  *
- * Pure: no imports, no I/O.
+ * ## The client's own value goes through the broker, never onto the project
+ *
+ * The Integrations page posts to Mission Control's broker
+ * (`/api/public/integrations/secrets`), which writes the value and records it
+ * `set` (`integrationLedgerStatus`). `resolve_api_key_billability` rates `set`
+ * `byok`, so that record is what stops the recharge. A value put straight on
+ * the client's project bypasses it: the ledger keeps Aurixa's status, so every
+ * call on the client's own key goes on being recharged as Aurixa's, and the
+ * passes that act on that status treat the value as Aurixa's (the fleet sweep
+ * deletes a value it finds under a `federated` name, and the withdrawal levers
+ * delete one under an `inherited` name). Which names the broker accepts is the
+ * broker's own rule (`tenantSecretRefusal`), asked here rather than restated.
+ *
+ * Pure: no I/O.
  */
+
+import { tenantSecretRefusal } from "./integrationSecretBroker.pure";
 
 /** The ledger statuses whose value Aurixa supplied, and so must account for at handover. */
 export const PLATFORM_PAID_STATUSES = ["inherited", "minted", "federated"] as const;
@@ -46,14 +61,36 @@ export type PlannedRotation = {
 const KEPT =
   "By default it stays: mark this row skipped, with evidence that the key is kept and billed under D6.";
 
-const HINTS: Record<PlatformPaidStatus, (name: string) => string> = {
-  inherited: (name) =>
-    `${name} is Aurixa's key, forwarded by Mission Control. It stays after handover (${D6_KEEP_AND_BILL}). It is withdrawn only when the client supplies its own value for ${name}: set theirs on the client's project, which replaces Aurixa's, and record that as evidence. ${KEPT}`,
-  minted: (name) =>
-    `${name} was minted for this clone on Aurixa's own vendor account. It stays after handover (${D6_KEEP_AND_BILL}). It is withdrawn only when the client supplies its own value for ${name}: set theirs on the client's project, then revoke the minted key at the vendor, and record both as evidence. ${KEPT}`,
-  federated: (name) =>
-    `${name} is a credential Mission Control issues for this clone. It stays after handover (${D6_KEEP_AND_BILL}). It is withdrawn only when the client supplies its own value for ${name}: set theirs on the client's project, then end the federation, and record both as evidence. ${KEPT}`,
+/** Where each kind of platform key came from. */
+const ORIGIN: Record<PlatformPaidStatus, (name: string) => string> = {
+  inherited: (name) => `${name} is Aurixa's key, forwarded by Mission Control.`,
+  minted: (name) => `${name} was minted for this clone on Aurixa's own vendor account.`,
+  federated: (name) => `${name} is a credential Mission Control issues for this clone.`,
 };
+
+/** The one way a client's own value replaces Aurixa's: the broker, which records it (see the header). */
+const THROUGH_THE_BROKER = (name: string) =>
+  `the client enters its own value for ${name} on the clone's Integrations page. Mission Control's broker writes it and records it as the client's own (\`set\`), and that record is what stops the recharge. Never set it directly on the client's project: that bypasses the record, so the client's own calls go on being recharged as Aurixa's`;
+
+/** What withdraws Aurixa's once the ledger records the client's own value. */
+const WITHDRAWAL: Record<PlatformPaidStatus, string> = {
+  inherited:
+    "The client's value then replaces Aurixa's on the project; record the clone's ledger reading `set` as evidence.",
+  minted:
+    "Once the clone's ledger reads `set`, revoke Aurixa's minted key at the vendor, and record both as evidence.",
+  federated:
+    "Once the clone's ledger reads `set`, end the federation, and record both as evidence.",
+};
+
+function platformHint(name: string, status: PlatformPaidStatus): string {
+  const stays = `It stays after handover (${D6_KEEP_AND_BILL}).`;
+  // A name the broker refuses has no client-side replacement at all, so the
+  // hint must not send anyone to a page that answers no.
+  if (tenantSecretRefusal(name) !== null) {
+    return `${ORIGIN[status](name)} ${stays} The client cannot bring its own value for ${name}: the clone's Integrations page refuses it (Mission Control's broker does not let a tenant write ${name}), and it is never set directly on the client's project. ${KEPT}`;
+  }
+  return `${ORIGIN[status](name)} ${stays} It is withdrawn only when ${THROUGH_THE_BROKER(name)}. ${WITHDRAWAL[status]} ${KEPT}`;
+}
 
 const LINK_HINT = `The key that links this clone to Mission Control: usage reports, entitlements and the activation gate read it, and the usage forwarder that bills the platform keys after handover reports through it (${D6_KEEP_AND_BILL}). It is never withdrawn by default, and the client bringing its own keys does not withdraw it. Mark this row skipped, with evidence that the link is kept; withdrawing it is a separate decision to stop metering this clone.`;
 
@@ -76,8 +113,16 @@ export function platformCredentialRotations(
     if (entry.name === MISSION_CONTROL_LINK_SECRET || names.has(entry.name)) continue;
     if (!isPlatformPaid(entry.status)) continue;
     names.add(entry.name);
-    rows.push({ target: "other", key_ref: `platform.${entry.name}`, hint: HINTS[entry.status](entry.name) });
+    rows.push({
+      target: "other",
+      key_ref: `platform.${entry.name}`,
+      hint: platformHint(entry.name, entry.status),
+    });
   }
-  rows.push({ target: "other", key_ref: `platform.${MISSION_CONTROL_LINK_SECRET}`, hint: LINK_HINT });
+  rows.push({
+    target: "other",
+    key_ref: `platform.${MISSION_CONTROL_LINK_SECRET}`,
+    hint: LINK_HINT,
+  });
   return rows;
 }
