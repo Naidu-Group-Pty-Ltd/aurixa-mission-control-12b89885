@@ -16,6 +16,7 @@ import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import type { TablesUpdate } from "@/integrations/supabase/types";
 import { asJson, asRow } from "@/lib/json-cast";
 import {
+  AUDIT_ACCOUNT,
   CLAUDE_MODEL_ID,
   DEFAULT_AUDIT_MODEL,
   EFFORTS,
@@ -532,6 +533,12 @@ const GUARD_LIST_MAX = 100;
 const SettingsInput = z
   .object({
     claude_enabled: z.boolean(),
+    audit_account: z
+      .string()
+      .trim()
+      .regex(AUDIT_ACCOUNT, "a Prime username")
+      .nullable()
+      .or(z.literal("").transform(() => null)),
     nightly_enabled: z.boolean(),
     mode: z.enum(LIVE_AUDIT_MODES),
     target_url: z
@@ -724,13 +731,28 @@ export const getLiveAuditEngineHealth = createServerFn({ method: "GET" })
 
     // Read first: the key's check below is only "ok" in the sense the
     // switch says it is.
-    const { data: switchRow, error: switchErr } = await supabase
-      .from("live_audit_settings")
-      .select("claude_enabled")
-      .eq("target_key", "prime")
-      .maybeSingle();
+    const [{ data: switchRow, error: switchErr }, { data: lastAuthRun, error: lastAuthErr }] =
+      await Promise.all([
+        supabase
+          .from("live_audit_settings")
+          .select("claude_enabled, audit_account")
+          .eq("target_key", "prime")
+          .maybeSingle(),
+        // The latest run that reported how its sign-in went.
+        supabase
+          .from("live_audit_runs")
+          .select("summary")
+          .eq("target_key", "prime")
+          .eq("mode", "live")
+          .not("summary->auth", "is", null)
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle(),
+      ]);
     if (switchErr) throw new Error(switchErr.message);
+    if (lastAuthErr) throw new Error(lastAuthErr.message);
     const claudeOn = switchRow?.claude_enabled === true;
+    const accountRow = switchRow as { audit_account?: string | null } | null;
     checks.push({
       key: "claude_switch",
       label: "Use Claude",
@@ -853,20 +875,36 @@ export const getLiveAuditEngineHealth = createServerFn({ method: "GET" })
             ? undefined
             : "Run the Actions secret sync for Prime in Settings once Mission Control holds the key.",
         });
-        const user = names(setup.repoVariables, "LIVE_AUDIT_USER_ID");
+        const variable = names(setup.repoVariables, "LIVE_AUDIT_USER_ID");
+        const account = accountRow?.audit_account ?? null;
+        // What Prime said about the account on the last run that asked:
+        // named and minted, refused (and why), or nothing named at all.
+        const lastAuth = (
+          lastAuthRun?.summary as { auth?: { state?: string; detail?: string } } | null
+        )?.auth;
+        const refused = lastAuth?.state === "refused" || lastAuth?.state === "rejected";
+        const named = Boolean(account) || variable === true;
         checks.push({
           key: "audit_account",
           label: "The audit's staff account",
-          status: user === null ? "warn" : user ? "ok" : "warn",
-          detail:
-            user === null
-              ? "Prime's variable names could not be read"
-              : user
-                ? "LIVE_AUDIT_USER_ID names the account the audit signs in as"
-                : "No LIVE_AUDIT_USER_ID: runs see only Prime's public pages",
-          fix: user
-            ? undefined
-            : "Create a view-only admin account on Prime for the audit, and put its user id in the repository variable LIVE_AUDIT_USER_ID.",
+          status: !named ? "warn" : refused ? "fail" : "ok",
+          detail: !named
+            ? variable === null
+              ? "No account is named here, and Prime's variable names could not be read: runs may see only Prime's public pages"
+              : "No account is named: runs see only Prime's public pages"
+            : [
+                variable
+                  ? "LIVE_AUDIT_USER_ID on Prime names the account (it wins over this page)"
+                  : `${account} is named under Settings`,
+                lastAuth?.state
+                  ? `last run: ${lastAuth.state}${lastAuth.detail ? ` — ${lastAuth.detail}` : ""}`
+                  : "no run has signed in with it yet",
+              ].join("; "),
+          fix: !named
+            ? "Create an admin on Prime (User Management → Create Sub-Admin) with the Read Only preset, for the audit alone, and enter its username under Settings → The audit account."
+            : refused
+              ? "Prime refused the account on the last run: give it the Read Only preset (no edit or delete anywhere), make sure it is active, or name another under Settings."
+              : undefined,
         });
         // The session job reads the environment's copy first and the
         // repository's otherwise (Prime's DEPLOYMENT_PROTECTION.md moves it

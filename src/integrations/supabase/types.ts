@@ -4992,6 +4992,7 @@ export type Database = {
       }
       live_audit_settings: {
         Row: {
+          audit_account: string | null
           audit_model: string | null
           autofix_enabled: boolean
           autofix_max_per_run: number
@@ -5021,6 +5022,7 @@ export type Database = {
           viewports: string[]
         }
         Insert: {
+          audit_account?: string | null
           audit_model?: string | null
           autofix_enabled?: boolean
           autofix_max_per_run?: number
@@ -5050,6 +5052,7 @@ export type Database = {
           viewports?: string[]
         }
         Update: {
+          audit_account?: string | null
           audit_model?: string | null
           autofix_enabled?: boolean
           autofix_max_per_run?: number

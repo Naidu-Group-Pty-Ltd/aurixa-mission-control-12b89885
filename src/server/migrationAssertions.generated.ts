@@ -1423,4 +1423,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20261030161700",
     assertions: [{ kind: "column", table: "live_audit_settings", column: "claude_enabled" }],
   },
+  {
+    migration: "20261030193300_live_audit_audit_account.sql",
+    version: "20261030193300",
+    assertions: [{ kind: "column", table: "live_audit_settings", column: "audit_account" }],
+  },
 ];
