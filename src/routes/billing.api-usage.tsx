@@ -242,20 +242,23 @@ function ApiUsagePage() {
         {/* `unknown` rather than a formatted zero whenever the read failed or is
             still in flight: on a billing page a confident "$0.00" is a claim,
             and one we cannot make until the data is actually in. */}
+        {/* The rollups' charge is every billable unit at our rate. Each
+            provider's free units come off when the period closes, so this is
+            more than will be invoiced, and says so. */}
         <StatCard
-          label="Billable this period"
+          label="At our rates, before free units"
           value={loadError ? "—" : overview.isPending ? "…" : formatMicros(totals.charge)}
           hint={
             loadError
               ? "Unknown — could not read the meter"
-              : `${totals.events.toLocaleString()} call${totals.events === 1 ? "" : "s"} metered`
+              : `${totals.events.toLocaleString()} call${totals.events === 1 ? "" : "s"} metered; only usage above each provider's free units is invoiced`
           }
           tone={loadError ? "warning" : "default"}
         />
         <StatCard
           label="Our vendor cost"
           value={loadError ? "—" : overview.isPending ? "…" : formatMicros(totals.cost)}
-          hint={loadError ? "Unknown" : `Margin ${formatMicros(totals.margin)}`}
+          hint={loadError ? "Unknown" : `Margin before free units ${formatMicros(totals.margin)}`}
           tone={loadError ? "warning" : "default"}
         />
         <StatCard
@@ -343,7 +346,7 @@ function ApiUsagePage() {
                       <TableHead className="text-right">Calls</TableHead>
                       <TableHead className="text-right">Errors</TableHead>
                       <TableHead className="text-right">Our cost</TableHead>
-                      <TableHead className="text-right">Billable</TableHead>
+                      <TableHead className="text-right">Before free units</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -401,7 +404,7 @@ function ApiUsagePage() {
                     <TableHead className="text-right">On our key</TableHead>
                     <TableHead className="text-right">On their key</TableHead>
                     <TableHead className="text-right">Tenants</TableHead>
-                    <TableHead className="text-right">Billable</TableHead>
+                    <TableHead className="text-right">Before free units</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -517,6 +520,7 @@ function ChargesTable({ charges, canManage, onChanged }) {
         <Table>
           <TableHeader>
             <TableRow>
+              <TableHead>Tenant</TableHead>
               <TableHead>Period</TableHead>
               <TableHead>Status</TableHead>
               <TableHead className="text-right">Cost</TableHead>
@@ -528,6 +532,9 @@ function ChargesTable({ charges, canManage, onChanged }) {
           <TableBody>
             {charges.map((c) => (
               <TableRow key={c.id}>
+                <TableCell className="font-medium">
+                  {c.tenant?.display_name ?? c.clone?.name ?? c.tenant?.external_ref ?? c.tenant_id}
+                </TableCell>
                 <TableCell className="tabular-nums">
                   {c.period_start} → {c.period_end}
                 </TableCell>

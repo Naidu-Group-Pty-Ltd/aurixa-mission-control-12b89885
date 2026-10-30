@@ -1,6 +1,24 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { closeResultFrom } from "./apiUsageSettlement.pure";
+
+/** The newest migration's definition of `public.<fn>`, up to the next function it defines. */
+function latestDefinition(fn: string): { file: string; sql: string } {
+  const files = readdirSync("supabase/migrations")
+    .filter((f) => f.endsWith(".sql"))
+    .sort()
+    .reverse();
+  const head = new RegExp(`create\\s+or\\s+replace\\s+function\\s+public\\.${fn}\\(`, "i");
+  for (const file of files) {
+    const sql = readFileSync(`supabase/migrations/${file}`, "utf8");
+    const at = sql.search(head);
+    if (at < 0) continue;
+    const rest = sql.slice(at + 1);
+    const next = rest.search(/create\s+or\s+replace\s+function\s/i);
+    return { file, sql: sql.slice(at, next < 0 ? undefined : at + 1 + next) };
+  }
+  throw new Error(`no migration defines public.${fn}`);
+}
 
 /**
  * A period closes into one charge per currency, and a charge under the
@@ -213,5 +231,91 @@ describe("the period usage is filed under", () => {
     );
     expect(overview).toContain("_period_start: data.period_start,");
     expect(overview).not.toContain("defaultPeriod()");
+  });
+});
+
+/**
+ * Every tenant gets its allowance every billing period, whether or not Stripe
+ * recorded a renewal, and only usage above it is invoiced (the owner's
+ * decision, 30 Oct 2026). No Stripe renewal has ever been recorded, so a
+ * tenant's anchor still reads the day its plan started; the free units come
+ * from the rate row for each period's own rollups at close, and the period is
+ * the one counted on from that anchor (20261030110000). Dry-run on a copy of
+ * production: each October period closes with Airtable's 5,000 free requests
+ * taken off before any is charged, and its Lovable tokens inside their
+ * 100,000 free.
+ */
+describe("the allowance each period gets", () => {
+  it("is the rate's free units, applied afresh to each period's rollups at close", () => {
+    const close = latestDefinition("close_api_usage_period").sql;
+    expect(close).toContain("coalesce(pr.included_free_units, 0) as free_units");
+    expect(close).toContain("_free := least(_row.free_units, _row.billable_quantity);");
+    expect(close).toContain(
+      "where r.tenant_id = _tenant_id and r.period_start = _period_start and r.currency = _currency",
+    );
+  });
+
+  it("falls in the period counted on from the anchor, whether or not Stripe moved it", () => {
+    const record = latestDefinition("record_api_usage_event").sql;
+    expect(record).toContain(
+      "SELECT public.api_usage_period_start(t.current_period_start::date,_when) INTO _period",
+    );
+    const closable = latestDefinition("api_usage_closable_periods").sql;
+    expect(closable).toContain(
+      "r.period_start < public.api_usage_period_start(t.current_period_start::date, now())",
+    );
+  });
+});
+
+/**
+ * Didit is priced in AUD, so a period closes into one AUD charge (the owner's
+ * decision, 30 Oct 2026). It was the only rate in USD, and absorbed, so every
+ * period holding it closed a second, empty USD charge: three on 30 Oct.
+ */
+describe("Didit priced in AUD", () => {
+  const sql = readFileSync("supabase/migrations/20261030210000_didit_is_priced_in_aud.sql", "utf8");
+  // RBA F11.1, 30 Oct 2026: A$1 = US$0.7040.
+  const USD_PER_AUD = 0.704;
+
+  it("cites the rate it converts at, and says it is re-set by hand", () => {
+    expect(sql).toContain("A$1 = US$0.7040 on 30 Oct 2026");
+    expect(sql).toContain("Reserve Bank of Australia, statistical table F11.1");
+    expect(sql).toContain("_usd_per_aud constant numeric := 0.7040;");
+    expect(sql).toContain("it is re-set by hand");
+  });
+
+  it("rounds the price up to the cent, and converts the cost to the micro", () => {
+    const rounded = "ceil(resale_micros_per_unit / _usd_per_aud / 10000) * 10000";
+    const cost = "round(cost_micros_per_unit / _usd_per_aud)";
+    // The row and its three per-operation overrides, each.
+    expect(sql.split(rounded)).toHaveLength(3);
+    expect(sql.split(cost)).toHaveLength(3);
+    expect(sql).not.toContain("ceil(cost_micros_per_unit");
+    // Only while the row still reads USD, so a second run converts nothing twice.
+    expect(sql).toContain("where secret_name = 'DIDIT_API_KEY' and currency = 'USD'");
+    expect(sql).toMatch(/where secret_name = 'DIDIT_API_KEY'\n\s+and currency = 'USD';/);
+  });
+
+  it("states the figures its arithmetic gives for what 30 Oct measured", () => {
+    const idVerification = Math.round(200_000 / USD_PER_AUD);
+    const fiveCents = Math.round(50_000 / USD_PER_AUD);
+    expect([idVerification, fiveCents]).toEqual([284_091, 71_023]);
+    expect(sql).toContain(`AUD 0.${idVerification}`);
+    expect(sql).toContain(`AUD 0.0${fiveCents}`);
+    expect(sql).toContain(`AUD 0.${idVerification + 2 * fiveCents}`);
+    // Resale is 0 and stays 0: Didit is still absorbed.
+    expect(Math.ceil(0 / USD_PER_AUD / 10_000) * 10_000).toBe(0);
+    expect(sql).not.toMatch(/\babsorbed\s*=/);
+  });
+
+  it("moves only USD Didit usage in a period not yet closed in USD, and proves it by effect", () => {
+    expect(sql).toContain(
+      "lock table public.api_usage_events, public.api_usage_rollups in share row exclusive mode;",
+    );
+    expect(sql).toContain("and c.currency = 'USD' and c.status <> 'open');");
+    expect(sql).toContain("raise exception 'Didit is priced in %, not AUD'");
+    expect(sql).toContain(
+      "raise exception '% Didit rollup(s) in USD remain in a period still to close'",
+    );
   });
 });

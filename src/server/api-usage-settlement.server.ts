@@ -152,11 +152,24 @@ export async function invoiceClosedCharge(chargeId: string): Promise<InvoiceResu
     return { ok: true, skipped: true, reason: "below_threshold" };
   }
 
-  const { data: tenant } = await adminAny
+  const { data: tenant, error: tenantError } = await adminAny
     .from("tenants")
     .select("id, display_name, external_ref, stripe_customer_id, billing_stripe_customer_id")
     .eq("id", row.tenant_id)
     .maybeSingle();
+  if (tenantError) {
+    // A read that failed is not a tenant without a customer. Say what
+    // happened and leave the charge closed: the next sweep reads it again.
+    const reason = `tenant_read_failed: ${tenantError.message}`.slice(0, 500);
+    const { error: noteError } = await adminAny
+      .from("api_usage_charges")
+      .update({ last_error: reason })
+      .eq("id", chargeId);
+    return {
+      ok: false,
+      error: noteError ? `${reason} (last_error not written: ${noteError.message})` : reason,
+    };
+  }
 
   const customerId: string | null =
     tenant?.stripe_customer_id ?? tenant?.billing_stripe_customer_id ?? null;

@@ -135,10 +135,11 @@ export async function grantPlanAllowance(args: {
  * Moves a workspace's billing period forward and issues the new month's
  * allowance.
  *
- * The allowance is issued once per (plan, period start), so it renews only
- * when the period actually moves — which is something only Stripe knows. Left
- * unwired, a workspace would receive its included credits once, at purchase,
- * and never again.
+ * The hourly issuer credits every period counted on from the anchor, whether
+ * or not Stripe renewed (20261030220000, the owner's decision of 30 Oct 2026).
+ * A renewal still issues at once, so credits a customer has just paid for are
+ * spendable straight away, and issue_plan_allowance makes the two one grant:
+ * a plan has one grant per period, whichever arrives first.
  *
  * Refuses to move the period backwards, because Stripe redelivers and events
  * can arrive out of order; rewinding would re-issue a month already credited.

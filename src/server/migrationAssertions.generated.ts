@@ -1438,4 +1438,25 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     version: "20261030193300",
     assertions: [{ kind: "column", table: "live_audit_settings", column: "audit_account" }],
   },
+  {
+    migration: "20261030210000_didit_is_priced_in_aud.sql",
+    version: "20261030210000",
+    assertions: [
+      { kind: "none", reason: "re-prices one catalog row and its three per-operation rows," },
+      { kind: "none", reason: "and creates no object a claim could probe; every table here" },
+      { kind: "none", reason: "already holds rows, so `rows:` would pass whether or not this" },
+      { kind: "none", reason: "ran. The block at the end fails the migration unless Didit" },
+      { kind: "none", reason: "reads in AUD and no period still to close holds it in USD." },
+    ],
+  },
+  {
+    migration: "20261030220000_plan_allowance_every_period.sql",
+    version: "20261030220000",
+    assertions: [
+      { kind: "none", reason: "replaces two functions that already exist, so `rpc:` would" },
+      { kind: "none", reason: "pass whether or not this ran, and creates no other object. The" },
+      { kind: "none", reason: "block at the end fails the migration unless both are this" },
+      { kind: "none", reason: "file's and executable by service_role alone." },
+    ],
+  },
 ];
