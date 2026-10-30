@@ -77,7 +77,10 @@ describe("planChangeRef", () => {
  * either order, a day early, after month-end clamping, and at the same moment;
  * past_due, canceled and incomplete entitlements are skipped; a tenant with no
  * entitlement row is granted; a tenant three periods behind gets the current
- * one only.
+ * one only; a tenant created on first call keeps the one grant provisioning
+ * gave it for its first period (before this, the hourly run added a second:
+ * ten tenants hold both), and one that has changed plan since still gets the
+ * new plan's.
  */
 describe("the plan allowance every period (20261030220000)", () => {
   const sql = readFileSync(
@@ -112,7 +115,7 @@ describe("the plan allowance every period (20261030220000)", () => {
       "and coalesce((l.metadata->>'period_start')::timestamptz, l.created_at)::date >= _from",
     );
     expect(issue).toContain(
-      "and coalesce((l.metadata->>'period_start')::timestamptz, l.created_at)::date < _to))",
+      "and coalesce((l.metadata->>'period_start')::timestamptz, l.created_at)::date < _to)",
     );
     // A renewal and the hourly run are serialised per tenant, the lock taken
     // before the tenant (and so the renewal's new anchor) is read.
@@ -134,6 +137,21 @@ describe("the plan allowance every period (20261030220000)", () => {
     expect(hourly).not.toMatch(/not exists \(select 1 from public\.clone_seat_entitlements/);
     expect(issue.slice(0, issue.indexOf("  else\n"))).not.toContain("clone_seat_entitlements");
     expect(driver).toContain("where status = 'active'");
+  });
+
+  it("counts the first month provisioning grants as that period's, while the plan is unchanged", () => {
+    // ensureTenant gives a tenant it creates its plan's allowance at once,
+    // through grant_tokens, under this reason and with no plan or period.
+    const provisioning = readFileSync("src/server/clone-api-keys.server.ts", "utf8");
+    expect(provisioning).toContain('_reason: "auto_provisioned_monthly_allowance",');
+    expect(issue).toContain("or (l.reason = 'auto_provisioned_monthly_allowance'");
+    expect(issue).toContain(
+      "and l.created_at >= coalesce(_tenant.plan_started_at, _tenant.created_at) - interval '10 seconds'",
+    );
+    expect(issue).toContain("and l.created_at::date >= _from");
+    expect(issue).toContain("and l.created_at::date < _to))");
+    // And the migration refuses to finish without it.
+    expect(sql).toContain("position('auto_provisioned_monthly_allowance' in p.prosrc) = 0");
   });
 
   it("runs for service_role only", () => {

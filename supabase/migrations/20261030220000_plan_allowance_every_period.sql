@@ -21,6 +21,17 @@
 --   expired except Aurixa Builders' (31 Oct) and the tutorial demo's
 --   (28 Nov). Prime holds none: its anchor (19 May) is older than the rule
 --   that only periods beginning after 28 Jul are issued.
+-- - Ten tenants were each given their first period's allowance twice. A
+--   tenant that provisioning creates on first call (ensureTenant's
+--   auto-provision, clone-api-keys.server.ts) is given its plan's monthly
+--   allowance at once, through grant_tokens, as
+--   `auto_provisioned_monthly_allowance` with no plan or period in its
+--   metadata. The hourly run then issued the same plan's allowance for the
+--   same period, 13 to 60 minutes later: 100 + 100 free credits for NPC
+--   Test, both dashboard tenants, Preflight, the CRM, Aurixa Builders and
+--   the four other builders-network tenants. The token integration doc
+--   calls the first grant that plan's monthly allowance
+--   (prime-repo-token-integration.md), so it is not a welcome credit.
 -- - Three seat entitlements exist, all `active` and none with a Stripe
 --   subscription: the prime's, NPC Client Dashboard's (scale, comped) and
 --   the tutorial demo's (launch).
@@ -58,6 +69,10 @@
 --      a late renewal finds its own ref.
 --    A plan change is not held back: it starts its period at the change, and
 --    another plan's grant is not this plan's.
+--    The grant provisioning makes when it creates a tenant is that period's
+--    grant too, for as long as the tenant stays on the plan it was created
+--    with. So a tenant created on first call gets its first month once, at
+--    creation, and the hourly run credits from its second period on.
 -- 3. The guard, beside the webhook's own rule ("a cancelled or past-due plan
 --    must not keep granting credits", api.public.stripe.webhook.ts:532-533).
 --    The hourly run skips a tenant whose clone's seat entitlement
@@ -159,7 +174,17 @@ begin
             or (l.reason = 'plan_allowance'
                 and l.metadata->>'plan_id' = _tenant.plan_id::text
                 and coalesce((l.metadata->>'period_start')::timestamptz, l.created_at)::date >= _from
-                and coalesce((l.metadata->>'period_start')::timestamptz, l.created_at)::date < _to))
+                and coalesce((l.metadata->>'period_start')::timestamptz, l.created_at)::date < _to)
+            -- The first month that provisioning gives a tenant it creates on
+            -- first call (ensureTenant): this allowance, through grant_tokens,
+            -- so with no plan or period of its own. It is this plan's while
+            -- the tenant has not changed plan since. The same call set
+            -- plan_started_at a fraction of a second before, on the app's
+            -- clock rather than the database's.
+            or (l.reason = 'auto_provisioned_monthly_allowance'
+                and l.created_at >= coalesce(_tenant.plan_started_at, _tenant.created_at) - interval '10 seconds'
+                and l.created_at::date >= _from
+                and l.created_at::date < _to))
   ) then
     return jsonb_build_object('ok', true, 'idempotent', true, 'tokens', _allowance);
   end if;
@@ -235,10 +260,12 @@ begin
   select count(*) into _old
     from pg_proc p join pg_namespace n on n.oid = p.pronamespace
    where n.nspname = 'public'
-     and ((p.proname = 'issue_plan_allowance' and position('subscription_not_live' in p.prosrc) = 0)
+     and ((p.proname = 'issue_plan_allowance'
+           and (position('subscription_not_live' in p.prosrc) = 0
+                or position('auto_provisioned_monthly_allowance' in p.prosrc) = 0))
           or (p.proname = 'issue_due_plan_allowances' and position('2026-07-28' in p.prosrc) > 0));
   if _old > 0 then
-    raise exception '% plan allowance function(s) still read the anchor alone', _old;
+    raise exception '% plan allowance function(s) are not this file''s', _old;
   end if;
 end
 $verify$;
