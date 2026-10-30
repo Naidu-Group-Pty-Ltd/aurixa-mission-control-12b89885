@@ -1,6 +1,6 @@
 /**
- * Website → Videos → one video: its copy, chapters, transcript and media, and
- * the acts that put it on the website or take it off.
+ * Website → Videos → one video: its copy, chapters, transcript, video and
+ * pictures, and the acts that put it on the website or take it off.
  *
  * The problems listed beside Publish are computed from the form as Save would
  * write it, by the same rules the server refuses on (`websiteBriefings.pure`),
@@ -12,7 +12,7 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import { toast } from "sonner";
-import { ArrowLeft, ExternalLink, Plus, Trash2 } from "lucide-react";
+import { ArrowDownUp, ArrowLeft, ExternalLink, Plus, Timer, Trash2 } from "lucide-react";
 import { ProtectedRoute } from "@/components/protected-route";
 import { RouteError } from "@/components/route-error";
 import { PageHeader } from "@/components/page-header";
@@ -31,6 +31,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { WebsiteVideoMediaPanel } from "@/components/website-video-media-panel";
+import { WebsiteVideoPicturesPanel } from "@/components/website-video-pictures-panel";
 import { STATUS_COPY } from "@/components/website-video-status";
 import {
   deleteDraftWebsiteBriefingFn,
@@ -43,11 +44,14 @@ import {
   WEBSITE_ARTWORK,
   WEBSITE_EXPLORE_TARGETS,
   briefingPageUrl,
+  formatChapterTime,
+  hasMedia,
   premiereProblems,
   publishProblems,
   type BriefingStatus,
 } from "@/lib/websiteBriefings.pure";
 import {
+  chaptersInOrder,
   exploreLabelFor,
   factsFromForm,
   formFromRow,
@@ -119,6 +123,7 @@ function WebsiteVideoEditor() {
   const [saved, setSaved] = useState<BriefingForm | null>(() => (row ? formFromRow(row) : null));
   const [busy, setBusy] = useState(false);
   const [serverProblems, setServerProblems] = useState<string[]>([]);
+  const [playhead, setPlayhead] = useState<number | null>(null);
 
   // A refetch (the page refetches when the window regains focus) replaces the
   // form only while it holds no unsaved edits, so switching tabs never loses
@@ -141,6 +146,17 @@ function WebsiteVideoEditor() {
   }, [row]);
 
   const dirty = form && saved ? !formsEqual(form, saved) : false;
+
+  // Leaving the page (a reload, a closed tab) with unsaved edits asks first.
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
   const built = form ? payloadFromForm(form) : null;
   const facts = useMemo(() => (row && form ? factsFromForm(row, form) : null), [row, form]);
   const toPublish = facts ? publishProblems(facts) : [];
@@ -266,7 +282,15 @@ function WebsiteVideoEditor() {
 
   const status = row.status as BriefingStatus;
   const statusCopy = STATUS_COPY[status] ?? STATUS_COPY.draft;
-  const slugLocked = Boolean(row.media_version);
+  const slugLocked = hasMedia(row);
+  const shapeLocked = Boolean(row.media_version);
+
+  /** A chapter at the player's position, placed in time order. */
+  const addChapterAtPlayhead = () => {
+    if (playhead === null || !form) return;
+    const chapters = [...form.chapters, { time: formatChapterTime(playhead), label: "" }];
+    set("chapters", chaptersInOrder(chapters));
+  };
 
   return (
     <div className="space-y-6 pb-16">
@@ -535,7 +559,7 @@ function WebsiteVideoEditor() {
               onChange={(e) => set("disclaimer", e.target.value)}
             />
           </div>
-          <div className="grid gap-4 md:grid-cols-3">
+          <div className="grid gap-4 md:grid-cols-4">
             <div className="space-y-2">
               <Label>Card artwork (before a poster exists)</Label>
               <Select value={form.artwork} onValueChange={(v) => set("artwork", v)}>
@@ -552,8 +576,25 @@ function WebsiteVideoEditor() {
               </Select>
             </div>
             <div className="space-y-2">
+              <Label htmlFor="v-artwork-position">Artwork focus</Label>
+              <Input
+                id="v-artwork-position"
+                className="font-mono"
+                placeholder="center"
+                value={form.artworkPosition}
+                onChange={(e) => set("artworkPosition", e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                Which part of the artwork the card keeps, as a CSS position: <code>30% 25%</code>.
+              </p>
+            </div>
+            <div className="space-y-2">
               <Label>Orientation</Label>
-              <Select value={form.orientation} onValueChange={(v) => set("orientation", v)}>
+              <Select
+                value={form.orientation}
+                onValueChange={(v) => set("orientation", v)}
+                disabled={shapeLocked}
+              >
                 <SelectTrigger aria-label="Orientation">
                   <SelectValue />
                 </SelectTrigger>
@@ -563,7 +604,9 @@ function WebsiteVideoEditor() {
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">
-                Set from the video when it is uploaded.
+                {shapeLocked
+                  ? "Measured from the video; a new upload sets it again."
+                  : "Set from the video when it is uploaded."}
               </p>
             </div>
             <div className="space-y-2">
@@ -575,7 +618,7 @@ function WebsiteVideoEditor() {
                 onChange={(e) => set("sortOrder", e.target.value)}
               />
               <p className="text-xs text-muted-foreground">
-                Lower comes first; the flagship always leads.
+                Lower comes first. Reorder the library from the list of videos.
               </p>
             </div>
           </div>
@@ -592,6 +635,34 @@ function WebsiteVideoEditor() {
             slug={row.slug}
             media={row}
             mediaOrigin={query.data?.mediaOrigin ?? ""}
+            disabled={busy || dirty}
+            onPlayhead={setPlayhead}
+            onUploaded={(rebuild) => {
+              if (rebuild) rebuildToast(rebuild as Rebuild, "");
+              void refresh();
+            }}
+          />
+          {dirty && (
+            <p className="mt-2 text-xs text-muted-foreground">
+              Save your changes before uploading.
+            </p>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Pictures</CardTitle>
+          <CardDescription>
+            The thumbnail designed for the video, the poster and the link preview, each uploaded on
+            its own without uploading the video again. A new video upload keeps them.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <WebsiteVideoPicturesPanel
+            row={row}
+            mediaOrigin={query.data?.mediaOrigin ?? ""}
+            libraryCode={query.data?.libraryCode ?? null}
             disabled={busy || dirty}
             onUploaded={(rebuild) => {
               if (rebuild) rebuildToast(rebuild as Rebuild, "");
@@ -654,18 +725,39 @@ function WebsiteVideoEditor() {
               </Button>
             </div>
           ))}
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() =>
-              set("chapters", [
-                ...form.chapters,
-                { time: form.chapters.length ? "" : "0:00", label: "" },
-              ])
-            }
-          >
-            <Plus className="mr-1 h-3 w-3" /> Add a chapter
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() =>
+                set("chapters", [
+                  ...form.chapters,
+                  { time: form.chapters.length ? "" : "0:00", label: "" },
+                ])
+              }
+            >
+              <Plus className="mr-1 h-3 w-3" /> Add a chapter
+            </Button>
+            {playhead !== null && (
+              <Button variant="outline" size="sm" onClick={addChapterAtPlayhead}>
+                <Timer className="mr-1 h-3 w-3" /> Add one at {formatChapterTime(playhead)}
+              </Button>
+            )}
+            {form.chapters.length > 1 && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => set("chapters", chaptersInOrder(form.chapters))}
+              >
+                <ArrowDownUp className="mr-1 h-3 w-3" /> Put in time order
+              </Button>
+            )}
+          </div>
+          {playhead === null && row.media_mp4 && (
+            <p className="text-xs text-muted-foreground">
+              Play or scrub the video above to add a chapter where it is.
+            </p>
+          )}
           {built && !built.ok && (
             <ul className="list-disc pl-5 text-xs text-destructive">
               {built.errors.map((e) => (

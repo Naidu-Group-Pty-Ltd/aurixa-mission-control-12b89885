@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { isHiddenFile, relativePathOf, uploadPackage } from "./briefingUpload";
+import { planPicturesUpload } from "./websiteBriefings.pure";
 
 const PACKAGE = [
   "master.m3u8",
@@ -123,6 +124,45 @@ describe("uploadPackage", () => {
       retryDelayMs: 0,
     });
     expect(outcome.ok).toBe(false);
+    expect(site.calls).toHaveLength(0);
+  });
+});
+
+describe("pictures on their own", () => {
+  it("go up the same way under a pictures plan, as JPEGs cached for good", async () => {
+    const site = fakeWebsite();
+    const outcome = await uploadPackage({
+      files: files(["thumbnail.jpg", "card.jpg"]),
+      grant,
+      plan: planPicturesUpload,
+      fetchImpl: site.fetchImpl,
+      retryDelayMs: 0,
+    });
+    expect(outcome).toEqual({ ok: true, uploaded: 2, skipped: 0 });
+    const puts = site.calls.filter((c) => c.method === "PUT");
+    expect(puts.map((c) => c.url)).toEqual([
+      "https://put.test/card.jpg",
+      "https://put.test/thumbnail.jpg",
+    ]);
+    expect(puts.every((c) => c.headers["content-type"] === "image/jpeg")).toBe(true);
+    expect(puts.every((c) => c.headers["x-upsert"] === "false")).toBe(true);
+  });
+
+  it("a package plan refuses pictures alone, and a pictures plan refuses a package", async () => {
+    const site = fakeWebsite();
+    const alone = await uploadPackage({
+      files: files(["thumbnail.jpg"]),
+      grant,
+      fetchImpl: site.fetchImpl,
+    });
+    expect(alone.ok).toBe(false);
+    const pkg = await uploadPackage({
+      files: files(),
+      grant,
+      plan: planPicturesUpload,
+      fetchImpl: site.fetchImpl,
+    });
+    expect(pkg.ok).toBe(false);
     expect(site.calls).toHaveLength(0);
   });
 });

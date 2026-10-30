@@ -277,7 +277,7 @@ update public.api_usage_charges c
        metadata = coalesce(c.metadata, '{}'::jsonb)
                   || jsonb_build_object('currency_relabelled_from', c.currency,
                                         'cost_micros_before', c.cost_micros,
-                                        'currency_relabelled_by', '20261030100000'),
+                                        'currency_relabelled_by', '20261030110000'),
        updated_at = now()
   from (select l.charge_id, min(pr.currency) as rated_in
           from public.api_usage_charge_lines l

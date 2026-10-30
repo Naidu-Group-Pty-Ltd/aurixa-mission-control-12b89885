@@ -15939,6 +15939,7 @@ export type Database = {
           created_by: string | null
           expires_at: string
           id: string
+          kind: string
           paths: string[]
           token_sha256: string
           version: string
@@ -15950,6 +15951,7 @@ export type Database = {
           created_by?: string | null
           expires_at: string
           id?: string
+          kind?: string
           paths: string[]
           token_sha256: string
           version: string
@@ -15961,6 +15963,7 @@ export type Database = {
           created_by?: string | null
           expires_at?: string
           id?: string
+          kind?: string
           paths?: string[]
           token_sha256?: string
           version?: string
@@ -15993,6 +15996,7 @@ export type Database = {
           media_hls: string | null
           media_mp4: string | null
           media_poster: string | null
+          media_thumbnail: string | null
           media_version: string | null
           orientation: string
           published_on: string | null
@@ -16024,6 +16028,7 @@ export type Database = {
           media_hls?: string | null
           media_mp4?: string | null
           media_poster?: string | null
+          media_thumbnail?: string | null
           media_version?: string | null
           orientation?: string
           published_on?: string | null
@@ -16055,6 +16060,7 @@ export type Database = {
           media_hls?: string | null
           media_mp4?: string | null
           media_poster?: string | null
+          media_thumbnail?: string | null
           media_version?: string | null
           orientation?: string
           published_on?: string | null

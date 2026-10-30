@@ -84,7 +84,7 @@ export async function closeUsagePeriod(
  * would bill a tenant for half a month and leave the rest unattributable, since
  * closing freezes the rollups it summed.
  *
- * The database answers (`api_usage_closable_periods`, 20261030100000): each
+ * The database answers (`api_usage_closable_periods`, 20261030110000): each
  * tenant's periods before its current one, counted on its cycle by the same
  * function `record_api_usage_event` files usage with, that still have a
  * currency to close or invoice. A period counted here from its start date

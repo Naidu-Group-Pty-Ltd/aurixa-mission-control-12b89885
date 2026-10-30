@@ -130,7 +130,7 @@ describe("the sweep and the invoice path", () => {
  */
 describe("the period usage is filed under", () => {
   const sql = readFileSync(
-    "supabase/migrations/20261030100000_usage_files_under_its_own_period.sql",
+    "supabase/migrations/20261030110000_usage_files_under_its_own_period.sql",
     "utf8",
   );
   const settlement = readFileSync("src/server/api-usage-settlement.server.ts", "utf8");

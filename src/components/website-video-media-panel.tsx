@@ -7,7 +7,11 @@
  * website's bucket under a single-use grant, then read back from the bucket
  * the way a viewer's player will see it; only then does the listing point at
  * it. A new upload is always a new version folder, so the version playing now
- * keeps playing until the new one has been verified.
+ * keeps playing until the new one has been verified. Pictures uploaded on
+ * their own (the Pictures panel) stay when a new version lands.
+ *
+ * The video playing now is shown in a player — its progressive fallback,
+ * which every browser plays — and its playhead is offered to the chapters.
  */
 import { useRef, useState } from "react";
 import { useServerFn } from "@tanstack/react-start";
@@ -33,6 +37,7 @@ type Media = {
   media_mp4: string | null;
   media_poster: string | null;
   media_card: string | null;
+  media_captions?: string | null;
   duration_seconds: number | null;
   orientation: string;
 };
@@ -45,6 +50,7 @@ export function WebsiteVideoMediaPanel({
   media,
   mediaOrigin,
   onUploaded,
+  onPlayhead,
   disabled,
 }: {
   briefingId: string;
@@ -52,6 +58,8 @@ export function WebsiteVideoMediaPanel({
   media: Media;
   mediaOrigin: string;
   onUploaded: (rebuild: { requested: boolean; reason?: string } | null) => void;
+  /** The player's position, in whole seconds, as it plays or is scrubbed. */
+  onPlayhead?: (seconds: number) => void;
   disabled?: boolean;
 }) {
   const createUpload = useServerFn(createBriefingUploadFn);
@@ -111,8 +119,11 @@ export function WebsiteVideoMediaPanel({
         setProblems([done.error, ...done.problems]);
         return;
       }
+      const kept = done.kept.length
+        ? ` Kept the ${done.kept.join(" and ")} uploaded on ${done.kept.length === 1 ? "its" : "their"} own.`
+        : "";
       toast.success(
-        `Uploaded ${grant.version}: ${done.durationSeconds ? formatChapterTime(done.durationSeconds) : "progressive"} ${done.orientation} video, verified from the website's bucket.`,
+        `Uploaded ${grant.version}: ${done.durationSeconds ? formatChapterTime(done.durationSeconds) : "progressive"} ${done.orientation} video, verified from the website's bucket.${kept}`,
       );
       setPicked(null);
       setFolderName(null);
@@ -126,22 +137,40 @@ export function WebsiteVideoMediaPanel({
   }
 
   const poster = url(media.media_poster);
-  const card = url(media.media_card);
+  const playable = url(media.media_mp4);
+  const frame =
+    media.orientation === "portrait"
+      ? "h-72 w-auto self-start border border-border/60 bg-black object-contain"
+      : "h-48 w-auto self-start border border-border/60 bg-black object-contain";
 
   return (
     <div className="space-y-4">
       {media.media_version ? (
         <div className="flex flex-col gap-4 md:flex-row">
-          {poster && (
-            <img
-              src={poster}
-              alt="Poster"
-              className={
-                media.orientation === "portrait"
-                  ? "h-56 w-auto self-start border border-border/60 object-contain"
-                  : "h-36 w-auto self-start border border-border/60 object-contain"
-              }
-            />
+          {playable ? (
+            <video
+              key={playable}
+              src={playable}
+              poster={poster ?? undefined}
+              controls
+              preload="metadata"
+              playsInline
+              className={frame}
+              onTimeUpdate={(e) => onPlayhead?.(Math.floor(e.currentTarget.currentTime))}
+              onSeeked={(e) => onPlayhead?.(Math.floor(e.currentTarget.currentTime))}
+            >
+              {media.media_captions && (
+                <track
+                  kind="captions"
+                  src={url(media.media_captions)!}
+                  srcLang="en"
+                  label="English"
+                  default
+                />
+              )}
+            </video>
+          ) : (
+            poster && <img src={poster} alt="Poster" className={frame} />
           )}
           <div className="space-y-1 text-sm">
             <p>
@@ -154,6 +183,7 @@ export function WebsiteVideoMediaPanel({
               {[
                 ["stream", media.media_hls],
                 ["fallback", media.media_mp4],
+                ["captions", media.media_captions ?? null],
                 ["poster", media.media_poster],
                 ["link preview", media.media_card],
               ].map(([label, path]) =>
@@ -172,12 +202,10 @@ export function WebsiteVideoMediaPanel({
                 ) : null,
               )}
             </ul>
-            {card && (
-              <img
-                src={card}
-                alt="Link preview"
-                className="mt-2 h-24 w-auto border border-border/60"
-              />
+            {playable && (
+              <p className="pt-1 text-xs text-muted-foreground">
+                The player plays the fallback MP4; the website streams the adaptive ladder.
+              </p>
             )}
           </div>
         </div>

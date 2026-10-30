@@ -2,17 +2,29 @@ import { describe, expect, it } from "vitest";
 import {
   affectsWebsite,
   chaptersOf,
+  coverCrop,
   formatChapterTime,
+  hasMedia,
+  jpegSize,
+  libraryCode,
+  liveOrder,
   mediaFieldsFor,
   nextVersion,
   orientationOf,
   paragraphsOf,
   parseChapterTime,
   parseMasterPlaylist,
+  pictureFieldsFor,
+  pictureShape,
+  pictureSizeProblem,
+  pictureSource,
+  picturesAfterPackage,
+  planPicturesUpload,
   planUpload,
   playlistDuration,
   premiereProblems,
   publishProblems,
+  reorderPlan,
   resolveWithin,
   slugify,
   sydneyDate,
@@ -214,7 +226,220 @@ describe("uploads", () => {
       media_poster: "videos/x/v2/poster.jpg",
       media_card: "videos/x/v2/card.jpg",
       media_captions: null,
+      media_thumbnail: null,
     });
+    expect(mediaFieldsFor("videos/x/v2/", [...encoded, "thumbnail.jpg"]).media_thumbnail).toBe(
+      "videos/x/v2/thumbnail.jpg",
+    );
+  });
+});
+
+/** The first bytes of a baseline JPEG of this size, as a browser's encoder writes them. */
+function jpegHead(width: number, height: number): Uint8Array {
+  const app0 = [0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 1, 1, 0, 0, 1, 0, 1, 0, 0];
+  const dqt = [0xff, 0xdb, 0x00, 0x43, 0x00, ...new Array(64).fill(1)];
+  const sof = [0xff, 0xc0, 0x00, 0x11, 8, height >> 8, height & 255, width >> 8, width & 255, 3];
+  return Uint8Array.from([0xff, 0xd8, ...app0, ...dqt, ...sof, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1]);
+}
+
+describe("pictures", () => {
+  it("each picture has the size the website expects, the poster in the video's shape", () => {
+    expect(pictureShape("thumbnail", "portrait")).toMatchObject({ width: 1920, height: 1080 });
+    expect(pictureShape("poster", "portrait")).toMatchObject({ width: 1080, height: 1920 });
+    expect(pictureShape("poster", "landscape")).toMatchObject({ width: 1920, height: 1080 });
+    expect(pictureShape("card", "portrait")).toMatchObject({ width: 1200, height: 630 });
+  });
+
+  it("takes a 4K master, refuses another shape or too few pixels, never crops to fit", () => {
+    expect(pictureSizeProblem("thumbnail", "portrait", { width: 3840, height: 2160 })).toBeNull();
+    expect(pictureSizeProblem("poster", "portrait", { width: 2160, height: 3840 })).toBeNull();
+    expect(pictureSizeProblem("thumbnail", "portrait", { width: 1080, height: 1920 })).toMatch(
+      /16:9/,
+    );
+    expect(pictureSizeProblem("poster", "portrait", { width: 1920, height: 1080 })).toMatch(/9:16/);
+    expect(pictureSizeProblem("thumbnail", "landscape", { width: 1024, height: 576 })).toMatch(
+      /at least 1280×720/,
+    );
+    expect(pictureSizeProblem("card", "landscape", { width: 1200, height: 630 })).toBeNull();
+    expect(pictureSizeProblem("thumbnail", "landscape", { width: 0, height: 0 })).toMatch(/16:9/);
+    // Within 1% of the shape is taken (and trimmed by a pixel or two when drawn).
+    expect(pictureSizeProblem("thumbnail", "landscape", { width: 1920, height: 1090 })).toBeNull();
+    expect(
+      pictureSizeProblem("thumbnail", "landscape", { width: 1920, height: 1100 }),
+    ).not.toBeNull();
+  });
+
+  it("makes the card from the thumbnail's centre, the full width kept", () => {
+    expect(coverCrop({ width: 3840, height: 2160 }, { width: 1200, height: 630 })).toEqual({
+      sx: 0,
+      sy: 72,
+      sw: 3840,
+      sh: 2016,
+    });
+    expect(coverCrop({ width: 1920, height: 1080 }, { width: 1920, height: 1080 })).toEqual({
+      sx: 0,
+      sy: 0,
+      sw: 1920,
+      sh: 1080,
+    });
+    expect(coverCrop({ width: 2000, height: 1080 }, { width: 1920, height: 1080 })).toMatchObject({
+      sx: 40,
+      sw: 1920,
+    });
+  });
+
+  it("uploads only the three pictures on their own, each a JPEG cached for good", () => {
+    const plan = planPicturesUpload(["thumbnail.jpg", "card.jpg"]);
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) return;
+    expect(plan.files.map((f) => f.path)).toEqual(["card.jpg", "thumbnail.jpg"]);
+    expect(plan.files.every((f) => f.contentType === "image/jpeg")).toBe(true);
+    expect(plan.files.every((f) => /immutable/.test(f.cacheControl))).toBe(true);
+    expect(planPicturesUpload([]).ok).toBe(false);
+    const bad = planPicturesUpload(["poster.jpg", "master.m3u8"]);
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.problems.join()).toMatch(/master\.m3u8/);
+  });
+
+  it("fills only the pictures an upload holds", () => {
+    expect(pictureFieldsFor("videos/x/v3/", ["thumbnail.jpg", "poster.jpg"])).toEqual({
+      media_thumbnail: "videos/x/v3/thumbnail.jpg",
+      media_poster: "videos/x/v3/poster.jpg",
+    });
+  });
+
+  it("knows a picture uploaded on its own from one that came with the video", () => {
+    const row = listing({
+      media_version: "v1",
+      media_poster: "videos/borrowing-capacity/v2/poster.jpg",
+      media_card: "videos/borrowing-capacity/v1/card-2.jpg",
+      media_thumbnail: null,
+    });
+    expect(pictureSource(row, "poster")).toBe("own");
+    expect(pictureSource(row, "card")).toBe("video");
+    expect(pictureSource(row, "thumbnail")).toBe("none");
+    // Before any video, every picture was uploaded on its own.
+    expect(
+      pictureSource(
+        listing({
+          media_version: null,
+          media_thumbnail: "videos/borrowing-capacity/v1/thumbnail.jpg",
+        }),
+        "thumbnail",
+      ),
+    ).toBe("own");
+  });
+
+  it("a new video keeps the pictures uploaded on their own, and replaces its own", () => {
+    const before = listing({
+      media_version: "v1",
+      media_poster: "videos/borrowing-capacity/v2/poster.jpg",
+      media_card: "videos/borrowing-capacity/v1/card-2.jpg",
+      media_thumbnail: "videos/borrowing-capacity/v2/thumbnail.jpg",
+    });
+    const incoming = mediaFieldsFor("videos/borrowing-capacity/v3/", [
+      "master.m3u8",
+      "poster.jpg",
+      "card.jpg",
+    ]);
+    expect(picturesAfterPackage(before, incoming, "portrait")).toEqual({
+      fields: {
+        media_poster: "videos/borrowing-capacity/v2/poster.jpg",
+        media_card: "videos/borrowing-capacity/v3/card.jpg",
+        media_thumbnail: "videos/borrowing-capacity/v2/thumbnail.jpg",
+      },
+      kept: ["thumbnail", "poster"],
+    });
+    // A video that changed shape takes its own poster: the old one would not fit the frame.
+    const reshaped = picturesAfterPackage(before, incoming, "landscape");
+    expect(reshaped.fields.media_poster).toBe("videos/borrowing-capacity/v3/poster.jpg");
+    expect(reshaped.kept).toEqual(["thumbnail"]);
+  });
+
+  it("reads a JPEG's size from its frame header", () => {
+    expect(jpegSize(jpegHead(1920, 1080))).toEqual({ width: 1920, height: 1080 });
+    expect(jpegSize(jpegHead(1080, 1920))).toEqual({ width: 1080, height: 1920 });
+    expect(jpegSize(new TextEncoder().encode("<html>not found</html>"))).toBeNull();
+    expect(jpegSize(jpegHead(1200, 630).slice(0, 30))).toBeNull();
+  });
+
+  it("any media at all fixes the slug", () => {
+    expect(
+      hasMedia(
+        listing({
+          media_version: null,
+          media_hls: null,
+          media_mp4: null,
+          media_poster: null,
+          media_card: null,
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      hasMedia(
+        listing({
+          media_version: null,
+          media_hls: null,
+          media_mp4: null,
+          media_poster: null,
+          media_card: null,
+          media_thumbnail: "videos/borrowing-capacity/v1/thumbnail.jpg",
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("serves the thumbnail of a published listing, and none for a premiere", () => {
+    const thumb = "videos/borrowing-capacity/v2/thumbnail.jpg";
+    expect(
+      toPublicListing(listing({ status: "published", media_thumbnail: thumb }))?.media?.thumbnail,
+    ).toBe(thumb);
+    expect(toPublicListing(listing({ status: "published" }))?.media?.thumbnail).toBeNull();
+    expect(
+      toPublicListing(listing({ status: "premiere", media_thumbnail: thumb }))?.media,
+    ).toBeNull();
+  });
+
+  it("holds the thumbnail to the listing's own folder", () => {
+    expect(
+      publishProblems(listing({ media_thumbnail: "videos/another-video/v1/thumbnail.jpg" })).join(),
+    ).toMatch(/thumbnail file is outside/);
+  });
+});
+
+describe("library order", () => {
+  const rows = [
+    { id: "a", slug: "a", status: "published", sort_order: 10 },
+    { id: "b", slug: "b", status: "draft", sort_order: 20 },
+    { id: "c", slug: "c", status: "premiere", sort_order: 100 },
+  ];
+
+  it("renumbers in tens, and writes only the listings that move", () => {
+    expect(reorderPlan(rows, ["c", "a", "b"])).toEqual({
+      ok: true,
+      changes: [
+        { id: "c", sort_order: 10 },
+        { id: "a", sort_order: 20 },
+        { id: "b", sort_order: 30 },
+      ],
+    });
+    expect(reorderPlan(rows, ["a", "b", "c"])).toEqual({
+      ok: true,
+      changes: [{ id: "c", sort_order: 30 }],
+    });
+  });
+
+  it("refuses an order that is not every listing exactly once", () => {
+    expect(reorderPlan(rows, ["a", "b"]).ok).toBe(false);
+    expect(reorderPlan(rows, ["a", "b", "b"]).ok).toBe(false);
+    expect(reorderPlan(rows, ["a", "b", "z"]).ok).toBe(false);
+  });
+
+  it("the website's order is the live listings', and its code tags count them", () => {
+    expect(liveOrder(rows)).toEqual(["a", "c"]);
+    expect(liveOrder([...rows].reverse())).toEqual(["a", "c"]);
+    expect(libraryCode(["a", "c"], "c")).toBe("BRF-02");
+    expect(libraryCode(["a", "c"], "b")).toBeNull();
   });
 });
 
