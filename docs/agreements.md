@@ -132,14 +132,15 @@ sentences.
 
 | Tier | File, under `public/agreements/subscription/` | Template id | SHA-256 | Tokens per cycle |
 | --- | --- | --- | --- | --- |
-| Launch | `aurixa-launch-subscription-agreement.docx` | `aurixa-subscription-launch-v8` | `f2fcd625…` | 7,000 |
-| Growth | `aurixa-growth-subscription-agreement.docx` | `aurixa-subscription-growth-v8` | `cd14a5e1…` | 35,000 |
-| Scale | `aurixa-scale-subscription-agreement.docx` | `aurixa-subscription-scale-v8` | `d8c6d20d…` | 75,000 |
+| Launch | `aurixa-launch-subscription-agreement.docx` | `aurixa-subscription-launch-v9` | `29c67b23…` | 7,000 |
+| Growth | `aurixa-growth-subscription-agreement.docx` | `aurixa-subscription-growth-v9` | `be040710…` | 35,000 |
+| Scale | `aurixa-scale-subscription-agreement.docx` | `aurixa-subscription-scale-v9` | `7c90e797…` | 75,000 |
 
 These are the owner's final documents (C01 Launch, C02 Growth, C03 Scale).
-Their text is committed exactly as approved; only their document properties
-were amended (see *What the files carry*). Nothing in this repository
-generates or edits them. `SUBSCRIPTION_TEMPLATES`
+Their text is committed exactly as approved. Two amendments have been made,
+each on the owner's decision and each recorded under *What the files carry*:
+the document properties (25 September 2026), and Schedule A3 (Version 9,
+30 October 2026). Nothing in this repository generates them. `SUBSCRIPTION_TEMPLATES`
 (`src/lib/agreements/subscriptionTemplates.ts`) pins each file's full digest.
 The send fetches the template from the Worker's own origin and refuses any file
 whose digest differs — a stale deploy, a CDN serving something else, or an
@@ -170,6 +171,25 @@ names the tier and version.
   who last edited them. That is the only part that changed. Every other part is
   byte-identical to the approved files, which were pinned as `769a86aa…`,
   `055d801b…` and `7c22dc9b…`.
+- **Version 9 (30 October 2026).** On the owner's decision, Schedule A3 shows
+  the four partner portals AML/CTF brings as included with it. Each
+  template changed in three places:
+  - the Finance Portal (where the tier does not include it) and Solicitor
+    Portal rows read "Included with AML/CTF; otherwise optional" and price the
+    portal "without AML/CTF";
+  - the Builder / Developer Portal row reads "Workspace access included with
+    AML/CTF; each builder contracts separately", and its $699.00 is "per
+    builder, under its own agreement". Builders still pay their own fee (the
+    owner's decision of the same day);
+  - a new Accountant Portal row reads "Included with AML/CTF only", with no
+    price. Its price is undecided, and the agreement prints no price nobody may
+    charge.
+
+  A3's opening paragraph also gains one sentence stating the same. The
+  table's alternating row shading continues below the new row. The title and
+  keywords say Version 9. Every other clause is Version 8's, word for word.
+  Only `word/document.xml` and `docProps/core.xml` changed. Every other part
+  of each package is byte-identical to Version 8.
 - **The guard.** A test fails if a committed template's properties ever again
   carry a draft status or a person's name.
 - **Issued documents** rebuild `docProps/core.xml` again, with the title, offer
@@ -244,8 +264,10 @@ own, quoted in `subscriptionPricing.pure.ts`:
 Money is integer cents throughout.
 
 Additional lines are priced from the same document's Schedule A3. Items the
-tier already includes are not offered. The Builder / Developer Portal needs its
-own agreement, and Lenders is not for sale, so neither can be added.
+tier already includes are not offered, and neither is a partner portal on an
+offer With AML, which brings it. The Builder / Developer Portal needs its own
+agreement, the Accountant Portal comes only with AML/CTF, and Lenders is not
+for sale, so none of the three can be added.
 
 Schedule A4's usage authorities are required as the template requires them:
 
