@@ -747,7 +747,7 @@ describe("a parent deployment's own files, on a clone copied from a parent", () 
       '.select("github_owner, github_repo, default_branch, parent_clone_id")',
     );
     expect(caller).toMatch(
-      /retargetCloneRepo\([\s\S]{0,1600}\{ fromParentClone: Boolean\(cloneRow\.parent_clone_id\) \}/,
+      /retargetCloneRepo\([\s\S]{0,1600}\{\s*fromParentClone: Boolean\(cloneRow\.parent_clone_id\),/,
     );
   });
 });
@@ -895,5 +895,60 @@ describe("a parent deployment's own trees, on a clone copied from a parent", () 
     const step = src.slice(src.indexOf("// 5c."), src.indexOf("// 6. The shipped Supabase pair"));
     expect(step).toContain("for (const root of PARENT_DEPLOYMENT_OWN_TREES)");
     for (const root of PARENT_DEPLOYMENT_OWN_TREES) expect(step).not.toContain(`"${root}"`);
+  });
+});
+
+/**
+ * Stopped by its caller's budget, run against the App client: provisioning
+ * runs the retarget inside a request pg_net abandons at 60 seconds, and a run
+ * the runtime cuts off leaves no record of how far it got. On
+ * `tutorial-demo-orrimere-c158c7` (30 Oct 2026) it was killed mid-way on two
+ * passes running, seven commits in.
+ */
+describe("a retarget its caller's budget stops", () => {
+  const REPO = { owner: "Naidu-Group-Pty-Ltd", repo: "npc-child", branch: "main" };
+  const notFound = () => Promise.reject(Object.assign(new Error("Not Found"), { status: 404 }));
+  const read = () => github.repos.getContent.mock.calls.map(([args]) => args.path as string);
+
+  beforeEach(() => {
+    resetGithub();
+    github.repos.getContent.mockImplementation(() => notFound());
+  });
+
+  it("stops between steps, says so, and reads nothing after the stop", async () => {
+    let asked = 0;
+    const result = await retargetCloneRepo(REPO, CLONE, "anon", {
+      fromParentClone: true,
+      // Lets steps 2 and 2b run, then stops before the first workflow.
+      shouldStop: () => ++asked > 2,
+    });
+    expect(result.stoppedEarly).toBe(true);
+    expect(result.ok).toBe(false);
+    expect(result.actions.map((a) => a.target)).toContain("vars.SUPABASE_PROJECT_REF");
+    expect(read()).toContain("supabase/config.toml");
+    expect(read()).toContain(ISOLATION_SPEC_PATH);
+    expect(read()).not.toContain(".github/workflows/deploy-supabase-functions.yml");
+    expect(read()).not.toContain(GITLEAKS_CONFIG_PATH);
+    expect(github.repos.createOrUpdateFileContents).not.toHaveBeenCalled();
+  });
+
+  it("runs to the end when the caller never stops it", async () => {
+    const result = await retargetCloneRepo(REPO, CLONE, "anon", { shouldStop: () => false });
+    expect(result.stoppedEarly).toBeUndefined();
+    expect(read()).toContain(IDENTITY_GUARD_SPEC_PATH);
+  });
+
+  it("never stops between writing the shipped pair and teaching the secret scan its key", async () => {
+    /* Asked true from the moment the pair is first read: the check in front
+       of step 6 has already passed, so 6, the resolver and 7 run as one unit,
+       and the stop lands in front of step 8. */
+    const result = await retargetCloneRepo(REPO, CLONE, "anon", {
+      shouldStop: () => read().includes(SHIPPED_BACKEND_PAIR_PATHS[0]),
+    });
+    expect(result.stoppedEarly).toBe(true);
+    expect(read()).toContain(SHIPPED_BACKEND_PAIR_PATHS[0]);
+    expect(read()).toContain(RESOLVER_MODULE_CANDIDATES[0]);
+    expect(read()).toContain(GITLEAKS_CONFIG_PATH);
+    expect(read()).not.toContain(IDENTITY_GUARD_SPEC_PATH);
   });
 });

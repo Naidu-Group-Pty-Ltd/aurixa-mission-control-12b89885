@@ -86,7 +86,22 @@ export type ProvisionCloneInput = {
     adminPassword: string;
   } | null;
   /**
+   * Start this clone's sending identity as part of creation: the wizard's
+   * "Start this clone's sending identity" box, carried as itself.
+   *
+   * It used to be read through `sendingDomain` alone, and a ticked box with
+   * the domain left blank sends `null` there, which is exactly what an
+   * unticked box sends. Measured 29 Oct 2026: a demo clone submitted ticked
+   * and blank has no `clone_email_identities` row at all, while the wizard
+   * reported that its identity had started.
+   *
+   * Omitted, a `sendingDomain` still asks for one, as it always has.
+   */
+  startSendingIdentity?: boolean;
+  /**
    * The sending domain an operator typed for this clone's email identity.
+   * Null or blank starts it on the default `advanceEmailIdentity` derives
+   * from the clone's hostname, `send.<subdomain_fqdn>`.
    *
    * Carried because `advanceEmailIdentity` falls back to
    * `deriveSendingDomain(clone)` when it finds none recorded — so a browser
@@ -130,8 +145,26 @@ export type ProvisionCloneResult =
        * defect `provisionCloneSubdomain` was written to end.
        */
       subdomainFqdn?: string | null;
+      /**
+       * What became of the sending identity this request asked for, so the
+       * wizard reports what the server did rather than what its box said.
+       */
+      sendingIdentity: SendingIdentityOutcome;
     }
   | { ok: false; error: string };
+
+/**
+ * What provisioning did with a request for a sending identity.
+ *
+ * `refused` covers a refusal and a throw alike: either way nothing was
+ * started, the reason is the one `advanceEmailIdentity` gave, and the clone's
+ * page is where it is retried. `started` names the domain the identity is on,
+ * which for a blank request is the one derived for it.
+ */
+export type SendingIdentityOutcome =
+  | { status: "not_requested" }
+  | { status: "started"; sendingDomain: string | null }
+  | { status: "refused"; error: string };
 
 export const provisionClone = createServerFn({ method: "POST" })
   .middleware([requireAdmin])
@@ -157,6 +190,18 @@ export const provisionClone = createServerFn({ method: "POST" })
     // reported as a success.
     if (input.crmMode != null && !isCrmMode(input.crmMode)) {
       throw new Error("crmMode must be 'dependent' or 'independent'");
+    }
+    if (input.startSendingIdentity != null && typeof input.startSendingIdentity !== "boolean") {
+      throw new Error("startSendingIdentity must be a boolean");
+    }
+    if (input.sendingDomain != null && typeof input.sendingDomain !== "string") {
+      throw new Error("sendingDomain must be a string");
+    }
+    // A domain sent with the identity declined is refused rather than read
+    // either way: starting it overrides the decline, and dropping it loses the
+    // domain without a word.
+    if (input.startSendingIdentity === false && trim(input.sendingDomain)) {
+      throw new Error("sendingDomain was given with startSendingIdentity: false");
     }
     // A trial offer's code is provenance on the gate's history. One that is
     // not a code is refused rather than recorded as if it were.

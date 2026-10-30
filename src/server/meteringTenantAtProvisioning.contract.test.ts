@@ -26,6 +26,16 @@ const at = (needle: string) => {
   return i;
 };
 
+/**
+ * The first submit's call, by the clone it passes. The retry assigns from the
+ * same function earlier in the file, so the bare call text finds that one.
+ */
+const firstSubmitEffects = () => {
+  const i = core.search(/= await startRequestedSideEffects\(\s*supabase,\s*userId,\s*inserted,/);
+  expect(i, "the first submit's startRequestedSideEffects call").toBeGreaterThan(-1);
+  return i;
+};
+
 describe("provisionCloneCore, first submit", () => {
   it("checks the sold plan before any repository exists, and refuses one billing_plans lacks", () => {
     const check = at("const sold = await resolveSoldPlan(data.planSlug);");
@@ -45,23 +55,21 @@ describe("provisionCloneCore, first submit", () => {
       "await seedSyncExclusions(supabase, inserted.id)",
       'await supabase.from("clone_addon_purchases")',
       "reconcileCloneEntitlements({",
-      "= await startRequestedSideEffects(",
     ]) {
       expect(at(later), later).toBeGreaterThan(metering);
     }
+    expect(firstSubmitEffects()).toBeGreaterThan(metering);
   });
 
   it("withholds the backend while the tenant is unsettled", () => {
-    const call = core.slice(at("= await startRequestedSideEffects("));
+    const call = core.slice(firstSubmitEffects());
     expect(call.slice(0, 200)).toMatch(/metering\.ok \? data : \{ \.\.\.data, backend: null \}/);
   });
 
   it("returns the failure, so the operator sees it and the retry finishes the clone", () => {
     const failure = at("if (!metering.ok) {");
     expect(core.slice(failure, failure + 120)).toMatch(/return \{\s*ok: false,/);
-    expect(
-      at("return { ok: true, cloneId: inserted.id, githubUrl, subdomainFqdn: reservedFqdn };"),
-    ).toBeGreaterThan(failure);
+    expect(core.search(/return \{\s*ok: true,\s*cloneId: inserted\.id,/)).toBeGreaterThan(failure);
   });
 });
 

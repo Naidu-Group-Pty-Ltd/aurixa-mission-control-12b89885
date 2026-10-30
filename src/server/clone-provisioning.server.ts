@@ -11,7 +11,11 @@ import { generateApiKey } from "./clone-api-keys.server";
 import { fireTokenWebhook } from "./token-webhooks.server";
 import { armGate } from "./payment-gate.server";
 import type { Database } from "@/integrations/supabase/types";
-import type { ProvisionCloneInput, ProvisionCloneResult } from "./clone-provisioning.functions";
+import type {
+  ProvisionCloneInput,
+  ProvisionCloneResult,
+  SendingIdentityOutcome,
+} from "./clone-provisioning.functions";
 import { crmChildFields, describeCrmPlacement, type CrmParent } from "./crmLineage.pure";
 import { sortedUniqueSlugs } from "@/lib/pricing/contract-exclusions";
 import {
@@ -71,12 +75,13 @@ export async function provisionCloneCore(
       // follows reads the one, and the backend meters against the other.
       const settled = await settleRetriedClone(supabase, existing, data);
       if (!settled.ok) return settled;
-      await startRequestedSideEffects(supabase, userId, existing, data);
+      const { sendingIdentity } = await startRequestedSideEffects(supabase, userId, existing, data);
       return {
         ok: true,
         cloneId: existing.id,
         githubUrl: existing.github_url,
         idempotent: true,
+        sendingIdentity,
       };
     }
   }
@@ -689,7 +694,11 @@ export async function provisionCloneCore(
   //
   // Without its metering tenant the backend waits (see above); the retry,
   // which settles the tenant first, queues it.
-  const { subdomain: reservedSubdomain, fqdn: reservedFqdn } = await startRequestedSideEffects(
+  const {
+    subdomain: reservedSubdomain,
+    fqdn: reservedFqdn,
+    sendingIdentity,
+  } = await startRequestedSideEffects(
     supabase,
     userId,
     inserted,
@@ -826,7 +835,13 @@ export async function provisionCloneCore(
     };
   }
 
-  return { ok: true, cloneId: inserted.id, githubUrl, subdomainFqdn: reservedFqdn };
+  return {
+    ok: true,
+    cloneId: inserted.id,
+    githubUrl,
+    subdomainFqdn: reservedFqdn,
+    sendingIdentity,
+  };
 }
 
 /**
@@ -1017,7 +1032,11 @@ async function startRequestedSideEffects(
   userId: string,
   inserted: { id: string },
   data: ProvisionCloneInput,
-): Promise<{ subdomain: string | null; fqdn: string | null }> {
+): Promise<{
+  subdomain: string | null;
+  fqdn: string | null;
+  sendingIdentity: SendingIdentityOutcome;
+}> {
   // ─── Reserve the clone's name in the Aurixa zone ──────────────────
   // Before the deployment, because the deployment attaches THIS name. The
   // drain used to fall back to `clone.slug` when no subdomain was recorded,
@@ -1070,36 +1089,54 @@ async function startRequestedSideEffects(
   // did not fail, it quietly started an identity on a domain nobody chose,
   // which is the harder failure to notice of the two.
   //
+  // Asked for by the request, not by the domain. This ran only when a domain
+  // was typed, so the wizard's box ticked with the domain left blank, which
+  // the box promises "derives it from the clone", started nothing. Measured
+  // 29 Oct 2026: a demo clone provisioned that way has no identity row. Blank
+  // goes in as `undefined`, the one value that makes `advanceEmailIdentity`
+  // derive `send.<subdomain_fqdn>` from the hostname the reservation above has
+  // just written; an empty string is refused as no hostname at all.
+  //
   // Idempotent: it adopts an existing identity rather than creating a second
   // one, which is why the drain's own call at `syncing_env` stays exactly as
-  // it is. Non-fatal for the same reason as everything else here.
-  if (data.sendingDomain) {
+  // it is. Non-fatal for the same reason as everything else here, and its
+  // outcome travels back so the wizard can say what actually happened.
+  const typedDomain = data.sendingDomain?.trim() || null;
+  let sendingIdentity: SendingIdentityOutcome = { status: "not_requested" };
+  if (data.startSendingIdentity ?? Boolean(typedDomain)) {
+    const requested = typedDomain
+      ? `The sending domain "${typedDomain}"`
+      : "A sending identity on the clone's default domain";
     try {
       const { advanceEmailIdentity } = await import("@/server/email-identity.server");
       const started = await advanceEmailIdentity(supabase, inserted.id, {
         mode: "provision",
-        sendingDomain: data.sendingDomain,
+        sendingDomain: typedDomain ?? undefined,
         actorUserId: userId,
       });
-      if (!started.ok) {
+      if (started.ok) {
+        sendingIdentity = { status: "started", sendingDomain: started.row?.sending_domain ?? null };
+      } else {
+        sendingIdentity = { status: "refused", error: started.error };
         console.error("[provisionClone] sending identity refused:", started.error);
         await warnOnClone(
           supabase,
           inserted.id,
           `Sending identity not started: ${data.name}`,
-          `The sending domain "${data.sendingDomain}" was requested and could not be ` +
-            `started: ${started.error}. Retry it from the clone's page.`,
+          `${requested} was requested and could not be started: ${started.error}. ` +
+            `Retry it from the clone's page.`,
           "email_identity",
         );
       }
     } catch (e) {
+      const error = e instanceof Error ? e.message : String(e);
+      sendingIdentity = { status: "refused", error };
       console.error("[provisionClone] sending identity failed:", e);
       await warnOnClone(
         supabase,
         inserted.id,
         `Sending identity not started: ${data.name}`,
-        `The sending domain "${data.sendingDomain}" was requested and threw: ` +
-          `${e instanceof Error ? e.message : String(e)}. Retry it from the clone's page.`,
+        `${requested} was requested and threw: ${error}. Retry it from the clone's page.`,
         "email_identity",
       );
     }
@@ -1159,5 +1196,5 @@ async function startRequestedSideEffects(
       );
     }
   }
-  return { subdomain: reservedSubdomain, fqdn: reservedFqdn };
+  return { subdomain: reservedSubdomain, fqdn: reservedFqdn, sendingIdentity };
 }

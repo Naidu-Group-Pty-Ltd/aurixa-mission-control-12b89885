@@ -63,6 +63,33 @@ describe("judgeReadiness", () => {
     expect(r.cloneReady).toBe(true);
   });
 
+  /**
+   * An absence a default covers is not a degradation. Unset,
+   * `SB_ORG_PROJECT_SOFT_LIMIT` is `DEFAULT_SOFT_LIMITS[planTier] ?? pro`, so
+   * grading it `degraded` put a backend pipeline with nothing missing beside
+   * the two webhook secrets whose absence does cost something.
+   */
+  it("does not degrade a capability for a credential that falls back to a default", () => {
+    const r = judgeReadiness({ present: without("SB_ORG_PROJECT_SOFT_LIMIT"), config: {} });
+    const backend = capability(r, "clone_backend");
+    expect(backend.verdict).toBe("ready");
+    expect(backend.blockers).toEqual([]);
+    expect(backend.credentials.find((c) => c.name === "SB_ORG_PROJECT_SOFT_LIMIT")?.state).toBe(
+      "default",
+    );
+    expect(r.degraded).toBe(0);
+  });
+
+  it.each(["GITHUB_WEBHOOK_SECRET", "VERCEL_WEBHOOK_SECRET"])(
+    "still degrades without %s, whose events are polled instead",
+    (name) => {
+      const r = judgeReadiness({ present: without(name), config: {} });
+      const owner = r.capabilities.find((c) => c.credentials.some((x) => x.name === name));
+      expect(owner?.verdict).toBe("degraded");
+      expect(owner?.credentials.find((c) => c.name === name)?.state).toBe("missing");
+    },
+  );
+
   it("blocks on a failed config check even when every credential is set", () => {
     // Cloudflare had its token question look answered while
     // `cloudflare_account_id` and `cloudflare_zone_id` were both NULL, so
@@ -215,6 +242,40 @@ describe("the catalog", () => {
     const names = CAPABILITIES.flatMap((c) => c.credentials.map((x) => x.name));
     expect(new Set(names).size).toBe(names.length);
   });
+
+  /**
+   * A default is declared only where the purpose says one applies, and never
+   * on a required name, which would stop blocking.
+   *
+   * `DOCUSIGN_BASE_URL` also "defaults", to DocuSign's demo environment, and
+   * its purpose says a production account, which this deployment's is, must
+   * set its own: unset there, the REST base and the OAuth host derived from
+   * it are both demo hosts. That absence is a gap, so it stays `degraded`.
+   * `VERCEL_TEAM_ID` names no default at all.
+   */
+  it("declares a default only where one stands in for the absence", () => {
+    const defaulting = CAPABILITIES.flatMap((c) => c.credentials).filter(
+      (c) => c.defaultsWhenUnset,
+    );
+    expect(defaulting.map((c) => c.name)).toEqual(["SB_ORG_PROJECT_SOFT_LIMIT"]);
+    for (const c of defaulting) {
+      expect(c.required, c.name).toBe(false);
+      expect(c.purpose, c.name).toMatch(/default/i);
+    }
+  });
+});
+
+/*
+ * Every renderer of a credential's state. One that knows only `set` and
+ * `missing` draws a name on its default as neither, which reads as a gap.
+ */
+describe("a credential on its default is shown as using it", () => {
+  it.each(["src/components/provisioning-readiness-panel.tsx", "src/components/readiness-card.tsx"])(
+    "in %s",
+    (path) => {
+      expect(readFileSync(path, "utf8")).toContain('c.state === "default"');
+    },
+  );
 });
 
 /*

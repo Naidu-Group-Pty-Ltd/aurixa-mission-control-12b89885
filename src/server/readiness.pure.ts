@@ -42,8 +42,15 @@
  * carries `config` checks beside its credentials, and both can block it.
  */
 
-/** Present in the environment, or not. Never "valid". */
-export type CredentialState = "set" | "missing";
+/**
+ * Present in the environment, or not. Never "valid".
+ *
+ * `default` is absent too, for a name whose reader falls back to a default
+ * when it is unset. Unset, `SB_ORG_PROJECT_SOFT_LIMIT` leaves the limit for
+ * the org's plan in force, and reporting it `missing` graded a backend
+ * pipeline that lacked nothing as `degraded`.
+ */
+export type CredentialState = "set" | "missing" | "default";
 
 export type CredentialCheck = {
   readonly name: string;
@@ -72,7 +79,7 @@ export type CapabilityVerdict =
   | "ready"
   /** Something required is absent, so this cannot work. */
   | "blocked"
-  /** Works, with something optional absent. */
+  /** Works, with something optional absent and no default in its place. */
   | "degraded"
   /** A precondition this side cannot see. */
   | "unknown";
@@ -101,7 +108,19 @@ export type Capability = {
   readonly onClonePath: boolean;
 };
 
-type CredentialSpec = { name: string; purpose: string; required: boolean };
+type CredentialSpec = {
+  name: string;
+  purpose: string;
+  required: boolean;
+  /**
+   * Unset, its reader applies a default, so the absence costs nothing: it is
+   * reported as `default` and degrades nothing. Only for an optional name
+   * whose purpose says a default applies. An absence that still costs
+   * something, like a webhook secret whose events are then polled, is not a
+   * default.
+   */
+  defaultsWhenUnset?: boolean;
+};
 type CapabilitySpec = {
   key: string;
   title: string;
@@ -165,6 +184,8 @@ export const CAPABILITIES: readonly CapabilitySpec[] = [
         name: "SB_ORG_PROJECT_SOFT_LIMIT",
         purpose: "Refuses to provision past this many org projects. Defaults when unset.",
         required: false,
+        // Unset, `resolveSoftLimit` takes `DEFAULT_SOFT_LIMITS` for the org's plan tier.
+        defaultsWhenUnset: true,
       },
     ],
   },
@@ -489,8 +510,15 @@ export const CLONE_PATH = [
 export function judgeReadiness(input: ReadinessInput): ReadinessReport {
   const capabilities: Capability[] = CAPABILITIES.map((spec) => {
     const credentials: CredentialCheck[] = spec.credentials.map((c) => ({
-      ...c,
-      state: input.present.has(c.name) ? "set" : "missing",
+      name: c.name,
+      purpose: c.purpose,
+      required: c.required,
+      // A required name never stands on a default: it blocks when absent.
+      state: input.present.has(c.name)
+        ? "set"
+        : !c.required && c.defaultsWhenUnset
+          ? "default"
+          : "missing",
     }));
     const config = input.config[spec.key] ?? [];
 

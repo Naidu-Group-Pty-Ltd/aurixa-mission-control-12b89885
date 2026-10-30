@@ -6,6 +6,7 @@ import { z } from "zod";
 import { requireAdmin } from "@/integrations/supabase/role-middleware";
 import { balanceSnapshot, fireTokenWebhook } from "@/server/token-webhooks.server";
 import { operatorDisplayName, recordAdminAction } from "@/server/purchases.server";
+import { rollUpGiftCampaigns } from "./giftCampaigns.pure";
 
 const ScopeSchema = z.discriminatedUnion("scope", [
   z.object({ scope: z.literal("all") }),
@@ -147,48 +148,19 @@ export const bulkGiftTokens = createServerFn({ method: "POST" })
   });
 
 // List past promotion campaigns by rolling up token_ledger rows with source='promotion'.
+// `expires_at` is read with the rest. Every row of a campaign carries the expiry
+// it was granted with, and one stored and never shown cannot be checked against
+// what the operator set.
 export const listGiftCampaigns = createServerFn({ method: "GET" })
   .middleware([requireAdmin])
   .handler(async ({ context }) => {
     const { data, error } = await context.supabase
       .from("token_ledger")
-      .select("source_ref, tokens, tenant_id, reason, metadata, created_at, created_by")
+      .select("source_ref, tokens, tenant_id, reason, metadata, created_at, created_by, expires_at")
       .eq("source", "manual")
       .like("source_ref", "promo:%")
       .order("created_at", { ascending: false })
       .limit(2000);
     if (error) throw new Error(error.message);
-    const map = new Map<
-      string,
-      {
-        campaignId: string;
-        campaignName: string;
-        reason: string;
-        tenants: number;
-        totalTokens: number;
-        tokensPerTenant: number;
-        createdAt: string;
-        grantedBy: string | null;
-      }
-    >();
-    for (const row of data ?? []) {
-      const key = row.source_ref ?? "unknown";
-      const existing = map.get(key);
-      if (existing) {
-        existing.tenants++;
-        existing.totalTokens += row.tokens;
-      } else {
-        map.set(key, {
-          campaignId: key,
-          campaignName: (row.metadata as any)?.campaign_name ?? row.reason,
-          reason: row.reason ?? "",
-          tenants: 1,
-          totalTokens: row.tokens,
-          tokensPerTenant: row.tokens,
-          createdAt: row.created_at,
-          grantedBy: (row.metadata as any)?.granted_by ?? null,
-        });
-      }
-    }
-    return { campaigns: [...map.values()] };
+    return { campaigns: rollUpGiftCampaigns(data ?? []) };
   });
