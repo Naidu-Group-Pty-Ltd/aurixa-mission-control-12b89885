@@ -79,6 +79,11 @@ import {
   type MigrationSkipReason,
 } from "./fleetMigrationEligibility.pure";
 import { blockOvertakenBySequence } from "./blockSequence.pure";
+import {
+  primeHoldingsOf,
+  withVersionsHeldThroughPrime,
+  type PrimeHoldings,
+} from "./primeHoldings.pure";
 import { notifyOperators, writeAuditLog } from "./audit.server";
 import { recordKnownProvenance } from "./migrationProvenance.server";
 import { chunkCursorFor } from "./chunkCursorStore.pure";
@@ -822,6 +827,14 @@ export async function openScopedPrimeCorpus(
        * behaviour the pass had before the prime published skeletons.
        */
       seedSkeletons: SeedSkeletonReport | null;
+      /**
+       * The prime ledger versions holding each corpus file's bytes, for the
+       * files the prime records under a version other than their own. A clone
+       * stamped from the prime records the prime's version, never the file's,
+       * so every caller that asks a clone's ledger what it holds asks through
+       * this. See `primeHoldings.pure.ts`.
+       */
+      primeHoldings: PrimeHoldings;
     }
   | { ok: false; error: string }
 > {
@@ -837,6 +850,7 @@ export async function openScopedPrimeCorpus(
 
   let primeApplied: Set<string>;
   let primeBodyDigests: Set<string>;
+  let primeLedgerRows: { version: string; bodyDigest: string | null }[];
   let primeRef: string;
   try {
     primeRef = await resolvePrimeBackendRef(supabase);
@@ -849,9 +863,15 @@ export async function openScopedPrimeCorpus(
       `select version, ${LEDGER_BODY_DIGEST_SQL} as body_digest from supabase_migrations.schema_migrations`,
     )) as Array<{ version?: unknown; body_digest?: unknown }>;
     const safe = Array.isArray(rows) ? rows : [];
-    primeApplied = new Set(
-      safe.map((r) => r?.version).filter((v): v is string => typeof v === "string"),
-    );
+    primeLedgerRows = safe
+      .filter(
+        (r): r is { version: string; body_digest?: unknown } => typeof r?.version === "string",
+      )
+      .map((r) => ({
+        version: r.version,
+        bodyDigest: typeof r.body_digest === "string" ? r.body_digest : null,
+      }));
+    primeApplied = new Set(primeLedgerRows.map((r) => r.version));
     primeBodyDigests = new Set(
       safe
         .map((r) => r?.body_digest)
@@ -951,6 +971,13 @@ export async function openScopedPrimeCorpus(
     primeBodyDigests,
   );
   const { runnableIds, split } = wholeRunnableVersions(metas, runnable);
+  // Every file's digests, not only the ones attached to `metas`: a version
+  // translates only where each file AT it is read and matched, and those are
+  // version-matched files, which the attachment above leaves bare.
+  const primeHoldings = primeHoldingsOf({
+    files: corpus.metas.map((m) => ({ id: m.id, name: m.name, digests: digested.get(m.path) })),
+    primeLedger: primeLedgerRows,
+  });
   return {
     ok: true,
     corpus,
@@ -972,6 +999,7 @@ export async function openScopedPrimeCorpus(
       primeApplied,
     ),
     seedSkeletons,
+    primeHoldings,
   };
 }
 
@@ -1176,6 +1204,8 @@ export async function runFleetMigrationSync(
     // Set when the block is discharged by the lane's own order rather than by
     // the ledger — the third route, named in the log line below.
     let overtaken: string | null = null;
+    // Set when the ledger holds the block's bytes under the prime's version.
+    let heldThroughPrime = false;
 
     if (!upstreamRefusal) {
       const ledger = await readCloneMigrationLedger(ref);
@@ -1218,14 +1248,34 @@ export async function runFleetMigrationSync(
           );
           continue;
         }
-        const sequence = blockOvertakenBySequence({
-          reason: v.row.migration_blocked_reason,
-          metas: earlyScoped.metas,
-          runnableIds: earlyScoped.runnableIds,
-          cloneApplied: new Set(appliedVersions),
-        });
-        if (!sequence.discharged) continue;
-        overtaken = sequence.why;
+        /*
+          A STAMPED CLONE RECORDS THE PRIME'S VERSION OF THE BYTES.
+
+          Asked before the order, with the corpus the order needs: a clone
+          built from the prime's schema records the version the PRIME ran a
+          file under, so a block naming the file's own version is one the
+          ledger test above can never see discharged. The demo clone was
+          blocked on `20250912170521` while recording `20250912050519`, the
+          same bytes. The union is also what the order is tested against, so
+          the two cannot disagree. See `primeHoldings.pure.ts`.
+        */
+        const held = withVersionsHeldThroughPrime(
+          new Set(appliedVersions),
+          earlyScoped.metas,
+          earlyScoped.primeHoldings,
+        );
+        if (blockIsDischarged(v.row.migration_blocked_reason, [...held])) {
+          heldThroughPrime = true;
+        } else {
+          const sequence = blockOvertakenBySequence({
+            reason: v.row.migration_blocked_reason,
+            metas: earlyScoped.metas,
+            runnableIds: earlyScoped.runnableIds,
+            cloneApplied: held,
+          });
+          if (!sequence.discharged) continue;
+          overtaken = sequence.why;
+        }
       }
     }
 
@@ -1251,7 +1301,9 @@ export async function runFleetMigrationSync(
           ? "its block recorded an upstream quota refusal, not a schema rejection"
           : overtaken
             ? `the lane no longer sends the version its block named first: ${overtaken}`
-            : "its ledger now records the version the block named"),
+            : heldThroughPrime
+              ? "its ledger records the prime's version of the bytes the block named"
+              : "its ledger now records the version the block named"),
     );
 
     v.row.migration_blocked_at = null;
@@ -1486,8 +1538,13 @@ export async function runFleetMigrationSync(
         // withheld one. The whole corpus can — and `scoped.metas` rather than
         // `corpus.metas`, because only the first carries the dependency facts
         // that narrow the barrier from blanket to per-dependency. The ids are
-        // the scope's WHOLE versions, never `runnable`'s: see its field.
-        { corpus: scopedMetas, runnableIds: scoped.runnableIds },
+        // the scope's WHOLE versions, never `runnable`'s: see its field. And the
+        // prime's versions of each file's bytes, which a stamped clone records.
+        {
+          corpus: scopedMetas,
+          runnableIds: scoped.runnableIds,
+          primeHoldings: scoped.primeHoldings,
+        },
         /*
           A BODY TOO BIG TO HOLD IS STILL SENDABLE.
 

@@ -1340,6 +1340,12 @@ async function executeSqlMigration(
   } catch {
     // Tracking tables may not exist yet — applyPrimeMigrations creates them.
   }
+  // And what it holds under the version the prime ran it as: a clone stamped
+  // from the prime records the prime's versions, never the files' own. The
+  // replay below asks the same way, so this lane's count of what is pending
+  // and what the replay sends cannot disagree (`primeHoldings.pure.ts`).
+  const { withVersionsHeldThroughPrime } = await import("@/server/primeHoldings.pure");
+  applied = withVersionsHeldThroughPrime(applied, scopedMetas, scoped.primeHoldings);
 
   /*
     Record what can be READ about how this clone came to hold what it holds.
@@ -1465,8 +1471,8 @@ async function executeSqlMigration(
       // `runnable` alone cannot say whether a cleared version sits behind a
       // withheld one. The whole corpus can — and the same enriched array the
       // partition above reads, so the replay's refusal and this lane's count
-      // of what is held back cannot disagree.
-      { corpus: scopedMetas, runnableIds },
+      // of what is held back cannot disagree — and the same holdings.
+      { corpus: scopedMetas, runnableIds, primeHoldings: scoped.primeHoldings },
       { isPastDeadline: (reserveMs) => Date.now() + reserveMs >= deadlineAt },
       // A body the ceiling refuses is streamed and chunked rather than failed.
       // The cursor rides on the run's result, so a pass the budget stops
