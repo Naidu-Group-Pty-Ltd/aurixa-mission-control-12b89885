@@ -552,10 +552,10 @@ async function handleSubscriptionUpdated(sub: Stripe.Subscription) {
     return;
   }
 
-  // 2. A renewal. The allowance is issued once per billing period, so it only
-  //    renews if the period moves — and Stripe is the only thing that knows it
-  //    has. Without this a workspace would receive its included credits once,
-  //    at purchase, and never again.
+  // 2. A renewal. It moves the period to Stripe's and issues that period's
+  //    allowance now, rather than at the hourly issuer's next run. The issuer
+  //    credits every period whether or not Stripe renews (20261030220000), and
+  //    a plan gets one grant per period, so the two never both land.
   const periodStartTs =
     subAny.current_period_start ?? subAny.items?.data?.[0]?.current_period_start ?? null;
   if (!periodStartTs) return;
