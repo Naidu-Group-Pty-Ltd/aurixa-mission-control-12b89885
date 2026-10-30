@@ -484,7 +484,9 @@ describe("the four minted only where the project holds none", () => {
     expect(server).toContain(
       'randomBytes(bytes).toString(encoding === "base64url" ? "base64url" : "hex")',
     );
-    expect(server).toContain("? await readStoredSecretNames(projectRef)");
+    // The names come from the reader that carries a failure, and a failure is null, never empty.
+    expect(server).toContain("const held = await readHeldSecretNames(projectRef);");
+    expect(server).toContain("envNames = held.ok ? new Set(held.names) : null;");
     expect(server).toContain("{ vault, primeShape, envNames }");
   });
 

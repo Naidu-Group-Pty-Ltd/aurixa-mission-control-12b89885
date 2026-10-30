@@ -45,7 +45,6 @@ import { mentionedVersionsOf } from "./migrationVersionMentions.pure";
 import { MIGRATION_PROVENANCE_VALUES } from "./migrationProvenance.pure";
 import {
   parseStoredSecretDigests,
-  parseStoredSecretNames,
   planSecretWrite,
   type SecretWriteResult,
 } from "./secretWriteDiff.pure";
@@ -5158,25 +5157,6 @@ async function readStoredSecretDigests(projectRef: string): Promise<Map<string, 
     });
     if (!res.ok) return null;
     return parseStoredSecretDigests((await res.json()) as unknown);
-  } catch {
-    return null;
-  }
-}
-
-/**
- * The names a project's function environment holds, never a value, or `null`
- * when the list could not be read. A caller deciding whether to MINT reads a
- * null as "unknown" and mints nothing: unlike the digest read above, a failure
- * here must never look like an empty project.
- */
-export async function readStoredSecretNames(projectRef: string): Promise<ReadonlySet<string> | null> {
-  try {
-    const res = await fetch(`${MGMT_API}/projects/${projectRef}/secrets`, {
-      headers: headers(),
-      signal: AbortSignal.timeout(STORED_DIGEST_READ_TIMEOUT_MS),
-    });
-    if (!res.ok) return null;
-    return parseStoredSecretNames((await res.json()) as unknown);
   } catch {
     return null;
   }

@@ -135,7 +135,7 @@ export async function ensureOwnedSecrets(
   specs: readonly OwnedSecretSpec[],
   primeShape: PrimeShape | null,
 ): Promise<EnsureOwnedSecretsResult> {
-  const { runSqlOnProject, sqlLiteral, setCloneSecretValues, readStoredSecretNames } =
+  const { runSqlOnProject, sqlLiteral, setCloneSecretValues } =
     await import("./backend-provisioning.server");
 
   const vaultNames = ownedSecretVaultNames(specs);
@@ -156,11 +156,16 @@ export async function ensureOwnedSecrets(
   }
 
   // The environment's NAMES, for a spec minted only where the project holds
-  // none. Null when the list could not be read, and the planner then mints
-  // nothing for those specs: a failed read is not an absent value.
-  const envNames = specs.some((s) => s.kind === "random" && s.onlyWhereAbsent)
-    ? await readStoredSecretNames(projectRef)
-    : null;
+  // none, from the reader that carries a failure rather than flattening it
+  // (`readHeldSecretNames`). Null when the list could not be read, and the
+  // planner then mints nothing for those specs: a failed read is not an
+  // absent value.
+  let envNames: ReadonlySet<string> | null = null;
+  if (specs.some((s) => s.kind === "random" && s.onlyWhereAbsent)) {
+    const { readHeldSecretNames } = await import("./cloneProhibitedSecrets.server");
+    const held = await readHeldSecretNames(projectRef);
+    envNames = held.ok ? new Set(held.names) : null;
+  }
 
   let plan: OwnedSecretsPlan;
   try {
