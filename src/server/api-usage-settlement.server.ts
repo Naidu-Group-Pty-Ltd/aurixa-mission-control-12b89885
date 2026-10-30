@@ -21,6 +21,9 @@ import { asJson } from "@/lib/json-cast";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { getStripe } from "@/server/stripe.server";
 import { formatMicros } from "@/lib/api-usage-rating";
+import { closeResultFrom, type CloseResult } from "@/server/apiUsageSettlement.pure";
+
+export type { ClosedCharge, CloseResult } from "@/server/apiUsageSettlement.pure";
 
 /** jsonb column read back as `Json`; spread only when it is an object. */
 function asObject(value: unknown): Record<string, unknown> {
@@ -33,7 +36,7 @@ function asObject(value: unknown): Record<string, unknown> {
 const adminAny = supabaseAdmin;
 
 /** Below this, a Stripe invoice item costs more in reconciliation than it
- *  collects. Sub-threshold periods close and stay closed at zero owed. */
+ *  collects. A charge under it is never sent and ends `below_threshold`. */
 export const MIN_INVOICEABLE_CENTS = 50;
 
 export type ChargeRow = {
@@ -46,21 +49,21 @@ export type ChargeRow = {
   amount_cents: number;
   amount_micros: number;
   cost_micros: number;
-  status: "open" | "closed" | "invoiced" | "waived" | "failed";
+  status: "open" | "closed" | "invoiced" | "below_threshold" | "waived" | "failed";
   stripe_invoice_item_id: string | null;
   last_error: string | null;
   closed_at: string | null;
   invoiced_at: string | null;
 };
 
-export type CloseResult =
-  | { ok: true; chargeId: string; alreadyClosed: boolean; amountCents: number; lines: number }
-  | { ok: false; error: string };
-
 /**
  * Close one tenant-period. Thin wrapper over `close_api_usage_period` — the
  * arithmetic lives in SQL so it runs in the same transaction as the read of the
  * rollups it is summing.
+ *
+ * A period closes into one charge per currency (20261030090000): a USD line
+ * and an AUD line are never summed into one amount. The top-level fields are
+ * the first charge's, as the function answered before it closed per currency.
  */
 export async function closeUsagePeriod(
   tenantId: string,
@@ -71,22 +74,7 @@ export async function closeUsagePeriod(
     _period_start: periodStart,
   });
   if (error) return { ok: false, error: error.message };
-  const r = (data ?? {}) as {
-    ok?: boolean;
-    error?: string;
-    charge_id?: string;
-    already_closed?: boolean;
-    amount_cents?: number;
-    lines?: number;
-  };
-  if (!r.ok) return { ok: false, error: r.error ?? "close_failed" };
-  return {
-    ok: true,
-    chargeId: r.charge_id as string,
-    alreadyClosed: Boolean(r.already_closed),
-    amountCents: r.amount_cents ?? 0,
-    lines: r.lines ?? 0,
-  };
+  return closeResultFrom(data);
 }
 
 /**
@@ -156,17 +144,20 @@ export async function invoiceClosedCharge(chargeId: string): Promise<InvoiceResu
   if (row.status === "waived") {
     return { ok: true, skipped: true, reason: "waived" };
   }
+  if (row.status === "below_threshold") {
+    return { ok: true, skipped: true, reason: "below_threshold" };
+  }
   if (row.status !== "closed") {
     return { ok: true, skipped: true, reason: `not_closed:${row.status}` };
   }
   if (row.amount_cents < MIN_INVOICEABLE_CENTS) {
-    // Nothing worth collecting. Mark it invoiced so the cron stops revisiting
-    // it, and record why the amount never reached a statement.
+    // Nothing worth collecting, so nothing is sent. Its own status says so:
+    // `invoiced` here told the Billing page money had been asked for (key
+    // audit R6). The cron stops revisiting it all the same.
     await adminAny
       .from("api_usage_charges")
       .update({
-        status: "invoiced",
-        invoiced_at: new Date().toISOString(),
+        status: "below_threshold",
         metadata: asJson({ ...asObject(charge.metadata), below_threshold: true }),
       })
       .eq("id", chargeId);
@@ -271,7 +262,8 @@ export type SweepResult = {
   invoiced: number;
   skipped: number;
   failed: number;
-  totalCents: number;
+  /** Invoiced cents per currency: an AUD cent and a USD cent are never added. */
+  totalCentsByCurrency: Record<string, number>;
   errors: Array<{ tenant_id: string; period_start: string; error: string }>;
 };
 
@@ -288,7 +280,7 @@ export async function sweepApiUsageSettlement(now = new Date()): Promise<SweepRe
     invoiced: 0,
     skipped: 0,
     failed: 0,
-    totalCents: 0,
+    totalCentsByCurrency: {},
     errors: [],
   };
 
@@ -299,20 +291,24 @@ export async function sweepApiUsageSettlement(now = new Date()): Promise<SweepRe
       out.errors.push({ ...period, error: closed.error });
       continue;
     }
-    if (closed.alreadyClosed) out.alreadyClosed += 1;
-    else out.closed += 1;
 
-    const invoiced = await invoiceClosedCharge(closed.chargeId);
-    if (invoiced.ok === false) {
-      out.failed += 1;
-      out.errors.push({ ...period, error: invoiced.error });
-      continue;
-    }
-    if (invoiced.skipped === true) {
-      out.skipped += 1;
-    } else {
-      out.invoiced += 1;
-      out.totalCents += invoiced.amountCents;
+    // One charge per currency, each invoiced on its own.
+    for (const charge of closed.charges) {
+      if (charge.alreadyClosed) out.alreadyClosed += 1;
+      else out.closed += 1;
+
+      const invoiced = await invoiceClosedCharge(charge.chargeId);
+      if (invoiced.ok === false) {
+        out.failed += 1;
+        out.errors.push({ ...period, error: `${charge.currency}: ${invoiced.error}` });
+        continue;
+      }
+      if (invoiced.skipped === true) {
+        out.skipped += 1;
+      } else {
+        out.invoiced += 1;
+        out.totalCentsByCurrency[charge.currency] = (out.totalCentsByCurrency[charge.currency] ?? 0) + invoiced.amountCents;
+      }
     }
   }
 
