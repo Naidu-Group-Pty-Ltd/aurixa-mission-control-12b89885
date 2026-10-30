@@ -25,12 +25,18 @@ import { beginGithubLane } from "@/server/githubUsageMeter";
 // clone's repository CONTENT is at that prime revision, and this deploys
 // FUNCTIONS. It settles, because the planner widens an open run rather than
 // queuing a second one.
+/** Inside the job's 120 s, with room for the response. */
+const BACKEND_CATCHUP_WINDOW_MS = 100_000;
+
 export const Route = createFileRoute("/hooks/backend-catchup")({
   server: {
     handlers: {
       POST: async ({ request }) => {
         const auth = verifyCronAuth(request);
         if (!auth.ok) return auth.response;
+        // The job's own window is 120 s (`20260907100000_schedule_backend_catchup.sql`);
+        // the comparison below starts only with its time left inside this.
+        const deadlineAt = Date.now() + BACKEND_CATCHUP_WINDOW_MS;
         // Attribute this invocation's App-installation calls. See
         // githubUsageMeter.ts: the count is taken at the one hook every call
         // already passes through, and named here.
@@ -135,12 +141,33 @@ export const Route = createFileRoute("/hooks/backend-catchup")({
             });
           }
 
+          // Last, a backend whose finishing pass had no time left to compare
+          // it with the prime: one per pass, while this pass has the step's
+          // own time left. It records its own audit row per clone, and never
+          // fails the catch-up. See `deferredParity.server.ts`.
+          let deferredParity: unknown = null;
+          try {
+            const { catchUpDeferredParity } = await import("@/server/deferredParity.server");
+            const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+            deferredParity = await catchUpDeferredParity({ supabase: supabaseAdmin, deadlineAt });
+          } catch (parityErr) {
+            const message =
+              parityErr instanceof Error ? parityErr.message : "deferred parity catch-up failed";
+            deferredParity = { refused: message };
+            console.error("[hooks/backend-catchup] deferred parity", message);
+            await writeAuditLog({
+              action: "deferred_parity_sweep",
+              entityType: "cron",
+              metadata: { error: message },
+            });
+          }
+
           // 200 with the refusals in the body: one clone with no Supabase
           // project is a state, not a failed sweep.
-          return new Response(
-            JSON.stringify({ success: true, ...report, primeOnlyFunctions, cloneOwnedFunctions }),
-            { headers: { "Content-Type": "application/json" } },
-          );
+          const body = { success: true, ...report, primeOnlyFunctions, cloneOwnedFunctions };
+          return new Response(JSON.stringify({ ...body, deferredParity }), {
+            headers: { "Content-Type": "application/json" },
+          });
         } catch (e) {
           const message = e instanceof Error ? e.message : "backend catch-up failed";
           console.error("[hooks/backend-catchup]", message);
