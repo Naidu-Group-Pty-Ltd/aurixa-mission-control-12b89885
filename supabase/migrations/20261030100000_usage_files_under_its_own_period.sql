@@ -64,7 +64,6 @@
 -- An event recorded in the seconds this runs may still be filed under the old
 -- period. The re-file holds the usage tables against writes while it runs.
 
-begin;
 
 create or replace function public.api_usage_period_start(_anchor date, _when timestamptz)
 returns date
@@ -494,5 +493,3 @@ begin
   end if;
 end
 $verify$;
-
-commit;
