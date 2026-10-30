@@ -448,6 +448,30 @@ describe("the trees the independent line keeps as its own", () => {
     expect(dependent.held).toEqual([]);
   });
 
+  it("lets a released kept spec past the kept rule, and past nothing else", () => {
+    // `keptSpecRelease.pure.ts`: a kept spec left behind by the file it tests,
+    // whose prime copy needs nothing the line lacks, travels on evidence.
+    const released = new Set([AGENT_SPEC]);
+    const carried = partitionCascadePaths([RULE, AGENT_SPEC], [], {
+      crmMode: "independent",
+      fromAnotherLine: true,
+      travelsPastKept: released,
+    });
+    expect(carried.write).toEqual([AGENT_SPEC]);
+    expect(carried.held.map((h) => h.path)).toEqual([RULE]);
+
+    // Only the kept rule steps aside: a protected row on the same path holds it.
+    const rowHeld = partitionCascadePaths(
+      [AGENT_SPEC],
+      [{ pattern: "src/lib/agent/__tests__/**", reason: "protected", note: "the clone's own" }],
+      { crmMode: "independent", fromAnotherLine: true, travelsPastKept: released },
+    );
+    expect(rowHeld.write).toEqual([]);
+    expect(rowHeld.held.map((h) => [h.path, h.pattern])).toEqual([
+      [AGENT_SPEC, "src/lib/agent/__tests__/**"],
+    ]);
+  });
+
   it("holds a deletion from outside the line too, and none in a conversion", () => {
     const fromPrime = partitionCascadePaths([RULE, "src/gone.ts"], [], {
       purpose: "delete",

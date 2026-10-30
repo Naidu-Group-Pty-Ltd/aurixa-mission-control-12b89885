@@ -747,7 +747,9 @@ export const CRM_LINE_VARIANT_NOTE =
  *   fails there.
  *
  * `protected`, so a pass carries them silently, with nothing listed and
- * nothing to approve. Held only where the bytes come from OUTSIDE the line
+ * nothing to approve — except a spec whose subject crosses, which the
+ * left-behind channel judges, holds for a person or lists
+ * (`keptSpecRelease.pure.ts`). Held only where the bytes come from OUTSIDE the line
  * (`fromAnotherLine`), like a variant: a child of the head reads the head and
  * receives the head's own copies. A deletion is held too, unlike a withheld
  * feature's: the file at that path on the line is the line's own, whatever

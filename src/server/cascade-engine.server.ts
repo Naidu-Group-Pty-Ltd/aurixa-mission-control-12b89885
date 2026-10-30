@@ -96,6 +96,14 @@ import {
   type LeftBehindTouch,
   type SpecSide,
 } from "./cascade/specsLeftBehind.pure";
+import {
+  describeKeptSpecsLeftBehind,
+  isCrmLineKeptHold,
+  treeAfterDelivery,
+  whatKeptSpecLacks,
+  type KeptSpecLeftBehind,
+} from "./cascade/keptSpecRelease.pure";
+import type { TreeIndex } from "./cascade/importClosure.pure";
 import { gitBlobSha } from "./cascade/gitBlobSha.pure";
 import {
   MAX_STRANDED_PROBES,
@@ -5153,10 +5161,16 @@ export async function processClone(args: {
    * the delivery is final. A note is written when its spec is judged, and the
    * delivery still changes after that: a subject is held later in the pass, a
    * removal is withheld once the specs that stay are known. Keyed by spec.
+   * `kept` is the line's kept-tree hold a note replaced, put back if the note
+   * is dropped: the spec stays the line's, and is counted as held.
    */
   const reverseHolds = new Map<
     string,
-    { current: HeldPath; rebuild: (touch: LeftBehindTouch) => HeldPath | null }
+    {
+      current: HeldPath;
+      rebuild: (touch: LeftBehindTouch) => HeldPath | null;
+      kept?: HeldPath;
+    }
   >();
   /** Put `next` where `prev` stands in both lists, or take `prev` out of both. */
   const replaceHold = (prev: HeldPath, next: HeldPath | null) => {
@@ -5167,6 +5181,38 @@ export async function processClone(args: {
       else list.splice(at, 1);
     }
   };
+  /**
+   * Kept specs this pass owes: the carry's partition lets each past the line's
+   * kept rule, and past nothing else (`travelsPastKept`).
+   */
+  const keptTravelling = new Set<string>();
+  /** The line's kept-tree holds standing now, by path (`isCrmLineKeptHold`). */
+  const keptHoldsNow = () =>
+    new Map(partition.held.filter(isCrmLineKeptHold).map((h) => [h.path, h] as const));
+  /**
+   * The clone's tree as the delivery stands now, built once per question, or
+   * null where the clone's tree was not read.
+   */
+  const keptPresentNow = (): TreeIndex | null =>
+    cloneShaByPath === null
+      ? null
+      : treeAfterDelivery({
+          clone: cloneShaByPath,
+          writes: changedOnClone(),
+          removes: deletesCrossing,
+        });
+  /**
+   * What prime's copy of a kept spec needs that `present` will not have, or
+   * null where that cannot be asked — a copy or a tree not read is not a
+   * verdict, and the spec stays as it was.
+   */
+  const keptSpecLacks = (spec: string, present: TreeIndex | null): string[] | null => {
+    const text = primeKeptText.get(spec);
+    if (text === undefined || present === null || primeShaByPath === null) return null;
+    return whatKeptSpecLacks({ specPath: spec, primeText: text, prime: primeShaByPath, present });
+  };
+  /** Kept specs that stay the line's while a file they test crosses, for the proposal. */
+  const keptStaying: KeptSpecLeftBehind[] = [];
   /** The evidence verdict per left-behind spec: may prime's copy replace the clone's? */
   const leftBehindVerdicts = new Map<string, HoldRelease>();
   /** A left-behind spec not judged this pass, and why. */
@@ -5333,9 +5379,28 @@ export async function processClone(args: {
       const heldNow = new Set(partition.held.map((h) => h.path));
       const unjudged: Array<{ path: string; cloneSha: string }> = [];
       const leftBehindNow = keptLeftBehind();
+      // A spec the independent line keeps whole (`CRM_LINE_KEPT_PATTERNS`) is
+      // held `protected`, and this half used to pass over every held spec — so
+      // a file it tests crossed and the line's older copy stayed, silently,
+      // to fail `verify`. One that prime's copy can run on the line (it needs
+      // nothing the line will not have) is judged like an unheld spec below;
+      // the rest stay the line's, as D15 decided, and are listed. See
+      // `keptSpecRelease.pure.ts`.
+      const keptHolds = keptHoldsNow();
+      const keptJudgeable = new Set<string>();
+      const keptAsking = leftBehindNow.filter(
+        (lb) => keptHolds.has(lb.spec) && !attemptedSubjects.has(lb.spec),
+      );
+      const present = keptAsking.length > 0 ? keptPresentNow() : null;
+      for (const lb of keptAsking) {
+        const lacks = keptSpecLacks(lb.spec, present);
+        if (lacks !== null && lacks.length === 0) keptJudgeable.add(lb.spec);
+      }
+      const passedOver = (spec: string) =>
+        (heldNow.has(spec) && !keptJudgeable.has(spec)) || attemptedSubjects.has(spec);
       for (const lb of leftBehindNow) {
         leftBehind.set(lb.spec, lb);
-        if (heldNow.has(lb.spec) || attemptedSubjects.has(lb.spec)) continue;
+        if (passedOver(lb.spec)) continue;
         if (leftBehindVerdicts.has(lb.spec)) continue;
         const cloneSha = cloneShaByPath?.get(lb.spec);
         if (cloneSha === undefined) continue;
@@ -5368,7 +5433,8 @@ export async function processClone(args: {
       }
       const releasing: string[] = [];
       for (const lb of leftBehindNow) {
-        if (heldNow.has(lb.spec) || attemptedSubjects.has(lb.spec)) continue;
+        if (passedOver(lb.spec)) continue;
+        const keptHold = keptHolds.get(lb.spec);
         let verdict = leftBehindVerdicts.get(lb.spec);
         if (verdict === undefined) {
           const approved = overwriteApproved.has(lb.spec);
@@ -5388,7 +5454,13 @@ export async function processClone(args: {
             // merge as a held variant. Merged, it travels like a released
             // spec, as the merge (`prepareOne`); current, it is held and owes
             // nothing; anything else is held for a person as before.
-            const mergedAs = carryingAllowed ? await tryVariantMerge(lb.spec) : "hold";
+            //
+            // Not a kept spec: the merge is of the line's edits with prime's,
+            // and `whatKeptSpecLacks` judged prime's copy, not that merge.
+            // One the line edited waits for a person, whose approval the next
+            // pass honours.
+            const mergedAs =
+              carryingAllowed && keptHold === undefined ? await tryVariantMerge(lb.spec) : "hold";
             await keepLedger("past the window");
             if (mergedAs === "write") {
               // Its verdict stays the evidence's `hold`: the spec is reported
@@ -5403,7 +5475,9 @@ export async function processClone(args: {
               removed: lb.removed,
               why: verdict.why,
             });
-            partition.held.push(held);
+            // In place of the kept hold, so the spec is held once and said.
+            if (keptHold) replaceHold(keptHold, held);
+            else partition.held.push(held);
             if (mergedAs !== "current") needsReconcile.push(held);
             attemptedSubjects.add(lb.spec);
             const why = verdict.why;
@@ -5413,6 +5487,7 @@ export async function processClone(args: {
                 touch.touchedBy.length + (touch.withheld?.length ?? 0) === 0
                   ? null
                   : leftBehindSpecHold({ membrane, spec: lb.spec, ...touch, why }),
+              kept: keptHold,
             });
             continue;
           }
@@ -5454,6 +5529,16 @@ export async function processClone(args: {
             continue;
           }
           leftBehindCut.delete(spec);
+          // A kept spec that is owed leaves the line's kept tree for this
+          // pass: its hold comes off, so the plan does not refuse it, and the
+          // carry's own partition lets it past the kept rule
+          // (`travelsPastKept`) — and past nothing else. One cut short above
+          // keeps its hold, and the final sweep says why.
+          const keptHold = keptHolds.get(spec);
+          if (keptHold) {
+            replaceHold(keptHold, null);
+            keptTravelling.add(spec);
+          }
           owedSpecs.push(spec);
         }
       }
@@ -5534,7 +5619,10 @@ export async function processClone(args: {
     // than the rule that governs it. Partitioning here is the same function
     // over the same exclusions, so a protected path is protected whether the
     // clone installs the module it lives in or not.
-    const gated = partitionCascadePaths(plan.carry, exclusions, lineOpts);
+    const gated = partitionCascadePaths(plan.carry, exclusions, {
+      ...lineOpts,
+      travelsPastKept: keptTravelling,
+    });
     // Marked attempted whichever way they went: a subject the exclusions hold
     // is settled, and re-planning it every round would never terminate.
     for (const h of gated.held) attemptedSubjects.add(h.path);
@@ -5668,10 +5756,29 @@ export async function processClone(args: {
   // this: prime's history cleared it and the carry stopped before it (a
   // ceiling), or it was never judged at all (the probe ceiling). Both clear
   // on a later pass, and the note says which.
+  //
+  // A spec the line keeps whole, still under its kept hold, is either listed
+  // or held the same way. Prime's copy needs something the line will not have:
+  // it stays the line's, `protected` and never offered for approval (that
+  // approval would ship a spec that cannot load), and the proposal lists it
+  // with what it lacks. Prime's copy could run here but was never judged: it
+  // is held for a person in place of the kept hold, like any unjudged spec,
+  // and an approval of it is honoured on the next pass.
   if (keptSpecSubjects.size > 0) {
-    const heldNow = new Set(partition.held.map((h) => h.path));
+    const keptHolds = keptHoldsNow();
+    const heldNow = new Set(partition.held.filter((h) => !isCrmLineKeptHold(h)).map((h) => h.path));
+    const present = keptHolds.size > 0 ? keptPresentNow() : null;
     for (const lb of keptLeftBehind()) {
       leftBehind.set(lb.spec, lb);
+      const keptHold = keptHolds.get(lb.spec);
+      if (keptHold) {
+        const lacks = keptSpecLacks(lb.spec, present);
+        if (lacks === null) continue;
+        if (lacks.length > 0) {
+          keptStaying.push({ spec: lb.spec, touchedBy: lb.touchedBy, lacks });
+          continue;
+        }
+      }
       if (heldNow.has(lb.spec)) continue;
       const cutShort: LeftBehindCutShort = leftBehindCut.get(lb.spec) ?? "ceiling";
       const held = leftBehindSpecHold({
@@ -5681,7 +5788,8 @@ export async function processClone(args: {
         removed: lb.removed,
         cutShort,
       });
-      partition.held.push(held);
+      if (keptHold) replaceHold(keptHold, held);
+      else partition.held.push(held);
       needsReconcile.push(held);
       reverseHolds.set(lb.spec, {
         current: held,
@@ -5689,6 +5797,7 @@ export async function processClone(args: {
           touch.touchedBy.length + (touch.withheld?.length ?? 0) === 0
             ? null
             : leftBehindSpecHold({ membrane, spec: lb.spec, ...touch, cutShort }),
+        kept: keptHold,
       });
     }
   }
@@ -5879,7 +5988,11 @@ export async function processClone(args: {
       });
       replaceHold(entry.current, next);
       if (next) entry.current = next;
-      else reverseHolds.delete(spec);
+      else {
+        reverseHolds.delete(spec);
+        // A kept spec with nothing left to say stays the line's, held as before.
+        if (entry.kept) partition.held.push(entry.kept);
+      }
     }
   }
 
@@ -6480,14 +6593,22 @@ export async function processClone(args: {
             `nothing of this clone's is lost — the same evidence a held path is released on.\n\n` +
             specsBroughtAcrossNote
           : "") +
+        (keptStaying.length > 0
+          ? `\n\n### Kept by this line, and left behind by the files they test\n\n` +
+            `This line keeps these specs as its own, and prime's copies need files the line does ` +
+            `not carry, so they cannot travel. This delivery changes the files they assert about, ` +
+            `so their older assertions now run against the new files: update each here, in the ` +
+            `line's own copy.\n\n` +
+            describeKeptSpecsLeftBehind(keptStaying)
+          : "") +
         (needsReconcile.length > 0
           ? `\n\n### Needs a human — ${needsReconcile.length} file(s) changed upstream and were held back\n\n` +
             `These carry deliberate divergence on this clone, so the cascade will never overwrite them. ` +
             `Prime has moved; someone has to decide what to carry across.\n\n` +
             needsReconcile.map((h) => `- \`${h.path}\`${h.note ? ` — ${h.note}` : ""}`).join("\n")
           : "") +
-        (partition.held.length - needsReconcile.length > 0
-          ? `\n\n_${partition.held.length - needsReconcile.length} further path(s) are owned by this clone and were withheld without comment._`
+        (partition.held.length - needsReconcile.length - keptStaying.length > 0
+          ? `\n\n_${partition.held.length - needsReconcile.length - keptStaying.length} further path(s) are owned by this clone and were withheld without comment._`
           : "") +
         (conversion
           ? (describeConversionDeletions(deletionPlan, conversion.leaving.label)
