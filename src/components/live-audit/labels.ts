@@ -101,6 +101,8 @@ export function modelOf(anthropic: unknown): {
   model: string | null;
   chosen: boolean | null;
   available: boolean | null;
+  /** The run was sent with Claude off (Use Claude was off in the settings). */
+  off: boolean;
 } {
   const a = (anthropic && typeof anthropic === "object" ? anthropic : {}) as Record<
     string,
@@ -109,9 +111,11 @@ export function modelOf(anthropic: unknown): {
   return {
     model: typeof a.model === "string" ? a.model : null,
     // The runner's own words (lib/config.mjs on Prime): "chosen" when the
-    // settings named a model, "default" when nobody had, "off" with no key.
+    // settings named a model, "default" when nobody had, "off" when the run
+    // was sent with Claude off.
     chosen: a.model_source === "chosen" ? true : a.model_source === "default" ? false : null,
     available: typeof a.available === "boolean" ? a.available : null,
+    off: a.model_source === "off",
   };
 }
 

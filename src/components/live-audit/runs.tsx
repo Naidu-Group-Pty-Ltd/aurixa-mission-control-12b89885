@@ -117,7 +117,11 @@ export function LiveAuditRuns({
                   {m.chosen === false ? " (default)" : ""}
                 </span>
               )}
-              {m.available === false && <span className="text-warning">· without Claude</span>}
+              {m.off ? (
+                <span>· Claude off</span>
+              ) : (
+                m.available === false && <span className="text-warning">· without Claude</span>
+              )}
               {r.auth_state && r.auth_state !== "signed_in" && (
                 <span className="text-warning">· {r.auth_state.replace(/_/g, " ")}</span>
               )}
@@ -267,7 +271,13 @@ export function RunSheet({
                 label="spend"
                 value={formatUsd(spend.usd ?? run.cost_usd)}
                 size="sm"
-                note={m.model ? `${m.model}${m.chosen === false ? " (default)" : ""}` : "no model"}
+                note={
+                  m.off
+                    ? "Claude off"
+                    : m.model
+                      ? `${m.model}${m.chosen === false ? " (default)" : ""}`
+                      : "no model"
+                }
               />
               <MetricCell
                 label="templates"

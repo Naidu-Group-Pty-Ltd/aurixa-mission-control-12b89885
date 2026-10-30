@@ -142,6 +142,8 @@ export const getLiveAuditOverview = createServerFn({ method: "GET" })
       open: { total: (openRes.data ?? []).length, bySeverity, byState },
       fixes: fixes.map((f) => ({ ...f, finding: titles[f.finding_id] ?? null })),
       anthropicKey: anthropicKeyConfigured(),
+      claudeEnabled:
+        (settingsRes.data as { claude_enabled?: boolean } | null)?.claude_enabled === true,
       defaultModel: DEFAULT_AUDIT_MODEL,
     };
   });
@@ -265,9 +267,16 @@ export const getLiveAuditFinding = createServerFn({ method: "GET" })
     }
 
     const { anthropicKeyConfigured } = await import("@/server/live-audit-fix.server");
+    const { data: switchRow, error: switchErr } = await supabase
+      .from("live_audit_settings")
+      .select("claude_enabled")
+      .eq("target_key", (finding as { target_key?: string }).target_key ?? "prime")
+      .maybeSingle();
+    if (switchErr) throw new Error(switchErr.message);
     return {
       canAct: role.admin,
       anthropicKey: anthropicKeyConfigured(),
+      claudeEnabled: switchRow?.claude_enabled === true,
       finding,
       events: eventsRes.data ?? [],
       observations: obsRes.data ?? [],
@@ -507,6 +516,7 @@ const FunctionName = z.string().regex(/^[a-z0-9-]{2,80}$/, "a function name");
 
 const SettingsInput = z
   .object({
+    claude_enabled: z.boolean(),
     nightly_enabled: z.boolean(),
     mode: z.enum(LIVE_AUDIT_MODES),
     target_url: z
@@ -642,6 +652,29 @@ export const getLiveAuditEngineHealth = createServerFn({ method: "GET" })
       fix: key
         ? undefined
         : "Set ANTHROPIC_API_KEY in Mission Control (a key from the Anthropic workspace the live audit should bill to), then run the Actions secret sync for Prime in Settings.",
+    });
+
+    // Read first: the key's check below is only "ok" in the sense the
+    // switch says it is.
+    const { data: switchRow, error: switchErr } = await supabase
+      .from("live_audit_settings")
+      .select("claude_enabled")
+      .eq("target_key", "prime")
+      .maybeSingle();
+    if (switchErr) throw new Error(switchErr.message);
+    const claudeOn = switchRow?.claude_enabled === true;
+    checks.push({
+      key: "claude_switch",
+      label: "Use Claude",
+      status: claudeOn ? "ok" : "warn",
+      detail: claudeOn
+        ? key
+          ? "On: Claude reads the code, explores, judges and drafts fixes, on Mission Control's ANTHROPIC_API_KEY"
+          : "On, but Mission Control holds no ANTHROPIC_API_KEY, so runs still go without Claude"
+        : "Off: runs crawl and judge from the browser alone and make no Anthropic call, and no fix is drafted",
+      fix: claudeOn
+        ? undefined
+        : "When the live audit's workspace-scoped Anthropic key is provisioned: set it as ANTHROPIC_API_KEY in Mission Control, publish, sync it to Prime, then turn on Use Claude under Settings.",
     });
 
     const masters = await resolveLiveAuditMasterSecrets();

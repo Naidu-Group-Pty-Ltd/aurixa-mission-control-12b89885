@@ -98,9 +98,19 @@ confirms the defect gone, or reopens it.
 
 The fixes flow through **the Anthropic key**: `ANTHROPIC_API_KEY` in Mission
 Control, which the Actions secret sync writes into Prime's repository for the
-Claude Code fixes. Until it is set, every fix — a person's or automatic —
-says it is waiting on the key and nothing is dispatched; the runs themselves
-still crawl and report from the browser alone, and say that Claude stood down.
+Claude Code fixes.
+
+**Claude is used only once a person turns it on** (Settings → Claude → **Use
+Claude**, `live_audit_settings.claude_enabled`, off by default since
+`20261030161700`). Mission Control already holds an org-scoped
+`ANTHROPIC_API_KEY` for Codex Security's critical and high fixes and syncs it
+into Prime every night; the live audit is to run on the workspace-scoped key
+the owner provisions when they choose, so a key being present is not consent
+to spend it. While the switch is off, every run is dispatched with Claude off
+(`ai: "off"` in its settings, the runner's own off switch: no Anthropic call is
+made, whatever key the workflow holds) and crawls and judges from the browser
+alone, and no fix is drafted, by a person or automatically. With the switch on
+but no key configured, fixes say they are waiting on the key.
 
 **Automatic fixes** (off until switched on): after each completed run, the
 sweep drafts fixes for up to N of that run's open defects, worst and surest
@@ -139,15 +149,17 @@ Each can be muted under **Settings → Notifications**.
 2. On Prime: create a **view-only admin** staff account for the audit and put
    its user id in the repository variable `LIVE_AUDIT_USER_ID`. Without it,
    runs see only the signed-out pages.
-3. Set `ANTHROPIC_API_KEY` in Mission Control — a key from the Anthropic
-   workspace the audit should bill to — and run the Actions secret sync for
-   Prime. Optionally set the repository variable
-   `LIVE_AUDIT_ANTHROPIC_WORKSPACE_ID` on Prime.
-4. Choose the audit model and the fix model under **Settings** (until then
-   runs use the default, `DEFAULT_AUDIT_MODEL` in `src/lib/live-audit-policy.ts`, and record that it was the default).
-5. Run one by hand, read **Runs → Held back by the guard**, and allow any
-   function there you know only reads. Then switch the nightly run on, and
-   automatic fixes when the findings have earned it.
+3. Run one by hand, read **Runs → Held back by the guard**, and allow any
+   function there you know only reads. Runs work without Claude: they crawl
+   every reachable page and report what the browser saw.
+4. When the owner provisions the live audit's workspace-scoped Anthropic key:
+   set it as `ANTHROPIC_API_KEY` in Mission Control (replacing the org-scoped
+   one), publish, run the Actions secret sync for Prime, choose the audit and
+   fix models under **Settings** (until then runs use the default,
+   `DEFAULT_AUDIT_MODEL` in `src/lib/live-audit-policy.ts`, and record that it
+   was the default), and turn on **Use Claude**.
+5. Switch the nightly run on, and automatic fixes when the findings have
+   earned it.
 
 **Engine health** checks every one of these.
 

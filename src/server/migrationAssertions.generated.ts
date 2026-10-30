@@ -1418,4 +1418,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "cron", jobname: "live-audit-sweep" },
     ],
   },
+  {
+    migration: "20261030161700_live_audit_claude_switch.sql",
+    version: "20261030161700",
+    assertions: [{ kind: "column", table: "live_audit_settings", column: "claude_enabled" }],
+  },
 ];
