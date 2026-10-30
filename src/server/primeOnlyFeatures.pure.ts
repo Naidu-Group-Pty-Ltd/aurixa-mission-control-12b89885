@@ -163,6 +163,21 @@ export const PRIME_ONLY_FEATURES: readonly PrimeOnlyFeature[] = [
     cronJobs: [],
     buckets: [],
   },
+  {
+    // The live audit drives the prime's production site in Chromium and is
+    // proven there first (docs/LIVE_AUDIT.md). Only the WORKFLOW is withheld:
+    // the runner under `.github/live-audit/` travels to a clone inert, since
+    // nothing there starts it, and bringing the audit to the clones is this
+    // entry removed here and in the prime's `scripts/lib/primeOnlyFeatures.mjs`
+    // together.
+    key: "live-audit",
+    title: "Live audit",
+    reason: "Prime-only: the live audit is proven on the prime before it reaches a clone.",
+    files: [".github/workflows/live-audit.yml"],
+    functions: [],
+    cronJobs: [],
+    buckets: [],
+  },
 ];
 
 const FUNCTIONS_PREFIX = "supabase/functions/";

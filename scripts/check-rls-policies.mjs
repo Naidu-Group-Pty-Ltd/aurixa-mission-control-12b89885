@@ -50,6 +50,12 @@ const SERVICE_ROLE_ONLY = new Set([
   // learn which signatures have been seen — or delete one and re-enable a
   // replay.
   "codex_callback_receipts",
+  // The live audit's twin of the table above (20261030100100_live_audit.sql):
+  // one row per accepted run or fix callback signature, written and read only
+  // by the two live-audit webhook routes on the service role. Its migration
+  // REVOKEs the default grants; a policy would let a browser learn which
+  // signatures were seen, or delete one and re-enable a replay.
+  "live_audit_callback_receipts",
   // A per-commit cache of what the PRIME repo declares — secret NAMES and
   // function slugs, never a value. Written and read only by the provisioning
   // server routes, which hold the service role; its migration REVOKEs the
