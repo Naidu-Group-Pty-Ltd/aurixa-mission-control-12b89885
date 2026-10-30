@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   D6_KEEP_AND_BILL,
   MISSION_CONTROL_LINK_SECRET,
@@ -7,6 +7,11 @@ import {
   platformCredentialRotations,
 } from "./handoffCredentialPlan.pure";
 import { integrationLedgerStatus, tenantSecretRefusal } from "./integrationSecretBroker.pure";
+
+// The rotation module's executors write through the admin client; its default
+// plan is plain data, read here without a backend.
+vi.mock("@/integrations/supabase/client.server", () => ({ supabaseAdmin: {} }));
+const { DEFAULT_ROTATION_PLAN } = await import("./handoff-rotations.server");
 
 /**
  * The names a billable rate covers, as `api_provider_rates` read on 30 Oct
@@ -277,6 +282,22 @@ describe("what Aurixa supplied that nothing bills", () => {
     // And a key no rate covers does not say it is billed.
     const [unrated] = planOf([{ name: "OPENAI_API_KEY", status: "minted" }], new Set());
     expect(unrated.hint).not.toContain(D6_KEEP_AND_BILL);
+  });
+});
+
+describe("the default rotation plan", () => {
+  it("rotates no platform key: D6 keeps and bills them, and the ledger names each one", () => {
+    // LOVABLE_API_KEY was rotated here by default (an `edge_function_env` write
+    // over the clone's value), beside a ledger row that said it was kept.
+    const rotated = DEFAULT_ROTATION_PLAN.map((r) => r.key_ref);
+    for (const name of BILLED) expect(rotated).not.toContain(name);
+    expect(
+      DEFAULT_ROTATION_PLAN.filter((r) => r.target === "edge_function_env").map((r) => r.key_ref),
+    ).toEqual(["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET"]);
+    // And the key it used to rotate still has its row, from the ledger, saying it is kept.
+    const [lovable] = planOf([{ name: "LOVABLE_API_KEY", status: "inherited" }]);
+    expect(lovable.key_ref).toBe("platform.LOVABLE_API_KEY");
+    expect(lovable.hint).toContain(D6_KEEP_AND_BILL);
   });
 });
 

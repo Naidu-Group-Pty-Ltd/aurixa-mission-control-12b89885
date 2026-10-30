@@ -181,20 +181,20 @@ describe("a forward never writes over the clone's own (D6)", () => {
   it("the provisioning pass reads the ledger at the write, before it plans one", () => {
     const step = pipeline.slice(pipeline.indexOf('pauseIfDue("syncing secrets")'));
     const asked = step.indexOf("forwardLedger = await input.forwardLedger();");
-    const held = step.indexOf(
-      "forwardLedger.read ? null : await readProjectSecretNames(projectRef)",
+    const kept = step.indexOf(
+      "keptFromForward({ names: snapshot.secretNames, ledger: forwardLedger })",
     );
-    const kept = step.indexOf("keptFromForward({");
     const write = step.indexOf("const secretShells = await syncCloneSecrets(");
     expect(asked).toBeGreaterThan(-1);
-    expect(held).toBeGreaterThan(asked);
-    expect(kept).toBeGreaterThan(held);
+    expect(kept).toBeGreaterThan(asked);
     expect(write).toBeGreaterThan(kept);
     // The planner is told, and the line is said.
     const call = step.slice(write, step.indexOf("describeKeptForwards({", write));
     expect(call).toContain("kept: keptForwards,");
-    expect(call).toContain("ledgerUnread: forwardLedger.why");
     expect(step).toContain('if (keptLine) await onStatusUpdate?.("migrating", keptLine);');
+    // An unread ledger is decided in one place: the pure module keeps every
+    // name, as the fleet sweep and the push stand down. No second list is read.
+    expect(step.slice(0, write)).not.toContain("SecretNames(projectRef)");
   });
 
   it("the runner supplies the ledger read, for this clone, as supabase-js answers it", () => {

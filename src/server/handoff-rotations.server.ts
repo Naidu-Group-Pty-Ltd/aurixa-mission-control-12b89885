@@ -234,16 +234,17 @@ export async function rollbackRotation(row: any): Promise<RollbackOutcome> {
 // The default rotation plan enqueued when a handoff enters cutover. Each entry
 // is `(target, key_ref, hint)`; hint lands in `metadata.hint` so operators
 // know what secret to supply.
+//
+// No platform key Mission Control forwards is rotated here. LOVABLE_API_KEY
+// was, until the owner decided D6 on 30 Oct 2026: a platform key keeps running
+// after handover, billed through the usage forwarder, and is withdrawn only
+// when the client brings its own. Its row now comes from the clone's ledger
+// (`platformCredentialRotations`), as every other such key's does.
 export const DEFAULT_ROTATION_PLAN: Array<{
   target: RotationTarget;
   key_ref: string;
   hint: string;
 }> = [
-  {
-    target: "edge_function_env",
-    key_ref: "LOVABLE_API_KEY",
-    hint: "Rotate LOVABLE_API_KEY on the client's Supabase project via Mgmt API.",
-  },
   {
     target: "edge_function_env",
     key_ref: "STRIPE_SECRET_KEY",

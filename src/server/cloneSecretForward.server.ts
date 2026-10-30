@@ -164,10 +164,10 @@ export async function pushCloneSecretForwards(
         "failed read is not an empty ledger.",
     };
   }
-  const kept = keptFromForward({ names: planned, ledger, held: null });
+  const kept = keptFromForward({ names: planned, ledger });
   const names = planned.filter((n) => !kept.has(n));
   const keptList = [...kept].map(([name, why]) => ({ name, why }));
-  const note = describeKeptForwards({ kept: [...kept.keys()], ledger, held: null }) ?? undefined;
+  const note = describeKeptForwards({ kept: [...kept.keys()], ledger }) ?? undefined;
   if (names.length === 0) {
     return {
       ok: true,

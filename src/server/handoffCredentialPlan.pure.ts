@@ -1,10 +1,11 @@
 /**
  * What a handoff must decide about the credentials Aurixa pays for.
  *
- * `DEFAULT_ROTATION_PLAN` covers Lovable, Stripe, Cloudflare and GitHub, and
- * nothing else. A clone also holds the vendor keys Mission Control forwarded
- * to it, keys minted on Aurixa's own vendor accounts for it, and the key that
- * links it to Mission Control. Handed to its client as it stands, the client
+ * `DEFAULT_ROTATION_PLAN` covers Stripe, Cloudflare and GitHub, and nothing
+ * else (its Lovable row went with D6, below). A clone also holds the vendor
+ * keys Mission Control forwarded to it, keys minted on Aurixa's own vendor
+ * accounts for it, and the key that links it to Mission Control. Handed to its
+ * client as it stands, the client
  * keeps spending Aurixa's accounts (key audit S4, 29 Oct 2026).
  *
  * The owner decided D6 on 30 Oct 2026: keep and bill them. A platform key

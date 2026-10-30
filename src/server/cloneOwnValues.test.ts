@@ -96,45 +96,32 @@ describe("reading what the ledger keeps from a forward", () => {
     expect(readForwardLedger(rows([]))).toEqual({ read: true, kept: new Map() });
   });
 
-  it("with the ledger unread, keeps what the project holds, and everything when it cannot say", () => {
+  it("with the ledger unread, keeps every name, as the fleet sweep and the push stand down", () => {
+    // A name the project does not hold may be one taken off it on purpose.
     const ledger = readForwardLedger(failed);
-    const names = ["PERPLEXITY_API_KEY", "FIRECRAWL_API_KEY"];
-    const held = keptFromForward({ names, ledger, held: new Set(["PERPLEXITY_API_KEY"]) });
-    expect([...held.keys()]).toEqual(["PERPLEXITY_API_KEY"]);
-    expect(held.get("PERPLEXITY_API_KEY")).toContain("the project already holds a value");
-    expect([...keptFromForward({ names, ledger, held: null }).keys()]).toEqual(names);
+    const names = ["PERPLEXITY_API_KEY", "FIRECRAWL_API_KEY", "GOOGLE_MAPS_API_KEY"];
+    const kept = keptFromForward({ names, ledger });
+    expect([...kept.keys()]).toEqual(names);
+    expect(kept.get("GOOGLE_MAPS_API_KEY")).toContain(
+      "the secret ledger could not be read (canceling statement due to statement timeout)",
+    );
   });
 
   it("says so in the status line, by what was actually kept", () => {
     const read = readForwardLedger(LEDGER);
-    expect(describeKeptForwards({ kept: [], ledger: read, held: null })).toBeNull();
+    expect(describeKeptForwards({ kept: [], ledger: read })).toBeNull();
     expect(
-      describeKeptForwards({
-        kept: ["OPENAI_API_KEY", "PERPLEXITY_API_KEY"],
-        ledger: read,
-        held: null,
-      }),
+      describeKeptForwards({ kept: ["OPENAI_API_KEY", "PERPLEXITY_API_KEY"], ledger: read }),
     ).toBe(
       "No platform value written over 2 forwarded name(s) this clone's ledger keeps: " +
         "OPENAI_API_KEY (minted), PERPLEXITY_API_KEY (set)",
     );
     const unread = readForwardLedger(failed);
-    // Kept are the held name and one with nothing to send; only the held one was written over.
     expect(
-      describeKeptForwards({
-        kept: ["PERPLEXITY_API_KEY", "GAMMA_API_KEY"],
-        ledger: unread,
-        held: new Set(["PERPLEXITY_API_KEY"]),
-      }),
+      describeKeptForwards({ kept: ["PERPLEXITY_API_KEY", "GAMMA_API_KEY"], ledger: unread }),
     ).toBe(
       "Secret ledger unreadable (canceling statement due to statement timeout): no platform " +
-        "value written over the 1 forwarded name(s) the project already holds: PERPLEXITY_API_KEY",
-    );
-    expect(describeKeptForwards({ kept: [], ledger: unread, held: new Set() })).toContain(
-      "no platform value written over anything, as the project holds none of the forwarded names",
-    );
-    expect(describeKeptForwards({ kept: [], ledger: unread, held: null })).toContain(
-      "no platform value was written, and the forward sweeps deliver what is missing once the ledger reads",
+        "value was written, and the forward sweeps deliver what is missing once the ledger reads",
     );
   });
 });
@@ -159,13 +146,12 @@ describe("a repair or re-provision, through the real planner", () => {
     ANTHROPIC_API_KEY: "aurixa-anthropic",
   };
   const AUTHORISED = new Set([...Object.keys(INHERITED), "OPENROUTER_API_KEY", "GAMMA_API_KEY"]);
-  const plan = (read: Parameters<typeof readForwardLedger>[0], held: Set<string> | null) => {
+  const plan = (read: Parameters<typeof readForwardLedger>[0]) => {
     const ledger = readForwardLedger(read);
     return planCloneSecrets(NAMES, INHERITED, gen, null, undefined, undefined, AUTHORISED, {
       // The Turnstile identity wrote its own secret: decided by `settled`, as before.
       settled: new Map([["TURNSTILE_SECRET_KEY", "2026-10-29T22:11:49.645Z"]]),
-      kept: keptFromForward({ names: NAMES, ledger, held }),
-      ...(ledger.read ? {} : { ledgerUnread: ledger.why }),
+      kept: keptFromForward({ names: NAMES, ledger }),
     });
   };
   const rowOf = (
@@ -174,7 +160,7 @@ describe("a repair or re-provision, through the real planner", () => {
   ) => ledgerStatusForShell(results.get(n)!.status);
 
   it("writes Mission Control's value only where the ledger does not keep the name", () => {
-    const { toWrite, results } = plan(LEDGER, null);
+    const { toWrite, results } = plan(LEDGER);
     expect(toWrite.map((w) => w.name)).toEqual(["FIRECRAWL_API_KEY"]);
     for (const n of [
       "PERPLEXITY_API_KEY",
@@ -191,7 +177,7 @@ describe("a repair or re-provision, through the real planner", () => {
 
   it("keeps a minted row even where Mission Control holds no value for the name", () => {
     // Without this, the row became `authorised_no_value`, and the next sweep read the name as owed.
-    const { results } = plan(LEDGER, null);
+    const { results } = plan(LEDGER);
     expect(results.get("OPENROUTER_API_KEY")).toMatchObject({ status: "kept_clone_value" });
     expect(rowOf(results, "OPENROUTER_API_KEY")).toBeNull();
     // A name the ledger does not keep still says what it is.
@@ -199,33 +185,23 @@ describe("a repair or re-provision, through the real planner", () => {
   });
 
   it("leaves Turnstile to the step that owns it", () => {
-    const { results } = plan(LEDGER, null);
+    const { results } = plan(LEDGER);
     expect(results.get("TURNSTILE_SECRET_KEY")).toMatchObject({ status: "set" });
   });
 
-  it("with the ledger unread, writes nothing over what the project holds, and no row it cannot vouch for", () => {
-    const { toWrite, results } = plan(
-      failed,
-      new Set(["PERPLEXITY_API_KEY", "OPENAI_API_KEY", "FIRECRAWL_API_KEY"]),
-    );
-    // Held: not written over. Not held, with a value: written, as a fresh project needs.
-    expect(toWrite.map((w) => w.name).sort()).toEqual(["ANTHROPIC_API_KEY", "GOOGLE_MAPS_API_KEY"]);
-    for (const n of ["PERPLEXITY_API_KEY", "OPENAI_API_KEY", "FIRECRAWL_API_KEY"]) {
-      expect(results.get(n)).toMatchObject({ status: "kept_clone_value" });
-    }
-    // Not written and not held: no row, because the one there may be the clone's own.
-    expect(results.get("OPENROUTER_API_KEY")).toMatchObject({ status: "kept_clone_value" });
-    expect(results.get("GAMMA_API_KEY")?.error).toContain("the secret ledger could not be read");
-    expect(rowOf(results, "GAMMA_API_KEY")).toBeNull();
-    expect(results.get("TURNSTILE_SECRET_KEY")).toMatchObject({ status: "set" });
-  });
-
-  it("writes no forwarded value at all when neither the ledger nor the project's list reads", () => {
-    const { toWrite, results } = plan(failed, null);
+  it("with the ledger unread, writes no forwarded value and no row it cannot vouch for", () => {
+    // Not over a value the project holds, nor onto one it does not: that may be
+    // a name taken off it on purpose. The sweeps deliver it once the ledger reads.
+    const { toWrite, results } = plan(failed);
     expect(toWrite).toEqual([]);
-    for (const n of Object.keys(INHERITED)) {
-      expect(results.get(n)).toMatchObject({ status: "kept_clone_value" });
+    for (const n of [...Object.keys(INHERITED), "OPENROUTER_API_KEY", "GAMMA_API_KEY"]) {
+      expect(results.get(n)).toMatchObject({ status: "kept_clone_value", success: true });
+      expect(results.get(n)?.error).toContain("the secret ledger could not be read");
+      // No row: the one there may be the clone's own.
+      expect(rowOf(results, n)).toBeNull();
     }
+    // Turnstile is still decided by the step that owns it.
+    expect(results.get("TURNSTILE_SECRET_KEY")).toMatchObject({ status: "set" });
   });
 });
 

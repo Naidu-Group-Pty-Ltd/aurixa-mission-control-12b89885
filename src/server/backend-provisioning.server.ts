@@ -1397,12 +1397,6 @@ export type CloneSecretFacts = {
    * is decided as before.
    */
   kept?: ReadonlyMap<string, string>;
-  /**
-   * Why the clone's secret ledger could not be read, when it could not. A
-   * forwarded name this pass does not write is then given no row: the row
-   * there may be the clone's own, and this pass cannot tell.
-   */
-  ledgerUnread?: string;
 };
 
 function nonEmpty(v: string | null | undefined): string | null {
@@ -4914,9 +4908,8 @@ export type SecretShellStatus =
   /**
    * A forwarded name no platform value was written over (`keptFromForward`):
    * the clone's ledger records its own value or a key minted for it, or the
-   * name as taken off it or federated, or the ledger could not be read and
-   * the project already holds a value, or holds none to write. Nothing is
-   * written, and neither is a ledger row: the one there stands
+   * name as taken off it or federated, or the ledger could not be read.
+   * Nothing is written, and neither is a ledger row: the one there stands
    * (`ledgerStatusForShell`).
    */
   | "kept_clone_value";
@@ -5100,13 +5093,6 @@ export function planCloneSecrets(
     } else if (typeof val === "string" && val.length > 0) {
       toWrite.push({ name, value: val });
       results.set(name, { name, status: "inherited", success: true });
-    } else if (facts?.ledgerUnread) {
-      results.set(name, {
-        name,
-        status: "kept_clone_value",
-        success: true,
-        error: `the secret ledger could not be read (${facts.ledgerUnread}), so this name's row is left as it is`,
-      });
     } else if (authorisedForwards?.has(name)) {
       // Marked inheritable and nothing arrived. Reporting this as `missing`
       // hides an authorised forward that did not happen behind the ordinary
@@ -5198,35 +5184,6 @@ export type { SecretWriteResult };
  * as if the list could not be read.
  */
 const STORED_DIGEST_READ_TIMEOUT_MS = 10_000;
-
-/**
- * The names a project's function environment holds, or `null` when the list
- * could not be read. Never throws.
- *
- * `listProjectSecretNames` answers `[]` for a failure exactly as for a project
- * holding nothing, which is right for a parity count and wrong for deciding
- * what a forwarded value may be written over: read as empty, a failed list
- * would let Mission Control's value go over the client's own.
- */
-export async function readProjectSecretNames(projectRef: string): Promise<Set<string> | null> {
-  try {
-    const res = await fetch(`${MGMT_API}/projects/${projectRef}/secrets`, {
-      headers: headers(),
-      signal: AbortSignal.timeout(STORED_DIGEST_READ_TIMEOUT_MS),
-    });
-    if (!res.ok) return null;
-    const raw = (await res.json()) as unknown;
-    if (!Array.isArray(raw)) return null;
-    const names = new Set<string>();
-    for (const row of raw) {
-      const name = (row as { name?: unknown } | null)?.name;
-      if (typeof name === "string" && name.length > 0) names.add(name);
-    }
-    return names;
-  } catch {
-    return null;
-  }
-}
 
 /**
  * Name → digest of every secret the project holds, or `null` when the list
@@ -6994,9 +6951,10 @@ export async function provisionCloneBackend(
   );
   // Owner decision D6: no forwarded value goes over what this clone's ledger
   // records as its own (`set`) or minted for it, nor over a name taken off it
-  // or federated. Read here, at the write. Unread, it is not an empty ledger:
-  // nothing the project already holds is written over, and nothing at all
-  // when the project's list cannot be read either (`keptFromForward`).
+  // or federated. Read here, at the write. Unread, it is not an empty ledger,
+  // so no forwarded value is written at all, as the fleet sweep and the push
+  // stand down too; the sweeps deliver what is missing once it reads
+  // (`keptFromForward`).
   const { keptFromForward, describeKeptForwards } = await import("./cloneSecretForward.pure");
   let forwardLedger: import("./cloneSecretForward.pure").ForwardLedger;
   try {
@@ -7004,12 +6962,7 @@ export async function provisionCloneBackend(
   } catch (err) {
     forwardLedger = { read: false, why: err instanceof Error ? err.message : String(err) };
   }
-  const heldNow = forwardLedger.read ? null : await readProjectSecretNames(projectRef);
-  const keptForwards = keptFromForward({
-    names: snapshot.secretNames,
-    ledger: forwardLedger,
-    held: heldNow,
-  });
+  const keptForwards = keptFromForward({ names: snapshot.secretNames, ledger: forwardLedger });
   const secretShells = await syncCloneSecrets(
     projectRef,
     snapshot.secretNames,
@@ -7040,13 +6993,11 @@ export async function provisionCloneBackend(
       missionControlOrigin: input.missionControlOrigin ?? resolveMissionControlOrigin(process.env),
       settled: new Map(Object.entries(input.settledSecrets ?? {})),
       kept: keptForwards,
-      ...(forwardLedger.read ? {} : { ledgerUnread: forwardLedger.why }),
     },
   );
   const keptLine = describeKeptForwards({
     kept: secretShells.filter((s) => s.status === "kept_clone_value").map((s) => s.name),
     ledger: forwardLedger,
-    held: heldNow,
   });
   if (keptLine) await onStatusUpdate?.("migrating", keptLine);
 
