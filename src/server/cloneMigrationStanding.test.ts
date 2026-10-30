@@ -332,3 +332,29 @@ describe("the server function asks the clone", () => {
     expect(status).toContain("scoped.runnable");
   });
 });
+
+describe("a clone stamped from the prime", () => {
+  it("does not read a file the prime ran under another version as pending", () => {
+    // The demo clone's ledger, 30 Oct 2026: the prime's versions, so Lovable's
+    // `20250912170521` is there as `20250912050519` — and the page read 594
+    // versions as owed that the clone holds (`primeHoldings.pure.ts`).
+    const runnable = [
+      m("20250912170521", "208618a7-d33a-4e4b-96c2-455f4efcf772"),
+      m("20270209090000", "model_hub_retired_fallbacks_name_their_successors"),
+    ];
+    const ledger: LedgerRow[] = [{ version: "20250912050519", name: "" }];
+    const r = readCloneMigrationStanding({
+      runnable,
+      ledger,
+      recordedVersion: "20270208100000",
+      heldThroughPrime: new Set(["20250912170521"]),
+    });
+    expect(r.pending.map((p) => p.id)).toEqual(["20270209090000"]);
+    expect(r.appliedVersionCount).toBe(1);
+    expect(r.runnableVersionCount).toBe(2);
+
+    // Without it, the reading this replaces.
+    const before = readCloneMigrationStanding({ runnable, ledger, recordedVersion: null });
+    expect(before.pending.map((p) => p.id)).toEqual(["20250912170521", "20270209090000"]);
+  });
+});

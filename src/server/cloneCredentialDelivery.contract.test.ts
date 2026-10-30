@@ -81,3 +81,48 @@ describe("self-rotation is reachable by the key that is actually delivered", () 
     expect(read("src/routes/api.public.clones.rotate-key.ts")).toContain('"clones:rotate"');
   });
 });
+
+/**
+ * A clone that rotates its own link key receives it (key audit S5). The clone's
+ * function cannot store a project secret (that needs a management token, and a
+ * clone never holds one), so Mission Control delivers the key itself, before
+ * the old one's life is ended.
+ */
+describe("a self-rotated key is delivered by Mission Control, before the old one is retired", () => {
+  const route = read("src/routes/api.public.clones.rotate-key.ts");
+  const link = read("src/server/rotatedLinkKey.server.ts");
+
+  it("delivers the new key before it schedules the old key's revocation", () => {
+    const deliver = route.indexOf("await deliverRotatedLinkKey(supabaseAdmin, current.clone_id, newId, raw)");
+    const supersede = route.indexOf(".update({ rotated_to: newId, revoke_at: revokeAt })");
+    expect(deliver).toBeGreaterThan(0);
+    expect(supersede).toBeGreaterThan(deliver);
+  });
+
+  it("revokes the new key, and leaves the old one, when delivery fails", () => {
+    const failed = route.slice(route.indexOf("if (!delivered.ok) {"), route.indexOf("const revokeAt ="));
+    expect(failed).toContain('.update({ revoked_at: new Date().toISOString() })');
+    expect(failed).toContain('.eq("id", newId)');
+    expect(failed).toContain('error: "delivery_failed"');
+    expect(failed).not.toContain("revoke_at");
+  });
+
+  it("never hands the plaintext back: the response names where it went", () => {
+    const ok = route.slice(route.lastIndexOf("return jsonResponse({"));
+    expect(ok).toContain('delivered_to: "function_environment"');
+    expect(ok).not.toMatch(/\bkey: raw\b/);
+  });
+
+  it("keeps a rotated link key a link key, so the link pass manages its scopes", () => {
+    expect(route).toContain("current.label === MISSION_CONTROL_LINK_KEY_LABEL");
+  });
+
+  it("writes through the link pass's writer and target rule, and stamps the delivery", () => {
+    const fn = link.slice(link.indexOf("export async function deliverRotatedLinkKey"));
+    expect(fn).toContain("await resolveCloneSecretTarget(supabase, cloneId)");
+    expect(fn).toContain("setCloneSecretValues(target.projectRef, [");
+    expect(fn).toContain("{ name: ENV_MISSION_CONTROL_CLONE_API_KEY, value: raw }");
+    expect(fn).toContain("delivered_env_at: nowIso, delivered_project_ref: target.projectRef");
+    expect(fn).toContain("recordSecretLedger(");
+  });
+});

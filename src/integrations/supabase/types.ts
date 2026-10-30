@@ -4997,6 +4997,7 @@ export type Database = {
           autofix_max_per_run: number
           autofix_min_confidence: number
           budget_usd: number
+          claude_enabled: boolean
           created_at: string
           effort_explore: string
           effort_scope: string
@@ -5025,6 +5026,7 @@ export type Database = {
           autofix_max_per_run?: number
           autofix_min_confidence?: number
           budget_usd?: number
+          claude_enabled?: boolean
           created_at?: string
           effort_explore?: string
           effort_scope?: string
@@ -5053,6 +5055,7 @@ export type Database = {
           autofix_max_per_run?: number
           autofix_min_confidence?: number
           budget_usd?: number
+          claude_enabled?: boolean
           created_at?: string
           effort_explore?: string
           effort_scope?: string

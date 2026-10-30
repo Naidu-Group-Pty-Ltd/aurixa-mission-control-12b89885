@@ -228,8 +228,10 @@ export const bulkReprovisionBackends = createServerFn({ method: "POST" })
   )
   .handler(async ({ data, context }) => {
     const { supabase, userId } = context;
-    const { enqueueCloneBackendProvisioning, generateSecurePassword } = await import(
-      /* @vite-ignore */ "@/lib/_server-shims/backend-provisioning.server"
+    const { enqueueCloneBackendProvisioning, generateSecurePassword, readAdminAccountPresence } =
+      await import(/* @vite-ignore */ "@/lib/_server-shims/backend-provisioning.server");
+    const { chooseFailedRequeue } = await import(
+      /* @vite-ignore */ "@/server/failedBackendRequeue.pure"
     );
 
     const { data: rows, error: readErr } = await supabase
@@ -270,14 +272,33 @@ export const bulkReprovisionBackends = createServerFn({ method: "POST" })
         skipped.push({ cloneId: row.clone_id, reason: "no admin_email to seed with" });
         continue;
       }
+      // A failed backend is re-queued the way that replaces no password
+      // somebody holds — see `chooseFailedRequeue`. A ready one is a repair
+      // already, and never re-seeds.
+      let repairOfFailed = false;
+      if (!repair) {
+        const projectRef = row.supabase_project_ref ?? null;
+        const choice = chooseFailedRequeue({
+          projectRef,
+          adminPresence: projectRef
+            ? await readAdminAccountPresence(projectRef, row.admin_email ?? "")
+            : null,
+        });
+        if (choice.kind === "refuse") {
+          skipped.push({ cloneId: row.clone_id, reason: choice.why });
+          continue;
+        }
+        repairOfFailed = choice.kind === "repair";
+      }
       const enq = await enqueueCloneBackendProvisioning(supabase, userId, {
         cloneId: row.clone_id,
         cloneName,
         region: row.region ?? undefined,
         adminEmail: row.admin_email ?? "",
         // A repair seeds nobody, so it queues no credential — see the enqueue.
-        adminPassword: repair ? null : generateSecurePassword(),
-        repair,
+        adminPassword: repair || repairOfFailed ? null : generateSecurePassword(),
+        repair: repair || repairOfFailed,
+        repairOfFailed,
         moduleIds: (row.queued_module_ids as string[] | null) ?? [],
       });
       if (enq.ok) queued.push(row.clone_id);

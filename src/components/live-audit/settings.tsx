@@ -147,6 +147,7 @@ export function LiveAuditSettingsPanel({
 
   const submit = () =>
     save.mutate({
+      claude_enabled: draft.claude_enabled === true,
       nightly_enabled: draft.nightly_enabled,
       mode: draft.mode,
       target_url: draft.target_url,
@@ -180,14 +181,27 @@ export function LiveAuditSettingsPanel({
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Models</CardTitle>
+          <CardTitle className="text-base">Claude</CardTitle>
           <CardDescription>
             Claude reads Prime's code, chooses the journeys, explores and judges what it saw; Claude
-            Code writes every fix. Until you choose, runs use {DEFAULT_AUDIT_MODEL} and record that
-            it was the default.
+            Code writes every fix. While Use Claude is off, runs make no Anthropic call (they crawl
+            and judge from the browser alone) and no fix is drafted, whatever key Mission Control
+            holds. Until you choose a model, runs use {DEFAULT_AUDIT_MODEL} and record that it was
+            the default.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4 md:grid-cols-2">
+          <div className="flex items-center gap-2 md:col-span-2">
+            <Switch
+              id="la-claude"
+              checked={draft.claude_enabled === true}
+              onCheckedChange={(v) => set("claude_enabled", v)}
+              disabled={disabled}
+            />
+            <Label htmlFor="la-claude">
+              Use Claude: turn on once the live audit&apos;s Anthropic key is provisioned
+            </Label>
+          </div>
           <div className="space-y-1.5">
             <Label htmlFor="la-audit-model">Audit model</Label>
             <ModelSelect
@@ -350,9 +364,12 @@ export function LiveAuditSettingsPanel({
           <CardTitle className="text-base">The guard</CardTitle>
           <CardDescription>
             Every request the browser makes passes the guard, which lets a backend function through
-            only when its code reads. Over-blocking is the safe failure: allow a function here, one
-            at a time, when you know it only reads; block one the profiler let through. Names only,
-            one per line.
+            only when its code reads or the call names an action that reads. Over-blocking is the
+            safe failure: allow here, one at a time, what you know only reads; block what the
+            profiler let through. One per line: a function's name (every call), name:action (calls
+            naming that action) or name:- (calls naming none), as a run's held-back list prints
+            them. A block wins, and nothing allows a call that asks to write on the way (mark_read:
+            true).
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4 md:grid-cols-2">

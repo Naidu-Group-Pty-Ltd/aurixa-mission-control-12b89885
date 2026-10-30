@@ -601,6 +601,9 @@ async function runBackendProvisioning(
     const { finishingStepFits, deferredLine, PARITY_DEFERRED_REASON } = await import(
       /* @vite-ignore */ "@/server/provisioningFinish.pure"
     );
+    // The parity sentences, built where the late comparison builds them too.
+    const { parityMismatchLine, parityUnverifiedLine, paritySurplusLine, PARITY_VERIFIED_LINE } =
+      await import(/* @vite-ignore */ "@/server/parityVerdict.pure");
     let repoRetarget: Awaited<ReturnType<typeof retargetCloneRepo>> | null = null;
     if (cloneRow?.github_owner && cloneRow?.github_repo) {
       try {
@@ -933,9 +936,9 @@ async function runBackendProvisioning(
           // Parity leads, because it is the only line that speaks to whether
           // the clone matches rather than to whether the steps ran.
           parity && parity.blocking_issues.length > 0
-            ? `Backend provisioned but DOES NOT MATCH the prime — ${parity.blocking_issues.join(", ")}. Review at /clones/${input.cloneId}`
+            ? parityMismatchLine(parity.blocking_issues, input.cloneId)
             : parityError
-              ? `Backend ready, but parity could not be verified (${parityError}) — it has not been compared with the prime`
+              ? parityUnverifiedLine(parityError)
               : partialFailures > 0
                 ? `Backend ready with warnings: ${failedFunctions.length} function deploy(s) and ${failedSecrets.length} secret sync(s) failed; ${missingSecrets.length} secret(s) awaiting operator input`
                 : missingSecrets.length > 0
@@ -947,8 +950,8 @@ async function runBackendProvisioning(
                     // the prime" over that is the reading that hid a table the
                     // prime does not have on the Preflight clone.
                     (parity?.surplus_in_target?.total ?? 0) > 0
-                    ? `Backend is ready — every object the prime has is present, and ${parity?.surplus_in_target.total} the prime does NOT have are also on the clone (prime-dropped or tenant-added; nothing was removed). Review at /clones/${input.cloneId}`
-                    : "Backend is ready — verified against the prime",
+                    ? paritySurplusLine(parity?.surplus_in_target?.total ?? 0, input.cloneId)
+                    : PARITY_VERIFIED_LINE,
         // Spent. The flag describes the pass that was queued, and this pass
         // has now finished it; the drain clears it on a terminal FAILURE for
         // the same reason. Left standing, the next ordinary provisioning of
@@ -1364,6 +1367,22 @@ export const retryBackendProvisioning = createServerFn({ method: "POST" })
         .eq("clone_id", data.cloneId);
 
       if (upsertErr) return { ok: false, error: upsertErr.message };
+
+      // This retry writes the queue row itself rather than through
+      // `enqueueCloneBackendProvisioning`, so it re-arms the deployment itself
+      // too: one that failed waiting on this backend waits on it again. See
+      // deploymentRearm.pure.ts. Never fails the retry.
+      try {
+        const { rearmDeploymentBlockedOnBackend } = await import(
+          /* @vite-ignore */ "@/server/hosting/deploymentRearm.server"
+        );
+        await rearmDeploymentBlockedOnBackend(data.cloneId);
+      } catch (e) {
+        console.error(
+          `[retryBackendProvisioning] deployment re-arm for ${data.cloneId} failed:`,
+          e instanceof Error ? e.message : String(e),
+        );
+      }
 
       return { ok: true, queued: true };
     },

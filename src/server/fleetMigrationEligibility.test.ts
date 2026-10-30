@@ -406,8 +406,13 @@ describe("the lane's rehabilitation pass", () => {
     const sequence = pass.indexOf("blockOvertakenBySequence(");
     expect(sequence, "the pass must test a block against the lane's order").toBeGreaterThan(-1);
     expect(ledger).toBeLessThan(sequence);
-    // From the same ledger read, so it cannot disagree with the replay.
-    expect(pass).toContain("cloneApplied: new Set(appliedVersions)");
+    // From the same ledger read, so it cannot disagree with the replay — and
+    // through the same holdings the replay asks with, so a stamped clone is
+    // asked for the versions it was given (`primeHoldings.pure.ts`).
+    expect(pass).toMatch(
+      /const held = withVersionsHeldThroughPrime\(\s*new Set\(appliedVersions\),\s*earlyScoped\.metas,\s*earlyScoped\.primeHoldings,?\s*\)/,
+    );
+    expect(pass).toContain("cloneApplied: held");
   });
 
   it("tests the lane's order on sweep passes only", () => {

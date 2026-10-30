@@ -27,6 +27,7 @@ import {
   triageTransition,
 } from "@/lib/live-audit-policy";
 import {
+  GUARD_ENTRY,
   LIVE_AUDIT_WORKFLOW_FILE,
   LIVE_AUDIT_WORKFLOW_VERSION,
   REMEDIATION_VERSION_FOR_DEFECTS,
@@ -142,6 +143,8 @@ export const getLiveAuditOverview = createServerFn({ method: "GET" })
       open: { total: (openRes.data ?? []).length, bySeverity, byState },
       fixes: fixes.map((f) => ({ ...f, finding: titles[f.finding_id] ?? null })),
       anthropicKey: anthropicKeyConfigured(),
+      claudeEnabled:
+        (settingsRes.data as { claude_enabled?: boolean } | null)?.claude_enabled === true,
       defaultModel: DEFAULT_AUDIT_MODEL,
     };
   });
@@ -265,9 +268,16 @@ export const getLiveAuditFinding = createServerFn({ method: "GET" })
     }
 
     const { anthropicKeyConfigured } = await import("@/server/live-audit-fix.server");
+    const { data: switchRow, error: switchErr } = await supabase
+      .from("live_audit_settings")
+      .select("claude_enabled")
+      .eq("target_key", (finding as { target_key?: string }).target_key ?? "prime")
+      .maybeSingle();
+    if (switchErr) throw new Error(switchErr.message);
     return {
       canAct: role.admin,
       anthropicKey: anthropicKeyConfigured(),
+      claudeEnabled: switchRow?.claude_enabled === true,
       finding,
       events: eventsRes.data ?? [],
       observations: obsRes.data ?? [],
@@ -289,7 +299,7 @@ export const getLiveAuditRun = createServerFn({ method: "GET" })
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!run) throw new Error("Run not found");
-    const [eventsRes, newRes] = await Promise.all([
+    const [eventsRes, newRes, guardRes] = await Promise.all([
       supabase
         .from("live_audit_events")
         .select("id, event_type, from_state, to_state, reason, finding_id, payload, created_at")
@@ -301,12 +311,24 @@ export const getLiveAuditRun = createServerFn({ method: "GET" })
         .select("id, title, severity, state, route_template, detector")
         .eq("first_seen_run_id", data.runId)
         .limit(100),
+      supabase
+        .from("live_audit_settings")
+        .select("guard_allow_functions, guard_block_functions")
+        .eq("target_key", "prime")
+        .maybeSingle(),
     ]);
     if (eventsRes.error) throw new Error(eventsRes.error.message);
     if (newRes.error) throw new Error(newRes.error.message);
+    if (guardRes.error) throw new Error(guardRes.error.message);
     return {
       canAct: role.admin,
       run,
+      // The guard lists as they stand now, so a held-back line says whether
+      // it has been allowed or blocked since.
+      guard: {
+        allow: ((guardRes.data?.guard_allow_functions ?? []) as string[]).slice(0, GUARD_LIST_MAX),
+        block: ((guardRes.data?.guard_block_functions ?? []) as string[]).slice(0, GUARD_LIST_MAX),
+      },
       events: eventsRes.data ?? [],
       newFindings: ((newRes.data ?? []) as Array<Record<string, any>>).sort(
         (a, b) => (SEVERITY_RANK[b.severity] ?? 0) - (SEVERITY_RANK[a.severity] ?? 0),
@@ -501,12 +523,15 @@ export const triageLiveAuditFinding = createServerFn({ method: "POST" })
   });
 
 const ModelInput = z.string().regex(CLAUDE_MODEL_ID, "a Claude model id").nullable();
-// The runner's own pattern (lib/config.mjs on Prime): a name it would drop is
-// never saved here, so the page never shows an allowance the run ignores.
-const FunctionName = z.string().regex(/^[a-z0-9-]{2,80}$/, "a function name");
+// The runner's own pattern (`GUARD_ENTRY`): an entry it would drop is never
+// saved here, so the page never shows an allowance the run ignores.
+const GuardEntryInput = z.string().regex(GUARD_ENTRY, "a function name, name:action or name:-");
+/** How many entries each guard list holds, as the runner reads them. */
+const GUARD_LIST_MAX = 100;
 
 const SettingsInput = z
   .object({
+    claude_enabled: z.boolean(),
     nightly_enabled: z.boolean(),
     mode: z.enum(LIVE_AUDIT_MODES),
     target_url: z
@@ -529,8 +554,8 @@ const SettingsInput = z
       .min(1)
       .max(2),
     screenshots: z.enum(["issues", "off"]),
-    guard_allow_functions: z.array(FunctionName).max(100),
-    guard_block_functions: z.array(FunctionName).max(100),
+    guard_allow_functions: z.array(GuardEntryInput).max(GUARD_LIST_MAX),
+    guard_block_functions: z.array(GuardEntryInput).max(GUARD_LIST_MAX),
     autofix_enabled: z.boolean(),
     autofix_max_per_run: z.number().int().min(0).max(20),
     autofix_min_confidence: z.number().min(0).max(1),
@@ -575,6 +600,59 @@ export const updateLiveAuditSettings = createServerFn({ method: "POST" })
       ),
     });
     return { ok: true, changed };
+  });
+
+/**
+ * Allow one call the guard held back, from the run that held it. The entry is
+ * the one the runner named for that line (`heldBackOf`), so an admin allows
+ * exactly what they read about and nothing wider. Appended server-side, so
+ * two admins allowing at once both land; an entry already allowed is a no-op,
+ * and one an operator blocked stays blocked (the runner reads the block
+ * first), which the answer says.
+ */
+export const allowLiveAuditGuardEntry = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d) => z.object({ entry: GuardEntryInput, runId: UUID.optional() }).parse(d))
+  .handler(async ({ data, context }) => {
+    const { supabase, userId } = context;
+    await requireAdmin(supabase, userId);
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { data: row, error: readErr } = await supabaseAdmin
+      .from("live_audit_settings")
+      .select("guard_allow_functions, guard_block_functions")
+      .eq("target_key", "prime")
+      .maybeSingle();
+    if (readErr) throw new Error(readErr.message);
+    if (!row) throw new Error("The live audit has no settings row for Prime; apply its migration.");
+    const allow = (row.guard_allow_functions ?? []) as string[];
+    const blocked = ((row.guard_block_functions ?? []) as string[]).some(
+      (b) => b === data.entry || b === data.entry.split(":")[0],
+    );
+    if (allow.includes(data.entry)) return { ok: true, added: false, blocked };
+    if (allow.length >= GUARD_LIST_MAX) {
+      throw new Error(
+        `The allow list already holds ${GUARD_LIST_MAX} entries; remove one under Settings first.`,
+      );
+    }
+    const next = [...allow, data.entry];
+    const { error } = await supabaseAdmin
+      .from("live_audit_settings")
+      .update(
+        asRow<TablesUpdate<"live_audit_settings">>({
+          guard_allow_functions: next,
+          updated_by: userId,
+        }),
+      )
+      .eq("target_key", "prime");
+    if (error) throw new Error(error.message);
+    await audit({
+      action: "live_audit.guard_entry_allowed",
+      entityType: "live_audit_settings",
+      entityId: "prime",
+      actorUserId: userId,
+      metadata: { entry: data.entry, run_id: data.runId ?? null, blocked },
+    });
+    return { ok: true, added: true, blocked };
   });
 
 export const setLiveAuditNightlySchedule = createServerFn({ method: "POST" })
@@ -642,6 +720,29 @@ export const getLiveAuditEngineHealth = createServerFn({ method: "GET" })
       fix: key
         ? undefined
         : "Set ANTHROPIC_API_KEY in Mission Control (a key from the Anthropic workspace the live audit should bill to), then run the Actions secret sync for Prime in Settings.",
+    });
+
+    // Read first: the key's check below is only "ok" in the sense the
+    // switch says it is.
+    const { data: switchRow, error: switchErr } = await supabase
+      .from("live_audit_settings")
+      .select("claude_enabled")
+      .eq("target_key", "prime")
+      .maybeSingle();
+    if (switchErr) throw new Error(switchErr.message);
+    const claudeOn = switchRow?.claude_enabled === true;
+    checks.push({
+      key: "claude_switch",
+      label: "Use Claude",
+      status: claudeOn ? "ok" : "warn",
+      detail: claudeOn
+        ? key
+          ? "On: Claude reads the code, explores, judges and drafts fixes, on Mission Control's ANTHROPIC_API_KEY"
+          : "On, but Mission Control holds no ANTHROPIC_API_KEY, so runs still go without Claude"
+        : "Off: runs crawl and judge from the browser alone and make no Anthropic call, and no fix is drafted",
+      fix: claudeOn
+        ? undefined
+        : "When the live audit's workspace-scoped Anthropic key is provisioned: set it as ANTHROPIC_API_KEY in Mission Control, publish, sync it to Prime, then turn on Use Claude under Settings.",
     });
 
     const masters = await resolveLiveAuditMasterSecrets();

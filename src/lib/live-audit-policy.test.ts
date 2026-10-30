@@ -32,6 +32,7 @@ const candidate = (over: Partial<FixCandidate> = {}): FixCandidate => ({
 });
 
 const settings: LiveAuditSettingsRow = {
+  claude_enabled: true,
   audit_model: null,
   effort_scope: "high",
   effort_explore: "medium",
@@ -128,11 +129,36 @@ describe("what a run is sent", () => {
   });
 });
 
+describe("Claude runs only when a person turns it on", () => {
+  it("sends every run with Claude off until Use Claude is on, whatever model is chosen", () => {
+    const off = runSettingsFor(
+      { ...settings, claude_enabled: false, audit_model: "claude-opus-5-5" },
+      { kind: "nightly" },
+    );
+    // The runner's own off switch (lib/config.mjs on Prime): no Anthropic call.
+    expect(off).toMatchObject({ ai: "off" });
+    expect(runSettingsFor(settings, { kind: "manual" })).not.toHaveProperty("ai");
+  });
+
+  it("drafts no fix while it is off, though Mission Control holds a key, and says why", () => {
+    const v = fixEligibility(candidate(), {
+      source: "operator",
+      minConfidence: 0.7,
+      claudeEnabled: false,
+      keyPresent: true,
+    });
+    expect(v.ok).toBe(false);
+    expect(v.ok === false && v.reason).toMatch(/Claude is off for the live audit/);
+    expect(v.ok === false && v.reason).toMatch(/Use Claude/);
+  });
+});
+
 describe("fixes are Claude's, and wait on the Anthropic key", () => {
   it("dispatches nothing until the key is configured, and says so", () => {
     const v = fixEligibility(candidate(), {
       source: "operator",
       minConfidence: 0.7,
+      claudeEnabled: true,
       keyPresent: false,
     });
     expect(v.ok).toBe(false);
@@ -145,6 +171,7 @@ describe("fixes are Claude's, and wait on the Anthropic key", () => {
         fixEligibility(candidate({ severity, confidence: 0.1, deterministic: false }), {
           source: "operator",
           minConfidence: 0.7,
+          claudeEnabled: true,
           keyPresent: true,
         }).ok,
       ).toBe(true);
@@ -152,14 +179,25 @@ describe("fixes are Claude's, and wait on the Anthropic key", () => {
   });
 
   it("never fixes the audit's own environment, or a finding already being fixed", () => {
-    const ctx = { source: "operator" as const, minConfidence: 0.7, keyPresent: true };
+    const ctx = {
+      source: "operator" as const,
+      minConfidence: 0.7,
+      claudeEnabled: true,
+      keyPresent: true,
+    };
     expect(fixEligibility(candidate({ category: "environment" }), ctx).ok).toBe(false);
     expect(fixEligibility(candidate({ state: "fix_pr_open" }), ctx).ok).toBe(false);
     expect(fixEligibility(candidate({ state: "dismissed" }), ctx).ok).toBe(false);
   });
 
   it("holds automatic fixes to confidence, reproduction and a retry limit", () => {
-    const ctx = { source: "autofix" as const, minConfidence: 0.7, keyPresent: true, now: NOW };
+    const ctx = {
+      source: "autofix" as const,
+      minConfidence: 0.7,
+      claudeEnabled: true,
+      keyPresent: true,
+      now: NOW,
+    };
     expect(fixEligibility(candidate({ confidence: 0.5 }), ctx).ok).toBe(false);
     expect(fixEligibility(candidate({ deterministic: false, reproduced: false }), ctx).ok).toBe(
       false,
@@ -186,7 +224,7 @@ describe("fixes are Claude's, and wait on the Anthropic key", () => {
         candidate({ id: "high-new", severity: "high", first_seen_at: "2026-10-20T00:00:00Z" }),
         candidate({ id: "high-old", severity: "high", first_seen_at: "2026-09-20T00:00:00Z" }),
       ],
-      { max: 4, minConfidence: 0.7, keyPresent: true, now: NOW },
+      { max: 4, minConfidence: 0.7, claudeEnabled: true, keyPresent: true, now: NOW },
     );
     expect(queue.map((f) => f.id)).toEqual([
       "critical-sure",
@@ -194,9 +232,23 @@ describe("fixes are Claude's, and wait on the Anthropic key", () => {
       "high-old",
       "high-new",
     ]);
-    expect(autofixQueue([candidate()], { max: 3, minConfidence: 0.7, keyPresent: false })).toEqual(
-      [],
-    );
+    expect(
+      autofixQueue([candidate()], {
+        max: 3,
+        minConfidence: 0.7,
+        claudeEnabled: true,
+        keyPresent: false,
+      }),
+    ).toEqual([]);
+    // And none while Claude is off, though the key is there.
+    expect(
+      autofixQueue([candidate()], {
+        max: 3,
+        minConfidence: 0.7,
+        claudeEnabled: false,
+        keyPresent: true,
+      }),
+    ).toEqual([]);
   });
 });
 

@@ -187,6 +187,7 @@ export function ReadinessCard() {
                       >
                         {c.name}
                         {c.state === "missing" && (c.required ? " · missing" : " · optional")}
+                        {c.state === "default" && " · default"}
                       </Badge>
                     ))}
                     {cap.config.map((cfg) => (

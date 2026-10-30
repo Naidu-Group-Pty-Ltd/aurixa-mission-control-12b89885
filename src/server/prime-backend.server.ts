@@ -466,6 +466,15 @@ export const IDENTITY_SECRETS = new Set([
    * Each clone's is created and written by `anthropicWorkspace.server.ts`.
    */
   "ANTHROPIC_WORKSPACE_ID",
+  // A clone's own session, step-up and MFA secrets (`cloneOwnedSecrets.pure.ts`,
+  // minted only where the project holds none). The prime reads them as
+  // `Deno?.env?.get?.(…)`, which the scan does not match today; should it ever
+  // match, a session pepper or a TOTP key copied from the prime would make two
+  // deployments' sessions and second factors interchangeable.
+  "SESSION_TOKEN_PEPPER",
+  "STEP_UP_TOKEN_PEPPER",
+  "MFA_TOTP_ENCRYPTION_KEY",
+  "MFA_RECOVERY_CODE_PEPPER",
 ]);
 
 /**

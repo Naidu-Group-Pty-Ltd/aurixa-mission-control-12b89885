@@ -143,13 +143,22 @@ function LiveAuditPage() {
         }
       />
 
-      {d && !d.anthropicKey && (
+      {d && !d.claudeEnabled && (
         <div className="glass spine spine-warn px-4 py-3 text-sm">
-          <span className="font-medium">Waiting on the Anthropic key.</span>{" "}
+          <span className="font-medium">Claude is off.</span>{" "}
           <span className="text-muted-foreground">
-            Runs still drive Prime and report what the browser saw. Claude's reading of the code,
-            its exploring and judging, and every fix, start once ANTHROPIC_API_KEY is set in Mission
-            Control and synced into Prime.
+            Runs drive Prime in the browser and report what it saw, with no Anthropic call. Claude's
+            reading of the code, its exploring and judging, and every fix, start when you turn on
+            Use Claude under Settings, once the live audit's key is provisioned.
+          </span>
+        </div>
+      )}
+      {d && d.claudeEnabled && !d.anthropicKey && (
+        <div className="glass spine spine-warn px-4 py-3 text-sm">
+          <span className="font-medium">Claude is on, but there is no Anthropic key.</span>{" "}
+          <span className="text-muted-foreground">
+            Set ANTHROPIC_API_KEY in Mission Control, publish, and sync it to Prime. Until then runs
+            still go without Claude.
           </span>
         </div>
       )}

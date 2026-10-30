@@ -156,3 +156,46 @@ export function coveredTemplates(summary: unknown): string[] {
 export function runWasComplete(summary: unknown): boolean {
   return (summary as { complete?: unknown } | null)?.complete === true;
 }
+
+/**
+ * An operator's guard entry, exactly as the runner reads one (`GUARD_ENTRY`,
+ * `.github/live-audit/lib/config.mjs` on Prime): a function's name (every
+ * call), `name:action` (calls naming that action) or `name:-` (calls naming
+ * none). An entry the runner would drop is never saved here, so the page
+ * never shows an allowance a run ignores.
+ */
+export const GUARD_ENTRY = /^[a-z0-9-]{2,80}(?::[A-Za-z0-9_-]{1,60})?$/;
+
+/** One line of a run's "held back by the guard" list. */
+export type HeldBack = {
+  endpoint: string;
+  count: number;
+  why: string | null;
+  kind: string | null;
+  /** The entry that would allow it; none for a write flag or an operator's block. */
+  entry: string | null;
+};
+
+/**
+ * What the guard held back in a run, from its summary, most first. A line
+ * that is malformed is dropped, and an entry the runner would not accept is
+ * none: a line is only ever offered for allowing in the form a run obeys.
+ */
+export function heldBackOf(summary: unknown): HeldBack[] {
+  const top = (summary as { guard?: { top?: unknown } } | null)?.guard?.top;
+  if (!Array.isArray(top)) return [];
+  const out: HeldBack[] = [];
+  for (const raw of top.slice(0, 40)) {
+    const t = raw as Record<string, unknown> | null;
+    if (!t || typeof t.endpoint !== "string" || t.endpoint.length > 300) continue;
+    const count =
+      typeof t.count === "number" && Number.isFinite(t.count)
+        ? Math.max(0, Math.floor(t.count))
+        : 0;
+    const text = (v: unknown, n: number) =>
+      typeof v === "string" && v.length > 0 ? v.slice(0, n) : null;
+    const entry = typeof t.entry === "string" && GUARD_ENTRY.test(t.entry) ? t.entry : null;
+    out.push({ endpoint: t.endpoint, count, why: text(t.why, 300), kind: text(t.kind, 20), entry });
+  }
+  return out.sort((a, b) => b.count - a.count);
+}

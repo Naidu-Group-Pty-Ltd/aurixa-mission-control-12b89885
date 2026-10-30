@@ -155,12 +155,27 @@ export async function ensureOwnedSecrets(
     return { ok: false, stage: "mirror_read", error: `Could not read the project's mirror: ${msg(e)}` };
   }
 
+  // The environment's NAMES, for a spec minted only where the project holds
+  // none, from the reader that carries a failure rather than flattening it
+  // (`readHeldSecretNames`). Null when the list could not be read, and the
+  // planner then mints nothing for those specs: a failed read is not an
+  // absent value.
+  let envNames: ReadonlySet<string> | null = null;
+  if (specs.some((s) => s.kind === "random" && s.onlyWhereAbsent)) {
+    const { readHeldSecretNames } = await import("./cloneProhibitedSecrets.server");
+    const held = await readHeldSecretNames(projectRef);
+    envNames = held.ok ? new Set(held.names) : null;
+  }
+
   let plan: OwnedSecretsPlan;
   try {
     plan = planOwnedSecrets(
       specs,
-      { vault, primeShape },
-      { random: (bytes) => randomBytes(bytes).toString("hex"), vapid: mintVapidKeyPair },
+      { vault, primeShape, envNames },
+      {
+        random: (bytes, encoding) => randomBytes(bytes).toString(encoding === "base64url" ? "base64url" : "hex"),
+        vapid: mintVapidKeyPair,
+      },
     );
   } catch (e) {
     return { ok: false, stage: "plan", error: msg(e) };

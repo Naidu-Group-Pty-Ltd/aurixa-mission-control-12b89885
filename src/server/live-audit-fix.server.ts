@@ -6,8 +6,10 @@
 // settings, and every guard a security fix passes — no CI, configuration or
 // migration changes, gitleaks on the added lines, the repository's checks on
 // the base plus the patch. It flows through the Anthropic key Mission Control
-// syncs into Prime's Actions secrets for the Claude Code fixes: until that key
-// is configured, no fix is dispatched and the page says why.
+// syncs into Prime's Actions secrets for the Claude Code fixes, and only once a
+// person has turned on "Use Claude" in the live audit's settings: a key being
+// configured (Mission Control holds an org-scoped one for Codex) is not consent
+// to spend it here. Until both hold, no fix is dispatched and the page says why.
 //
 // The pull request opens as a draft on a `live-audit/fix-…` branch and a
 // PERSON merges it while the audit is being proven on Prime. The sweep follows
@@ -113,6 +115,8 @@ export async function startLiveAuditFix(input: {
   const verdict = fixEligibility(finding, {
     source: input.source,
     minConfidence: Number(settings?.autofix_min_confidence ?? 0.7),
+    // No settings row reads as off: the switch is the consent, never a default.
+    claudeEnabled: settings?.claude_enabled === true,
     keyPresent: anthropicKeyConfigured(),
   });
   if (!verdict.ok) return { ok: false, error: verdict.reason };
@@ -405,6 +409,8 @@ export async function dispatchAutomaticLiveAuditFixes(): Promise<{
 }> {
   const settings = await loadLiveAuditSettings("prime");
   if (!settings?.autofix_enabled) return { ran: false, reason: "automatic fixes are off" };
+  if (settings.claude_enabled !== true)
+    return { ran: false, reason: "Claude is off for the live audit" };
   if (!anthropicKeyConfigured()) return { ran: false, reason: "waiting on the Anthropic key" };
 
   const { data: run, error: runErr } = await admin
@@ -445,6 +451,7 @@ export async function dispatchAutomaticLiveAuditFixes(): Promise<{
   const queue = autofixQueue((open ?? []) as FixCandidate[], {
     max: settings.autofix_max_per_run,
     minConfidence: Number(settings.autofix_min_confidence),
+    claudeEnabled: true,
     keyPresent: true,
   });
   let dispatched = 0;

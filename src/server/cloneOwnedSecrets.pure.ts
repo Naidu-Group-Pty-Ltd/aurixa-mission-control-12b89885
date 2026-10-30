@@ -51,6 +51,30 @@
  * on the prime the question is not "what does the prime hold" but "what do
  * the prime's own jobs read".
  *
+ * ## Four that are minted only where the project holds none (30 Oct 2026)
+ *
+ * The prime reads `SESSION_TOKEN_PEPPER`, `STEP_UP_TOKEN_PEPPER`,
+ * `MFA_TOTP_ENCRYPTION_KEY` and `MFA_RECOVERY_CODE_PEPPER` as
+ * `Deno?.env?.get?.(…)`, which the function scan does not match, so no clone
+ * was ever given one. Measured that day, read-only: NPC Test, Preflight and the
+ * CRM had hashed none of their sessions in fourteen days, so each stored its
+ * session tokens in plain text; the dashboard and the prime hashed theirs. No
+ * deployment held a sealed TOTP secret, a recovery code or a step-up proof, and
+ * no clone's vault mirrored any of the four.
+ *
+ * Unlike the peppers above, these may already be in a project's environment,
+ * set by hand: the dashboard's session pepper is. The environment cannot be
+ * read back, so minting over it would ROTATE it, and a rotated TOTP key
+ * unseals nobody's second factor. So each is `onlyWhereAbsent`: minted only
+ * where neither the vault nor the environment's list of names carries it, and
+ * never when that list could not be read. A value the environment holds without
+ * a mirror is left exactly as it is, and the pass says so.
+ *
+ * Two names are deliberately not here. `MESSAGING_HUB_PIN_PEPPER` falls back to
+ * a pepper derived from the project's own service-role key, which is already
+ * per deployment, and setting one later invalidates every PIN set under the
+ * fallback. `STEP_UP_ENFORCED` is a recorded fail-closed policy, not a secret.
+ *
  * Pure: no I/O. The server module supplies the reads and the mints.
  */
 
@@ -71,12 +95,20 @@ export type OwnedSecretSpec =
       /** The vault secret that mirrors `env`. */
       store: OwnedSecretStore;
       key: string;
-      /** Bytes of entropy to mint; the value is hex, so twice this in characters. */
+      /** Bytes of entropy to mint; hex by default, so twice this in characters. */
       bytes: number;
       /** The consumer's floor: a mirrored value at or above it is reused, below it replaced. */
       floor: number;
+      /** How the bytes are written. A base64url value must decode to exactly `bytes` bytes. */
+      encoding?: "hex" | "base64url";
       /** Only paired where the PRIME's vault holds the same key. */
       requiresPrime?: true;
+      /**
+       * Minted only where neither the vault nor the environment's names carry
+       * it, and never when those names could not be read: a value in the
+       * environment without a mirror was set by hand and would be rotated.
+       */
+      onlyWhereAbsent?: true;
       why: string;
     }
   | {
@@ -148,13 +180,69 @@ const MARKET_CRON_PAIR: Omit<Extract<OwnedSecretSpec, { kind: "random" }>, "requ
   why: "two scheduled jobs send the vault half as x-cron-secret and ten market functions compare it against the environment",
 };
 
-/** What a CLONE owns. The two pairs are gated on the prime holding the same half. */
+/** `sessionHash.ts` stores session tokens unhashed without one (16 characters or more). */
+const SESSION_PEPPER: OwnedSecretSpec = {
+  kind: "random",
+  env: "SESSION_TOKEN_PEPPER",
+  store: "vault",
+  key: "session_token_pepper",
+  bytes: 32,
+  floor: MIN_OWNED_SECRET_LENGTH,
+  onlyWhereAbsent: true,
+  why: "without it session tokens are stored in plain text; a lookup by hash falls back to the plain token, so no session is lost",
+};
+
+/** `stepUp.ts` hashes step-up proofs with an empty pepper without one. */
+const STEP_UP_PEPPER: OwnedSecretSpec = {
+  kind: "random",
+  env: "STEP_UP_TOKEN_PEPPER",
+  store: "vault",
+  key: "step_up_token_pepper",
+  bytes: 32,
+  floor: MIN_OWNED_SECRET_LENGTH,
+  onlyWhereAbsent: true,
+  why: "without it a step-up proof is hashed with an empty pepper",
+};
+
+/** `recoveryCodes.ts` refuses a pepper under 32 characters, and issues no recovery codes without one. */
+const MFA_RECOVERY_PEPPER: OwnedSecretSpec = {
+  kind: "random",
+  env: "MFA_RECOVERY_CODE_PEPPER",
+  store: "vault",
+  key: "mfa_recovery_code_pepper",
+  bytes: 32,
+  floor: 32,
+  onlyWhereAbsent: true,
+  why: "without it no MFA recovery code can be issued",
+};
+
+/** `totp.ts` takes a base64url 32-byte AES-256-GCM key, and no TOTP factor can be enrolled without one. */
+const MFA_TOTP_KEY: OwnedSecretSpec = {
+  kind: "random",
+  env: "MFA_TOTP_ENCRYPTION_KEY",
+  store: "vault",
+  key: "mfa_totp_encryption_key",
+  bytes: 32,
+  floor: 43,
+  encoding: "base64url",
+  onlyWhereAbsent: true,
+  why: "without it no TOTP factor can be enrolled; once one is, rotating the key unseals nobody's",
+};
+
+/**
+ * What a CLONE owns. The two pairs are gated on the prime holding the same
+ * half; the last four are minted only where the project holds none.
+ */
 export const OWNED_SECRET_SPECS: readonly OwnedSecretSpec[] = [
   RESET_PEPPER,
   CSRF_PEPPER,
   VAPID_PAIR,
   { ...FINANCE_CRON_PAIR, requiresPrime: true },
   { ...MARKET_CRON_PAIR, requiresPrime: true },
+  SESSION_PEPPER,
+  STEP_UP_PEPPER,
+  MFA_RECOVERY_PEPPER,
+  MFA_TOTP_KEY,
 ];
 
 /**
@@ -196,10 +284,16 @@ export type OwnedSecretFacts = {
   vault: Record<string, string | null>;
   /** What the prime holds; null when the prime could not be read. Ignored by an ungated spec. */
   primeShape: PrimeShape | null;
+  /**
+   * The names the project's function environment holds, never a value; null or
+   * absent when they could not be read. Read only by an `onlyWhereAbsent` spec,
+   * which then mints nothing.
+   */
+  envNames?: ReadonlySet<string> | null;
 };
 
 export type OwnedSecretMint = {
-  random: (bytes: number) => string;
+  random: (bytes: number, encoding?: "hex" | "base64url") => string;
   vapid: () => { publicKey: string; privateKey: string };
 };
 
@@ -212,7 +306,15 @@ export type OwnedSecretWrite = {
   source: "mirror" | "minted";
 };
 
-export type OwnedSecretSkipReason = "prime_holds_none" | "prime_unreadable";
+export type OwnedSecretSkipReason = "prime_holds_none" | "prime_unreadable" | "env_unmirrored" | "env_unreadable";
+
+/** Whether a value meets what its consumer accepts: the floor, and for base64url the exact decoded length. */
+export function isUsableOwnedValue(spec: Extract<OwnedSecretSpec, { kind: "random" }>, value: string): boolean {
+  if (spec.encoding === "base64url") {
+    return value.length === Math.ceil((spec.bytes * 4) / 3) && /^[A-Za-z0-9_-]+$/.test(value);
+  }
+  return value.length >= spec.floor;
+}
 
 export type OwnedSecretSkip = { env: string; store: OwnedSecretStore; key: string; reason: OwnedSecretSkipReason };
 
@@ -249,11 +351,26 @@ export function planOwnedSecrets(
         }
       }
       const held = (facts.vault[spec.key] ?? "").trim();
-      const usable = held.length >= spec.floor;
-      const value = usable ? held : mint.random(spec.bytes);
-      if (!usable && value.length < spec.floor) {
+      const usable = isUsableOwnedValue(spec, held);
+      if (!usable && spec.onlyWhereAbsent) {
+        const names = facts.envNames ?? null;
+        if (names === null) {
+          skipped.push({ env: spec.env, store: spec.store, key: spec.key, reason: "env_unreadable" });
+          why.push(`${spec.env}: the environment's names could not be read — not minted this pass`);
+          continue;
+        }
+        if (names.has(spec.env)) {
+          skipped.push({ env: spec.env, store: spec.store, key: spec.key, reason: "env_unmirrored" });
+          why.push(`${spec.env}: the environment holds a value this engine did not mint and cannot read — left as it is`);
+          continue;
+        }
+      }
+      const value = usable ? held : mint.random(spec.bytes, spec.encoding);
+      if (!usable && !isUsableOwnedValue(spec, value)) {
         throw new Error(
-          `${spec.env}: the generator produced ${value.length} characters; the consumer requires at least ${spec.floor}`,
+          spec.encoding === "base64url"
+            ? `${spec.env}: the generator produced ${value.length} characters; the consumer requires exactly ${spec.bytes} bytes as base64url`
+            : `${spec.env}: the generator produced ${value.length} characters; the consumer requires at least ${spec.floor}`,
         );
       }
       writes.push({ env: spec.env, store: spec.store, key: spec.key, value, source: usable ? "mirror" : "minted" });

@@ -15,6 +15,7 @@ import {
 } from "./backend-provisioning.server";
 import { beatWhileClaimHeld, openScopedPrimeCorpus } from "./fleet-migration.server";
 import { describeCoverage, type CoverageComposition } from "./migrationProvenance.pure";
+import { versionsHeldThroughPrime } from "./primeHoldings.pure";
 import {
   readCloneMigrationStanding,
   sharedVersionReading,
@@ -187,6 +188,17 @@ export const getCloneMigrationStatus = createServerFn({ method: "POST" })
             ledger: ledger.ok ? ledger.rows : null,
             ledgerError: ledger.ok ? null : ledger.error,
             recordedVersion: currentVersion,
+            // What a stamped clone records under the prime's versions, asked
+            // the way the sync asks it, so the page and the button agree.
+            heldThroughPrime: ledger.ok
+              ? new Set(
+                  versionsHeldThroughPrime({
+                    corpus: scoped.metas,
+                    holdings: scoped.primeHoldings,
+                    cloneApplied: new Set(ledger.rows.map((r) => r.version)),
+                  }),
+                )
+              : undefined,
           });
         }
       }
@@ -422,7 +434,13 @@ export const syncCloneMigrations = createServerFn({ method: "POST" })
           // same `scoped.metas`, which carries the dependency facts that
           // narrow that refusal to what actually depends on the hole — and
           // the same WHOLE versions, so no file is cleared by its sibling.
-          { corpus: scopedMetas, runnableIds: scoped.runnableIds },
+          // And the same holdings, so a stamped clone is asked for the version
+          // the prime ran each file as (`primeHoldings.pure.ts`).
+          {
+            corpus: scopedMetas,
+            runnableIds: scoped.runnableIds,
+            primeHoldings: scoped.primeHoldings,
+          },
           undefined,
           // And the same stream. A body past the corpus ceiling used to make
           // this button report "Migration failed at <the 39 MB seed>" — the

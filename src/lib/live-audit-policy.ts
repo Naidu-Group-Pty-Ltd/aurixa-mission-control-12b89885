@@ -159,6 +159,13 @@ export const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 // ── What a run is sent ────────────────────────────────────────────────────
 
 export type LiveAuditSettingsRow = {
+  /**
+   * Whether Claude may be used at all: reading the code, exploring, judging
+   * and fixing. Off until a person turns it on (migration 20261030161700):
+   * Mission Control's org-scoped ANTHROPIC_API_KEY is configured for Codex,
+   * and its presence is not the owner's consent to spend it here.
+   */
+  claude_enabled: boolean;
   audit_model: string | null;
   effort_scope: string;
   effort_explore: string;
@@ -189,6 +196,10 @@ export function runSettingsFor(
       : null;
   return {
     kind: input.kind,
+    // The runner's own off switch (lib/config.mjs on Prime): no Anthropic call
+    // is made, whatever key the workflow holds; it crawls and judges from the
+    // browser alone, and says Claude was off.
+    ...(s.claude_enabled ? {} : { ai: "off" }),
     ...(s.audit_model && CLAUDE_MODEL_ID.test(s.audit_model) ? { audit_model: s.audit_model } : {}),
     effort: { scope: s.effort_scope, explore: s.effort_explore, triage: s.effort_triage },
     budget_usd: Number(s.budget_usd),
@@ -227,8 +238,23 @@ export type FixCandidate = {
 /** Whether a finding may have a fix drafted now. */
 export function fixEligibility(
   f: FixCandidate,
-  ctx: { source: "operator" | "autofix"; minConfidence: number; keyPresent: boolean; now?: number },
+  ctx: {
+    source: "operator" | "autofix";
+    minConfidence: number;
+    /** The live audit's "Use Claude" setting. */
+    claudeEnabled: boolean;
+    keyPresent: boolean;
+    now?: number;
+  },
 ): Verdict {
+  if (!ctx.claudeEnabled) {
+    return {
+      ok: false,
+      reason:
+        'Claude is off for the live audit, so no fix is drafted. Turn on "Use Claude" under Settings once ' +
+        "the live audit's Anthropic key is provisioned.",
+    };
+  }
   if (!ctx.keyPresent) {
     return {
       ok: false,
@@ -274,7 +300,13 @@ export function fixEligibility(
 /** Automatic fixes for a run: worst first, surest first, oldest first. */
 export function autofixQueue<T extends FixCandidate>(
   findings: T[],
-  ctx: { max: number; minConfidence: number; keyPresent: boolean; now?: number },
+  ctx: {
+    max: number;
+    minConfidence: number;
+    claudeEnabled: boolean;
+    keyPresent: boolean;
+    now?: number;
+  },
 ): T[] {
   return findings
     .filter((f) => fixEligibility(f, { ...ctx, source: "autofix" }).ok)

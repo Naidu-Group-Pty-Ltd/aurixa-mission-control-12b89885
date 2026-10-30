@@ -75,7 +75,9 @@ describe("pending is what the fleet sync would send, never the raw corpus", () =
     // to send what this lane just counted as pending.
     const partitioned = /partitionByDependency\(\s*([A-Za-z_$][\w$.]*)\s*,/.exec(lane);
     expect(partitioned).not.toBeNull();
-    const handed = /\{\s*corpus:\s*([A-Za-z_$][\w$.]*)\s*,\s*runnableIds\s*\}/.exec(lane);
+    // `runnableIds` may be followed by the prime's holdings; the corpus is
+    // what this pins.
+    const handed = /\{\s*corpus:\s*([A-Za-z_$][\w$.]*)\s*,\s*runnableIds\b/.exec(lane);
     expect(handed).not.toBeNull();
     expect(handed![1]).toBe(partitioned![1]);
   });

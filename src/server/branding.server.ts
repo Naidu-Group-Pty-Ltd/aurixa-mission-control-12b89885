@@ -70,7 +70,7 @@ export async function applyBrandToClone(
   const [profileRes, backendRes, assignmentRes] = await Promise.all([
     supabase
       .from("clone_brand_profiles")
-      .select("id, version, brand_config, report_contact, asset_manifest, status")
+      .select("id, version, brand_config, report_contact, asset_manifest, status, config_hash")
       .eq("id", args.profileId)
       .maybeSingle(),
     supabase
@@ -192,7 +192,16 @@ export async function applyBrandToClone(
       status: "applied",
       applied_at: nowIso,
       applied_by: args.actorUserId,
-      applied_config_hash: finalHash,
+      // The PROFILE's hash, which is what every reader of this column compares
+      // it with: the drift scan, the drift check and the branding page all ask
+      // "has the profile changed since it was applied here?". `finalHash` is
+      // this clone's own bundle — asset URLs rewritten to its mirrored copies
+      // and its overrides layered on — so it never equals the profile's when a
+      // profile carries an asset, and the assignment read "drifted" seconds
+      // after a successful apply. Measured on `tutorial-demo-orrimere-c158c7`,
+      // 30 Oct 2026: applied 02:30:11, drifted 02:30:19. The clone's own hash
+      // still travels where it describes the clone: its payload and history.
+      applied_config_hash: profile.config_hash ?? finalHash,
       last_drift_check_at: nowIso,
       drift_summary: null,
       error_message: null,

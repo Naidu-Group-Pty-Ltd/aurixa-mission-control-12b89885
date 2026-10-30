@@ -27,7 +27,7 @@ primeOnlyFeatures.mjs` on Prime), so the cascade never carries it to a clone.
 | Tab           | What it holds                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Findings      | Every defect, ranked by severity. A finding opens to how a person reaches it (the recorded steps), the screenshot, the console, the stack and the requests, the files and lines Claude's reading of the code points at, its fixes and its whole history. An admin asks Claude for a fix, re-tests it (a run with the finding's page first), triages it, or changes its severity — a person's severity sticks across later runs. |
-| Runs          | Each run: what it covered, what the guard held back (by endpoint, so the guard can be tuned), which model it ran on and whether a person chose it, what it spent, and its timeline. An admin cancels a run in flight.                                                                                                                                                                                                           |
+| Runs          | Each run: what it covered, what the guard held back (by call, with why, so the guard can be tuned — an admin allows a line, after a confirmation, as exactly the entry the runner named for it), which model it ran on and whether a person chose it, what it spent, and its timeline. An admin cancels a run in flight.                                                                                                        |
 | Fixes         | Every fix Claude drafted, its pull request, and whether a later complete run confirmed the defect gone.                                                                                                                                                                                                                                                                                                                         |
 | Settings      | Models, effort per phase, the nightly switch and time, budget and limits, viewports, screenshots, the guard's allow and block lists, automatic fixes.                                                                                                                                                                                                                                                                           |
 | Engine health | Every piece the audit needs and whether it is there, with what to do when it is not. Presence only, never a value.                                                                                                                                                                                                                                                                                                              |
@@ -98,9 +98,19 @@ confirms the defect gone, or reopens it.
 
 The fixes flow through **the Anthropic key**: `ANTHROPIC_API_KEY` in Mission
 Control, which the Actions secret sync writes into Prime's repository for the
-Claude Code fixes. Until it is set, every fix — a person's or automatic —
-says it is waiting on the key and nothing is dispatched; the runs themselves
-still crawl and report from the browser alone, and say that Claude stood down.
+Claude Code fixes.
+
+**Claude is used only once a person turns it on** (Settings → Claude → **Use
+Claude**, `live_audit_settings.claude_enabled`, off by default since
+`20261030161700`). Mission Control already holds an org-scoped
+`ANTHROPIC_API_KEY` for Codex Security's critical and high fixes and syncs it
+into Prime every night; the live audit is to run on the workspace-scoped key
+the owner provisions when they choose, so a key being present is not consent
+to spend it. While the switch is off, every run is dispatched with Claude off
+(`ai: "off"` in its settings, the runner's own off switch: no Anthropic call is
+made, whatever key the workflow holds) and crawls and judges from the browser
+alone, and no fix is drafted, by a person or automatically. With the switch on
+but no key configured, fixes say they are waiting on the key.
 
 **Automatic fixes** (off until switched on): after each completed run, the
 sweep drafts fixes for up to N of that run's open defects, worst and surest
@@ -139,15 +149,25 @@ Each can be muted under **Settings → Notifications**.
 2. On Prime: create a **view-only admin** staff account for the audit and put
    its user id in the repository variable `LIVE_AUDIT_USER_ID`. Without it,
    runs see only the signed-out pages.
-3. Set `ANTHROPIC_API_KEY` in Mission Control — a key from the Anthropic
-   workspace the audit should bill to — and run the Actions secret sync for
-   Prime. Optionally set the repository variable
-   `LIVE_AUDIT_ANTHROPIC_WORKSPACE_ID` on Prime.
-4. Choose the audit model and the fix model under **Settings** (until then
-   runs use the default, `DEFAULT_AUDIT_MODEL` in `src/lib/live-audit-policy.ts`, and record that it was the default).
-5. Run one by hand, read **Runs → Held back by the guard**, and allow any
-   function there you know only reads. Then switch the nightly run on, and
-   automatic fixes when the findings have earned it.
+3. Run one by hand, read **Runs → Held back by the guard**, and allow any
+   call there you know only reads. Each line is a call as
+   `fn:<function>:<action>` (`-` when it names none), why the guard held it
+   back, and an **Allow** that adds exactly that entry (`allowLiveAuditGuardEntry`,
+   audited as `live_audit.guard_entry_allowed`). Under **Settings → The guard**
+   an entry is a function's name (every call), `name:action` or `name:-`, the
+   runner's own `GUARD_ENTRY` (`src/lib/live-audit-contract.ts`); a block wins,
+   and nothing allows a call that asks to write on the way (`mark_read: true`).
+   A page whose reads were held back and that then failed is counted
+   `degraded`, not covered. Runs work without Claude: they crawl every
+   reachable page and report what the browser saw.
+4. When the owner provisions the live audit's workspace-scoped Anthropic key:
+   set it as `ANTHROPIC_API_KEY` in Mission Control (replacing the org-scoped
+   one), publish, run the Actions secret sync for Prime, choose the audit and
+   fix models under **Settings** (until then runs use the default,
+   `DEFAULT_AUDIT_MODEL` in `src/lib/live-audit-policy.ts`, and record that it
+   was the default), and turn on **Use Claude**.
+5. Switch the nightly run on, and automatic fixes when the findings have
+   earned it.
 
 **Engine health** checks every one of these.
 

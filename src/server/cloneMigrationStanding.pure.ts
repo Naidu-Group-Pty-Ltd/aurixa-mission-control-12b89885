@@ -177,6 +177,12 @@ export function readCloneMigrationStanding(args: {
   recordedVersion: string | null;
   /** Why the ledger is null, when it is. */
   ledgerError?: string | null;
+  /**
+   * Runnable versions the clone holds under the version the PRIME ran them as
+   * — what a clone stamped from the prime records in place of the files' own
+   * (`versionsHeldThroughPrime`). Not pending, and nothing a press would send.
+   */
+  heldThroughPrime?: ReadonlySet<string>;
 }): CloneMigrationStanding {
   const { runnable, ledger, recordedVersion } = args;
 
@@ -244,7 +250,8 @@ export function readCloneMigrationStanding(args: {
   for (const m of runnable) {
     const rows = recorded.get(m.id);
     if (!rows) {
-      pending.push({ id: m.id, description: m.name });
+      if (args.heldThroughPrime?.has(m.id)) appliedVersions.add(m.id);
+      else pending.push({ id: m.id, description: m.name });
       continue;
     }
     appliedVersions.add(m.id);

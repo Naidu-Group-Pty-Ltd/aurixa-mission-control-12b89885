@@ -11,6 +11,7 @@ import {
   isVapidPrivateKey,
   ownedSecretEnvNames,
   ownedSecretVaultNames,
+  isUsableOwnedValue,
   type OwnedSecretFacts,
   type PrimeShape,
 } from "./cloneOwnedSecrets.pure";
@@ -19,7 +20,8 @@ const NOW = Date.parse("2026-09-06T06:00:00.000Z");
 const PUB = "B" + "a".repeat(86);
 const PRIV = "b".repeat(43);
 const mint = {
-  random: (bytes: number) => "r".repeat(bytes * 2),
+  random: (bytes: number, encoding?: "hex" | "base64url") =>
+    encoding === "base64url" ? "R".repeat(Math.ceil((bytes * 4) / 3)) : "r".repeat(bytes * 2),
   vapid: () => ({ publicKey: "B" + "m".repeat(86), privateKey: "n".repeat(43) }),
 };
 const shape = (over: Partial<PrimeShape> = {}): PrimeShape => ({
@@ -29,6 +31,7 @@ const shape = (over: Partial<PrimeShape> = {}): PrimeShape => ({
 const facts = (over: Partial<OwnedSecretFacts> = {}): OwnedSecretFacts => ({
   vault: {},
   primeShape: shape(),
+  envNames: new Set<string>(),
   ...over,
 });
 const write = (plan: ReturnType<typeof planOwnedSecrets>, env: string) =>
@@ -43,6 +46,10 @@ describe("the specs name the prime's contract", () => {
       "VAPID_PRIVATE_KEY",
       "FINANCE_PORTAL_CRON_SECRET",
       "MARKET_INGESTION_CRON_SECRET",
+      "SESSION_TOKEN_PEPPER",
+      "STEP_UP_TOKEN_PEPPER",
+      "MFA_RECOVERY_CODE_PEPPER",
+      "MFA_TOTP_ENCRYPTION_KEY",
     ]);
     // The finance function's older schedule read exactly this vault name; the
     // market jobs read exactly this one since market_cron_secret_from_vault.
@@ -357,5 +364,175 @@ describe("the step is written mirror first, fed to the batch, and never logged",
     const sources = files.map((f) => readFileSync(`supabase/migrations/${f}`, "utf8"));
     expect(sources.some((s) => s.includes("'clone-secrets-reconcile'"))).toBe(true);
     expect(sources.some((s) => /delivered_project_ref/.test(s) && /delivered_env_at/.test(s))).toBe(true);
+  });
+});
+
+/**
+ * The session, step-up and MFA secrets (30 Oct 2026). Measured that day: NPC
+ * Test, Preflight and the CRM hashed none of their sessions in fourteen days,
+ * because none held SESSION_TOKEN_PEPPER; the dashboard hashed its one session,
+ * so its environment holds one that no vault mirrors.
+ */
+describe("the four minted only where the project holds none", () => {
+  const FOUR = [
+    "SESSION_TOKEN_PEPPER",
+    "STEP_UP_TOKEN_PEPPER",
+    "MFA_RECOVERY_CODE_PEPPER",
+    "MFA_TOTP_ENCRYPTION_KEY",
+  ];
+  const totpSpec = OWNED_SECRET_SPECS.find(
+    (sp) => sp.kind === "random" && sp.env === "MFA_TOTP_ENCRYPTION_KEY",
+  );
+
+  it("are each minted only where absent, and are not the prime's", () => {
+    for (const env of FOUR) {
+      const spec = OWNED_SECRET_SPECS.find((sp) => sp.kind === "random" && sp.env === env);
+      expect(spec && spec.kind === "random" && spec.onlyWhereAbsent).toBe(true);
+    }
+    expect(ownedSecretEnvNames(PRIME_PAIR_SPECS)).not.toContain("SESSION_TOKEN_PEPPER");
+  });
+
+  it("mints all four where neither the vault nor the environment holds them", () => {
+    const plan = planOwnedSecrets(OWNED_SECRET_SPECS, facts(), mint);
+    for (const env of FOUR) expect(write(plan, env)?.source).toBe("minted");
+    // The TOTP key is the 32-byte key totp.ts decodes; the recovery pepper meets its 32-character floor.
+    expect(write(plan, "MFA_TOTP_ENCRYPTION_KEY")?.value).toHaveLength(43);
+    expect(write(plan, "MFA_RECOVERY_CODE_PEPPER")!.value.length).toBeGreaterThanOrEqual(32);
+  });
+
+  it("leaves a value the environment holds without a mirror, and says so", () => {
+    const plan = planOwnedSecrets(
+      OWNED_SECRET_SPECS,
+      facts({ envNames: new Set(["SESSION_TOKEN_PEPPER"]) }),
+      mint,
+    );
+    expect(write(plan, "SESSION_TOKEN_PEPPER")).toBeUndefined();
+    expect(plan.skipped).toContainEqual({
+      env: "SESSION_TOKEN_PEPPER",
+      store: "vault",
+      key: "session_token_pepper",
+      reason: "env_unmirrored",
+    });
+    // The other three are still minted.
+    for (const env of FOUR.slice(1)) expect(write(plan, env)?.source).toBe("minted");
+  });
+
+  it("mints none of them when the environment's names could not be read", () => {
+    for (const envNames of [null, undefined]) {
+      const plan = planOwnedSecrets(OWNED_SECRET_SPECS, facts({ envNames }), mint);
+      for (const env of FOUR) expect(write(plan, env)).toBeUndefined();
+      expect(
+        plan.skipped.filter((sk) => sk.reason === "env_unreadable").map((sk) => sk.env),
+      ).toEqual(FOUR);
+      // The rest of the list is unaffected.
+      expect(write(plan, "RESET_TOKEN_PEPPER")?.source).toBe("minted");
+    }
+  });
+
+  it("re-asserts its own mirror even where the environment holds the name", () => {
+    const plan = planOwnedSecrets(
+      OWNED_SECRET_SPECS,
+      facts({
+        vault: { session_token_pepper: "s".repeat(64) },
+        envNames: new Set(["SESSION_TOKEN_PEPPER"]),
+      }),
+      mint,
+    );
+    expect(write(plan, "SESSION_TOKEN_PEPPER")).toMatchObject({
+      source: "mirror",
+      value: "s".repeat(64),
+    });
+  });
+
+  it("never mints over an environment value, even beside a malformed mirror", () => {
+    const malformed = { mfa_totp_encryption_key: "R".repeat(44) };
+    const held = planOwnedSecrets(
+      OWNED_SECRET_SPECS,
+      facts({ vault: malformed, envNames: new Set(["MFA_TOTP_ENCRYPTION_KEY"]) }),
+      mint,
+    );
+    expect(write(held, "MFA_TOTP_ENCRYPTION_KEY")).toBeUndefined();
+    expect(held.skipped.find((sk) => sk.env === "MFA_TOTP_ENCRYPTION_KEY")?.reason).toBe(
+      "env_unmirrored",
+    );
+    // With nothing in the environment, a malformed mirror is replaced.
+    const absent = planOwnedSecrets(OWNED_SECRET_SPECS, facts({ vault: malformed }), mint);
+    expect(write(absent, "MFA_TOTP_ENCRYPTION_KEY")?.source).toBe("minted");
+  });
+
+  it("checks a base64url key by its decoded length, and refuses a generator that misses it", () => {
+    expect(totpSpec?.kind).toBe("random");
+    if (totpSpec?.kind !== "random") return;
+    expect(isUsableOwnedValue(totpSpec, "A".repeat(43))).toBe(true);
+    expect(isUsableOwnedValue(totpSpec, "A".repeat(42))).toBe(false);
+    expect(isUsableOwnedValue(totpSpec, "A".repeat(64))).toBe(false); // a hex-length string is not the key
+    expect(isUsableOwnedValue(totpSpec, "+".repeat(43))).toBe(false); // base64, not base64url
+    expect(() =>
+      planOwnedSecrets(OWNED_SECRET_SPECS, facts(), {
+        ...mint,
+        random: (bytes: number) => "r".repeat(bytes * 2),
+      }),
+    ).toThrow(/exactly 32 bytes as base64url/);
+  });
+
+  it("the server writes the TOTP key in the form totp.ts decodes", async () => {
+    const { randomBytes } = await import("node:crypto");
+    const value = randomBytes(32).toString("base64url");
+    expect(Buffer.from(value, "base64url")).toHaveLength(32);
+    if (totpSpec?.kind === "random") expect(isUsableOwnedValue(totpSpec, value)).toBe(true);
+    const server = readFileSync("src/server/cloneOwnedSecrets.server.ts", "utf8");
+    expect(server).toContain(
+      'randomBytes(bytes).toString(encoding === "base64url" ? "base64url" : "hex")',
+    );
+    // The names come from the reader that carries a failure, and a failure is null, never empty.
+    expect(server).toContain("const held = await readHeldSecretNames(projectRef);");
+    expect(server).toContain("envNames = held.ok ? new Set(held.names) : null;");
+    expect(server).toContain("{ vault, primeShape, envNames }");
+  });
+
+  it("dry run on the five clones as they stood on 30 Oct 2026", () => {
+    // Each clone's vault held the same nine names and none of the four. The
+    // dashboard's environment holds a session pepper (its sessions are hashed);
+    // the other clones hashed none, so they hold none.
+    const vault = {
+      csrf_token_pepper: "c".repeat(64),
+      reset_token_pepper: "p".repeat(64),
+      vapid_public_key: PUB,
+      vapid_private_key: PRIV,
+      finance_portal_cron_secret: "f".repeat(64),
+      market_ingestion_cron_secret: "m".repeat(64),
+    };
+    const primeShape = shape({
+      vaultNames: new Set(["finance_portal_cron_secret", "market_ingestion_cron_secret"]),
+    });
+    const clones: Record<string, ReadonlySet<string>> = {
+      dashboard: new Set(["RESET_TOKEN_PEPPER", "CSRF_TOKEN_PEPPER", "SESSION_TOKEN_PEPPER"]),
+      "npc-test": new Set(["RESET_TOKEN_PEPPER", "CSRF_TOKEN_PEPPER"]),
+      preflight: new Set(["RESET_TOKEN_PEPPER", "CSRF_TOKEN_PEPPER"]),
+      crm: new Set(["RESET_TOKEN_PEPPER", "CSRF_TOKEN_PEPPER"]),
+      orrimere: new Set(["RESET_TOKEN_PEPPER", "CSRF_TOKEN_PEPPER"]),
+    };
+    const outcome = Object.fromEntries(
+      Object.entries(clones).map(([slug, envNames]) => {
+        const plan = planOwnedSecrets(OWNED_SECRET_SPECS, { vault, primeShape, envNames }, mint);
+        return [
+          slug,
+          {
+            minted: plan.writes.filter((w) => w.source === "minted").map((w) => w.env),
+            left: plan.skipped.map((sk) => `${sk.env}:${sk.reason}`),
+          },
+        ];
+      }),
+    );
+    expect(outcome.dashboard).toEqual({
+      minted: ["STEP_UP_TOKEN_PEPPER", "MFA_RECOVERY_CODE_PEPPER", "MFA_TOTP_ENCRYPTION_KEY"],
+      left: ["SESSION_TOKEN_PEPPER:env_unmirrored"],
+    });
+    for (const slug of ["npc-test", "preflight", "crm", "orrimere"]) {
+      expect(outcome[slug]).toEqual({ minted: FOUR, left: [] });
+    }
+    // Nothing that was already the clone's is minted again: the six existing names are mirrors.
+    for (const slug of Object.keys(clones))
+      expect(outcome[slug].minted).not.toContain("RESET_TOKEN_PEPPER");
   });
 });

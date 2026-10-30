@@ -26,6 +26,7 @@ import {
 } from "./chunkCursorStore.pure";
 import { primeLedgerHoleNotes } from "./fleetBlockageRecord.pure";
 import type { CorpusMeta } from "./fleetCorpusScope.pure";
+import { withVersionsHeldThroughPrime, type PrimeHoldings } from "./primeHoldings.pure";
 import {
   frontierFromReplay,
   frontierUnreadable,
@@ -3264,6 +3265,14 @@ export async function applyPrimeMigrations(
     corpus: readonly CorpusMeta[];
     /** Ids the scope cleared. */
     runnableIds: ReadonlySet<string>;
+    /**
+     * The prime ledger versions holding each corpus file's bytes
+     * (`openScopedPrimeCorpus`). A clone stamped from the prime records those
+     * versions and never the files' own, so without this every file the prime
+     * ran under another version reads as missing and is sent again. Absent:
+     * the clone's versions alone, as before. See `primeHoldings.pure.ts`.
+     */
+    primeHoldings?: PrimeHoldings;
   },
   /**
    * Stop BETWEEN migrations once the caller's invocation budget is spent.
@@ -3365,7 +3374,15 @@ export async function applyPrimeMigrations(
         "so what it has applied is not known.",
     );
   }
-  const applied = new Set(ledger.rows.map((r) => r.version));
+  // What the clone records, and — for a scoped caller — what it holds under the
+  // version the prime ran it as. Every decision below reads this one set: the
+  // partition, the holes, the cursor and the skip, so none can send what
+  // another treats as held.
+  const applied = withVersionsHeldThroughPrime(
+    new Set(ledger.rows.map((r) => r.version)),
+    scope?.corpus ?? [],
+    scope?.primeHoldings,
+  );
 
   // Pre-flight: refuse a replay that cannot succeed, rather than starting one
   // that halts on migration #1 and reports the migration as the fault.
@@ -5546,6 +5563,52 @@ async function findUserIdByEmail(
 }
 
 /**
+ * Whether the clone's project already holds its admin account.
+ *
+ * Read before a lever that holds no operator password re-queues a failed
+ * backend (`chooseFailedRequeue`), because the seed below writes the queued
+ * password over an existing account's. The product signs in against
+ * `public.custom_users` where the prime defines it, and the seed writes both
+ * stores, so either one holding the address means somebody may hold its
+ * password. `unknown` when the project could not be asked, never `absent`.
+ */
+export async function readAdminAccountPresence(
+  projectRef: string,
+  adminEmail: string,
+): Promise<"present" | "absent" | "unknown"> {
+  const emailLit = sqlCredentialLiteral(adminEmail.trim().toLowerCase());
+  try {
+    const first = (await runSqlOnProject(
+      projectRef,
+      `select exists (select 1 from auth.users where lower(email) = ${emailLit}) as in_auth,
+              to_regclass('public.custom_users') is not null as has_custom_users`,
+    )) as Array<{ in_auth?: unknown; has_custom_users?: unknown }>;
+    const row = Array.isArray(first) ? first[0] : undefined;
+    if (!row || typeof row.in_auth !== "boolean" || typeof row.has_custom_users !== "boolean") {
+      return "unknown";
+    }
+    if (row.in_auth) return "present";
+    if (!row.has_custom_users) return "absent";
+    const second = (await runSqlOnProject(
+      projectRef,
+      `select exists (
+         select 1 from public.custom_users
+          where lower(email) = ${emailLit} or lower(username) = ${emailLit}
+       ) as in_custom`,
+    )) as Array<{ in_custom?: unknown }>;
+    const custom = Array.isArray(second) ? second[0]?.in_custom : undefined;
+    if (typeof custom !== "boolean") return "unknown";
+    return custom ? "present" : "absent";
+  } catch (e) {
+    console.error(
+      `[backend-provisioning] could not read the admin account on ${projectRef}:`,
+      e instanceof Error ? e.message : String(e),
+    );
+    return "unknown";
+  }
+}
+
+/**
  * Seed an admin user into the clone's backend using the Management API.
  * Creates the user via the Auth Admin API and inserts their admin role.
  */
@@ -6938,7 +7001,9 @@ export function generateSecurePassword(): string {
  * A PROVISION builds a backend that does not exist yet and refuses a row at
  * `ready`, because the wizard must never provision the same clone twice.
  *
- * A REPAIR takes a row at `ready` and NOTHING ELSE, and converges it onto the
+ * A REPAIR takes a row at `ready` — or a `failed` one whose admin account a
+ * re-queue lever has read and found present (`repairOfFailed`, see
+ * `chooseFailedRequeue`) — and converges it onto the
  * engine as it now stands. That is the case the `ready` refusal had no answer
  * for: every fix to this pipeline leaves the clones provisioned before it
  * frozen holding the old gaps, and the only remedy the product offered was to
@@ -6990,6 +7055,13 @@ export async function enqueueCloneBackendProvisioning(
     moduleIds?: string[];
     /** Converge an already-ready backend rather than build a new one. */
     repair?: boolean;
+    /**
+     * Repair a FAILED backend too. Only a lever that has read the admin
+     * account on the clone's project and found it present may ask this
+     * (`chooseFailedRequeue`): a repair seeds nobody, so over a backend with no
+     * admin it would finish a clone nobody can enter.
+     */
+    repairOfFailed?: boolean;
   },
 ): Promise<{ ok: true; queued: true } | { ok: false; error: string }> {
   const { encryptSecret } = await import("./crypto.server");
@@ -7010,7 +7082,10 @@ export async function enqueueCloneBackendProvisioning(
     // The mirror of the retry hook's `failed` guard. Stated as three separate
     // refusals because each one is a different thing to tell an operator.
     if (!existing) return { ok: false, error: "This clone has no backend to repair" };
-    if (existing.status !== "ready") {
+    const repairable =
+      existing.status === "ready" ||
+      (existing.status === "failed" && input.repairOfFailed === true);
+    if (!repairable) {
       return {
         ok: false,
         error: `Repair converges a READY backend — this one is '${existing.status}'. A failed backend is re-queued by the retry hook; one in flight is already being worked.`,
@@ -7080,6 +7155,19 @@ export async function enqueueCloneBackendProvisioning(
     { onConflict: "clone_id" },
   );
   if (upsertErr) return { ok: false, error: upsertErr.message };
+
+  // A deployment that failed waiting on this backend waits on it again now,
+  // rather than reading "will not retry without an operator" over a backend
+  // that is being built. See deploymentRearm.pure.ts. Never fails the enqueue.
+  try {
+    const { rearmDeploymentBlockedOnBackend } = await import("./hosting/deploymentRearm.server");
+    await rearmDeploymentBlockedOnBackend(input.cloneId);
+  } catch (e) {
+    console.error(
+      `[enqueueCloneBackendProvisioning] deployment re-arm for ${input.cloneId} failed:`,
+      e instanceof Error ? e.message : String(e),
+    );
+  }
 
   return { ok: true, queued: true };
 }

@@ -415,6 +415,9 @@ function NewClone() {
           // provisioning writes the authoritative set to `clone_modules` and
           // the backend pipeline reads it from there. (Audit finding #12.)
           backend: dedicatedBackend ? { region: backendRegion, adminEmail, adminPassword } : null,
+          // The box travels as itself. Read through the domain alone, ticked
+          // with the domain left blank arrived as `null`, the same as unticked.
+          startSendingIdentity: armEmail,
           sendingDomain: armEmail ? sendingDomain.trim() || null : null,
           idempotencyKey,
           // Which line, and therefore which parent the repository is copied
@@ -539,8 +542,24 @@ function NewClone() {
       // recorded, and the deployment drain calls it with no domain at all —
       // so a browser that never got this far did not fail, it started an
       // identity on a domain nobody chose.
-      if (armEmail) {
-        toast.info("Sending identity started — its domain verifies once DNS propagates.");
+      //
+      // What is said here is the server's answer. This toasted "started"
+      // whenever the box was ticked, and on 29 Oct 2026 it said so over a
+      // demo clone the server had started nothing for.
+      const identity = result.sendingIdentity;
+      if (identity.status === "started") {
+        toast.info(
+          `Sending identity started${identity.sendingDomain ? ` on ${identity.sendingDomain}` : ""}` +
+            " — its domain verifies once DNS propagates.",
+        );
+      } else if (identity.status === "refused") {
+        toast.warning("Sending identity not started. The clone page can retry it.", {
+          description: identity.error,
+        });
+      } else if (armEmail) {
+        toast.warning(
+          "A sending identity was asked for and the server started none. Start it from the clone page.",
+        );
       }
 
       setBusy(false);
@@ -1271,8 +1290,9 @@ function NewClone() {
               <div className="text-sm font-medium">Start this clone&apos;s sending identity</div>
               <div className="text-xs text-muted-foreground">
                 Registers the sending domain now so its DNS can propagate; the email drain mints the
-                scoped key once it verifies. The drain only ADVANCES an identity — nothing else in
-                the platform starts one, so an unstarted clone stays unable to send.
+                scoped key once it verifies. Left unticked, the email drain starts one on the domain
+                derived from this clone&apos;s subdomain once its backend is ready, so ticking it
+                buys the DNS that head start, or a domain of your choosing.
               </div>
               <CapabilityNote
                 readiness={readiness}
@@ -1292,8 +1312,10 @@ function NewClone() {
                 placeholder="mail.clientdomain.com.au — blank derives it from the clone"
               />
               <p className="text-xs text-muted-foreground">
-                Leave blank to use the platform default. Whatever is set here is the domain the
-                clone&apos;s mail is sent as, and it is what has to verify in DNS.
+                Leave blank to derive it from the subdomain reserved above (send.&lt;subdomain&gt;);
+                with no subdomain there is nothing to derive from, and the start is refused.
+                Whatever is set here is the domain the clone&apos;s mail is sent as, and it is what
+                has to verify in DNS.
               </p>
             </div>
           )}
