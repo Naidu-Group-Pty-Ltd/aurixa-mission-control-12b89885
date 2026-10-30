@@ -24,10 +24,16 @@ export function parityUnverifiedLine(reason: string): string {
   return `${PARITY_UNVERIFIED_PREFIX} (${reason}) — it has not been compared with the prime`;
 }
 
+/** How the line for a backend that does not match the prime begins. */
+export const PARITY_MISMATCH_PREFIX = "Backend provisioned but DOES NOT MATCH the prime";
+
 /** The line for a backend that does not match the prime. It leads every other reading. */
 export function parityMismatchLine(blockingIssues: readonly string[], cloneId: string): string {
-  return `Backend provisioned but DOES NOT MATCH the prime — ${blockingIssues.join(", ")}. Review at /clones/${cloneId}`;
+  return `${PARITY_MISMATCH_PREFIX} — ${blockingIssues.join(", ")}. Review at /clones/${cloneId}`;
 }
+
+/** How the line for a backend holding the prime's objects and more begins. */
+export const PARITY_SURPLUS_PREFIX = "Backend is ready — every object the prime has is present";
 
 /**
  * The line for a backend holding everything the prime has, and more.
@@ -38,7 +44,7 @@ export function parityMismatchLine(blockingIssues: readonly string[], cloneId: s
  * hid a table the prime does not have on the Preflight clone.
  */
 export function paritySurplusLine(surplusTotal: number, cloneId: string): string {
-  return `Backend is ready — every object the prime has is present, and ${surplusTotal} the prime does NOT have are also on the clone (prime-dropped or tenant-added; nothing was removed). Review at /clones/${cloneId}`;
+  return `${PARITY_SURPLUS_PREFIX}, and ${surplusTotal} the prime does NOT have are also on the clone (prime-dropped or tenant-added; nothing was removed). Review at /clones/${cloneId}`;
 }
 
 /** A blocking issue that is only credentials the clone was not given (`missing_secrets:N`). */
@@ -56,11 +62,13 @@ export const PARITY_VERIFIED_LINE = "Backend is ready — verified against the p
  * - **A mismatch** is written whatever stands, as the finishing pass leads
  *   with it. It is raised when it is a gap in what was replicated — a table,
  *   a function, a policy — because nobody was watching when it was found.
- *   Credentials alone are not raised: `missing_secrets` is blocking on every
- *   clone in the fleet (measured 30 Oct 2026: 4, 58, 58, 72 and 72 — the
- *   prime's own vendor keys, which each tenant supplies or goes without), so
- *   an alarm on it would fire for every clone and be read as noise. They are
- *   on the line, and on the clone's secrets page.
+ *   Credentials alone are not raised. Until PF-27 `missing_secrets` was
+ *   blocking on every clone in the fleet (measured 30 Oct 2026: 4, 58, 58, 72
+ *   and 72, the prime's own vendor keys, which each tenant supplies or goes
+ *   without), so an alarm on it fired for every clone and read as noise. It
+ *   now counts only what the forward policy sends (`diffSecrets`), and a
+ *   credential still has a page of its own: it is on the line, and on the
+ *   clone's secrets page with what supplies it.
  * - **A match** replaces only the unverified line. Any other line belongs to
  *   whoever wrote it since, and a match has nothing to retract there.
  */
@@ -86,5 +94,70 @@ export function lateParityVerdict(input: {
         ? paritySurplusLine(input.surplusTotal, input.cloneId)
         : PARITY_VERIFIED_LINE,
     raise: false,
+  };
+}
+
+/** Whether a status line is one of the parity sentences built here. */
+export function isParityLine(line: string | null): boolean {
+  const l = line ?? "";
+  return (
+    l.startsWith(PARITY_UNVERIFIED_PREFIX) ||
+    l.startsWith(PARITY_MISMATCH_PREFIX) ||
+    l.startsWith(PARITY_SURPLUS_PREFIX) ||
+    l === PARITY_VERIFIED_LINE
+  );
+}
+
+/**
+ * The replication gaps a comparison found that the one before it did not, or
+ * found fewer of: a category new to the list, or one whose count rose.
+ * Credentials are not counted (see {@link isCredentialGap}).
+ */
+export function newReplicationGaps(
+  previous: readonly string[],
+  current: readonly string[],
+): string[] {
+  const parse = (issue: string): [string, number] => {
+    const m = /^(.*):(\d+)$/.exec(issue);
+    return m ? [m[1], Number(m[2])] : [issue, 1];
+  };
+  const before = new Map(previous.filter((i) => !isCredentialGap(i)).map(parse));
+  return current.filter((issue) => {
+    if (isCredentialGap(issue)) return false;
+    const [key, count] = parse(issue);
+    return count > (before.get(key) ?? 0);
+  });
+}
+
+/**
+ * What a comparison that REFRESHES an earlier one may write, and whether an
+ * operator must be told (PF-30).
+ *
+ * - **The line** is replaced only where one of these sentences stands. Any
+ *   other line is a lane's reading of the clone now, and the comparison has
+ *   its own place: the report, and the clone page's backend card.
+ * - **Raised** only for a replication gap the earlier comparison did not
+ *   have. The same gap raised every day is noise; a new one is drift.
+ */
+export function refreshedParityVerdict(input: {
+  blockingIssues: readonly string[];
+  surplusTotal: number;
+  cloneId: string;
+  /** The status line on the row when the comparison was started. */
+  standing: string | null;
+  /** The blocking issues of the comparison being refreshed. */
+  previousBlocking: readonly string[];
+}): { detail: string | null; raise: boolean } {
+  const raise = newReplicationGaps(input.previousBlocking, input.blockingIssues).length > 0;
+  if (!isParityLine(input.standing)) return { detail: null, raise };
+  if (input.blockingIssues.length > 0) {
+    return { detail: parityMismatchLine(input.blockingIssues, input.cloneId), raise };
+  }
+  return {
+    detail:
+      input.surplusTotal > 0
+        ? paritySurplusLine(input.surplusTotal, input.cloneId)
+        : PARITY_VERIFIED_LINE,
+    raise,
   };
 }

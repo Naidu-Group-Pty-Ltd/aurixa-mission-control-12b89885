@@ -25,6 +25,8 @@ import {
 import { getCloneMigrationStatus, syncCloneMigrations } from "@/server/migration-sync.functions";
 import { syncCloneReferenceData } from "@/server/reference-data.functions";
 import { cn } from "@/lib/utils";
+import { formatDistanceToNow } from "@/lib/format";
+import { parityReading } from "@/lib/parityReading.pure";
 
 type BackendStatus = Awaited<ReturnType<typeof getCloneBackendStatus>>["backend"];
 type MigrationStatus = Awaited<ReturnType<typeof getCloneMigrationStatus>>;
@@ -255,6 +257,26 @@ export function CloneBackendCard({ cloneId }: { cloneId: string }) {
         {backend.status_detail && (
           <p className="text-xs text-muted-foreground">{backend.status_detail}</p>
         )}
+
+        {/* How it compares with the prime, as the catch-up last recorded it (PF-30). */}
+        {backend.status === "ready" &&
+          (() => {
+            const reading = parityReading(
+              backend.parity_checked_at,
+              backend.parity_report,
+              formatDistanceToNow,
+            );
+            return (
+              <p
+                className={cn(
+                  "text-xs",
+                  reading.differs ? "text-warning" : "text-muted-foreground",
+                )}
+              >
+                {reading.text}
+              </p>
+            );
+          })()}
 
         {/* Error message */}
         {backend.error_message && (

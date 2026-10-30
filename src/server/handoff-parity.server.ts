@@ -47,6 +47,7 @@ import {
   type SurplusClassification,
 } from "./surplusOrigin.pure";
 import { isPrimeOnlySecret } from "./primeOnlySecrets.pure";
+import { forwardedSecretNames } from "./forwardedSecrets.pure";
 import {
   isPrimeOnlyBucket,
   isPrimeOnlyCronJob,
@@ -698,20 +699,40 @@ function diffEdgeFunctions(
  * missing, and never blocks.** It is still shown — a clone lacking them is a
  * fact worth seeing — in a field of its own.
  *
+ * **And a credential no forward policy sends is not one either.** The same
+ * reading, the rest of the 58: DocuSign, Microsoft and Meta Ads keys a tenant
+ * supplies or goes without, and settings a clone leaves unset on purpose
+ * (`STEP_UP_ENFORCED`). By the owner's decision (30 Oct 2026, PF-27), a
+ * credential a clone lacks is a mismatch only when the forward policy sends it
+ * to that clone (`forwardedSecrets.pure.ts`); every other one is listed in
+ * `not_forwarded`, as information, and never blocks.
+ *
  * @param withheld Names this clone's own ledger records as deliberately
  *                 withheld (`clone_backend_secrets.status = 'withheld'`).
  *                 Absent where the caller has no clone to read, in which case
  *                 only the by-CLASS refusals below are excluded — the ones
  *                 that hold for every clone whatever any row says.
+ * @param forwarded The names the forward policy sends to this clone. Absent,
+ *                 or null where the policy could not be read, every absent
+ *                 name not withheld counts as missing, as before: an unread
+ *                 policy is not "nothing is sent", and must not quietly clear
+ *                 a real gap.
  */
-export function diffSecrets(prime: Snapshot, target: Snapshot, withheld?: ReadonlySet<string>) {
+export function diffSecrets(
+  prime: Snapshot,
+  target: Snapshot,
+  withheld?: ReadonlySet<string>,
+  forwarded?: ReadonlySet<string> | null,
+) {
   // Names only — values are never read.
   const missing: string[] = [];
   const withheldByPolicy: string[] = [];
+  const notForwarded: string[] = [];
   const extra: string[] = [];
   for (const name of prime.secretSet) {
     if (target.secretSet.has(name)) continue;
     if (isPrimeOnlySecret(name) || withheld?.has(name)) withheldByPolicy.push(name);
+    else if (forwarded && !forwarded.has(name)) notForwarded.push(name);
     else missing.push(name);
   }
   for (const name of target.secretSet) if (!prime.secretSet.has(name)) extra.push(name);
@@ -721,6 +742,10 @@ export function diffSecrets(prime: Snapshot, target: Snapshot, withheld?: Readon
     missing_in_target: missing.sort(),
     /** Absent from the clone because policy says so. Never a blocking issue. */
     withheld_by_policy: withheldByPolicy.sort(),
+    /** Absent, and no forward policy sends it: the tenant's own to supply. Information. */
+    not_forwarded: notForwarded.sort(),
+    /** Whether `missing_in_target` was judged against the forward policy. */
+    forward_policy: forwarded ? ("applied" as const) : ("not_read" as const),
     extra_in_target: extra.sort(),
   };
 }
@@ -1011,7 +1036,46 @@ export type ComputeParityOptions = {
    * a credential policy keeps off a tenant is not a gap in its parity.
    */
   withheldSecretNames?: Iterable<string>;
+  /**
+   * The names the forward policy sends to this clone
+   * ({@link readForwardedSecretNames}). See {@link diffSecrets}: a credential
+   * no policy sends is listed, not counted. Null or absent, every absent
+   * credential is counted, as before.
+   */
+  forwardedSecretNames?: Iterable<string> | null;
 };
+
+/**
+ * The names the forward policy sends to this clone: the fleet's `inherit`
+ * rows its CRM line takes, and its own authorisations the per-clone decision
+ * does not refuse (`forwardedSecrets.pure.ts`).
+ *
+ * Null on any failed read, never a partial set. An unread fleet policy is not
+ * "nothing is sent" (the forward code says the same of it), and a partial set
+ * would clear a real gap from the comparison.
+ */
+export async function readForwardedSecretNames(
+  supabase: SupabaseClient<Database>,
+  cloneId: string,
+): Promise<string[] | null> {
+  try {
+    const [fleet, own, clone] = await Promise.all([
+      supabase.from("prime_secret_forwards").select("name, inherit"),
+      supabase.from("clone_secret_forwards").select("name").eq("clone_id", cloneId),
+      supabase.from("clones").select("crm_mode").eq("id", cloneId).maybeSingle(),
+    ]);
+    if (fleet.error || own.error || clone.error) return null;
+    const { classifySecret } = await import("./prime-backend.server");
+    return forwardedSecretNames({
+      fleet: (fleet.data ?? []).map((r) => ({ name: r.name, inherit: r.inherit === true })),
+      authorised: (own.data ?? []).map((r) => r.name),
+      crmMode: (clone.data as { crm_mode?: string | null } | null)?.crm_mode ?? null,
+      classOf: classifySecret,
+    });
+  } catch {
+    return null;
+  }
+}
 
 /**
  * The names this clone's ledger records as deliberately withheld.
@@ -1083,6 +1147,7 @@ export async function computeParity(
     prime,
     target,
     opts?.withheldSecretNames ? new Set(opts.withheldSecretNames) : undefined,
+    opts?.forwardedSecretNames ? new Set(opts.forwardedSecretNames) : null,
   );
   const authCfg = diffAuthConfig(prime, target);
   const requiredExt = diffRequiredExtensions(target);
@@ -1234,6 +1299,10 @@ export async function computeParity(
     // narrowing above is invisible and reads as a clone that matches.
     (edgeFns.prime_only_undeclared.length > 0
       ? ` · prime-only edge-fns its repo no longer declares=${edgeFns.prime_only_undeclared.length}`
+      : "") +
+    // Listed, never counted: see `diffSecrets`. Said so the narrowing is seen.
+    (secrets.not_forwarded.length > 0
+      ? ` · credentials no forward policy sends (the tenant's own)=${secrets.not_forwarded.length}`
       : "") +
     // The prime's own feature, held back from every clone by policy. What is
     // absent is said so, or the narrowing reads as a clone that matches; what

@@ -866,6 +866,11 @@ async function runBackendProvisioning(
             const { readWithheldSecretNames } = await import("@/server/handoff-parity.server");
             return readWithheldSecretNames(supabase, input.cloneId);
           })(),
+          // A credential no forward policy sends is listed, not counted (PF-27).
+          forwardedSecretNames: await (async () => {
+            const { readForwardedSecretNames } = await import("@/server/handoff-parity.server");
+            return readForwardedSecretNames(supabase, input.cloneId);
+          })(),
           // Whose each surplus object is. Best effort — a clone that came up
           // short is recorded as short, and an unread index reads
           // `undetermined` rather than making a claim about the tenant.
