@@ -619,12 +619,32 @@ export const planStandardRotations = createServerFn({ method: "POST" })
   .inputValidator((input) => z.object({ handoff_id: z.string().uuid() }).parse(input))
   .handler(async ({ data, context }) => {
     const { DEFAULT_ROTATION_PLAN } = await import("@/server/handoff-rotations.server");
+    const { platformCredentialRotations } = await import("@/server/handoffCredentialPlan.pure");
+    const { data: handoff, error: hErr } = await context.supabase
+      .from("clone_handoffs")
+      .select("id, clone_id")
+      .eq("id", data.handoff_id)
+      .maybeSingle();
+    if (hErr) throw hErr;
+    if (!handoff) throw new Error("Handoff not found");
+    // The credentials Aurixa pays for, from this clone's own ledger (key audit
+    // S4). A ledger that cannot be read fails the plan: a plan without them
+    // reads as one with nothing to account for.
+    const { data: ledger, error: lErr } = await context.supabase
+      .from("clone_backend_secrets")
+      .select("name, status")
+      .eq("clone_id", handoff.clone_id);
+    if (lErr) throw new Error(`The clone's key ledger could not be read: ${lErr.message}`);
+    const plan = [
+      ...DEFAULT_ROTATION_PLAN,
+      ...platformCredentialRotations((ledger ?? []) as Array<{ name: string; status: string }>),
+    ];
     const { data: existing } = await context.supabase
       .from("handoff_secret_rotations")
       .select("target, key_ref")
       .eq("handoff_id", data.handoff_id);
     const seen = new Set((existing ?? []).map((r: any) => `${r.target}::${r.key_ref}`));
-    const rows = DEFAULT_ROTATION_PLAN.filter((p) => !seen.has(`${p.target}::${p.key_ref}`)).map(
+    const rows = plan.filter((p) => !seen.has(`${p.target}::${p.key_ref}`)).map(
       (p) => ({
         handoff_id: data.handoff_id,
         target: p.target,
@@ -634,7 +654,7 @@ export const planStandardRotations = createServerFn({ method: "POST" })
       }),
     );
     if (rows.length === 0) {
-      return { ok: true as const, inserted: 0, skipped: DEFAULT_ROTATION_PLAN.length };
+      return { ok: true as const, inserted: 0, skipped: plan.length };
     }
     const { error } = await context.supabase.from("handoff_secret_rotations").insert(rows);
     if (error) throw error;
