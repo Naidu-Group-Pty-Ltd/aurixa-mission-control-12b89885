@@ -50,6 +50,25 @@ export const INFRA_DIRS = new Set([
 export const ROUTING_BUCKET_DIRS = new Set(["admin", "pages", "routes"]);
 
 /**
+ * Whether a file is a test, which is never a route and never a domain.
+ *
+ * The prime keeps specs beside its pages (`src/pages/__tests__/…`,
+ * `src/pages/admin/BcSegmentEngineAdmin.security.test.ts`), and route
+ * discovery read them as routes. Measured on 29 Oct 2026 at prime@8312990:
+ * they became two modules (`-tests-` and
+ * `bc-segment-engine-admin.security.test`), and every page a spec imports was
+ * reached from two domains, so it was filed as shared, in platform-core. The
+ * Builder Portal, Cloudflare Management and the public Compliance Passport
+ * were, and the library follow archived `builder-portal` and
+ * `cloudflare-management` as though they had left the prime.
+ */
+export function isTestFile(path: string): boolean {
+  if (/(^|\/)(__tests__|__mocks__)\//.test(path)) return true;
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  return /\.(test|spec)\.[cm]?[jt]sx?$/.test(name);
+}
+
+/**
  * Paths that always belong to `platform-core`, whatever the reachability graph
  * says. A design-system button used by exactly one page today is still shared
  * infrastructure, and handing it to that page's module would make the next

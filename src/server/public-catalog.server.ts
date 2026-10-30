@@ -4,6 +4,7 @@
 // (api/public/storefront/catalog) that powers the customer-facing pricing
 // page on the Aurixa Systems website.
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
+import { presentAddonRow } from "@/lib/pricing/aurixa-catalog";
 
 export async function fetchPublicCatalog() {
   const [plans, packs, setups, addons, roles, reports] = await Promise.all([
@@ -51,7 +52,7 @@ export async function fetchPublicCatalog() {
     plans: plans.data ?? [],
     packs: packs.data ?? [],
     setups: setups.data ?? [],
-    addons: addons.data ?? [],
+    addons: (addons.data ?? []).map(presentAddonRow),
     roles: roles.data ?? [],
     reports: reports.data ?? [],
   };

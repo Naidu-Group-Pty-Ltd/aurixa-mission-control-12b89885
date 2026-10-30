@@ -6,8 +6,13 @@ import {
   seedPricingModuleMap,
   resolveClonePlan,
   classifyChange,
+  readPricingLibrary,
 } from "./entitlement-modules.server";
-import { resolveEntitledModules, buildFullMapping } from "@/lib/pricing/module-mapping";
+import {
+  resolveEntitledModules,
+  buildFullMapping,
+  unplacedModules,
+} from "@/lib/pricing/module-mapping";
 import { MODULES } from "@/lib/pricing/aurixa-catalog";
 import {
   listAddonPurchases,
@@ -65,18 +70,32 @@ export const seedModuleMap = createServerFn({ method: "POST" })
     return { ok: true as const, ...res };
   });
 
-/** The mapping table, for the operator-facing editor. */
+/**
+ * The mapping table, for the operator-facing editor, and the library modules
+ * no plan places (`unplacedModules`) — null, with the reason, when the library
+ * could not be read, because a failed read is not "every module is placed".
+ */
 export const getModuleMap = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .handler(async ({ context }) => {
-    const { data, error } = await context.supabase
-      .from("pricing_module_map")
-      .select("*")
-      .order("source_kind", { ascending: true })
-      .order("source_slug", { ascending: true })
-      .order("source_name", { ascending: true });
-    if (error) return { ok: false as const, error: error.message, rows: [] };
-    return { ok: true as const, rows: data ?? [] };
+    const [map, library] = await Promise.all([
+      context.supabase
+        .from("pricing_module_map")
+        .select("*")
+        .order("source_kind", { ascending: true })
+        .order("source_slug", { ascending: true })
+        .order("source_name", { ascending: true }),
+      readPricingLibrary(context.supabase),
+    ]);
+    if (map.error) return { ok: false as const, error: map.error.message, rows: [] };
+    return {
+      ok: true as const,
+      rows: map.data ?? [],
+      unplaced: library.ok
+        ? unplacedModules(new Set(library.catalogue.keys()), library.overrides)
+        : null,
+      unplacedError: library.ok ? null : library.error,
+    };
   });
 
 /** Take operator ownership of one mapping row. */

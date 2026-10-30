@@ -1351,6 +1351,11 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     assertions: [{ kind: "none", reason: "drops an index, creates no object" }],
   },
   {
+    migration: "20261029190000_accountant_portal_addon.sql",
+    version: "20261029190000",
+    assertions: [{ kind: "rows", table: "addon_modules", atLeast: 33 }],
+  },
+  {
     migration: "20261029230000_control_plane_secrets_not_forwarded.sql",
     version: "20261029230000",
     assertions: [
@@ -1417,6 +1422,11 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "cron", jobname: "live-audit-nightly" },
       { kind: "cron", jobname: "live-audit-sweep" },
     ],
+  },
+  {
+    migration: "20261030150000_aml_brings_partner_portals.sql",
+    version: "20261030150000",
+    assertions: [{ kind: "rows", table: "addon_modules", atLeast: 33 }],
   },
   {
     migration: "20261030161700_live_audit_claude_switch.sql",

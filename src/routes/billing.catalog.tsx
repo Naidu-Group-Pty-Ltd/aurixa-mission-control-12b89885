@@ -49,9 +49,20 @@ function money(cents: number, currency = "AUD") {
   }).format(cents / 100);
 }
 
-function priceRange(min: number, max: number, currency = "AUD") {
-  if (min === max || max === 0) return money(min, currency);
+function priceRange(min: number | null, max: number | null, currency = "AUD") {
+  // An add-on whose price is undecided is presented with none (`presentAddonRow`).
+  if (min == null) return "Price to be confirmed";
+  if (min === max || !max) return money(min, currency);
   return `${money(min, currency)} – ${money(max, currency)}`;
+}
+
+/** Whether the catalogue says AML/CTF brings this add-on (`presentAddonRow`). */
+function isIncludedWithAml(metadata: unknown): boolean {
+  return (
+    !!metadata &&
+    typeof metadata === "object" &&
+    (metadata as { included_with_aml?: unknown }).included_with_aml === true
+  );
 }
 
 function CatalogPage() {
@@ -209,16 +220,27 @@ function CatalogPage() {
                   <CardContent className="space-y-2">
                     <div className="text-sm font-medium">
                       {priceRange(a.price_min_cents, a.price_max_cents, a.currency)}
-                      <span className="text-muted-foreground font-normal">/{a.billing_period}</span>
+                      {a.price_min_cents != null && (
+                        <span className="text-muted-foreground font-normal">
+                          /{a.billing_period}
+                        </span>
+                      )}
                     </div>
-                    {a.included_in_plans?.length > 0 && (
+                    {(a.included_in_plans?.length > 0 || isIncludedWithAml(a.metadata)) && (
                       <div className="flex flex-wrap gap-1">
                         <span className="text-xs text-muted-foreground mr-1">Included in:</span>
-                        {a.included_in_plans.map((p: string) => (
+                        {(a.included_in_plans ?? []).map((p: string) => (
                           <Badge key={p} variant="secondary" className="text-xs capitalize">
                             {p}
                           </Badge>
                         ))}
+                        {/* A partner portal comes with any plan that includes
+                            AML/CTF (29 Oct 2026), from the catalogue's flag. */}
+                        {isIncludedWithAml(a.metadata) && (
+                          <Badge variant="secondary" className="text-xs">
+                            any plan with AML/CTF
+                          </Badge>
+                        )}
                       </div>
                     )}
                   </CardContent>

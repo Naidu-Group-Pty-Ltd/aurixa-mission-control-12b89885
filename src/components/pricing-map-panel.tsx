@@ -63,6 +63,9 @@ export function PricingMapPanel() {
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [onlyProblems, setOnlyProblems] = useState(true);
+  // Library modules no plan places, or why that could not be read.
+  const [unplaced, setUnplaced] = useState<string[] | null>(null);
+  const [unplacedError, setUnplacedError] = useState<string | null>(null);
 
   const load = useServerFn(getModuleMap);
   const seed = useServerFn(seedModuleMap);
@@ -73,7 +76,11 @@ export function PricingMapPanel() {
     setLoading(true);
     try {
       const res = await load({});
-      if (res.ok) setRows(res.rows as MapRow[]);
+      if (res.ok) {
+        setRows(res.rows as MapRow[]);
+        setUnplaced(res.unplaced);
+        setUnplacedError(res.unplacedError);
+      }
     } finally {
       setLoading(false);
     }
@@ -150,6 +157,31 @@ export function PricingMapPanel() {
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
+        {!loading && unplacedError && (
+          <Alert>
+            <TriangleAlert className="h-4 w-4" />
+            <AlertDescription className="text-xs">
+              Whether every library module has a plan could not be checked: {unplacedError}
+            </AlertDescription>
+          </Alert>
+        )}
+        {!loading && unplaced && unplaced.length > 0 && (
+          // The library follows the prime, so a new feature arrives here with no
+          // plan. Named, never left to resolve on nothing: a clone runs it and is
+          // recorded as not holding it until it is placed.
+          <Alert>
+            <TriangleAlert className="h-4 w-4" />
+            <AlertDescription className="space-y-1 text-xs">
+              <p>
+                {unplaced.length} library module(s) are on no plan. Every clone runs their code and
+                none is recorded as holding it until each is placed — in{" "}
+                <span className="font-mono">MODULE_COMPANIONS</span>, a tier&apos;s features or the
+                price list.
+              </p>
+              <p className="font-mono text-[10px] text-muted-foreground">{unplaced.join(", ")}</p>
+            </AlertDescription>
+          </Alert>
+        )}
         {loading ? (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <Loader2 className="h-3.5 w-3.5 animate-spin" /> loading…

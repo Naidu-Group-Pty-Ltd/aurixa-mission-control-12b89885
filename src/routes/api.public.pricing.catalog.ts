@@ -2,6 +2,16 @@ import { createFileRoute } from "@tanstack/react-router";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { jsonResponse, resolveCloneApiKey } from "@/server/clone-api-keys.server";
 import { indexVersion } from "@/server/report-cost-index.server";
+import { presentAddonRow } from "@/lib/pricing/aurixa-catalog";
+import type { Json } from "@/integrations/supabase/types";
+
+/** What this route selects from `addon_modules`, for the presentation below. */
+type AddonRow = {
+  slug: string;
+  price_min_cents: number | null;
+  price_max_cents: number | null;
+  metadata?: Json;
+};
 
 export const Route = createFileRoute("/api/public/pricing/catalog")({
   server: {
@@ -65,7 +75,7 @@ export const Route = createFileRoute("/api/public/pricing/catalog")({
         return jsonResponse({
           ok: true,
           roles: roles.data ?? [],
-          addons: addons.data ?? [],
+          addons: ((addons.data ?? []) as AddonRow[]).map(presentAddonRow),
           setups: setups.data ?? [],
           reports: reports.data ?? [],
           reports_version: reportsVersion,

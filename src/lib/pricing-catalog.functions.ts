@@ -1,5 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import { presentAddonRow } from "@/lib/pricing/aurixa-catalog";
 
 export const listPricingCatalog = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth])
@@ -31,7 +32,7 @@ export const listPricingCatalog = createServerFn({ method: "GET" })
 
     return {
       roles: roles.data ?? [],
-      addons: addons.data ?? [],
+      addons: (addons.data ?? []).map(presentAddonRow),
       setups: setups.data ?? [],
       reports: reports.data ?? [],
       plans: plans.data ?? [],

@@ -18,6 +18,7 @@ import { requireAdmin, requireOperator } from "@/integrations/supabase/role-midd
 import { ADMIN_ROLES, hasAnyRole } from "@/integrations/supabase/roles";
 import {
   agreementColumnsFromOffer,
+  amlExclusionConflict,
   issuingDay,
   provisioningSelectionFromOffer,
   selectionMatches,
@@ -516,6 +517,10 @@ export const configureAgreementProvisioning = createServerFn({ method: "POST" })
           `This agreement's offer sells ${names}. Provisioning follows the offer — change the offer to change what a signature provisions.`,
         );
       }
+      // The offer's AML choice too: it decides AML/CTF and the partner
+      // portals that come with it.
+      const amlConflict = amlExclusionConflict(offer.data, data.excludedModuleSlugs);
+      if (amlConflict) throw new Error(amlConflict);
     }
 
     // Validate against the catalog rather than trusting spellings: an
@@ -971,7 +976,8 @@ export const getAgreement = createServerFn({ method: "POST" })
  * and add-ons a signature provisions — follow the offer. When the plan or
  * add-ons change, the module selection made for the old ones is cleared and
  * armed provisioning is disarmed: it was armed for something the offer no
- * longer sells.
+ * longer sells. A changed AML choice that the saved exclusions no longer match
+ * disarms it too (`amlExclusionConflict`).
  */
 export const saveSubscriptionOffer = createServerFn({ method: "POST" })
   .middleware([requireOperator])
@@ -980,7 +986,7 @@ export const saveSubscriptionOffer = createServerFn({ method: "POST" })
     const { data: row, error } = await context.supabase
       .from("client_agreements")
       .select(
-        "id, document_kind, status, docusign_envelope_id, issued_at, plan_slug, addon_slugs, provision_on_signature",
+        "id, document_kind, status, docusign_envelope_id, issued_at, plan_slug, addon_slugs, excluded_module_slugs, provision_on_signature",
       )
       .eq("id", data.id)
       .maybeSingle();
@@ -997,7 +1003,10 @@ export const saveSubscriptionOffer = createServerFn({ method: "POST" })
     }
 
     const selectionChanged = !selectionMatches(row, provisioningSelectionFromOffer(data.offer));
-    const disarm = selectionChanged && row.provision_on_signature;
+    // A changed AML choice disarms as well: the exclusions were saved for the
+    // AML/CTF the offer used to sell, and with it the partner portals.
+    const amlConflict = amlExclusionConflict(data.offer, row.excluded_module_slugs) !== null;
+    const disarm = (selectionChanged || amlConflict) && row.provision_on_signature;
     const { data: saved, error: saveError } = await context.supabase
       .from("client_agreements")
       .update({

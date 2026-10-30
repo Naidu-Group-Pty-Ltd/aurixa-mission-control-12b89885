@@ -1,14 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
   ANNUAL_DISCOUNT,
+  AML_BUNDLED_MODULES,
   AML_CORE_BUNDLE_DISCOUNT_CENTS,
   AML_MODULE_SLUG,
   AML_NET_UPLIFT_CENTS,
   AML_REFERENCE_COMPONENT_CENTS,
   MODULES,
   PURCHASABLE_MODULES,
+  includedWithAml,
+  isModuleGrantable,
   isModulePurchasable,
   moduleSaleBlock,
+  presentAddonRow,
   TIERS,
   annualCents,
   annualPerMonthCents,
@@ -195,9 +199,47 @@ describe("the AML component, the conditional discount and the net uplift", () =>
   });
 });
 
+describe("the partner portals AML/CTF brings (29 Oct 2026)", () => {
+  it("are the four portals the Compliance Passport is shared through, and nothing else", () => {
+    expect(AML_BUNDLED_MODULES.map((m) => m.slug).sort()).toEqual([
+      "accountant-portal",
+      "builder-developer-portal",
+      "finance-portal",
+      "solicitor-portal",
+    ]);
+    for (const m of MODULES) {
+      expect(includedWithAml(m.slug), m.slug).toBe(AML_BUNDLED_MODULES.includes(m));
+    }
+    expect(includedWithAml(AML_MODULE_SLUG)).toBe(false);
+    expect(includedWithAml("no-such-module")).toBe(false);
+  });
+
+  it("change no price: the AML uplift stays $150, and each portal keeps its own figure", () => {
+    // Without AML/CTF a portal follows the price list as it stands, so its
+    // price, its tiers and its sale block are what they were.
+    expect(moduleBySlug("finance-portal")).toMatchObject({
+      monthlyInclGstCents: $(349),
+      includedIn: ["scale"],
+    });
+    expect(moduleBySlug("solicitor-portal")).toMatchObject({
+      monthlyInclGstCents: $(299),
+      includedIn: [],
+    });
+    expect(moduleSaleBlock("accountant-portal")).toBe("price_undecided");
+    expect(moduleSaleBlock("builder-developer-portal")).toBe("direct_sale");
+    for (const tier of TIERS) {
+      expect(tierPriceCents(tier, { withAml: true }) - tierPriceCents(tier, { withAml: false })).toBe(
+        AML_NET_UPLIFT_CENTS,
+      );
+    }
+  });
+});
+
 describe("module catalogue", () => {
-  it("carries all 25 priced modules from the pricing model", () => {
-    expect(MODULES).toHaveLength(25);
+  it("carries the pricing model's 25 priced modules, and the Accountant Portal", () => {
+    // The Accountant Portal is the owner's addition of 29 Oct 2026, after the
+    // model: an add-on in no tier, its price still undecided.
+    expect(MODULES).toHaveLength(26);
     expect(MODULES.every((m) => m.monthlyInclGstCents > 0)).toBe(true);
   });
 
@@ -240,8 +282,23 @@ describe("module catalogue", () => {
       expect(moduleBySlug(slug), slug).toBeDefined();
       expect(moduleBySlug(slug)!.monthlyInclGstCents, slug).toBe(cents);
     }
-    // Every module except Lenders, which the model retires to price history.
-    expect(Object.keys(published).length).toBe(MODULES.length - 1);
+    // Every module except Lenders, which the model retires to price history,
+    // and the Accountant Portal, which has no price yet: neither figure is one
+    // anybody publishes.
+    expect(Object.keys(published).length).toBe(MODULES.length - 2);
+    expect(MODULES.filter((m) => !(m.slug in published)).map((m) => m.slug)).toEqual([
+      "lenders",
+      "accountant-portal",
+    ]);
+  });
+
+  it("sells the Accountant Portal as the Solicitor Portal is, with its price undecided", () => {
+    const accountant = moduleBySlug("accountant-portal")!;
+    expect(accountant.includedIn).toEqual([]);
+    expect(accountant.category).toBe(moduleBySlug("solicitor-portal")!.category);
+    expect(accountant.priceUndecided).toBe(true);
+    // The A$1 its Stripe price was created at: a placeholder, not a price.
+    expect(accountant.monthlyInclGstCents).toBe(100);
   });
 
   it("only ever references tiers that exist", () => {
@@ -278,18 +335,77 @@ describe("module catalogue", () => {
 });
 
 describe("what may be sold through a checkout", () => {
-  it("withholds Lenders and the Builder / Developer Portal, and nothing else", () => {
+  it("withholds Lenders, the Builder / Developer Portal and the Accountant Portal, and nothing else", () => {
     const withheld = MODULES.filter((m) => !isModulePurchasable(m.slug)).map((m) => m.slug);
-    expect(withheld.sort()).toEqual(["builder-developer-portal", "lenders"]);
-    expect(PURCHASABLE_MODULES).toHaveLength(MODULES.length - 2);
+    expect(withheld.sort()).toEqual(["accountant-portal", "builder-developer-portal", "lenders"]);
+    expect(PURCHASABLE_MODULES).toHaveLength(MODULES.length - 3);
   });
 
-  it("says WHICH reason, because the two send an operator elsewhere", () => {
+  it("says WHICH reason, because each sends an operator elsewhere", () => {
     // No agreed price is a roadmap problem; a price with no agreed buyer is a
-    // contract problem. Collapsing them loses the difference.
+    // contract problem; a built module with no price is a pricing decision.
+    // Collapsing them loses the difference.
     expect(moduleSaleBlock("lenders")).toBe("coming_soon");
     expect(moduleSaleBlock("builder-developer-portal")).toBe("direct_sale");
+    expect(moduleSaleBlock("accountant-portal")).toBe("price_undecided");
     expect(moduleSaleBlock("finance-portal")).toBeNull();
+  });
+
+  it("lets an operator grant what a checkout sells, and a module whose only gap is its price", () => {
+    // The owner's decision of 29 Oct 2026: until it is priced, the Accountant
+    // Portal is had by grant, which charges nothing.
+    expect(isModuleGrantable("accountant-portal")).toBe(true);
+    expect(isModuleGrantable("finance-portal")).toBe(true);
+    expect(isModuleGrantable("lenders")).toBe(false);
+    expect(isModuleGrantable("builder-developer-portal")).toBe(false);
+    expect(isModuleGrantable("no-such-module")).toBe(false);
+    for (const m of PURCHASABLE_MODULES) expect(isModuleGrantable(m.slug), m.slug).toBe(true);
+  });
+
+  it("presents an undecided price as none, so the placeholder is never quoted", () => {
+    const row = {
+      slug: "accountant-portal",
+      price_min_cents: 100,
+      price_max_cents: 100,
+      metadata: { tax_inclusive: true },
+    };
+    expect(presentAddonRow(row)).toEqual({
+      slug: "accountant-portal",
+      price_min_cents: null,
+      price_max_cents: null,
+      metadata: { tax_inclusive: true, price_undecided: true, included_with_aml: true },
+    });
+    // A row with no metadata column selected still says why its price is absent.
+    expect(
+      presentAddonRow({ slug: "accountant-portal", price_min_cents: 100, price_max_cents: 100 })
+        .metadata,
+    ).toEqual({ price_undecided: true, included_with_aml: true });
+    // Every other row passes through untouched, figure and all.
+    const priced = { slug: "market-updates", price_min_cents: 7900, price_max_cents: 7900 };
+    expect(presentAddonRow(priced)).toBe(priced);
+  });
+
+  it("says which modules AML/CTF brings, and keeps their price", () => {
+    // The storefront labels these from the row alone (29 Oct 2026).
+    expect(
+      presentAddonRow({ slug: "solicitor-portal", price_min_cents: 29900, price_max_cents: 29900 }),
+    ).toEqual({
+      slug: "solicitor-portal",
+      price_min_cents: 29900,
+      price_max_cents: 29900,
+      metadata: { included_with_aml: true },
+    });
+    expect(
+      presentAddonRow({
+        slug: "finance-portal",
+        price_min_cents: 34900,
+        price_max_cents: 34900,
+        metadata: { gst_component_cents: 3173 },
+      }).metadata,
+    ).toEqual({ gst_component_cents: 3173, included_with_aml: true });
+    // AML/CTF itself is not one of the modules it brings.
+    const aml = { slug: "aml-ctf", price_min_cents: 15000, price_max_cents: 15000 };
+    expect(presentAddonRow(aml)).toBe(aml);
   });
 
   it("keeps a withheld module priced and listed rather than hidden", () => {

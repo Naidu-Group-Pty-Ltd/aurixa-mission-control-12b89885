@@ -117,13 +117,17 @@ export async function grantAddon(args: {
 
   const catalogue = MODULES.find((m) => m.slug === input.addonSlug);
   const block = moduleSaleBlock(input.addonSlug);
-  if (block) {
+  if (block && block !== "price_undecided") {
     // Two reasons a listed module is not for sale here, and they send an
     // operator to different places. Lenders is on the pricing page so the
     // roadmap is visible but has no agreed price; the Builder / Developer
     // Portal has a price and is sold directly, so granting it self-serve
     // would entitle code against a contract nobody wrote. Either way,
     // granting it entitles code nobody can be billed for.
+    //
+    // A module whose price is undecided is the exception the owner chose on
+    // 29 Oct 2026: it is built and sold, and until it is priced a grant is
+    // the only way to have it (`isModuleGrantable`).
     const name = catalogue?.name ?? input.addonSlug;
     return {
       ok: false,
@@ -167,7 +171,12 @@ export async function grantAddon(args: {
     stripe_subscription_id: input.stripeSubscriptionId ?? null,
     stripe_subscription_item_id: input.stripeSubscriptionItemId ?? null,
     stripe_price_id: input.stripePriceId ?? null,
-    unit_amount_cents: input.unitAmountCents ?? catalogue?.monthlyInclGstCents ?? null,
+    // An undecided price's figure is a placeholder, and a grant of it charges
+    // nothing: recording the placeholder would read as a price someone pays.
+    unit_amount_cents:
+      input.unitAmountCents ??
+      (catalogue?.priceUndecided ? null : catalogue?.monthlyInclGstCents) ??
+      null,
     current_period_end: input.currentPeriodEnd ?? null,
     source: input.source ?? "operator",
     external_ref: input.externalRef ?? null,

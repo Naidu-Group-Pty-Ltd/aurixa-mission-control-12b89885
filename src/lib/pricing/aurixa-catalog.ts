@@ -229,6 +229,28 @@ export type PricedModule = {
    * derives.
    */
   directSale?: boolean;
+  /**
+   * Built, and sold as an add-on — but nobody has decided what it costs.
+   *
+   * `monthlyInclGstCents` is then the placeholder its Stripe price was created
+   * at (the owner's decision of 29 Oct 2026: a product has to carry some
+   * price), never a price: no checkout sells it, no surface quotes it, and a
+   * grant records no amount. Unlike `comingSoon` the module exists and a
+   * workspace may have it, so an operator can grant it, at no charge, until a
+   * price is set. Deciding the price is the figure here and this flag removed,
+   * a migration rewording the `addon_modules` row's description (no sync
+   * writes it), and an Apply on the Pricing page, which adopts the Stripe
+   * product, adds the real price and links the row.
+   */
+  priceUndecided?: boolean;
+  /**
+   * Included at no extra cost wherever the plan includes AML/CTF Compliance:
+   * the owner's decision of 29 Oct 2026 that a tenant who takes AML has every
+   * partner portal the Compliance Passport travels through. Without AML the
+   * module keeps its own pricing (`includedIn`, its add-on price, or a direct
+   * sale). See `AML_BUNDLED_MODULES`.
+   */
+  includedWithAml?: boolean;
   note?: string;
 };
 
@@ -416,6 +438,7 @@ export const MODULES: readonly PricedModule[] = [
     category: "Administration",
     monthlyInclGstCents: 34900,
     includedIn: ["scale"],
+    includedWithAml: true,
     note: "Also unlocks client Send To Finance and Finance Messages.",
   },
   {
@@ -439,7 +462,22 @@ export const MODULES: readonly PricedModule[] = [
     category: "Administration",
     monthlyInclGstCents: 29900,
     includedIn: [],
+    includedWithAml: true,
     note: "Partner hand-off portal. A portal fee buys that portal's own scope and never grants AML/CTF.",
+  },
+  {
+    // The owner's decision of 29 Oct 2026: sold as the Solicitor Portal is,
+    // an add-on included in no tier, with its price still to be decided. The
+    // figure is the A$1 placeholder its Stripe price carries, which nothing
+    // may quote or charge — see `priceUndecided`.
+    slug: "accountant-portal",
+    name: "Accountant Portal",
+    category: "Administration",
+    monthlyInclGstCents: 100,
+    includedIn: [],
+    includedWithAml: true,
+    priceUndecided: true,
+    note: "Partner hand-off portal for the client's accountant. A portal fee buys that portal's own scope and never grants AML/CTF.",
   },
   {
     // Direct sale, on every tier — see `directSale`. Priced here so the price
@@ -450,6 +488,7 @@ export const MODULES: readonly PricedModule[] = [
     category: "Administration",
     monthlyInclGstCents: 69900,
     includedIn: [],
+    includedWithAml: true,
     directSale: true,
     note: "Sold separately, not as a tier add-on. A portal fee buys that portal's own scope and never grants AML/CTF.",
   },
@@ -618,6 +657,30 @@ export const AML_MODULE_SLUG = "aml-ctf";
  */
 export const TIER_INCLUDES_AML = true;
 
+/**
+ * What AML/CTF Compliance brings with it: every partner portal.
+ *
+ * The owner's decision of 29 Oct 2026. A tenant on any plan who takes AML/CTF
+ * (the headline with-AML price, or the module added later) has full
+ * multi-portal access at no extra cost: the Finance, Solicitor, Accountant and
+ * Builder / Developer portals, the four the Compliance Passport is shared
+ * through. A tenant without it follows the price list as it stands: the Finance
+ * Portal with Scale or as an add-on, the Solicitor and Accountant portals as
+ * add-ons, and the Builder / Developer Portal sold directly.
+ *
+ * Held means what the balance response decides (`balanceEntitlements`): AML/CTF
+ * is entitled, by the tier's headline SKU or by purchase, and no contract
+ * excludes it. A contract can still negotiate out a single portal, and
+ * excluding AML/CTF withdraws the whole bundle (`applyContractExclusions`).
+ */
+export const AML_BUNDLED_MODULES: readonly PricedModule[] = MODULES.filter(
+  (m) => m.includedWithAml,
+);
+
+/** Whether holding AML/CTF includes a module at no extra cost. */
+export const includedWithAml = (slug: string): boolean =>
+  moduleBySlug(slug)?.includedWithAml === true;
+
 /** The headline price for a tier — what the sheet titles it with, and what Stripe charges. */
 export function tierHeadlineCents(tier: Tier, period: BillingPeriod = "monthly"): number {
   return tierPriceCents(tier, { period, withAml: TIER_INCLUDES_AML });
@@ -634,12 +697,13 @@ export const moduleBySlug = (slug: string): PricedModule | undefined =>
 /**
  * The modules that can actually be sold through a checkout.
  *
- * Two flags take a row out, for two different reasons. `comingSoon` rows are
- * on the pricing page so the roadmap is visible but have no price anyone has
- * agreed to pay. `directSale` rows have a price and no agreed buyer — the
+ * Three flags take a row out, for three different reasons. `comingSoon` rows
+ * are on the pricing page so the roadmap is visible but have no price anyone
+ * has agreed to pay. `directSale` rows have a price and no agreed buyer — the
  * model prices the Builder / Developer Portal and in the same breath excludes
- * it from the recurring subtotal. Neither may reach Stripe or a self-serve
- * purchase.
+ * it from the recurring subtotal. `priceUndecided` rows are built and have a
+ * buyer but no price, only a placeholder. None may reach a checkout or a
+ * self-serve purchase.
  *
  * Deriving the sellable set here rather than filtering at each call site means
  * a module going on sale is one flag, not a hunt through the sync, the
@@ -649,12 +713,26 @@ export const moduleBySlug = (slug: string): PricedModule | undefined =>
  * anybody could buy. They go through `isModulePurchasable` now.
  */
 export const PURCHASABLE_MODULES: readonly PricedModule[] = MODULES.filter(
-  (m) => !m.comingSoon && !m.directSale,
+  (m) => !m.comingSoon && !m.directSale && !m.priceUndecided,
 );
 
 /** Whether a module may be sold through a checkout. */
 export const isModulePurchasable = (slug: string): boolean =>
   PURCHASABLE_MODULES.some((m) => m.slug === slug);
+
+/**
+ * Whether an operator may grant a module to a workspace.
+ *
+ * Everything a checkout sells, and a module whose only missing piece is its
+ * price: a grant charges nothing, so no undecided figure is billed, and the
+ * owner chose that such a module is had by grant until it is priced. A
+ * coming-soon module has nothing built to grant, and a direct-sale one is
+ * sold under a contract nobody wrote; both stay refused.
+ */
+export const isModuleGrantable = (slug: string): boolean => {
+  const block = moduleSaleBlock(slug);
+  return moduleBySlug(slug) !== undefined && (block === null || block === "price_undecided");
+};
 
 /**
  * Why a module cannot be bought here, or null if it can.
@@ -663,12 +741,76 @@ export const isModulePurchasable = (slug: string): boolean =>
  * exist; the model wants it listed WITH its price and a reason. Callers that
  * only need the yes/no use `isModulePurchasable`.
  */
-export function moduleSaleBlock(slug: string): "coming_soon" | "direct_sale" | null {
+export function moduleSaleBlock(
+  slug: string,
+): "coming_soon" | "direct_sale" | "price_undecided" | null {
   const mod = moduleBySlug(slug);
   if (!mod) return null;
   if (mod.comingSoon) return "coming_soon";
   if (mod.directSale) return "direct_sale";
+  if (mod.priceUndecided) return "price_undecided";
   return null;
+}
+
+/**
+ * A value a jsonb column holds. Typed rather than `unknown` because a server
+ * function's return has to be serialisable, and `unknown` is not.
+ */
+type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonValue[]
+  | { [key: string]: JsonValue | undefined };
+
+/** The price columns of an `addon_modules` row, as a catalogue read selects them. */
+type AddonPriceColumns = {
+  slug: string;
+  price_min_cents: number | null;
+  price_max_cents: number | null;
+  metadata?: JsonValue;
+};
+
+export type PresentedAddon<T extends AddonPriceColumns> = Omit<
+  T,
+  "price_min_cents" | "price_max_cents" | "metadata"
+> & {
+  price_min_cents: number | null;
+  price_max_cents: number | null;
+  metadata?: JsonValue;
+};
+
+/**
+ * An `addon_modules` row as a catalogue outside the database presents it.
+ *
+ * The row's price columns cannot be empty, so a module whose price is
+ * undecided keeps its placeholder there, and anywhere else that figure would
+ * read as what the module costs. So it is presented with no price, and says
+ * why in `metadata.price_undecided`; the catalogue's own flag decides, never
+ * the figure the row happens to hold.
+ *
+ * A module AML/CTF brings says so in `metadata.included_with_aml`, from the
+ * catalogue's flag as well, so a price list outside this repository (the
+ * storefront) can say where it is included without keeping a copy of the
+ * list. Every other row passes through as it is.
+ */
+export function presentAddonRow<T extends AddonPriceColumns>(row: T): PresentedAddon<T> {
+  const mod = moduleBySlug(row.slug);
+  if (!mod?.priceUndecided && !mod?.includedWithAml) return row;
+  const metadata =
+    row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata)
+      ? row.metadata
+      : {};
+  return {
+    ...row,
+    ...(mod.priceUndecided ? { price_min_cents: null, price_max_cents: null } : {}),
+    metadata: {
+      ...metadata,
+      ...(mod.priceUndecided ? { price_undecided: true } : {}),
+      ...(mod.includedWithAml ? { included_with_aml: true } : {}),
+    },
+  };
 }
 
 export const tierBySlug = (slug: string): Tier | undefined => TIERS.find((t) => t.slug === slug);

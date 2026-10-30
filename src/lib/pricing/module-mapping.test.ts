@@ -13,8 +13,14 @@ import {
   buildFullMapping,
   ENTITLEMENT_ONLY_MODULES,
   ALWAYS_INSTALLED,
+  MODULE_COMPANIONS,
+  NOT_SOLD_MODULES,
+  unplacedModules,
+  withCompanions,
+  libraryModulesOfAmlBundle,
 } from "./module-mapping";
-import { MODULES } from "./aurixa-catalog";
+import { AML_BUNDLED_MODULES, MODULES } from "./aurixa-catalog";
+import { LIBRARY_AFTER_TEST_ROUTE_FIX, LIBRARY_AT_83A3218 } from "./liveLibrary.fixture";
 
 /** Stand-in for the detected catalogue, covering the shapes that matter. */
 const KNOWN = new Set([
@@ -63,6 +69,8 @@ const KNOWN = new Set([
   // A real approved module in production. Its absence here is what let the
   // `intelligence-hub` alias look unresolved while the test still passed.
   "report-qa",
+  // Approved in production since 8 Oct 2026, and sold as an add-on since 29 Oct.
+  "accountant-portal",
 ]);
 
 const priced = (slug: string) => MODULES.find((m) => m.slug === slug)!;
@@ -390,7 +398,15 @@ describe("libraryModulesOf", () => {
         knownModules: KNOWN,
       });
       const added = bought.moduleSlugs.filter((s) => !shell.moduleSlugs.includes(s));
-      expect(libraryModulesOf(pm, KNOWN), pm.slug).toEqual(added);
+      // Buying AML/CTF also brings every partner portal (the owner's decision
+      // of 29 Oct 2026), which is its own translation, not AML/CTF's.
+      const expected =
+        pm.slug === "aml-ctf"
+          ? [
+              ...new Set([...libraryModulesOf(pm, KNOWN), ...libraryModulesOfAmlBundle(KNOWN)]),
+            ].sort()
+          : libraryModulesOf(pm, KNOWN);
+      expect(expected, pm.slug).toEqual(added);
     }
   });
 
@@ -408,7 +424,15 @@ describe("libraryModulesOf", () => {
 describe("libraryModulesExcludedBy", () => {
   it("unions what each excluded price-list slug maps to, and ignores an unknown one", () => {
     expect(libraryModulesExcludedBy(["commercial-industrial", "aml-ctf", "nope"], KNOWN)).toEqual([
+      // Excluding AML/CTF withdraws the portals it brings as well.
+      "accountant-portal",
       "aml",
+      "commercial",
+      "finance-portal",
+      "industrial",
+      "solicitor-portal",
+    ]);
+    expect(libraryModulesExcludedBy(["commercial-industrial"], KNOWN)).toEqual([
       "commercial",
       "industrial",
     ]);
@@ -530,13 +554,15 @@ describe("applyContractExclusions", () => {
   });
 
   it("an exclusion of a module the plan does not include changes nothing, and holds", () => {
-    const r = applyContractExclusions(launch, ["finance-portal"], library);
+    // Marketing: not in Launch, and not a portal AML/CTF brings.
+    const r = applyContractExclusions(launch, ["marketing"], library);
     expect(r.moduleSlugs).toEqual(launch.moduleSlugs);
     expect(r.includedModules).toEqual(launch.includedModules);
     expect(r.addonModules).toEqual(launch.addonModules);
+    expect(r.amlBundled).toEqual(launch.amlBundled);
     expect(r.entitlementKeys).toEqual(launch.entitlementKeys);
     // Still in effect: it is what stops a later upgrade handing it back.
-    expect(r.contractExcluded).toEqual(["finance-portal"]);
+    expect(r.contractExcluded).toEqual(["marketing"]);
   });
 
   it("reports a slug the price list does not know, and subtracts nothing for it", () => {
@@ -550,5 +576,289 @@ describe("applyContractExclusions", () => {
   it("reports the exclusions in effect sorted and de-duplicated", () => {
     const r = applyContractExclusions(scale, ["marketing", "aml-ctf", "marketing"], library);
     expect(r.contractExcluded).toEqual(["aml-ctf", "marketing"]);
+  });
+});
+
+describe("the partner portals AML/CTF brings (29 Oct 2026)", () => {
+  const library = { knownModules: KNOWN };
+  const launch = resolveEntitledModules({ planSlug: "launch", knownModules: KNOWN });
+  const scale = resolveEntitledModules({ planSlug: "scale", knownModules: KNOWN });
+  const portals = AML_BUNDLED_MODULES.map((m) => m.slug).sort();
+
+  it("come with every tier, whose headline SKU carries AML/CTF", () => {
+    for (const tier of ["launch", "growth", "scale"]) {
+      const r = resolveEntitledModules({ planSlug: tier, knownModules: KNOWN });
+      expect(r.amlBundled, tier).toEqual(portals.filter((s) => !r.includedModules.includes(s)));
+    }
+    expect(launch.amlBundled).toEqual([
+      "accountant-portal",
+      "builder-developer-portal",
+      "finance-portal",
+      "solicitor-portal",
+    ]);
+    // Scale includes the Finance Portal in its own right, so it is not bundled.
+    expect(scale.includedModules).toContain("finance-portal");
+    expect(scale.amlBundled).toEqual([
+      "accountant-portal",
+      "builder-developer-portal",
+      "solicitor-portal",
+    ]);
+  });
+
+  it("install the portals' library modules on the clone", () => {
+    for (const slug of ["finance-portal", "solicitor-portal", "accountant-portal"]) {
+      expect(launch.moduleSlugs, slug).toContain(slug);
+    }
+  });
+
+  it("come with AML/CTF bought on a plan that is no tier, and not without it", () => {
+    const none = resolveEntitledModules({ planSlug: "no-such-plan", knownModules: KNOWN });
+    expect(none.amlBundled).toEqual([]);
+    const bought = resolveEntitledModules({
+      planSlug: "no-such-plan",
+      purchasedAddons: ["aml-ctf"],
+      knownModules: KNOWN,
+    });
+    expect(bought.amlBundled).toEqual(portals);
+  });
+
+  it("count a portal bought on top as the add-on it is, never twice", () => {
+    const r = resolveEntitledModules({
+      planSlug: "launch",
+      purchasedAddons: ["solicitor-portal"],
+      knownModules: KNOWN,
+    });
+    expect(r.addonModules).toEqual(["solicitor-portal"]);
+    expect(r.amlBundled).not.toContain("solicitor-portal");
+  });
+
+  it("all go with an excluded AML/CTF, but not one the tier includes or the clone bought", () => {
+    const r = applyContractExclusions(scale, ["aml-ctf"], library);
+    expect(r.amlBundled).toEqual([]);
+    expect(r.moduleSlugs).not.toContain("solicitor-portal");
+    expect(r.moduleSlugs).not.toContain("accountant-portal");
+    expect(r.includedModules).toContain("finance-portal");
+    expect(r.moduleSlugs).toContain("finance-portal");
+
+    const bought = resolveEntitledModules({
+      planSlug: "launch",
+      purchasedAddons: ["solicitor-portal"],
+      knownModules: KNOWN,
+    });
+    const kept = applyContractExclusions(bought, ["aml-ctf"], library);
+    expect(kept.moduleSlugs).toContain("solicitor-portal");
+    expect(kept.moduleSlugs).not.toContain("finance-portal");
+    expect(kept.moduleSlugs).not.toContain("accountant-portal");
+  });
+
+  it("lose only the one portal a contract excludes", () => {
+    const r = applyContractExclusions(launch, ["solicitor-portal"], library);
+    expect(r.amlBundled).toEqual(launch.amlBundled.filter((s) => s !== "solicitor-portal"));
+    expect(r.moduleSlugs).not.toContain("solicitor-portal");
+    expect(r.moduleSlugs).toContain("finance-portal");
+    expect(r.moduleSlugs).toContain("aml");
+  });
+});
+
+describe("placement once detection stops reading tests as routes", () => {
+  /** The library the follow settles with `isTestFile`: 146 modules. */
+  const NEXT = new Set(LIBRARY_AFTER_TEST_ROUTE_FIX);
+
+  it("is the library at prime@83a3218, less the two spec modules, plus five", () => {
+    expect(NEXT.size).toBe(146);
+    expect(NEXT.has("-tests-")).toBe(false);
+    expect(NEXT.has("bc-segment-engine-admin.security.test")).toBe(false);
+  });
+
+  it("places every module, each where the prime gates it", () => {
+    expect(unplacedModules(NEXT)).toEqual([]);
+    expect(MODULE_COMPANIONS).toMatchObject({
+      "builder-portal": "listings",
+      "builder-stock-property": "listings",
+      "cloudflare-management": "platform-core",
+      "public-passport": "aml",
+      "backend-conversation": "integrations",
+    });
+  });
+
+  it("puts the public Compliance Passport with AML/CTF, and out with its exclusion", () => {
+    const launch = resolveEntitledModules({ planSlug: "launch", knownModules: NEXT });
+    expect(launch.moduleSlugs).toContain("public-passport");
+    const without = applyContractExclusions(launch, ["aml-ctf"], { knownModules: NEXT });
+    expect(without.moduleSlugs).not.toContain("public-passport");
+  });
+
+  it("puts the Builder Portal pages with Listings, Cloudflare in the shell, and the sync with Integrations", () => {
+    const launch = resolveEntitledModules({ planSlug: "launch", knownModules: NEXT });
+    const scale = resolveEntitledModules({ planSlug: "scale", knownModules: NEXT });
+    expect(launch.moduleSlugs).toContain("cloudflare-management");
+    // Listings is Scale's, through the Opportunity Marketplace, or bought.
+    for (const slug of ["builder-portal", "builder-stock-property"]) {
+      expect(launch.moduleSlugs, slug).not.toContain(slug);
+      expect(scale.moduleSlugs, slug).toContain(slug);
+    }
+    const bought = resolveEntitledModules({
+      planSlug: "launch",
+      purchasedAddons: ["opportunity-marketplace", "integrations"],
+      knownModules: NEXT,
+    });
+    for (const slug of ["builder-portal", "builder-stock-property", "backend-conversation"]) {
+      expect(bought.moduleSlugs, slug).toContain(slug);
+    }
+  });
+});
+
+describe("placement", () => {
+  /** Production's library at prime@83a3218, as the follow settled it. */
+  const LIVE = new Set(LIBRARY_AT_83A3218);
+  const launch = resolveEntitledModules({ planSlug: "launch", knownModules: LIVE });
+  const scale = resolveEntitledModules({ planSlug: "scale", knownModules: LIVE });
+
+  it("places every module production's library holds", () => {
+    // 105 of these 143 resolved on no plan before the companions existed.
+    expect(unplacedModules(LIVE)).toEqual([]);
+  });
+
+  it("names a module the follow brings in that nothing places, rather than dropping it", () => {
+    const grown = new Set([...LIVE, "backend-something-new"]);
+    expect(unplacedModules(grown)).toEqual(["backend-something-new"]);
+  });
+
+  it("puts a companion wherever its anchor goes: on a tier, and with an add-on", () => {
+    // A report feed rides Generated Reports, which every tier has.
+    expect(launch.moduleSlugs).toContain("backend-crime");
+    // Partner Referrals rides Agreements: Scale, or the add-on on Launch.
+    expect(launch.moduleSlugs).not.toContain("partner-referrals");
+    expect(scale.moduleSlugs).toContain("partner-referrals");
+    const bought = resolveEntitledModules({
+      planSlug: "launch",
+      purchasedAddons: ["agreements"],
+      knownModules: LIVE,
+    });
+    expect(bought.moduleSlugs).toContain("partner-referrals");
+    // Transitively: the Borrowing Capacity engine's console rides the page,
+    // which rides Clients.
+    expect(launch.moduleSlugs).toContain("bc-segment-engine-admin");
+  });
+
+  it("takes a companion out with the anchor a contract excludes", () => {
+    const r = applyContractExclusions(scale, ["agreements", "aml-ctf"], { knownModules: LIVE });
+    for (const gone of ["agreements", "partner-referrals", "aml", "backend-aml", "backend-didit"]) {
+      expect(r.moduleSlugs, gone).not.toContain(gone);
+    }
+    expect(libraryModulesOf(MODULES.find((m) => m.slug === "aml-ctf")!, LIVE)).toEqual([
+      "aml",
+      "backend-aml",
+      "backend-didit",
+    ]);
+  });
+
+  it("installs nothing a companion rides with when its anchor is gone, and names it", () => {
+    const without = new Set([...LIVE].filter((s) => s !== "messages"));
+    const r = resolveEntitledModules({ planSlug: "scale", knownModules: without });
+    expect(r.moduleSlugs).not.toContain("messaging");
+    expect(unplacedModules(without)).toEqual(["backend-message", "backend-messaging", "messaging"]);
+  });
+
+  it("sells no module it says is not sold, nor any companion of one", () => {
+    const everything = resolveEntitledModules({
+      planSlug: "scale",
+      purchasedAddons: MODULES.map((m) => m.slug),
+      knownModules: LIVE,
+    });
+    const unsold = [...LIVE].filter((s) => !everything.moduleSlugs.includes(s)).sort();
+    expect(unsold).toEqual([
+      "-tests-",
+      "backend-backfill",
+      "backend-diagnose",
+      "backend-migration",
+      "backend-one",
+      "backend-sync",
+      "bc-segment-engine-admin.security.test",
+      "ghl",
+    ]);
+    for (const slug of Object.keys(NOT_SOLD_MODULES)) expect(LIVE.has(slug), slug).toBe(true);
+  });
+
+  it("installs the Accountant Portal where AML/CTF is held, or where it is bought", () => {
+    // Every tier's headline SKU carries AML/CTF, and AML/CTF brings the portals.
+    expect(launch.amlBundled).toContain("accountant-portal");
+    expect(launch.moduleSlugs).toContain("accountant-portal");
+    // Without AML/CTF it is the add-on it always was.
+    const withoutAml = applyContractExclusions(launch, ["aml-ctf"], { knownModules: LIVE });
+    expect(withoutAml.moduleSlugs).not.toContain("accountant-portal");
+    const bought = resolveEntitledModules({
+      planSlug: "no-such-plan",
+      purchasedAddons: ["accountant-portal"],
+      knownModules: LIVE,
+    });
+    expect(bought.moduleSlugs).toContain("accountant-portal");
+    expect(bought.addonModules).toEqual(["accountant-portal"]);
+    expect(bought.amlBundled).toEqual([]);
+  });
+
+  it("is still the translation the resolution installs by, companions included", () => {
+    const shell = resolveEntitledModules({ planSlug: "no-such-plan", knownModules: LIVE });
+    for (const pm of MODULES) {
+      const bought = resolveEntitledModules({
+        planSlug: "no-such-plan",
+        purchasedAddons: [pm.slug],
+        knownModules: LIVE,
+      });
+      const added = bought.moduleSlugs.filter((s) => !shell.moduleSlugs.includes(s));
+      const expected =
+        pm.slug === "aml-ctf"
+          ? [...new Set([...libraryModulesOf(pm, LIVE), ...libraryModulesOfAmlBundle(LIVE)])].sort()
+          : libraryModulesOf(pm, LIVE);
+      expect(expected, pm.slug).toEqual(added);
+    }
+  });
+
+  it("names only modules production holds, so a typo cannot hide a gap", () => {
+    // Or will hold, once the follow settles detection's test-file fix.
+    const held = new Set([...LIVE, ...LIBRARY_AFTER_TEST_ROUTE_FIX]);
+    for (const [companion, anchor] of Object.entries(MODULE_COMPANIONS)) {
+      expect(held.has(companion), companion).toBe(true);
+      expect(held.has(anchor), `${companion} → ${anchor}`).toBe(true);
+    }
+  });
+
+  it("gives every module one place, never two", () => {
+    // What the shell, the tiers' features and the price list place by
+    // themselves, read off the mapping rather than restated here: an
+    // entitlement-only item such as Borrowing Capacity places no module of its
+    // name, so its page is a companion of Clients and not a second place.
+    const placedElsewhere = new Set<string>([
+      ...ALWAYS_INSTALLED,
+      ...Object.keys(NOT_SOLD_MODULES),
+      ...buildFullMapping(LIVE).flatMap((m) => m.moduleSlugs),
+    ]);
+    for (const companion of Object.keys(MODULE_COMPANIONS)) {
+      expect(placedElsewhere.has(companion), companion).toBe(false);
+    }
+    // And the tier lines added for modules the sheet predates each place one.
+    for (const slug of ["quantitative-reports", "templates", "automation", "report"]) {
+      expect(placedElsewhere.has(slug), slug).toBe(true);
+    }
+  });
+
+  it("follows every chain of anchors to a module placed some other way", () => {
+    for (const start of Object.keys(MODULE_COMPANIONS)) {
+      const seen = new Set<string>();
+      let slug = start;
+      while (MODULE_COMPANIONS[slug]) {
+        expect(seen.has(slug), `cycle through ${start}`).toBe(false);
+        seen.add(slug);
+        slug = MODULE_COMPANIONS[slug];
+      }
+    }
+  });
+
+  it("adds companions only for anchors in the set, and only modules the catalogue holds", () => {
+    expect(withCompanions(["templates"], new Set(["templates", "template-builder"]))).toEqual([
+      "template-builder",
+      "templates",
+    ]);
+    expect(withCompanions(["reports"], LIVE)).toEqual(["charts", "portfolio-reports", "reports"]);
   });
 });

@@ -25,6 +25,47 @@ measured against the live Mission Control database on 2026-08-28.
 > rehearsal (`DELIVERY_SYSTEM_PLAN.md`, W1 and D7). Where this runbook
 > describes a module cascade for a new clone, read it as history.
 
+> **29 Oct 2026: every library module has a place on the price list.**
+>
+> The library follow settled the catalogue at prime@83a3218 (run `7e505791`,
+> 22:34 UTC): 143 approved modules, 22 of them new since July. Measured with
+> `module-mapping.ts` against those 143, **105 resolved on no plan at all** —
+> a Scale clone's recorded entitlement named 32 modules, Launch's 22. Most were
+> the pieces detection splits a feature into: `backend-*` workers no route
+> reaches, operator consoles, public share pages, sub-pages.
+>
+> Each is now placed with the module whose feature it serves, as the prime
+> gates it (`MODULE_COMPANIONS`), or recorded as not sold and why
+> (`NOT_SOLD_MODULES`: two test files detection read as routes, and NPC's own
+> GoHighLevel migration tooling). Launch resolves 91 modules, Growth 92, Scale
+> 117, and every plan with every add-on 135; the other eight are the unsold
+> ones. See [Placement](#placement). The Pricing page names any module the
+> follow brings in that nothing places (`unplacedModules`).
+>
+> The same day the owner made the **Accountant Portal** an add-on in no tier,
+> sold as the Solicitor Portal is, with its **price undecided**: its Stripe
+> product (`prod_VX6f7zMP6x6zyo`) carries an A$1 placeholder price that nothing
+> quotes or charges, and until it is priced a workspace has it by an operator's
+> grant only (`priceUndecided`, `isModuleGrantable`).
+
+> **29 Oct 2026: AML/CTF brings every partner portal.**
+>
+> The owner's decision: a workspace on any plan that includes AML/CTF
+> Compliance has the Finance, Solicitor, Accountant and Builder / Developer
+> portals at no extra cost, the four the Compliance Passport is shared
+> through. One without AML/CTF keeps the price list as it stands: the Finance
+> Portal with Scale or as an add-on, the Solicitor and Accountant portals as
+> add-ons, the Builder / Developer Portal sold directly. No price and no tier
+> changed (`includedWithAml`, `AML_BUNDLED_MODULES`).
+>
+> AML/CTF is held where the tier's headline SKU carries it or it was bought,
+> and no contract excludes it. There, the balance response names the four
+> portals in `entitlements.addons` (`balanceEntitlements`), and the reconcile
+> installs their library modules (`resolveEntitledModules`, `amlBundled`). A
+> contract can exclude one portal; excluding `aml-ctf` withdraws all four,
+> except one the tier includes or the clone bought. See
+> [AML/CTF and the partner portals](#amlctf-and-the-partner-portals).
+
 > **D18: a contract's exclusions are price-list slugs, and they reach the
 > clone.**
 >
@@ -79,6 +120,61 @@ surfaced for an operator, never guessed.
 counterpart; bind it via the pricing map panel's override when its
 implementation lands. That it reads as *unmapped* rather than silently
 resolving to nothing is the design working.
+
+## Placement
+
+The join above runs from the price list to the library. Placement runs the
+other way: every library module has exactly one place, and a test against the
+library as production held it (`liveLibrary.fixture.ts`, 143 modules at
+prime@83a3218) fails if one has none or two.
+
+| place | where it is recorded | resolves on |
+| --- | --- | --- |
+| the shell | `ALWAYS_INSTALLED` | every plan |
+| a tier's feature | `TIER_FEATURES`, mirrored on the website's pricing page, via `TIER_FEATURE_ALIASES` where the names differ | that tier and above |
+| a priced module | `aurixa-catalog.ts`, via `PRICED_MODULE_ALIASES` | the tiers that include it, or its purchase |
+| a companion | `MODULE_COMPANIONS`: the module whose feature it serves | wherever that module is |
+| not sold | `NOT_SOLD_MODULES`, with the reason | no plan |
+
+**A companion goes where its anchor goes.** `resolveEntitledModules` adds every
+companion of a module it installs, transitively, and `libraryModulesOf` does
+the same, so a contract exclusion withholds an anchor's companions with it:
+excluding `aml-ctf` withholds `aml`, `backend-aml` and `backend-didit`. A
+companion whose anchor is not in the catalogue installs nothing.
+
+**A place writes down the prime's decision; it never makes a commercial one.**
+Each companion sits where the prime's route guard or server check already opens
+it. The Portfolio Analysis Review page is gated by `client.review`, so it rides
+Clients; Partner Referrals, Loan Writer Undertakings and Partner Compliance are
+gated by `agreements`; Workflow Playground by `integrations`. Three modules
+the sheet predates are now tier features, each where the prime opens it:
+Quantitative Reports, Templates and Auto Report Generation on Launch. A paid
+page under Clients (Borrowing Capacity, Lenders) is installed with Clients and
+shut by its entitlement key, as the paid client tabs are.
+
+**A new module is named, never left on no plan.** The library follows the
+prime by itself (D19). A feature merged there arrives with no place, and
+`unplacedModules` lists it on the Pricing page (`getModuleMap`) until it is
+placed. A failed library read says so rather than reporting nothing unplaced.
+
+**Detection reads no test file as a route** (`isTestFile`, 29 Oct 2026). It
+had taken every file under `src/pages/` for one, and the prime keeps specs
+there, so two modules were made of specs (`-tests-`,
+`bc-segment-engine-admin.security.test`) and every page a spec imports was
+filed as shared, in platform-core. Replayed at prime@8312990 with the fix, the
+library holds 146 modules (`LIBRARY_AFTER_TEST_ROUTE_FIX`): the two spec
+modules go, and five are placed by their prime gates.
+
+| module | what it is | placed with |
+| --- | --- | --- |
+| `builder-portal` | `/admin/builder-portal/:tab`, guarded by `listings` | `listings` |
+| `builder-stock-property` | `/listings/builder-stock/:stockItemId`, guarded by `listings` | `listings` |
+| `cloudflare-management` | `/cloudflare`, superadmin only | the shell |
+| `public-passport` | `/passport/:token`, the Compliance Passport a grant link opens | `aml` |
+| `backend-conversation` | `conversation-sync-cron`, the GoHighLevel conversation sync that runs | `integrations`, beside `backend-ghl` |
+
+The follow applies the fix at the first prime merge after Mission Control is
+published: two archives, against its limit of max(10, a quarter of 143).
 
 ## What "installing a module" actually does
 
@@ -235,11 +331,47 @@ entitlements: { addons: string[], excluded?: string[] }
 A failed read never fails the balance call. The derivation is
 `balanceEntitlements.pure.ts`.
 
+### AML/CTF and the partner portals
+
+What AML/CTF brings (the owner's decision of 29 Oct 2026) travels with it
+through every step above:
+
+| step | where | what happens |
+| --- | --- | --- |
+| the balance response | `balanceEntitlements` | Where `aml-ctf` ends up in `addons`, so does each portal, unless the contract excludes that portal. Only on an answer whose exclusions were read: the prime subtracts `aml-ctf` by the exclusions it last knew but keeps no copy of the bundle, so while they cannot be read the portals are withheld and a bought one stays. |
+| the reconcile | `resolveEntitledModules`, `applyContractExclusions` | The portals a plan neither includes nor bought are `amlBundled`, and their library modules install. Excluding `aml-ctf` empties `amlBundled`; excluding a portal removes that one. |
+| exclusions offered | `excludableModules` | On a tier, the four portals are offered beside AML/CTF. |
+| provisioning picks | `libraryModulesExcludedBy` | An excluded `aml-ctf` also drops the portals' library modules; the reconcile reinstalls any one the plan still holds, such as Scale's Finance Portal. |
+| the storefront | `/api/public/storefront/handoff` | `addon_slugs` is the balance response's `addons`, through the same helper (`heldEntitlements.server.ts`), and `excluded_slugs` its `excluded`, so the site gates its documentation and add-on buttons as the workspace's own app is gated. |
+| the catalogue | `presentAddonRow` | Each portal's row carries `metadata.included_with_aml`, from the catalogue's flag. |
+| Stripe | `moduleProductShape` | Each portal's product says where it is included, and carries `metadata.included_with_aml`. |
+
+**A subscription offer's AML choice decides it.** An offer taken With AML
+cannot sell a portal as a line (`purchasableItems`, the composer's gap), and
+its order form names the portals in its AML scope. An offer taken Without AML
+provisions neither AML/CTF nor the portals only when `aml-ctf` is excluded, so
+`configureAgreementProvisioning` refuses exclusions that disagree with the
+offer (`amlExclusionConflict`), and saving an offer whose AML choice no longer
+matches the armed exclusions disarms provisioning. Provisioning itself takes
+the exclusion from the offer (`provisionedExclusions`), so the operator's
+button, which arms a signed agreement nobody configured, provisions it the same
+way, and an offer that cannot be read provisions nothing. It used to rest on an
+operator ticking the exclusion.
+
+Two things stay open. The Builder / Developer Portal's own fee is charged to
+builders under the Builder Partner Agreement (`builderPortalPayment.pure.ts`);
+whether a builder admitted by a workspace with AML/CTF still pays it is a
+separate decision, and nothing here waives it. And Schedule A3 in the three
+subscription templates still prints each portal's reference fee; the order
+form's AML scope is what states the inclusion until the templates are revised.
+
 ## Guardrails inventory (where each lives)
 
 | guardrail | where |
 | --- | --- |
 | Unmapped is surfaced, never guessed | `module-mapping.ts` (`unmapped` outcome), pricing map panel |
+| Every library module has one place, and a new one is named | `MODULE_COMPANIONS`, `NOT_SOLD_MODULES`, `unplacedModules` (pricing map panel); the placement tests against `liveLibrary.fixture.ts` |
+| An undecided price is never quoted, sold or recorded as charged | `priceUndecided` (out of `PURCHASABLE_MODULES`, grantable by `isModuleGrantable`), `presentAddonRow` on every catalogue read, `grantAddon` records no amount |
 | Clone secret writes can never reach the prime | `cloneSecretTarget.pure.ts` — ref is a return value, not an argument |
 | Identity secrets generated per clone, never copied | `planCloneSecrets` (`generated` class) |
 | Clone repo re-targeted off the prime before handover | `clone-repo-retarget.server.ts` |

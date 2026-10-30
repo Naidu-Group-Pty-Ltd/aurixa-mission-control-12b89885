@@ -258,6 +258,16 @@ describe("an annual prepayment", () => {
   });
 });
 
+describe("With AML", () => {
+  it("names the partner portals AML/CTF brings in the order's AML scope", () => {
+    const composed = compose(completeOffer("launch"));
+    expect(composed.gaps).toEqual([]);
+    expect(composed.fields["scope.aml_summary"]).toMatch(
+      /^With AML — .*, and the Customer's access to the Finance, Solicitor, Accountant and Builder \/ Developer portals with no separate access fee\. Checks and monitoring: /,
+    );
+  });
+});
+
 describe("Without AML", () => {
   it("states the option in every AML field and asks for no AML authority", () => {
     const offer = completeOffer("growth", (o) => {
@@ -312,6 +322,20 @@ describe("what an additional line may not be", () => {
     );
     expect(messages(withLine("lenders"))).toMatch(/not for sale/);
     expect(messages(withLine("no-such-item"))).toMatch(/not in Schedule A3/);
+  });
+
+  it("refuses a partner portal on an offer With AML, which brings it (29 Oct 2026)", () => {
+    expect(messages(withLine("solicitor-portal"))).toMatch(
+      /Solicitor Portal comes with AML\/CTF, which this offer includes/,
+    );
+    expect(messages(withLine("finance-portal"))).toMatch(/comes with AML\/CTF/);
+    // Without AML, a portal is the add-on Schedule A3 prices.
+    const without = withLine("solicitor-portal");
+    without.aml = "without";
+    without.usage.amlAllowance = "";
+    without.usage.amlBasis = "";
+    expect(gapKeys(without)).toEqual([]);
+    expect(compose(without).lines.map((l) => l.key)).toEqual(["solicitor-portal"]);
   });
 
   it("refuses a committed line on a flexible term and a discount above the charge", () => {

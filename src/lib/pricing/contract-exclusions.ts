@@ -84,13 +84,18 @@ export function validateContractExclusions(
 /**
  * The price-list modules a plan can have negotiated out: the ones it includes,
  * plus AML/CTF on a tier, because every tier's headline SKU carries it
- * (`TIER_INCLUDES_AML`) although `aml-ctf` lists no tier in `includedIn`.
+ * (`TIER_INCLUDES_AML`) although `aml-ctf` lists no tier in `includedIn`, and
+ * with it the partner portals AML/CTF brings (`includedWithAml`, the owner's
+ * decision of 29 Oct 2026). Excluding AML/CTF withdraws them all; excluding one
+ * portal withdraws that one.
  */
 export function excludableModules(planSlug: string | null | undefined): PricedModule[] {
   if (!planSlug) return [];
   const amlOnThisPlan = TIER_INCLUDES_AML && Boolean(tierBySlug(planSlug));
   return MODULES.filter(
-    (m) => m.includedIn.includes(planSlug) || (m.slug === AML_MODULE_SLUG && amlOnThisPlan),
+    (m) =>
+      m.includedIn.includes(planSlug) ||
+      (amlOnThisPlan && (m.slug === AML_MODULE_SLUG || m.includedWithAml === true)),
   );
 }
 

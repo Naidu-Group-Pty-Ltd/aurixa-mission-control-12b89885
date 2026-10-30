@@ -27,7 +27,7 @@
  * refusing the envelope is the right outcome — not an envelope that has
  * nowhere to sign.
  */
-import { MODULES } from "@/lib/pricing/aurixa-catalog";
+import { AML_MODULE_SLUG, MODULES } from "@/lib/pricing/aurixa-catalog";
 import type { IssuedDocumentMeta } from "./docxPackage.pure";
 import { isoDate, parseIsoDate } from "./subscriptionPricing.pure";
 import {
@@ -42,6 +42,7 @@ import {
   A3_INCLUDED,
   a3Item,
   isIncludedInTier,
+  isIncludedWithAml,
   SUBSCRIPTION_ANCHORS,
   SUBSCRIPTION_TEMPLATES,
   type SubscriptionTierSlug,
@@ -451,9 +452,36 @@ export function provisioningSelectionFromOffer(offer: SubscriptionOffer): {
     const item = a3Item(line.itemKey);
     if (item?.kind !== "module" || !item.catalogSlug) continue;
     if (isIncludedInTier(offer.tier, item.key)) continue;
+    // Brought by the AML/CTF the offer takes, so never sold as a line.
+    if (offer.aml === "with" && isIncludedWithAml(item.key)) continue;
     slugs.add(item.catalogSlug);
   }
   return { planSlug: offer.tier, addonSlugs: [...slugs].sort() };
+}
+
+/**
+ * Why the exclusions recorded for a signature disagree with the AML/CTF the
+ * offer sells, or null when they agree.
+ *
+ * The offer's With AML / Without AML is the customer's choice, and AML/CTF is
+ * what brings the partner portals (29 Oct 2026). A tier's plan carries AML/CTF
+ * unless the agreement excludes it, so an offer taken Without AML provisions
+ * neither AML/CTF nor the portals only when `aml-ctf` is excluded, and an
+ * offer taken With AML must not exclude it. Left to an operator's tick, a
+ * Without AML signature handed the customer what they declined.
+ */
+export function amlExclusionConflict(
+  offer: Pick<SubscriptionOffer, "aml">,
+  excludedSlugs: readonly string[] | null | undefined,
+): string | null {
+  const excluded = (excludedSlugs ?? []).includes(AML_MODULE_SLUG);
+  if (offer.aml === "without" && !excluded) {
+    return "This agreement's offer is Without AML, so a signature must not provision AML/CTF Compliance or the partner portals it brings. Exclude AML/CTF Compliance.";
+  }
+  if (offer.aml === "with" && excluded) {
+    return "This agreement's offer includes AML/CTF Compliance, so it cannot be excluded. Change the offer to Without AML to take it out.";
+  }
+  return null;
 }
 
 /** Whether an agreement row's plan and add-ons are exactly an offer's selection. */
