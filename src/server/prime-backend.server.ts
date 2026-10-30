@@ -41,6 +41,12 @@ import {
   unreadableSeedSkeletons,
   type SeedSkeletonReading,
 } from "./seedSkeletonManifest.pure";
+import {
+  EFFECT_REPLAYS_PATH,
+  readEffectReplayManifest,
+  unfetchedEffectReplays,
+  type EffectReplayReading,
+} from "./migrationEffectReplay.pure";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -785,6 +791,7 @@ export function resetPrimeSnapshotCache(): void {
   blobCache = null;
   withdrawalTextCache = null;
   seedSkeletonCache = null;
+  effectReplayTextCache = null;
 }
 
 /**
@@ -871,6 +878,51 @@ async function readSeedSkeletonsFromListing(
   const reading = readSeedSkeletonManifest(text);
   seedSkeletonCache = { sha: blob.sha, reading };
   return reading;
+}
+
+/**
+ * The effect-replay manifest's text, keyed by its git blob sha, for the
+ * withdrawal cache's reason: content-addressed, so it cannot go stale.
+ */
+let effectReplayTextCache: { sha: string; text: string } | null = null;
+
+/**
+ * The prime's `MIGRATION_EFFECT_REPLAYS.json` — the owner-approved privilege
+ * and policy files a clone built later is given at build — and the commit it
+ * was read at.
+ *
+ * Read from the same short-lived listing `openPrimeMigrationCorpus` takes, so
+ * within one pass the manifest and the files it names come from one commit;
+ * the caller compares the two commits rather than trusting the window. A
+ * listing that cannot be taken throws, as the corpus does. A manifest the
+ * tree lists and GitHub will not serve is `unfetched`, which replays nothing
+ * and is asked again, never an empty list (`migrationEffectReplay.pure.ts`).
+ */
+export async function fetchEffectReplayManifest(
+  octokit: Octokit,
+  ref: RepoRef,
+): Promise<{ commitSha: string; reading: EffectReplayReading }> {
+  const { blobs, commitSha } = await listSupabaseBlobs(octokit, ref);
+  const blob = blobs.find((b) => b.path === EFFECT_REPLAYS_PATH);
+  if (!blob) return { commitSha, reading: readEffectReplayManifest(null) };
+  if (effectReplayTextCache?.sha === blob.sha) {
+    return { commitSha, reading: readEffectReplayManifest(effectReplayTextCache.text) };
+  }
+  let text: string;
+  try {
+    text = decodeBase64Utf8(await fetchBlobBase64(octokit, ref, blob.sha));
+  } catch (e) {
+    return {
+      commitSha,
+      reading: unfetchedEffectReplays(
+        `GitHub would not serve it (${
+          e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)
+        })`,
+      ),
+    };
+  }
+  effectReplayTextCache = { sha: blob.sha, text };
+  return { commitSha, reading: readEffectReplayManifest(text) };
 }
 
 /**

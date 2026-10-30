@@ -5,6 +5,7 @@ import {
   type MigrationDependencyFacts,
 } from "./migrationDependencyFacts.pure";
 import { mentionedVersionsOf } from "./migrationVersionMentions.pure";
+import { effectProbeIn } from "./migrationEffectProbe.pure";
 import { fetchBlobTextsBatched, decodeBase64Utf8 } from "./prime-backend.server";
 import type { RepoRef } from "./github-app.server";
 import type { Octokit } from "@octokit/rest";
@@ -76,6 +77,8 @@ type CacheEntry = {
   facts: Map<string, MigrationDependencyFacts>;
   /** The versions each decoded body names. Same keys as {@link facts}, same rule. */
   mentions: Map<string, string[]>;
+  /** The `-- @effect:` probe each decoded body declares, null where none. Same keys, same rule. */
+  probes: Map<string, string | null>;
 };
 let cache: CacheEntry | null = null;
 
@@ -124,6 +127,17 @@ export type PrimeBodyDigestPass = {
    * the other would put it back on the blanket rule for no reason.
    */
   mentionsByPath: Map<string, string[]>;
+  /**
+   * Repo path → the `-- @effect:` probe that body declares (`effectProbeIn`,
+   * the prime's own rule), or null where it declares none — for the bodies
+   * this pass decoded, keyed exactly as {@link factsByPath}.
+   *
+   * A path MISSING from this map is a body nobody read, and so a probe nobody
+   * knows about: never "declares none". The migration-effect report counts
+   * those apart (`migrationEffectReplay.server.ts`), and reads them from here
+   * so the effect report and the fleet sync read one corpus once per commit.
+   */
+  probesByPath: Map<string, string | null>;
 };
 
 /**
@@ -149,11 +163,13 @@ export async function digestPrimeBodies(
       digests: new Map(),
       facts: new Map(),
       mentions: new Map(),
+      probes: new Map(),
     };
   }
   const warm = cache.digests;
   const warmFacts = cache.facts;
   const warmMentions = cache.mentions;
+  const warmProbes = cache.probes;
   const byPathMeta = new Map(corpus.files.map((f) => [f.path, f]));
 
   const wanted = [...new Set(paths)].slice(0, MAX_DIGEST_FILES);
@@ -181,6 +197,7 @@ export async function digestPrimeBodies(
         // The text is decoded either way; the facts are the cheap half.
         warmFacts.set(path, dependencyFactsOf(sql));
         warmMentions.set(path, mentionedVersionsOf(sql));
+        warmProbes.set(path, effectProbeIn(sql));
         fetched += 1;
       }
     } catch {
@@ -193,6 +210,7 @@ export async function digestPrimeBodies(
   const byPath = new Map<string, string[]>();
   const factsByPath = new Map<string, MigrationDependencyFacts>();
   const mentionsByPath = new Map<string, string[]>();
+  const probesByPath = new Map<string, string | null>();
   const unread: string[] = [];
   for (const path of wanted) {
     const d = warm.get(path) ?? [];
@@ -202,6 +220,7 @@ export async function digestPrimeBodies(
     if (f !== undefined) factsByPath.set(path, f);
     const named = warmMentions.get(path);
     if (named !== undefined) mentionsByPath.set(path, named);
+    if (warmProbes.has(path)) probesByPath.set(path, warmProbes.get(path) ?? null);
   }
-  return { byPath, fetched, unread, factsByPath, mentionsByPath };
+  return { byPath, fetched, unread, factsByPath, mentionsByPath, probesByPath };
 }

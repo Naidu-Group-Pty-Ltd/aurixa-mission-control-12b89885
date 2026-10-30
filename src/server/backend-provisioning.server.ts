@@ -5930,6 +5930,20 @@ export type ProvisionBackendInput = {
    */
   onSchemaVerified?: () => Promise<void>;
   /**
+   * The migration-effect stage, run once the schema is verified and the
+   * ledger stamped: replay the prime's owner-approved privilege and policy
+   * files whose effect the stamp recorded without running, and report every
+   * other declared effect the clone lacks (`migrationEffectReplay.server.ts`).
+   *
+   * Supplied by the caller, as `linkMissionControl` is, because it resolves
+   * the clone through Mission Control's own tables and records its outcome
+   * there; the stamp it answers to is the caller's to know. Absent, the stage
+   * does not run.
+   */
+  replayMigrationEffects?: (
+    projectRef: string,
+  ) => Promise<import("./migrationEffectReplay.server").EffectStageResult>;
+  /**
    * Converge a backend that is already provisioned, rather than build one.
    *
    * Every replication step here checks the target before it writes — that is
@@ -6330,6 +6344,58 @@ export async function provisionCloneBackend(
       throw new Error(
         `Migration ${migrationFailure.name} failed: ${migrationFailure.error ?? "unknown"} ` +
           `(project ${projectRef} kept — retry resumes from the failed migration)`,
+      );
+    }
+  }
+
+  // Step 4b: the effects the stamp recorded and the catalogue copy never
+  // carried.
+  //
+  // The stamp lists every version the prime records, so a file that takes a
+  // privilege back, restates a policy for the clones or seeds a row is
+  // recorded here as run while its effect is absent. Measured 30 Oct 2026 on
+  // Orrimere, built the day before: 35 of the prime's 63 `-- @effect:` probes
+  // returned no row, and the publishable key could write `api_usage_log`. So
+  // once the schema is verified and the ledger stamped, the stage replays the
+  // files the owner approved for this (`MIGRATION_EFFECT_REPLAYS.json`), each
+  // after a dry run that rolls back, and reports every other probe that
+  // returns no row.
+  //
+  // Here rather than at the end, so its budget comes from the front of a pass:
+  // the tail is where the finishing steps already starve. Owed once per stamp,
+  // which the stage reads from its own audit record, so the passes that
+  // deploy functions afterwards pay one read of Mission Control's audit log
+  // and nothing else. Only the introspected schema needs it: the replay
+  // strategy runs every file, effects and all.
+  //
+  // Non-fatal, like the API settings: a failure is the status line and the
+  // stage's row, and the pass goes on. A stage the budget stopped is the one
+  // exception, thrown OUTSIDE the catch — inside it a pause would read as the
+  // stage being skipped, and the pass would run on with files undecided. It
+  // carries no resume stage, so the stored marker is left alone; the next
+  // pass asks the clone, which already holds what this one replayed.
+  //
+  // The budget is checked inside, once the stage knows it is owed, rather
+  // than by a `pauseIfDue` here: on the passes it is not, a pause in front of
+  // it would name a stage that was never going to run.
+  if (strategy === "introspection" && input.replayMigrationEffects) {
+    let effects: import("./migrationEffectReplay.server").EffectStageResult | null = null;
+    try {
+      effects = await input.replayMigrationEffects(projectRef);
+      if (effects.ran) await onStatusUpdate?.("migrating", effects.line);
+    } catch (err) {
+      await onStatusUpdate?.(
+        "migrating",
+        `Migration effect stage skipped: ${err instanceof Error ? err.message : String(err)} — the next pass asks again`,
+      );
+    }
+    if (effects?.stoppedAtDeadline) {
+      // What it decided travels with the pause, which overwrites the line
+      // above: a stage that stopped part way must not read as one not begun.
+      throw new BudgetPause(
+        effects.ran
+          ? `${effects.line} The rest resume next tick.`
+          : "replaying the prime's approved privilege and policy files",
       );
     }
   }

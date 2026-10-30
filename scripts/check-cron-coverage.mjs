@@ -77,6 +77,16 @@ const NOT_SCHEDULED = new Map([
       "ever running again.",
   ],
   [
+    "clone-effect-replay",
+    "Invoked on demand (cron-secret bearer) to replay, on clones that already " +
+      "exist, the prime's owner-approved privilege and policy files whose " +
+      "@effect probe returns no row, after a dry run that rolls back, and to " +
+      "report every other probe. The owner's decision of 30 Oct 2026 gives a NEW " +
+      "clone these at build, inside /hooks/backend-provisioning-drain, which IS " +
+      "scheduled; nothing yet decides that the existing fleet is swept on a " +
+      "timer, so it runs when somebody asks.",
+  ],
+  [
     "verification-selftest",
     "Invoked on demand (cron-secret bearer) to ask a clone whether identity " +
       "verification can actually reach the provider from where it runs. It " +

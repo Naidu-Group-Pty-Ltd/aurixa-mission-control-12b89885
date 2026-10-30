@@ -1027,7 +1027,15 @@ export function sqlstateWords(code: string | null): string | null {
 export function readSqlFailure(raw: string): { sqlstate: string | null; message: string } {
   const json = /"code"\s*:\s*"([0-9A-Za-z]{5})"/.exec(raw);
   const bare = /\bSQLSTATE[: ]\s*([0-9A-Za-z]{5})\b/.exec(raw);
-  const sqlstate = (json?.[1] ?? bare?.[1] ?? null)?.toUpperCase() ?? null;
+  // The third form is the one the Management API's query endpoint is on
+  // record answering with — `{"message":"Failed to run sql query: ERROR:
+  // 42601: syntax error at or near …"}`, verbatim from npc-test-76b3b3 on
+  // 12 Sep 2026 (`fleetMigrationEligibility.test.ts`) — the code between
+  // `ERROR:` and the next colon. Neither form above matches it, so a failure
+  // in that form read as having no code. Upper-case only, as Postgres writes
+  // one, so a word in a message cannot pass for it.
+  const wire = /\bERROR:\s+([0-9A-Z]{5}):/.exec(raw);
+  const sqlstate = (json?.[1] ?? bare?.[1] ?? wire?.[1] ?? null)?.toUpperCase() ?? null;
   const msg = /"message"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(raw);
   const message = msg
     ? msg[1].replace(/\\n/g, " ").replace(/\\"/g, '"').replace(/\\\\/g, "\\")

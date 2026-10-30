@@ -85,6 +85,7 @@ import { Route as HooksCascadeAuditRouteImport } from './routes/hooks.cascade-au
 import { Route as HooksCascadeDrainRouteImport } from './routes/hooks.cascade-drain'
 import { Route as HooksCascadeMergeDrainRouteImport } from './routes/hooks.cascade-merge-drain'
 import { Route as HooksCloneDeployerDeclarationReconcileRouteImport } from './routes/hooks.clone-deployer-declaration-reconcile'
+import { Route as HooksCloneEffectReplayRouteImport } from './routes/hooks.clone-effect-replay'
 import { Route as HooksCloneJwtSecretReconcileRouteImport } from './routes/hooks.clone-jwt-secret-reconcile'
 import { Route as HooksClonePrivilegeReconcileRouteImport } from './routes/hooks.clone-privilege-reconcile'
 import { Route as HooksCloneSecretForwardReconcileRouteImport } from './routes/hooks.clone-secret-forward-reconcile'
@@ -642,6 +643,11 @@ const HooksCloneDeployerDeclarationReconcileRoute =
     path: '/hooks/clone-deployer-declaration-reconcile',
     getParentRoute: () => rootRouteImport,
   } as any)
+const HooksCloneEffectReplayRoute = HooksCloneEffectReplayRouteImport.update({
+  id: '/hooks/clone-effect-replay',
+  path: '/hooks/clone-effect-replay',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const HooksCloneJwtSecretReconcileRoute =
   HooksCloneJwtSecretReconcileRouteImport.update({
     id: '/hooks/clone-jwt-secret-reconcile',
@@ -1630,6 +1636,7 @@ export interface FileRoutesByFullPath {
   '/hooks/cascade-drain': typeof HooksCascadeDrainRoute
   '/hooks/cascade-merge-drain': typeof HooksCascadeMergeDrainRoute
   '/hooks/clone-deployer-declaration-reconcile': typeof HooksCloneDeployerDeclarationReconcileRoute
+  '/hooks/clone-effect-replay': typeof HooksCloneEffectReplayRoute
   '/hooks/clone-jwt-secret-reconcile': typeof HooksCloneJwtSecretReconcileRoute
   '/hooks/clone-privilege-reconcile': typeof HooksClonePrivilegeReconcileRoute
   '/hooks/clone-secret-forward-reconcile': typeof HooksCloneSecretForwardReconcileRoute
@@ -1875,6 +1882,7 @@ export interface FileRoutesByTo {
   '/hooks/cascade-drain': typeof HooksCascadeDrainRoute
   '/hooks/cascade-merge-drain': typeof HooksCascadeMergeDrainRoute
   '/hooks/clone-deployer-declaration-reconcile': typeof HooksCloneDeployerDeclarationReconcileRoute
+  '/hooks/clone-effect-replay': typeof HooksCloneEffectReplayRoute
   '/hooks/clone-jwt-secret-reconcile': typeof HooksCloneJwtSecretReconcileRoute
   '/hooks/clone-privilege-reconcile': typeof HooksClonePrivilegeReconcileRoute
   '/hooks/clone-secret-forward-reconcile': typeof HooksCloneSecretForwardReconcileRoute
@@ -2123,6 +2131,7 @@ export interface FileRoutesById {
   '/hooks/cascade-drain': typeof HooksCascadeDrainRoute
   '/hooks/cascade-merge-drain': typeof HooksCascadeMergeDrainRoute
   '/hooks/clone-deployer-declaration-reconcile': typeof HooksCloneDeployerDeclarationReconcileRoute
+  '/hooks/clone-effect-replay': typeof HooksCloneEffectReplayRoute
   '/hooks/clone-jwt-secret-reconcile': typeof HooksCloneJwtSecretReconcileRoute
   '/hooks/clone-privilege-reconcile': typeof HooksClonePrivilegeReconcileRoute
   '/hooks/clone-secret-forward-reconcile': typeof HooksCloneSecretForwardReconcileRoute
@@ -2372,6 +2381,7 @@ export interface FileRouteTypes {
     | '/hooks/cascade-drain'
     | '/hooks/cascade-merge-drain'
     | '/hooks/clone-deployer-declaration-reconcile'
+    | '/hooks/clone-effect-replay'
     | '/hooks/clone-jwt-secret-reconcile'
     | '/hooks/clone-privilege-reconcile'
     | '/hooks/clone-secret-forward-reconcile'
@@ -2617,6 +2627,7 @@ export interface FileRouteTypes {
     | '/hooks/cascade-drain'
     | '/hooks/cascade-merge-drain'
     | '/hooks/clone-deployer-declaration-reconcile'
+    | '/hooks/clone-effect-replay'
     | '/hooks/clone-jwt-secret-reconcile'
     | '/hooks/clone-privilege-reconcile'
     | '/hooks/clone-secret-forward-reconcile'
@@ -2864,6 +2875,7 @@ export interface FileRouteTypes {
     | '/hooks/cascade-drain'
     | '/hooks/cascade-merge-drain'
     | '/hooks/clone-deployer-declaration-reconcile'
+    | '/hooks/clone-effect-replay'
     | '/hooks/clone-jwt-secret-reconcile'
     | '/hooks/clone-privilege-reconcile'
     | '/hooks/clone-secret-forward-reconcile'
@@ -3109,6 +3121,7 @@ export interface RootRouteChildren {
   HooksCascadeDrainRoute: typeof HooksCascadeDrainRoute
   HooksCascadeMergeDrainRoute: typeof HooksCascadeMergeDrainRoute
   HooksCloneDeployerDeclarationReconcileRoute: typeof HooksCloneDeployerDeclarationReconcileRoute
+  HooksCloneEffectReplayRoute: typeof HooksCloneEffectReplayRoute
   HooksCloneJwtSecretReconcileRoute: typeof HooksCloneJwtSecretReconcileRoute
   HooksClonePrivilegeReconcileRoute: typeof HooksClonePrivilegeReconcileRoute
   HooksCloneSecretForwardReconcileRoute: typeof HooksCloneSecretForwardReconcileRoute
@@ -3786,6 +3799,13 @@ declare module '@tanstack/react-router' {
       path: '/hooks/clone-deployer-declaration-reconcile'
       fullPath: '/hooks/clone-deployer-declaration-reconcile'
       preLoaderRoute: typeof HooksCloneDeployerDeclarationReconcileRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/clone-effect-replay': {
+      id: '/hooks/clone-effect-replay'
+      path: '/hooks/clone-effect-replay'
+      fullPath: '/hooks/clone-effect-replay'
+      preLoaderRoute: typeof HooksCloneEffectReplayRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/hooks/clone-jwt-secret-reconcile': {
@@ -5204,6 +5224,7 @@ const rootRouteChildren: RootRouteChildren = {
   HooksCascadeMergeDrainRoute: HooksCascadeMergeDrainRoute,
   HooksCloneDeployerDeclarationReconcileRoute:
     HooksCloneDeployerDeclarationReconcileRoute,
+  HooksCloneEffectReplayRoute: HooksCloneEffectReplayRoute,
   HooksCloneJwtSecretReconcileRoute: HooksCloneJwtSecretReconcileRoute,
   HooksClonePrivilegeReconcileRoute: HooksClonePrivilegeReconcileRoute,
   HooksCloneSecretForwardReconcileRoute: HooksCloneSecretForwardReconcileRoute,

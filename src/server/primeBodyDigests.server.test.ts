@@ -189,6 +189,36 @@ describe("digestPrimeBodies", () => {
     expect(again.mentionsByPath.get("r")).toEqual(["20261204020000"]);
   });
 
+  /**
+   * The migration-effect report reads each body's `-- @effect:` probe from
+   * this pass rather than reading the corpus a second time, so a body it did
+   * not decode must carry no entry: an unread body is a probe nobody knows
+   * about, never a body that declares none.
+   */
+  it("keeps the probe each decoded body declares, null where none, and nothing for a body it did not read", async () => {
+    const probed = "-- @effect: select 1 from public.t where v = 18\ninsert into t values (18);\n";
+    const files = {
+      p: { sql: probed },
+      plain: { sql: "create table t ();" },
+      big: { sql: "x", size: MAX_DIGEST_BYTES + 1 },
+    };
+    serves({ p: { sql: probed }, plain: { sql: files.plain.sql } });
+    const out = await digestPrimeBodies(
+      corpusOf("sha-probes", files),
+      ["p", "plain", "big"],
+      octokit,
+      ref,
+    );
+    expect(out.probesByPath.get("p")).toBe("select 1 from public.t where v = 18");
+    expect(out.probesByPath.get("plain")).toBeNull();
+    expect(out.probesByPath.has("big")).toBe(false);
+    expect([...out.probesByPath.keys()]).toEqual([...out.factsByPath.keys()]);
+
+    const again = await digestPrimeBodies(corpusOf("sha-probes", files), ["p"], octokit, ref);
+    expect(again.fetched).toBe(0);
+    expect(again.probesByPath.get("p")).toBe("select 1 from public.t where v = 18");
+  });
+
   it("carries an id the corpus does not hold as unread rather than throwing", async () => {
     const files = { a: { sql: "SELECT 1;" } };
     serves(files);
