@@ -31,7 +31,7 @@
  * callbacks). They stay listed, because the handover record names everything
  * Aurixa supplied, but nothing bills them, so their rows say what each is and
  * what the operator does with it instead. What is billed is the rate table's
- * to say (`api_provider_rates`, a billable row per key): measured 30 Oct 2026
+ * to say (`api_provider_rates`, an active billable row per key): measured 30 Oct 2026
  * it rated the seven keys on every clone's plan and none of the six others.
  *
  * ## The client's own value goes through the broker, never onto the project
@@ -189,7 +189,7 @@ function hintFor(name: string, status: PlatformPaidStatus, billed: ReadonlySet<s
     tenantSecretRefusal(name) === null
       ? `the client may bring its own on the clone's Integrations page, never directly on the project`
       : `the clone's Integrations page refuses it, so the client cannot bring its own`;
-  return `${name} is a value Aurixa supplied that no rate bills: it has no billable row in api_provider_rates, so nothing is charged for it. It stays after handover. If it is a credential, its rate is missing and calls on it are charged to nobody, and ${own}; if it is a setting, nothing is withdrawn. Mark this row skipped, with evidence of which it is and that it is kept.`;
+  return `${name} is a value Aurixa supplied that no rate bills: it has no active billable row in api_provider_rates, so nothing is charged for it. It stays after handover. If it is a credential, its rate is missing and calls on it are charged to nobody, and ${own}; if it is a setting, nothing is withdrawn. Mark this row skipped, with evidence of which it is and that it is kept.`;
 }
 
 function isPlatformPaid(status: string): status is PlatformPaidStatus {
@@ -202,7 +202,7 @@ function isPlatformPaid(status: string): status is PlatformPaidStatus {
  * client brought (`set`) or that never reached the clone (`withheld`,
  * `authorised_no_value`) is not Aurixa's to account for.
  *
- * `billed` is every name a billable rate covers (`api_provider_rates`), the
+ * `billed` is every name an active billable rate covers (`api_provider_rates`), the
  * one record of what is billed; a row says it is billed only from there.
  */
 export function platformCredentialRotations(

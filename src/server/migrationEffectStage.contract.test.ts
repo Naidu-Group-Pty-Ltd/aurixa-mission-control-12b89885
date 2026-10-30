@@ -124,11 +124,11 @@ describe("/hooks/clone-effect-replay", () => {
     expect(at(route, "reconcileCloneEffectReplays(supabaseAdmin, {")).toBeGreaterThan(standDown);
   });
 
-  it("takes a dry run and one clone, and nothing else", () => {
+  it("takes a dry run and one clone, and refuses a malformed option before it runs", () => {
+    // Driven through the real handler in `cloneEffectReplayRoute.test.ts`.
     expect(route).toContain("const dryRun = body.dryRun === true;");
-    expect(route).toMatch(
-      /typeof body\.cloneId === "string" && \/\^\[0-9a-f-\]\{36\}\$\/i\.test\(body\.cloneId\)/,
-    );
+    const refusal = at(route, 'return refuse("dryRun must be true or false");');
+    expect(at(route, "reconcileCloneEffectReplays(supabaseAdmin, {")).toBeGreaterThan(refusal);
   });
 
   it("is declared unscheduled, with what drives the new clones' half of it", () => {

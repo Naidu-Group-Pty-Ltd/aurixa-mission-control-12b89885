@@ -263,7 +263,7 @@ describe("what Aurixa supplied that nothing bills", () => {
   it("says what it can of a value no rate bills and nobody has named", () => {
     const [row] = planOf([{ name: "GOOGLE_MAPS_API_KEY", status: "inherited" }]);
     expect(row.hint).toContain(
-      "GOOGLE_MAPS_API_KEY is a value Aurixa supplied that no rate bills: it has no billable row in api_provider_rates",
+      "GOOGLE_MAPS_API_KEY is a value Aurixa supplied that no rate bills: it has no active billable row in api_provider_rates",
     );
     expect(row.hint).toContain(
       "the client may bring its own on the clone's Integrations page, never directly on the project",
@@ -322,6 +322,9 @@ describe("planning a handoff", () => {
     const rates = plan.indexOf('.from("api_provider_rates")');
     expect(rates).toBeGreaterThan(-1);
     expect(plan.slice(rates, rates + 200)).toContain('.eq("is_billable", true)');
+    // Only an active rate bills: the usage event reads the rate `AND is_active`,
+    // and files a call on an inactive one as `rate_missing`, recharged to nobody.
+    expect(plan.slice(rates, rates + 200)).toContain('.eq("is_active", true)');
     expect(plan).toContain("if (rErr) throw new Error(");
     expect(plan.indexOf("platformCredentialRotations(")).toBeGreaterThan(rates);
   });
