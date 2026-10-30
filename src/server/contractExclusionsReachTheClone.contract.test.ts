@@ -73,6 +73,17 @@ describe("the agreement path", () => {
     expect(agreement).not.toMatch(/contract_excluded_module_slugs/);
   });
 
+  it("takes AML/CTF out of a Without AML offer before the claim, so before anything is made", () => {
+    // The operator's button arms an agreement nobody configured; the offer is
+    // what decides AML/CTF and the portals it brings (30 Oct 2026).
+    const derive = agreement.search(
+      /agreement\.excluded_module_slugs = provisionedExclusions\(\s*agreement\.excluded_module_slugs \?\? \[\],\s*offer\.data\.aml,\s*\)/,
+    );
+    expect(derive).toBeGreaterThan(-1);
+    expect(agreement.indexOf('.update({ provision_status: "provisioning"')).toBeGreaterThan(derive);
+    expect(agreement).toMatch(/reason: "offer_unreadable"/);
+  });
+
   it("drops the picks the exclusions map to before the clone is created", () => {
     const dropAt = agreement.indexOf("effectiveModuleIds(moduleIds, excludedSlugs, {");
     expect(dropAt).toBeGreaterThan(-1);

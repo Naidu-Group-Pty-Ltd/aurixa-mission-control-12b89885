@@ -24,7 +24,9 @@
  *    Finance, Solicitor, Accountant and Builder / Developer portals, each
  *    unless the contract excludes it. The prime gates each portal on its slug,
  *    so this is how a tenant with AML/CTF has them, and how a tenant without it
- *    keeps today's pricing.
+ *    keeps today's pricing. While the exclusions cannot be read the portals
+ *    are withheld (only the bought ones are sent), because the prime could
+ *    subtract `aml-ctf` by the exclusions it last knew but not the portals.
  *  - A billing-exempt tenant's `addons` is every module on the price list,
  *    less its exclusions (D17). The prime's gate already passes an exempt
  *    workspace on a live answer, but its last-known-good cache records only
@@ -92,7 +94,14 @@ export function balanceEntitlements(input: {
   // AML/CTF, held by the SKU or bought, brings every partner portal. Asked
   // after the derivation above, so a contract that excludes AML/CTF withdraws
   // the portals with it, and the filter below withdraws any one it excludes.
-  if (addons.has(AML_MODULE_SLUG) && !withheld.has(AML_MODULE_SLUG)) {
+  //
+  // Only on an answer whose exclusions were read. When they could not be,
+  // `aml-ctf` is still sent and the prime takes it out by the exclusions it
+  // last knew, but the prime keeps no copy of the bundle and caches this list
+  // as it stands, so it could not take the portals out with it: a workspace
+  // that excluded AML/CTF would be handed all four by a failed read. Withheld,
+  // they return with the next answer that reads; a portal bought stays.
+  if (excluded !== null && addons.has(AML_MODULE_SLUG) && !withheld.has(AML_MODULE_SLUG)) {
     for (const m of AML_BUNDLED_MODULES) addons.add(m.slug);
   }
 

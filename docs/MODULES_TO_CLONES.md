@@ -338,7 +338,7 @@ through every step above:
 
 | step | where | what happens |
 | --- | --- | --- |
-| the balance response | `balanceEntitlements` | Where `aml-ctf` ends up in `addons`, so does each portal, unless the contract excludes that portal. |
+| the balance response | `balanceEntitlements` | Where `aml-ctf` ends up in `addons`, so does each portal, unless the contract excludes that portal. Only on an answer whose exclusions were read: the prime subtracts `aml-ctf` by the exclusions it last knew but keeps no copy of the bundle, so while they cannot be read the portals are withheld and a bought one stays. |
 | the reconcile | `resolveEntitledModules`, `applyContractExclusions` | The portals a plan neither includes nor bought are `amlBundled`, and their library modules install. Excluding `aml-ctf` empties `amlBundled`; excluding a portal removes that one. |
 | exclusions offered | `excludableModules` | On a tier, the four portals are offered beside AML/CTF. |
 | provisioning picks | `libraryModulesExcludedBy` | An excluded `aml-ctf` also drops the portals' library modules; the reconcile reinstalls any one the plan still holds, such as Scale's Finance Portal. |
@@ -352,7 +352,10 @@ its order form names the portals in its AML scope. An offer taken Without AML
 provisions neither AML/CTF nor the portals only when `aml-ctf` is excluded, so
 `configureAgreementProvisioning` refuses exclusions that disagree with the
 offer (`amlExclusionConflict`), and saving an offer whose AML choice no longer
-matches the armed exclusions disarms provisioning. It used to rest on an
+matches the armed exclusions disarms provisioning. Provisioning itself takes
+the exclusion from the offer (`provisionedExclusions`), so the operator's
+button, which arms a signed agreement nobody configured, provisions it the same
+way, and an offer that cannot be read provisions nothing. It used to rest on an
 operator ticking the exclusion.
 
 Two things stay open. The Builder / Developer Portal's own fee is charged to

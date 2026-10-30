@@ -47,7 +47,9 @@ describe("excluded", () => {
   it("is ABSENT when the read failed, never sent as an empty list", () => {
     const r = balanceEntitlements({ ...base, contractExcluded: null });
     expect("excluded" in r).toBe(false);
-    expect(JSON.parse(JSON.stringify(r))).toEqual({ addons: withAml });
+    // AML/CTF still, which the prime takes out by the exclusions it last
+    // knew; the portals it brings wait for an answer that read them.
+    expect(JSON.parse(JSON.stringify(r))).toEqual({ addons: ["aml-ctf"] });
   });
 });
 
@@ -95,7 +97,7 @@ describe("addons", () => {
       addonSlugs: ["call-logs"],
       contractExcluded: null,
     });
-    expect(r.addons).toEqual(plus("call-logs"));
+    expect(r.addons).toEqual(["aml-ctf", "call-logs"]);
   });
 
   it("adds no AML/CTF for a without-AML SKU or for a plan that is not a tier", () => {
@@ -133,6 +135,23 @@ describe("the partner portals AML/CTF brings (29 Oct 2026)", () => {
   it("lose the one portal a contract excludes, and keep the rest", () => {
     const r = balanceEntitlements({ ...base, contractExcluded: ["solicitor-portal"] });
     expect(r.addons).toEqual(withAml.filter((s) => s !== "solicitor-portal"));
+  });
+
+  it("are withheld while the exclusions cannot be read, and a portal bought stays", () => {
+    // The prime subtracts `aml-ctf` by the exclusions it last knew, but keeps
+    // no copy of the bundle: sent now, the portals would reach a workspace
+    // whose contract excluded AML/CTF (found in review, 30 Oct 2026).
+    const unknown = balanceEntitlements({ ...base, contractExcluded: null });
+    expect(unknown.addons).toEqual(["aml-ctf"]);
+    expect("excluded" in unknown).toBe(false);
+    const bought = balanceEntitlements({
+      ...base,
+      addonSlugs: ["solicitor-portal"],
+      contractExcluded: null,
+    });
+    expect(bought.addons).toEqual(["aml-ctf", "solicitor-portal"]);
+    // The next answer that reads them brings the portals back.
+    expect(balanceEntitlements({ ...base, contractExcluded: [] }).addons).toEqual(withAml);
   });
 
   it("all go with an excluded AML/CTF, but a portal the tenant bought stays", () => {
