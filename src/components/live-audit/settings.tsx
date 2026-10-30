@@ -364,9 +364,12 @@ export function LiveAuditSettingsPanel({
           <CardTitle className="text-base">The guard</CardTitle>
           <CardDescription>
             Every request the browser makes passes the guard, which lets a backend function through
-            only when its code reads. Over-blocking is the safe failure: allow a function here, one
-            at a time, when you know it only reads; block one the profiler let through. Names only,
-            one per line.
+            only when its code reads or the call names an action that reads. Over-blocking is the
+            safe failure: allow here, one at a time, what you know only reads; block what the
+            profiler let through. One per line: a function's name (every call), name:action (calls
+            naming that action) or name:- (calls naming none), as a run's held-back list prints
+            them. A block wins, and nothing allows a call that asks to write on the way (mark_read:
+            true).
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4 md:grid-cols-2">

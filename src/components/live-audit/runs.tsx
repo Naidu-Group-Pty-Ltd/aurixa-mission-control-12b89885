@@ -18,7 +18,12 @@ import { MetricCell } from "@/components/metric-bar";
 import { useConfirm } from "@/components/confirm-dialog";
 import { formatDistanceToNow } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { cancelLiveAuditRunFn, getLiveAuditRun } from "@/lib/live-audit.functions";
+import {
+  allowLiveAuditGuardEntry,
+  cancelLiveAuditRunFn,
+  getLiveAuditRun,
+} from "@/lib/live-audit.functions";
+import { heldBackOf, type HeldBack } from "@/lib/live-audit-contract";
 import {
   KIND_LABEL,
   WORD,
@@ -169,12 +174,26 @@ export function RunSheet({
     onError: (e: Error) => toast.error(e.message),
   });
 
+  const allowFn = useServerFn(allowLiveAuditGuardEntry);
+  const allow = useMutation({
+    mutationFn: (entry: string) => allowFn({ data: { entry, runId: runId! } }),
+    onSuccess: (r, entry) => {
+      if (r.added) toast.success(`${entry} is allowed from the next run`);
+      else toast.info(`${entry} was already allowed`);
+      if (r.blocked) toast.warning(`${entry} is also blocked under Settings, and a block wins`);
+      qc.invalidateQueries({ queryKey: ["live-audit-run", runId] });
+      qc.invalidateQueries({ queryKey: ["live-audit-overview"] });
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
   const d = q.data as any;
   const run = d?.run;
   const summary = (run?.summary ?? {}) as Record<string, any>;
   const phases = (run?.phases ?? {}) as Record<string, any>;
   const coverage = (summary.coverage ?? {}) as Record<string, any>;
   const guard = (summary.guard ?? {}) as Record<string, any>;
+  const heldBack = heldBackOf(summary);
   const spend = (summary.anthropic ?? run?.anthropic ?? {}) as Record<string, any>;
   const m = modelOf(run?.anthropic ?? summary.anthropic);
   const open = run && ["queued", "dispatched", "running"].includes(run.status);
@@ -265,7 +284,7 @@ export function RunSheet({
                 label="withheld"
                 value={guard.withheld ?? guard.blocked ?? "—"}
                 size="sm"
-                note="writes the guard stopped"
+                note="calls the guard held back"
               />
               <MetricCell
                 label="spend"
@@ -312,25 +331,33 @@ export function RunSheet({
               </ul>
             </section>
 
-            {Array.isArray(guard.top) && guard.top.length > 0 && (
+            {heldBack.length > 0 && (
               <section className="space-y-2">
                 <h3 className="label-mono">Held back by the guard</h3>
                 <p className="text-xs text-muted-foreground">
                   Requests the audit refused to send because they could change Prime. A page that
-                  needs one of these to load reads as broken to the audit: allow the function under
-                  Settings if its code only reads.
+                  needs one of these to load reads as broken to the audit. Allow one only when you
+                  know its code only reads: the entry allows exactly the call on its line, on every
+                  run after this one.
                 </p>
-                <ul className="space-y-0.5 font-mono text-[11px]">
-                  {(guard.top as Array<{ endpoint: string; count: number }>)
-                    .slice(0, 12)
-                    .map((t) => (
-                      <li key={t.endpoint} className="flex gap-3">
-                        <span className="w-10 shrink-0 text-right text-muted-foreground">
-                          {t.count}×
-                        </span>
-                        <span className="truncate">{t.endpoint}</span>
-                      </li>
-                    ))}
+                <ul className="space-y-1.5">
+                  {heldBack.slice(0, 12).map((t) => (
+                    <HeldBackLine
+                      key={t.endpoint}
+                      line={t}
+                      status={guardStatus(t, d.guard)}
+                      canAct={d.canAct === true}
+                      pending={allow.isPending}
+                      onAllow={async (entry) => {
+                        const ok = await confirm({
+                          title: `Allow ${entry}?`,
+                          description: `From the next run the audit sends this call to production whenever a page makes it. It was held back because ${t.why ?? "the guard could not show it only reads"}. Allow it only if you know its code only reads; remove it under Settings → The guard.`,
+                          confirmText: "Allow",
+                        });
+                        if (ok) allow.mutate(entry);
+                      }}
+                    />
+                  ))}
                 </ul>
               </section>
             )}
@@ -377,5 +404,61 @@ export function RunSheet({
         )}
       </SheetContent>
     </Sheet>
+  );
+}
+
+/** Whether a held-back line's entry is allowed or blocked now. */
+function guardStatus(
+  line: HeldBack,
+  lists: { allow?: string[]; block?: string[] } | undefined,
+): "allowed" | "blocked" | null {
+  if (!line.entry) return null;
+  const fn = line.entry.split(":")[0];
+  if (lists?.block?.some((b) => b === line.entry || b === fn)) return "blocked";
+  if (lists?.allow?.some((a) => a === line.entry || a === fn)) return "allowed";
+  return null;
+}
+
+function HeldBackLine({
+  line,
+  status,
+  canAct,
+  pending,
+  onAllow,
+}: {
+  line: HeldBack;
+  status: "allowed" | "blocked" | null;
+  canAct: boolean;
+  pending: boolean;
+  onAllow: (entry: string) => void;
+}) {
+  return (
+    <li className="flex items-start gap-3">
+      <span className="w-10 shrink-0 pt-px text-right font-mono text-[11px] text-muted-foreground">
+        {line.count}×
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="font-mono text-[11px] break-all">{line.endpoint}</div>
+        {line.why && <div className="text-[11px] text-muted-foreground">{line.why}</div>}
+      </div>
+      {status ? (
+        <span className="label-mono shrink-0 pt-px text-[10px] text-muted-foreground">
+          {status}
+        </span>
+      ) : (
+        canAct &&
+        line.entry && (
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-6 shrink-0 px-2 text-xs"
+            disabled={pending}
+            onClick={() => onAllow(line.entry!)}
+          >
+            Allow
+          </Button>
+        )
+      )}
+    </li>
   );
 }
