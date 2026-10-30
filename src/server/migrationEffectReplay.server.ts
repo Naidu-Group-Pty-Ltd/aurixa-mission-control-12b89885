@@ -50,7 +50,7 @@ import {
   resolveCloneSecretTarget,
   type CloneSecretTarget,
 } from "./cloneAllowedOrigins.server";
-import { writeAuditLog } from "./audit.server";
+import { notifyOperators, writeAuditLog } from "./audit.server";
 import { rotate } from "./clonePrivilegeRepair.server";
 import { pastDeadline } from "./provisioningBudget";
 import { MAX_DIGEST_BYTES, digestPrimeBodies } from "./primeBodyDigests.server";
@@ -64,16 +64,23 @@ import {
   type ProbeAnswer,
 } from "./migrationEffectProbe.pure";
 import {
+  EFFECT_NOTICE_AUDIT_ACTION,
   EFFECT_REPLAY_AUDIT_ACTION,
   admitBody,
   admitEntry,
   applyStatement,
   buildEffectReport,
+  decideEffectNotice,
+  describeEffectNotice,
   describeReplays,
   describeReport,
   dryRunStatement,
+  effectExposures,
+  exposureKey,
+  exposuresTold,
   failureWords,
   normaliseInstant,
+  notReplayed,
   outcomeAfterApply,
   outcomeOfProbe,
   readApplyFailure,
@@ -82,6 +89,7 @@ import {
   reportComplete,
   settledEarlier,
   type BodiesNotRead,
+  type EffectExposure,
   type EffectReplayEntry,
   type EffectReplayReading,
   type EffectReport,
@@ -517,6 +525,121 @@ function auditMetadataOf(
   };
 }
 
+/**
+ * What became of telling a person about a run's exposures.
+ *
+ * `not_delivered` is a notice owed and not written: the stage leaves its stamp
+ * owed for it, and the hook raises it on its next run, because nothing was
+ * recorded as told.
+ */
+export type EffectNoticeState =
+  | { state: "none" }
+  | { state: "told_before" }
+  | { state: "delivered"; severity: "error" | "warning"; exposures: number; fresh: number }
+  | { state: "not_delivered"; severity: "error" | "warning"; exposures: number };
+
+/**
+ * Tell the operators what a run left without its effect, once per exposure
+ * for this project and stamp (`decideEffectNotice`).
+ *
+ * The record is the audit log, as the privilege sweep keeps its own: a row
+ * under `EFFECT_NOTICE_AUDIT_ACTION` for each notice that landed, written
+ * after it landed. A row lost after a notice landed says it again next run,
+ * which is noise and the safe direction. Never throws: telling is beside the
+ * work, and failing the work over it would be the wrong way round.
+ */
+async function announceEffectExposures(
+  supabase: Db,
+  input: {
+    cloneId: string;
+    cloneName: string | null;
+    projectRef: string;
+    stampedAt: string | null;
+    commit: string | null;
+    exposures: readonly EffectExposure[];
+    /** The build's next pass resumes what this one did not reach. */
+    resumes?: boolean;
+  },
+): Promise<EffectNoticeState> {
+  if (input.exposures.length === 0) return { state: "none" };
+  let told: Set<string> | null = null;
+  try {
+    const { data, error } = await supabase
+      .from("audit_log")
+      .select("metadata")
+      .eq("entity_type", "clone")
+      .eq("entity_id", input.cloneId)
+      .eq("action", EFFECT_NOTICE_AUDIT_ACTION)
+      .order("created_at", { ascending: false })
+      .limit(50);
+    if (!error) {
+      told = exposuresTold(data ?? [], {
+        projectRef: input.projectRef,
+        stampedAt: input.stampedAt,
+      });
+    }
+  } catch {
+    told = null;
+  }
+  const decision = decideEffectNotice({ exposures: input.exposures, told });
+  if (!decision.notify) {
+    return decision.reason === "told_before" ? { state: "told_before" } : { state: "none" };
+  }
+
+  const notice = describeEffectNotice({
+    cloneName: input.cloneName,
+    projectRef: input.projectRef,
+    stampedAt: input.stampedAt,
+    commit: input.commit,
+    exposures: decision.exposures,
+    fresh: decision.fresh,
+    resumes: input.resumes ?? false,
+  });
+  const record = {
+    project_ref: input.projectRef,
+    stamped_at: normaliseInstant(input.stampedAt),
+    prime_sha: input.commit,
+    severity: decision.severity,
+    exposures: decision.exposures.map(exposureKey),
+    fresh: decision.fresh.map(exposureKey),
+  };
+  let landed = false;
+  try {
+    landed = await notifyOperators({
+      // The privilege sweep's kind: something a person must do on a clone,
+      // and one the inbox keeps (`notificationDisposition.ts`).
+      kind: "drift_medium",
+      severity: decision.severity,
+      title: notice.title,
+      body: notice.body,
+      cloneId: input.cloneId,
+      url: `/clones/${input.cloneId}`,
+      metadata: { source: EFFECT_NOTICE_AUDIT_ACTION, ...record },
+    });
+  } catch {
+    landed = false;
+  }
+  if (!landed) {
+    return {
+      state: "not_delivered",
+      severity: decision.severity,
+      exposures: decision.exposures.length,
+    };
+  }
+  await writeAuditLog({
+    action: EFFECT_NOTICE_AUDIT_ACTION,
+    entityType: "clone",
+    entityId: input.cloneId,
+    metadata: record,
+  });
+  return {
+    state: "delivered",
+    severity: decision.severity,
+    exposures: decision.exposures.length,
+    fresh: decision.fresh.length,
+  };
+}
+
 export type EffectStageResult = {
   /** False when an earlier pass settled this project's stamp; nothing was asked of anyone. */
   ran: boolean;
@@ -526,6 +649,8 @@ export type EffectStageResult = {
   stoppedAtDeadline: boolean;
   settled: boolean;
   run?: CloneEffectRun;
+  /** Whether the operators were told what the run left without its effect. */
+  notice?: EffectNoticeState;
 };
 
 /**
@@ -574,7 +699,19 @@ export async function runEffectReplayStage(
     return { ran: false, line: "", stoppedAtDeadline: true, settled: false };
   }
 
-  const refusal = async (why: string): Promise<EffectStageResult> => {
+  const refusal = async (
+    why: string,
+    cloneName: string | null = null,
+  ): Promise<EffectStageResult> => {
+    // Nothing listed was reached, so the clone may lack every approved fix.
+    const notice = await announceEffectExposures(supabase, {
+      cloneId: input.cloneId,
+      cloneName,
+      projectRef: input.projectRef,
+      stampedAt: input.stampedAt,
+      commit: input.expectedSha,
+      exposures: [notReplayed(why)],
+    });
     await writeAuditLog({
       action: EFFECT_REPLAY_AUDIT_ACTION,
       entityType: "clone",
@@ -586,6 +723,7 @@ export async function runEffectReplayStage(
         prime_sha: input.expectedSha,
         settled: false,
         refused: why,
+        notice: notice.state,
       },
     });
     return {
@@ -593,6 +731,7 @@ export async function runEffectReplayStage(
       line: `Migration effects not replayed: ${why} — the next pass asks again`,
       stoppedAtDeadline: false,
       settled: false,
+      notice,
     };
   };
 
@@ -609,13 +748,14 @@ export async function runEffectReplayStage(
   if (target.projectRef !== input.projectRef) {
     return refusal(
       `the clone's row names ${target.projectRef}, not the ${input.projectRef} this pass is building`,
+      target.cloneName,
     );
   }
 
   let prime: PrimeEffects;
   try {
     const source = input.source ?? (await resolvePrimeSource(supabase));
-    if (!source) return refusal("no prime repository is configured");
+    if (!source) return refusal("no prime repository is configured", target.cloneName);
     const remaining = input.deadlineAt === null ? null : input.deadlineAt - Date.now();
     prime = await readPrimeEffects(input.octokit ?? getAppOctokit(), source, {
       expectedSha: input.expectedSha,
@@ -625,25 +765,42 @@ export async function runEffectReplayStage(
           : "this pass had no time left for it; the next pass takes it",
     });
   } catch (e) {
-    return refusal(`the prime could not be read (${msg(e).slice(0, 240)})`);
+    return refusal(`the prime could not be read (${msg(e).slice(0, 240)})`, target.cloneName);
   }
 
   const run = await replayEffectsOnClone(target, prime, {
     deadlineAt: input.deadlineAt,
     dryRun: false,
   });
+  const notice = await announceEffectExposures(supabase, {
+    cloneId: input.cloneId,
+    cloneName: run.cloneName,
+    projectRef: input.projectRef,
+    stampedAt: input.stampedAt,
+    commit: run.commit,
+    exposures: effectExposures(run),
+    resumes: run.stopped,
+  });
+  // A notice owed and not written keeps the stamp owed, so the next pass
+  // raises it again rather than the stamp settling with nobody told.
+  const settled = run.settled && notice.state !== "not_delivered";
   await writeAuditLog({
     action: EFFECT_REPLAY_AUDIT_ACTION,
     entityType: "clone",
     entityId: input.cloneId,
-    metadata: auditMetadataOf(run, { source: "provisioning", stampedAt: input.stampedAt }),
+    metadata: {
+      ...auditMetadataOf(run, { source: "provisioning", stampedAt: input.stampedAt }),
+      settled,
+      notice: notice.state,
+    },
   });
   return {
     ran: true,
     line: describeEffectRun(run),
     stoppedAtDeadline: run.stopped,
-    settled: run.settled,
+    settled,
     run,
+    notice,
   };
 }
 
@@ -657,6 +814,8 @@ export type EffectReplaySweepResult = {
   /** The clone the budget stopped the pass at, if any. */
   pausedAt: string | null;
   refused: Array<{ cloneId: string; reason: string; error: string }>;
+  /** Each clone whose run left an approved fix unconfirmed, and whether the operators were told. */
+  notices: Array<{ cloneId: string } & Exclude<EffectNoticeState, { state: "none" }>>;
 };
 
 /**
@@ -675,7 +834,7 @@ export async function reconcileCloneEffectReplays(
   const dryRun = Boolean(opts.dryRun);
   let q = supabase
     .from("clone_backends")
-    .select("clone_id, status")
+    .select("clone_id, status, schema_verified_at")
     .not("supabase_project_ref", "is", null);
   if (opts.cloneId) q = q.eq("clone_id", opts.cloneId);
   const { data, error } = await q;
@@ -684,7 +843,14 @@ export async function reconcileCloneEffectReplays(
 
   const refused: EffectReplaySweepResult["refused"] = [];
   const candidates: string[] = [];
-  for (const row of (data ?? []) as Array<{ clone_id: string | null; status: string | null }>) {
+  // Each clone's ledger stamp, the key its exposures are told under, as the
+  // stage that built it told them.
+  const stamps = new Map<string, string | null>();
+  for (const row of (data ?? []) as Array<{
+    clone_id: string | null;
+    status: string | null;
+    schema_verified_at?: string | null;
+  }>) {
     if (!row.clone_id) continue;
     if (row.status !== "ready") {
       refused.push({
@@ -695,6 +861,7 @@ export async function reconcileCloneEffectReplays(
       continue;
     }
     candidates.push(row.clone_id);
+    stamps.set(row.clone_id, row.schema_verified_at ?? null);
   }
   candidates.sort();
   if (candidates.length === 0) {
@@ -706,6 +873,7 @@ export async function reconcileCloneEffectReplays(
       runs: [],
       pausedAt: null,
       refused,
+      notices: [],
     };
   }
 
@@ -727,6 +895,7 @@ export async function reconcileCloneEffectReplays(
     runs: [],
     pausedAt: null,
     refused,
+    notices: [],
   };
 
   const minute = Math.floor((opts.now ?? Date.now()) / 60_000);
@@ -748,6 +917,18 @@ export async function reconcileCloneEffectReplays(
     }
     const run = await replayEffectsOnClone(target, prime, { deadlineAt: opts.deadlineAt, dryRun });
     out.runs.push(run);
+    // Told as the stage tells it, under the clone's own stamp, so a run here
+    // after the build's notice repeats nothing that notice said. Nothing for
+    // a dry run (`effectExposures`).
+    const notice = await announceEffectExposures(supabase, {
+      cloneId,
+      cloneName: run.cloneName,
+      projectRef: run.projectRef,
+      stampedAt: stamps.get(cloneId) ?? null,
+      commit: run.commit,
+      exposures: effectExposures(run),
+    });
+    if (notice.state !== "none") out.notices.push({ cloneId, ...notice });
     // The per-clone record of what was done to it. A dry run is somebody
     // looking and answers them; a pass that found every approved file already
     // in effect has nothing to add to the clone's history, and its report
@@ -757,7 +938,10 @@ export async function reconcileCloneEffectReplays(
         action: EFFECT_REPLAY_AUDIT_ACTION,
         entityType: "clone",
         entityId: cloneId,
-        metadata: auditMetadataOf(run, { source: "hook", stampedAt: null }),
+        metadata: {
+          ...auditMetadataOf(run, { source: "hook", stampedAt: null }),
+          notice: notice.state,
+        },
       });
     }
     if (run.stopped) {

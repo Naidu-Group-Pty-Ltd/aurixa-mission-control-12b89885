@@ -7,10 +7,15 @@ import {
   admitEntry,
   applyStatement,
   buildEffectReport,
+  decideEffectNotice,
+  describeEffectNotice,
   describeReplays,
   describeReport,
   dryRunStatement,
+  effectExposures,
+  exposuresTold,
   normaliseInstant,
+  notReplayed,
   outcomeAfterApply,
   outcomeOfProbe,
   readApplyFailure,
@@ -515,5 +520,215 @@ describe("describeReplays", () => {
     expect(line).toContain(
       "1 dry run failed (20270205100000: it refers to a table that does not exist here)",
     );
+  });
+});
+
+describe("telling a person what an approved fix did not do", () => {
+  const outcome = (
+    file: string,
+    status: ReplayOutcome["status"],
+    extra: Partial<ReplayOutcome> = {},
+  ): ReplayOutcome => ({ file, version: file.slice(0, 14), kind: "privilege", status, ...extra });
+  const read = { state: "read" as const };
+
+  it("names every listed file that ended any way but in effect or replayed", () => {
+    const exposures = effectExposures({
+      dryRun: false,
+      manifest: read,
+      outcomes: [
+        outcome("20270204090000_a.sql", "already_in_effect"),
+        outcome("20270205100000_b.sql", "replayed", { applied: true }),
+        outcome("20270206000000_c.sql", "refused", { why: "withdrawn" }),
+        outcome("20270207000000_d.sql", "dry_run_failed", { why: "no role", sqlstate: "42704" }),
+        outcome("20270208000000_e.sql", "apply_failed", { why: "probe false" }),
+        outcome("20270209000000_f.sql", "probe_unreadable", { why: "no answer", transient: true }),
+        outcome("20270210000000_g.sql", "not_reached"),
+      ],
+    });
+    expect(exposures.map((e) => [e.file.slice(15), e.status, e.transient ?? false])).toEqual([
+      ["c.sql", "refused", false],
+      ["d.sql", "dry_run_failed", false],
+      ["e.sql", "apply_failed", false],
+      ["f.sql", "probe_unreadable", true],
+      ["g.sql", "not_reached", true],
+    ]);
+  });
+
+  it("names the manifest where no file could be reached, and nothing for a dry run", () => {
+    expect(
+      effectExposures({
+        dryRun: false,
+        manifest: { state: "unfetched", why: "503" },
+        outcomes: [],
+      }),
+    ).toEqual([
+      { file: EFFECT_REPLAYS_PATH, status: "manifest_unfetched", why: "503", transient: true },
+    ]);
+    expect(
+      effectExposures({
+        dryRun: false,
+        manifest: { state: "unreadable", why: "schema_version 2" },
+        outcomes: [],
+      }),
+    ).toEqual([
+      { file: EFFECT_REPLAYS_PATH, status: "manifest_unreadable", why: "schema_version 2" },
+    ]);
+    // An absent manifest approves nothing, so nothing is owed.
+    expect(effectExposures({ dryRun: false, manifest: { state: "absent" }, outcomes: [] })).toEqual(
+      [],
+    );
+    expect(
+      effectExposures({
+        dryRun: true,
+        manifest: read,
+        outcomes: [outcome("20270207000000_d.sql", "dry_run_failed")],
+      }),
+    ).toEqual([]);
+    expect(notReplayed("the prime could not be read")).toEqual({
+      file: EFFECT_REPLAYS_PATH,
+      status: "not_replayed",
+      why: "the prime could not be read",
+      transient: true,
+    });
+  });
+
+  it("reads what was told for this project and stamp only, the stamp compared as an instant", () => {
+    const records = [
+      {
+        metadata: {
+          project_ref: "p1",
+          stamped_at: "2026-10-29 22:11:49.645+00",
+          exposures: ["a.sql|refused"],
+        },
+      },
+      {
+        metadata: {
+          project_ref: "p1",
+          stamped_at: "2026-10-30T00:00:00.000Z",
+          exposures: ["b.sql|refused"],
+        },
+      },
+      {
+        metadata: {
+          project_ref: "p2",
+          stamped_at: "2026-10-29T22:11:49.645Z",
+          exposures: ["c.sql|refused"],
+        },
+      },
+      { metadata: { project_ref: "p1", stamped_at: null, exposures: ["d.sql|refused"] } },
+      { metadata: null },
+    ];
+    expect([
+      ...exposuresTold(records, { projectRef: "p1", stampedAt: "2026-10-29T22:11:49.645Z" }),
+    ]).toEqual(["a.sql|refused"]);
+    // A clone never stamped is told once too, under no stamp.
+    expect([...exposuresTold(records, { projectRef: "p1", stampedAt: null })]).toEqual([
+      "d.sql|refused",
+    ]);
+  });
+
+  it("tells what was not told before, loudest where a person must change something", () => {
+    const verdict = { file: "a.sql", status: "apply_failed" as const };
+    const reading = { file: "b.sql", status: "not_reached" as const, transient: true };
+    expect(decideEffectNotice({ exposures: [], told: new Set() })).toEqual({
+      notify: false,
+      reason: "nothing_exposed",
+    });
+    expect(
+      decideEffectNotice({ exposures: [verdict], told: new Set(["a.sql|apply_failed"]) }),
+    ).toEqual({ notify: false, reason: "told_before" });
+    expect(decideEffectNotice({ exposures: [reading], told: new Set() })).toMatchObject({
+      notify: true,
+      severity: "warning",
+    });
+    expect(
+      decideEffectNotice({ exposures: [verdict, reading], told: new Set(["a.sql|apply_failed"]) }),
+    ).toMatchObject({ notify: true, severity: "error", fresh: [reading] });
+    // The same file ending another way is told: a budget stop the resumed pass turned into a failure.
+    expect(
+      decideEffectNotice({
+        exposures: [{ ...verdict, status: "dry_run_failed" }],
+        told: new Set(["a.sql|not_reached"]),
+      }),
+    ).toMatchObject({ notify: true });
+    // A record that could not be read is not one that says "told".
+    expect(decideEffectNotice({ exposures: [verdict], told: null })).toMatchObject({
+      notify: true,
+      fresh: [verdict],
+    });
+  });
+
+  it("says each file, how it ended and why, marks what is new, and caps the list", () => {
+    const exposures = Array.from({ length: 14 }, (_, i) => ({
+      file: `2027020${String(i).padStart(7, "0")}_f${i}.sql`,
+      status: "apply_failed" as const,
+      why: `reason ${i}`,
+    }));
+    const text = describeEffectNotice({
+      cloneName: "Orrimere",
+      projectRef: "orrimereorrimereorri",
+      stampedAt: "2026-10-29 22:11:49.645+00",
+      commit: "18685b30892c2f5fcfd1f59ad754a5430fb08145",
+      exposures,
+      fresh: exposures.slice(0, 1),
+    });
+    expect(text.title).toBe(
+      "Orrimere: 14 approved privilege or policy fixes not confirmed in effect",
+    );
+    expect(text.body).toContain(`${EFFECT_REPLAYS_PATH} at 18685b3 approves these files`);
+    expect(text.body).toContain("ledger stamped 2026-10-29T22:11:49.645Z");
+    expect(text.body).toContain(`- ${exposures[0].file}: apply failed — reason 0 (new)`);
+    expect(text.body).toContain(`- ${exposures[1].file}: apply failed — reason 1\n`);
+    expect(text.body).not.toContain(exposures[12].file);
+    expect(text.body).toContain("- and 2 more");
+    expect(text.body).toContain("/hooks/clone-effect-replay");
+
+    const all = describeEffectNotice({
+      cloneName: "Orrimere",
+      projectRef: "orrimereorrimereorri",
+      stampedAt: null,
+      commit: null,
+      exposures: exposures.slice(0, 1),
+      fresh: exposures.slice(0, 1),
+    });
+    // Nothing is marked new when everything is.
+    expect(all.body).not.toContain("(new)");
+    expect(all.body).toContain("ledger not stamped");
+    expect(all.title).toBe("Orrimere: 1 approved privilege or policy fix not confirmed in effect");
+  });
+
+  it("says the build resumes a budget stop only when it does", () => {
+    const stopped = [
+      { file: "20270210090000_c.sql", status: "not_reached" as const, transient: true },
+    ];
+    const base = {
+      cloneName: null,
+      projectRef: "p",
+      stampedAt: null,
+      commit: null,
+      exposures: stopped,
+      fresh: stopped,
+    };
+    const resumed = describeEffectNotice({ ...base, resumes: true });
+    expect(resumed.title).toBe(
+      "A clone: 1 approved privilege or policy fix not confirmed in effect",
+    );
+    expect(resumed.body).toContain("not reached before the budget ran out");
+    expect(resumed.body).toContain("The build's next pass resumes what this one did not reach");
+    expect(describeEffectNotice(base).body).not.toContain("next pass resumes");
+  });
+
+  it("titles a run that reached no file as one that replayed nothing", () => {
+    const text = describeEffectNotice({
+      cloneName: null,
+      projectRef: "p",
+      stampedAt: null,
+      commit: "18685b30892c2f5fcfd1f59ad754a5430fb08145",
+      exposures: [notReplayed("the prime could not be read (503)")],
+      fresh: [notReplayed("the prime could not be read (503)")],
+    });
+    expect(text.title).toBe("A clone: the approved privilege and policy fixes were not replayed");
+    expect(text.body).toContain("not replayed: the prime could not be read (503)");
+    expect(text.body).toContain("may lack every privilege and policy fix the owner approved");
   });
 });

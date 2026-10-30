@@ -739,7 +739,9 @@ export function describeReport(report: EffectReport): string {
   const nr = report.bodiesNotRead;
   const notRead = nr.pastCeiling + nr.beyondFileLimit + nr.failed;
   const notReadParts = [
-    nr.pastCeiling ? `${nr.pastCeiling} past the ${Math.round(nr.ceilingBytes / 1024)} KB read ceiling` : null,
+    nr.pastCeiling
+      ? `${nr.pastCeiling} past the ${Math.round(nr.ceilingBytes / 1024)} KB read ceiling`
+      : null,
     nr.beyondFileLimit ? `${nr.beyondFileLimit} past the number one pass reads` : null,
     nr.failed ? `${nr.failed} failed` : null,
   ].filter((p): p is string => p !== null);
@@ -756,4 +758,234 @@ export function describeReport(report: EffectReport): string {
       : null,
   ].filter((p): p is string => p !== null);
   return `on this clone ${parts.join(", ")} — reported, never repaired`;
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+ * Telling a person.
+ *
+ * A listed file that ends any way but already in effect or replayed leaves
+ * the clone without a fix the owner approved for every clone: refused, a dry
+ * run or an apply that failed, a probe that could not be read, or not reached
+ * when the budget ran out. So does a run that could reach no file at all. The
+ * status line and the stage's row say so, and neither reaches anybody, so
+ * each one is raised as an operator notification, on the path the privilege
+ * sweep raises its own on (`notifyOperators`, `drift_medium`: a thing a
+ * person must do).
+ *
+ * Told once per project and stamp, the key the stage is owed under. Repeated
+ * passes that end the same way say nothing more; a pass that ends a file a
+ * way not yet told says it. The key is each exposure (the file and how it
+ * ended), not the stamp alone, because a stamp lasts: an existing clone keeps
+ * its stamp for months while the hook brings it files approved after its
+ * build, and a budget stop is resumed by a pass that may then fail the apply.
+ * Keyed on the stamp alone, the first notice would silence both.
+ * ──────────────────────────────────────────────────────────────────────── */
+
+/**
+ * The audit action recording each exposure notice that LANDED.
+ *
+ * The record a notice is checked against, as the privilege sweep keeps its
+ * own: one row per notice delivered, never per pass observed, so a notice the
+ * database refused is raised again rather than recorded as told. Not the
+ * notifications themselves, which an operator may purge.
+ */
+export const EFFECT_NOTICE_AUDIT_ACTION = "clone_backend.migration_effects_notice";
+
+/** How a run left an approved fix unconfirmed on a clone. */
+export type ExposureStatus =
+  | Exclude<ReplayStatus, "already_in_effect" | "replayed" | "would_replay">
+  /** The manifest's text could not be used, so no listed file was reached. */
+  | "manifest_unreadable"
+  /** The manifest would not fetch, so no listed file was reached. */
+  | "manifest_unfetched"
+  /** The stage refused before the manifest was read: the clone, its project or the prime. */
+  | "not_replayed";
+
+export type EffectExposure = {
+  /** The listed file, or the manifest's path where no file could be reached. */
+  file: string;
+  status: ExposureStatus;
+  why?: string;
+  /** A reading not taken rather than a verdict: asked again by the next run. */
+  transient?: boolean;
+};
+
+/**
+ * Every approved fix a run leaves unconfirmed. Nothing for a dry run, which is
+ * somebody looking and answers them.
+ */
+export function effectExposures(run: {
+  dryRun: boolean;
+  manifest: { state: EffectReplayReading["state"]; why?: string };
+  outcomes: readonly ReplayOutcome[];
+}): EffectExposure[] {
+  if (run.dryRun) return [];
+  const out: EffectExposure[] = [];
+  if (run.manifest.state === "unreadable" || run.manifest.state === "unfetched") {
+    out.push({
+      file: EFFECT_REPLAYS_PATH,
+      status: run.manifest.state === "unreadable" ? "manifest_unreadable" : "manifest_unfetched",
+      why: run.manifest.why ?? "no reason was recorded",
+      ...(run.manifest.state === "unfetched" ? { transient: true } : {}),
+    });
+  }
+  for (const o of run.outcomes) {
+    if (
+      o.status === "already_in_effect" ||
+      o.status === "replayed" ||
+      o.status === "would_replay"
+    ) {
+      continue;
+    }
+    out.push({
+      file: o.file,
+      status: o.status,
+      ...(o.why ? { why: o.why } : {}),
+      ...(o.transient || o.status === "not_reached" ? { transient: true } : {}),
+    });
+  }
+  return out;
+}
+
+/** The exposure a stage refusal is: no listed file was reached, for this reason. */
+export function notReplayed(why: string): EffectExposure {
+  return { file: EFFECT_REPLAYS_PATH, status: "not_replayed", why, transient: true };
+}
+
+/** The key one exposure is told under, within one project and stamp. */
+export function exposureKey(e: Pick<EffectExposure, "file" | "status">): string {
+  return `${e.file}|${e.status}`;
+}
+
+/** The exposures the notice rows say were told for this project and stamp. */
+export function exposuresTold(
+  records: ReadonlyArray<{ metadata: unknown }>,
+  at: { projectRef: string; stampedAt: string | null },
+): Set<string> {
+  const stamp = normaliseInstant(at.stampedAt);
+  const told = new Set<string>();
+  for (const r of records) {
+    const m = (r.metadata ?? {}) as Record<string, unknown>;
+    if (m.project_ref !== at.projectRef) continue;
+    if (normaliseInstant(typeof m.stamped_at === "string" ? m.stamped_at : null) !== stamp)
+      continue;
+    if (!Array.isArray(m.exposures)) continue;
+    for (const k of m.exposures) if (typeof k === "string") told.add(k);
+  }
+  return told;
+}
+
+export type EffectNoticeDecision =
+  /** Nothing is exposed, or everything exposed was told before for this project and stamp. */
+  | { notify: false; reason: "nothing_exposed" | "told_before" }
+  | {
+      notify: true;
+      /** `error` while any exposure is a verdict a person must change something for. */
+      severity: "error" | "warning";
+      /** Every exposure the run left, each named in the notice. */
+      exposures: EffectExposure[];
+      /** The ones not told before for this project and stamp. */
+      fresh: EffectExposure[];
+    };
+
+/**
+ * Whether this run's exposures are told, and how loudly.
+ *
+ * `told` null is a record that could not be read, and the notice is raised:
+ * at worst it is said twice. The privilege sweep goes the other way, for a
+ * pass every half hour over a standing state; this one runs once a stamp, or
+ * when somebody asks, and what it would otherwise drop is a clone without a
+ * fix.
+ */
+export function decideEffectNotice(input: {
+  exposures: readonly EffectExposure[];
+  told: ReadonlySet<string> | null;
+}): EffectNoticeDecision {
+  if (input.exposures.length === 0) return { notify: false, reason: "nothing_exposed" };
+  const told = input.told;
+  const fresh = told
+    ? input.exposures.filter((e) => !told.has(exposureKey(e)))
+    : [...input.exposures];
+  if (fresh.length === 0) return { notify: false, reason: "told_before" };
+  return {
+    notify: true,
+    severity: input.exposures.some((e) => !e.transient) ? "error" : "warning",
+    exposures: [...input.exposures],
+    fresh,
+  };
+}
+
+const EXPOSURE_WORDS: Readonly<Record<ExposureStatus, string>> = {
+  dry_run_failed: STATUS_WORDS.dry_run_failed,
+  apply_failed: STATUS_WORDS.apply_failed,
+  probe_unreadable: STATUS_WORDS.probe_unreadable,
+  refused: STATUS_WORDS.refused,
+  not_reached: "not reached before the budget ran out",
+  manifest_unreadable: "could not be used",
+  manifest_unfetched: "could not be fetched",
+  not_replayed: "not replayed",
+};
+
+/** The most exposures one notice names; the rest are counted. */
+const NOTICE_LINES = 12;
+
+/** The notice's words. Names, reasons and the remedy; never a body or a probe. */
+export function describeEffectNotice(input: {
+  cloneName: string | null;
+  projectRef: string;
+  stampedAt: string | null;
+  commit: string | null;
+  exposures: readonly EffectExposure[];
+  fresh: readonly EffectExposure[];
+  /** The build's next pass resumes what this one did not reach. */
+  resumes?: boolean;
+}): { title: string; body: string } {
+  const who = input.cloneName ?? "A clone";
+  const stamp = normaliseInstant(input.stampedAt);
+  const where = `project ${input.projectRef}, ${stamp ? `ledger stamped ${stamp}` : "ledger not stamped"}`;
+  const at = input.commit ? ` at ${input.commit.slice(0, 7)}` : "";
+  const remedy =
+    "Once the cause is dealt with, `/hooks/clone-effect-replay` with this clone's id asks the clone again and replays what it may.";
+  const files = input.exposures.filter((e) => e.file !== EFFECT_REPLAYS_PATH);
+
+  if (files.length === 0) {
+    const reasons = input.exposures
+      .map((e) => `${EXPOSURE_WORDS[e.status]}: ${e.why ?? "no reason was recorded"}`)
+      .join("; ");
+    return {
+      title: `${who}: the approved privilege and policy fixes were not replayed`,
+      body:
+        `On this clone (${where}) the files the prime's ${EFFECT_REPLAYS_PATH}${at} approves for ` +
+        `every clone were not replayed (${reasons}), so it may lack every privilege and policy fix ` +
+        `the owner approved. ${remedy}`,
+    };
+  }
+
+  const freshKeys = new Set(input.fresh.map(exposureKey));
+  const marked = input.fresh.length < input.exposures.length;
+  const lines = input.exposures.slice(0, NOTICE_LINES).map((e) => {
+    const isNew = marked && freshKeys.has(exposureKey(e)) ? " (new)" : "";
+    return `- ${e.file}: ${EXPOSURE_WORDS[e.status]}${e.why ? ` — ${e.why}` : ""}${isNew}`;
+  });
+  if (input.exposures.length > NOTICE_LINES) {
+    lines.push(`- and ${input.exposures.length - NOTICE_LINES} more`);
+  }
+  const verdicts = input.exposures.some((e) => !e.transient);
+  const guidance = [
+    verdicts
+      ? "A refused file is corrected on the prime; a failed dry run or apply says above why the file did not take effect here."
+      : "Each is a reading not taken, so the clone may hold the fix; nothing has said so yet.",
+    input.resumes && input.exposures.some((e) => e.status === "not_reached")
+      ? "The build's next pass resumes what this one did not reach, and tells you again only if a file then does not take effect."
+      : null,
+    remedy,
+  ].filter((s): s is string => s !== null);
+  return {
+    title: `${who}: ${plural(files.length, "approved privilege or policy fix", "approved privilege or policy fixes")} not confirmed in effect`,
+    body:
+      `The prime's ${EFFECT_REPLAYS_PATH}${at} approves these files for every clone, and on this ` +
+      `clone (${where}) none of them is confirmed in effect:\n\n${lines.join("\n")}\n\n` +
+      `Until each one is, the clone may lack a privilege or policy fix the owner approved. ` +
+      guidance.join(" "),
+  };
 }

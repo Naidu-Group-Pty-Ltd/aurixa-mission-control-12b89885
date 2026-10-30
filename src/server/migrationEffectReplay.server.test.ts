@@ -57,8 +57,12 @@ const {
   effectSweepIsNoteworthy,
   EFFECT_REPORT_NEEDS_MS,
 } = await import("./migrationEffectReplay.server");
-const { readEffectReplayManifest, EFFECT_REPLAY_AUDIT_ACTION } =
-  await import("./migrationEffectReplay.pure");
+const {
+  readEffectReplayManifest,
+  EFFECT_REPLAY_AUDIT_ACTION,
+  EFFECT_NOTICE_AUDIT_ACTION,
+  EFFECT_REPLAYS_PATH,
+} = await import("./migrationEffectReplay.pure");
 const { MAX_DIGEST_BYTES } = await import("./primeBodyDigests.server");
 
 const SHA = "18685b30892c2f5fcfd1f59ad754a5430fb08145";
@@ -228,16 +232,29 @@ function fakePrime(
   }));
 }
 
-/** Mission Control's own tables: the stage's audit rows, and the clone list. */
+/**
+ * Mission Control's own tables: the stage's audit rows, the notice rows (by
+ * their own action, as the engine asks for them), and the clone list.
+ */
 function fakeSupabase(
   opts: {
     records?: Array<Record<string, unknown>>;
+    notices?: Array<Record<string, unknown>>;
+    /** The notice rows could not be read. */
+    noticesError?: string;
     backends?: Array<Record<string, unknown>>;
   } = {},
 ) {
   const from = (table: string) => {
     const filters: Array<[string, unknown]> = [];
     const result = () => {
+      if (
+        table === "audit_log" &&
+        filters.some(([c, v]) => c === "action" && v === EFFECT_NOTICE_AUDIT_ACTION)
+      ) {
+        if (opts.noticesError) return { data: null, error: { message: opts.noticesError } };
+        return { data: (opts.notices ?? []).map((m) => ({ metadata: m })), error: null };
+      }
       if (table === "audit_log")
         return { data: (opts.records ?? []).map((m) => ({ metadata: m })), error: null };
       if (table === "clone_backends") {
@@ -267,6 +284,19 @@ const stageInput = (over: Partial<Parameters<typeof runEffectReplayStage>[1]> = 
   deadlineAt: null,
   ...over,
 });
+
+/** The rows written under one audit action, by their metadata. */
+const rowsUnder = (action: string) =>
+  audit.writeAuditLog.mock.calls
+    .map((c) => c[0] as { action: string; metadata: Record<string, unknown> })
+    .filter((r) => r.action === action)
+    .map((r) => r.metadata);
+
+/** Every notice raised, as `notifyOperators` was given it. */
+const noticesRaised = () =>
+  (audit.notifyOperators.mock.calls as unknown as Array<[Record<string, unknown>]>).map(
+    (c) => c[0],
+  );
 
 const kinds = () =>
   sent.map((s) =>
@@ -515,7 +545,7 @@ describe("what the stage refuses", () => {
     const r = await runEffectReplayStage(fakeSupabase(), stageInput());
     expect(sql.runSqlOnProject).not.toHaveBeenCalled();
     expect(r.settled).toBe(false);
-    expect(audit.writeAuditLog).toHaveBeenCalledTimes(1);
+    expect(rowsUnder(EFFECT_REPLAY_AUDIT_ACTION)).toHaveLength(1);
   });
 
   it("reads nothing at a commit other than the one the pass was built from", async () => {
@@ -604,6 +634,7 @@ describe("/hooks/clone-effect-replay against clones that exist", () => {
     ]);
     expect(inEffect.has("a")).toBe(false);
     expect(audit.writeAuditLog).not.toHaveBeenCalled();
+    expect(audit.notifyOperators).not.toHaveBeenCalled();
     expect(effectSweepIsNoteworthy(out)).toBe(false);
   });
 
@@ -649,5 +680,256 @@ describe("/hooks/clone-effect-replay against clones that exist", () => {
     expect(row.action).toBe(EFFECT_REPLAY_AUDIT_ACTION);
     expect(row.metadata).toMatchObject({ source: "hook", stamped_at: null });
     expect(effectSweepIsNoteworthy(out)).toBe(true);
+  });
+});
+
+/**
+ * A listed file that ends any way but already in effect or replayed leaves the
+ * clone without a fix the owner approved for every clone, and the status line
+ * and the stage's row reach nobody. So it is raised as an operator
+ * notification, once per exposure for the project and stamp.
+ */
+describe("telling the operators what an approved fix did not do", () => {
+  const ineffective = (f: File): File => ({ ...f, behaviour: "ineffective" });
+
+  it("tells them once, as an error, when an approved file did not take effect on a new clone", async () => {
+    const a = ineffective(A);
+    fakeClone([a, C]);
+    fakePrime([a, C]);
+    const r = await runEffectReplayStage(fakeSupabase(), stageInput());
+
+    expect(noticesRaised()).toHaveLength(1);
+    const n = noticesRaised()[0];
+    expect(n).toMatchObject({
+      kind: "drift_medium",
+      severity: "error",
+      cloneId: ORRIMERE.cloneId,
+      url: `/clones/${ORRIMERE.cloneId}`,
+      title: `${ORRIMERE.cloneName}: 1 approved privilege or policy fix not confirmed in effect`,
+    });
+    expect(n.body).toContain(
+      `- ${A.name}: dry run failed — the file ran in the dry run and its probe still returned no row`,
+    );
+    expect(n.body).toContain(`project ${ORRIMERE.projectRef}, ledger stamped ${STAMP}`);
+    expect(n.body).not.toContain(C.name);
+    // Recorded as told once it landed, under the notice's own action.
+    expect(rowsUnder(EFFECT_NOTICE_AUDIT_ACTION)).toEqual([
+      expect.objectContaining({
+        project_ref: ORRIMERE.projectRef,
+        stamped_at: STAMP,
+        prime_sha: SHA,
+        severity: "error",
+        exposures: [`${A.name}|dry_run_failed`],
+      }),
+    ]);
+    expect(r.notice).toEqual({ state: "delivered", severity: "error", exposures: 1, fresh: 1 });
+    expect(r.settled).toBe(true);
+    expect(rowsUnder(EFFECT_REPLAY_AUDIT_ACTION)[0]).toMatchObject({
+      settled: true,
+      notice: "delivered",
+    });
+  });
+
+  it("tells nobody when every approved file is in effect or replayed", async () => {
+    fakeClone([A, B]);
+    fakePrime([A, B]);
+    inEffect.add("b");
+    const r = await runEffectReplayStage(fakeSupabase(), stageInput());
+    expect(audit.notifyOperators).not.toHaveBeenCalled();
+    expect(rowsUnder(EFFECT_NOTICE_AUDIT_ACTION)).toEqual([]);
+    expect(r.notice).toEqual({ state: "none" });
+  });
+
+  it("raises a reading not taken as a warning, and a pass that ends the same way says nothing more", async () => {
+    const locked = { ...A, behaviour: "lock" as const };
+    fakeClone([locked]);
+    fakePrime([locked]);
+    const first = await runEffectReplayStage(fakeSupabase(), stageInput());
+    expect(first.settled).toBe(false);
+    expect(noticesRaised()).toHaveLength(1);
+    expect(noticesRaised()[0]).toMatchObject({ severity: "warning" });
+    expect(noticesRaised()[0].body).toContain(`- ${A.name}: dry run failed`);
+    expect(noticesRaised()[0].body).toContain("nothing has said so yet");
+
+    // Owed again, and the next pass of the build ends the same way.
+    const records = rowsUnder(EFFECT_REPLAY_AUDIT_ACTION);
+    const notices = rowsUnder(EFFECT_NOTICE_AUDIT_ACTION);
+    const second = await runEffectReplayStage(fakeSupabase({ records, notices }), stageInput());
+    expect(second.ran).toBe(true);
+    expect(noticesRaised()).toHaveLength(1);
+    expect(second.notice).toEqual({ state: "told_before" });
+  });
+
+  it("tells a file the budget did not reach, and then only what the resumed pass ends differently", async () => {
+    let clock = 1_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => clock);
+    const c = ineffective(C);
+    fakeClone([A, c]);
+    fakePrime([A, c]);
+    onApply = () => {
+      clock += 60_000;
+    };
+    const first = await runEffectReplayStage(
+      fakeSupabase(),
+      stageInput({ deadlineAt: clock + EFFECT_REPORT_NEEDS_MS + 1_000 }),
+    );
+    expect(first.stoppedAtDeadline).toBe(true);
+    expect(noticesRaised()).toHaveLength(1);
+    expect(noticesRaised()[0]).toMatchObject({ severity: "warning" });
+    expect(noticesRaised()[0].body).toContain(`- ${C.name}: not reached before the budget ran out`);
+    expect(noticesRaised()[0].body).toContain(
+      "The build's next pass resumes what this one did not reach",
+    );
+
+    const records = rowsUnder(EFFECT_REPLAY_AUDIT_ACTION);
+    const notices = rowsUnder(EFFECT_NOTICE_AUDIT_ACTION);
+    onApply = () => {};
+    const second = await runEffectReplayStage(
+      fakeSupabase({ records, notices }),
+      stageInput({ deadlineAt: clock + 45_000 }),
+    );
+    expect(second.run?.outcomes.map((o) => o.status)).toEqual([
+      "already_in_effect",
+      "dry_run_failed",
+    ]);
+    expect(noticesRaised()).toHaveLength(2);
+    expect(noticesRaised()[1]).toMatchObject({ severity: "error" });
+    expect(noticesRaised()[1].body).toContain(`- ${C.name}: dry run failed`);
+    expect(rowsUnder(EFFECT_NOTICE_AUDIT_ACTION)[1]).toMatchObject({
+      exposures: [`${C.name}|dry_run_failed`],
+      fresh: [`${C.name}|dry_run_failed`],
+    });
+  });
+
+  it("keeps the stamp owed when the notice could not be written, and raises it on the next pass", async () => {
+    const a = ineffective(A);
+    fakeClone([a]);
+    fakePrime([a]);
+    audit.notifyOperators.mockResolvedValueOnce(false);
+    const first = await runEffectReplayStage(fakeSupabase(), stageInput());
+    expect(first.notice).toEqual({ state: "not_delivered", severity: "error", exposures: 1 });
+    expect(first.settled).toBe(false);
+    expect(rowsUnder(EFFECT_NOTICE_AUDIT_ACTION)).toEqual([]);
+    expect(rowsUnder(EFFECT_REPLAY_AUDIT_ACTION)[0]).toMatchObject({
+      settled: false,
+      notice: "not_delivered",
+    });
+
+    const records = rowsUnder(EFFECT_REPLAY_AUDIT_ACTION);
+    const second = await runEffectReplayStage(fakeSupabase({ records }), stageInput());
+    expect(second.ran).toBe(true);
+    expect(second.notice).toMatchObject({ state: "delivered" });
+    expect(second.settled).toBe(true);
+    expect(noticesRaised()).toHaveLength(2);
+  });
+
+  it("tells them when the stage reached no file at all, once for the stamp", async () => {
+    target.resolveCloneSecretTarget.mockRejectedValue(new Error("names the prime"));
+    const first = await runEffectReplayStage(fakeSupabase(), stageInput());
+    expect(noticesRaised()).toHaveLength(1);
+    expect(noticesRaised()[0]).toMatchObject({
+      kind: "drift_medium",
+      severity: "warning",
+      title: "A clone: the approved privilege and policy fixes were not replayed",
+    });
+    expect(noticesRaised()[0].body).toContain("names the prime");
+    expect(first.notice).toMatchObject({ state: "delivered", severity: "warning" });
+    expect(rowsUnder(EFFECT_NOTICE_AUDIT_ACTION)[0]).toMatchObject({
+      exposures: [`${EFFECT_REPLAYS_PATH}|not_replayed`],
+    });
+
+    const notices = rowsUnder(EFFECT_NOTICE_AUDIT_ACTION);
+    await runEffectReplayStage(fakeSupabase({ notices }), stageInput());
+    expect(noticesRaised()).toHaveLength(1);
+  });
+
+  it("tells them rather than staying silent when the record of what was told cannot be read", async () => {
+    const a = ineffective(A);
+    fakeClone([a]);
+    fakePrime([a]);
+    const notices = [
+      {
+        project_ref: ORRIMERE.projectRef,
+        stamped_at: STAMP,
+        exposures: [`${A.name}|dry_run_failed`],
+      },
+    ];
+    await runEffectReplayStage(fakeSupabase({ notices, noticesError: "timeout" }), stageInput());
+    expect(noticesRaised()).toHaveLength(1);
+  });
+
+  describe("from /hooks/clone-effect-replay", () => {
+    const ready = [
+      {
+        clone_id: ORRIMERE.cloneId,
+        status: "ready",
+        // As PostgREST spells the stamp the build recorded.
+        schema_verified_at: "2026-10-29 22:11:49.645+00",
+      },
+    ];
+
+    it("repeats nothing the build already told, under the clone's own stamp", async () => {
+      const a = ineffective(A);
+      fakeClone([a]);
+      fakePrime([a]);
+      await runEffectReplayStage(fakeSupabase(), stageInput());
+      expect(noticesRaised()).toHaveLength(1);
+
+      const notices = rowsUnder(EFFECT_NOTICE_AUDIT_ACTION);
+      const out = await reconcileCloneEffectReplays(fakeSupabase({ backends: ready, notices }), {
+        deadlineAt: Date.now() + 45_000,
+      });
+      expect(out.runs[0].outcomes[0].status).toBe("dry_run_failed");
+      expect(noticesRaised()).toHaveLength(1);
+      expect(out.notices).toEqual([{ cloneId: ORRIMERE.cloneId, state: "told_before" }]);
+    });
+
+    it("tells a file approved after the build, and marks it new beside what was told", async () => {
+      const a = ineffective(A);
+      const b = ineffective(B);
+      fakeClone([a, b]);
+      fakePrime([a, b]);
+      const notices = [
+        {
+          project_ref: ORRIMERE.projectRef,
+          stamped_at: STAMP,
+          exposures: [`${A.name}|dry_run_failed`],
+        },
+      ];
+      const out = await reconcileCloneEffectReplays(fakeSupabase({ backends: ready, notices }), {
+        deadlineAt: Date.now() + 45_000,
+      });
+      expect(noticesRaised()).toHaveLength(1);
+      const n = noticesRaised()[0];
+      expect(n).toMatchObject({
+        severity: "error",
+        title: `${ORRIMERE.cloneName}: 2 approved privilege or policy fixes not confirmed in effect`,
+      });
+      expect(n.body).toMatch(new RegExp(`- ${B.name}: dry run failed — [^\\n]*\\(new\\)`));
+      expect(n.body).not.toMatch(new RegExp(`- ${A.name}: [^\\n]*\\(new\\)`));
+      expect(out.notices).toEqual([
+        {
+          cloneId: ORRIMERE.cloneId,
+          state: "delivered",
+          severity: "error",
+          exposures: 2,
+          fresh: 1,
+        },
+      ]);
+      expect(rowsUnder(EFFECT_REPLAY_AUDIT_ACTION)[0]).toMatchObject({ notice: "delivered" });
+    });
+
+    it("tells nobody about a dry run, whatever it found", async () => {
+      const a = ineffective(A);
+      fakeClone([a]);
+      fakePrime([a]);
+      const out = await reconcileCloneEffectReplays(fakeSupabase({ backends: ready }), {
+        deadlineAt: Date.now() + 45_000,
+        dryRun: true,
+      });
+      expect(out.runs[0].outcomes[0].status).toBe("dry_run_failed");
+      expect(audit.notifyOperators).not.toHaveBeenCalled();
+      expect(out.notices).toEqual([]);
+    });
   });
 });
