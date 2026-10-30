@@ -154,3 +154,22 @@ export const LIBRARY_AT_83A3218: readonly string[] = [
   "white-label",
   "workflow",
 ];
+
+/**
+ * The library the follow settles once detection stops reading test files as
+ * routes (`isTestFile`, 29 Oct 2026). Replayed at prime@8312990: the two
+ * modules made of specs go, the three the follow had archived come back
+ * (`builder-portal`, `cloudflare-management`, `backend-conversation`), and two
+ * pages that had been filed as shared become modules of their own
+ * (`builder-stock-property`, `public-passport`). 146 modules.
+ */
+export const LIBRARY_AFTER_TEST_ROUTE_FIX: readonly string[] = [
+  ...LIBRARY_AT_83A3218.filter(
+    (s) => s !== "-tests-" && s !== "bc-segment-engine-admin.security.test",
+  ),
+  "backend-conversation",
+  "builder-portal",
+  "builder-stock-property",
+  "cloudflare-management",
+  "public-passport",
+].sort();

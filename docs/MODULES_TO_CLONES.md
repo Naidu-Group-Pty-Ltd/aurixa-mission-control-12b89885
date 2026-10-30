@@ -157,6 +157,25 @@ prime by itself (D19). A feature merged there arrives with no place, and
 `unplacedModules` lists it on the Pricing page (`getModuleMap`) until it is
 placed. A failed library read says so rather than reporting nothing unplaced.
 
+**Detection reads no test file as a route** (`isTestFile`, 29 Oct 2026). It
+had taken every file under `src/pages/` for one, and the prime keeps specs
+there, so two modules were made of specs (`-tests-`,
+`bc-segment-engine-admin.security.test`) and every page a spec imports was
+filed as shared, in platform-core. Replayed at prime@8312990 with the fix, the
+library holds 146 modules (`LIBRARY_AFTER_TEST_ROUTE_FIX`): the two spec
+modules go, and five are placed by their prime gates.
+
+| module | what it is | placed with |
+| --- | --- | --- |
+| `builder-portal` | `/admin/builder-portal/:tab`, guarded by `listings` | `listings` |
+| `builder-stock-property` | `/listings/builder-stock/:stockItemId`, guarded by `listings` | `listings` |
+| `cloudflare-management` | `/cloudflare`, superadmin only | the shell |
+| `public-passport` | `/passport/:token`, the Compliance Passport a grant link opens | `aml` |
+| `backend-conversation` | `conversation-sync-cron`, the GoHighLevel conversation sync that runs | `integrations`, beside `backend-ghl` |
+
+The follow applies the fix at the first prime merge after Mission Control is
+published: two archives, against its limit of max(10, a quarter of 143).
+
 ## What "installing a module" actually does
 
 Three different mechanisms, one per artefact kind — and knowing which is

@@ -20,7 +20,7 @@ import {
   libraryModulesOfAmlBundle,
 } from "./module-mapping";
 import { AML_BUNDLED_MODULES, MODULES } from "./aurixa-catalog";
-import { LIBRARY_AT_83A3218 } from "./liveLibrary.fixture";
+import { LIBRARY_AFTER_TEST_ROUTE_FIX, LIBRARY_AT_83A3218 } from "./liveLibrary.fixture";
 
 /** Stand-in for the detected catalogue, covering the shapes that matter. */
 const KNOWN = new Set([
@@ -660,6 +660,54 @@ describe("the partner portals AML/CTF brings (29 Oct 2026)", () => {
   });
 });
 
+describe("placement once detection stops reading tests as routes", () => {
+  /** The library the follow settles with `isTestFile`: 146 modules. */
+  const NEXT = new Set(LIBRARY_AFTER_TEST_ROUTE_FIX);
+
+  it("is the library at prime@83a3218, less the two spec modules, plus five", () => {
+    expect(NEXT.size).toBe(146);
+    expect(NEXT.has("-tests-")).toBe(false);
+    expect(NEXT.has("bc-segment-engine-admin.security.test")).toBe(false);
+  });
+
+  it("places every module, each where the prime gates it", () => {
+    expect(unplacedModules(NEXT)).toEqual([]);
+    expect(MODULE_COMPANIONS).toMatchObject({
+      "builder-portal": "listings",
+      "builder-stock-property": "listings",
+      "cloudflare-management": "platform-core",
+      "public-passport": "aml",
+      "backend-conversation": "integrations",
+    });
+  });
+
+  it("puts the public Compliance Passport with AML/CTF, and out with its exclusion", () => {
+    const launch = resolveEntitledModules({ planSlug: "launch", knownModules: NEXT });
+    expect(launch.moduleSlugs).toContain("public-passport");
+    const without = applyContractExclusions(launch, ["aml-ctf"], { knownModules: NEXT });
+    expect(without.moduleSlugs).not.toContain("public-passport");
+  });
+
+  it("puts the Builder Portal pages with Listings, Cloudflare in the shell, and the sync with Integrations", () => {
+    const launch = resolveEntitledModules({ planSlug: "launch", knownModules: NEXT });
+    const scale = resolveEntitledModules({ planSlug: "scale", knownModules: NEXT });
+    expect(launch.moduleSlugs).toContain("cloudflare-management");
+    // Listings is Scale's, through the Opportunity Marketplace, or bought.
+    for (const slug of ["builder-portal", "builder-stock-property"]) {
+      expect(launch.moduleSlugs, slug).not.toContain(slug);
+      expect(scale.moduleSlugs, slug).toContain(slug);
+    }
+    const bought = resolveEntitledModules({
+      planSlug: "launch",
+      purchasedAddons: ["opportunity-marketplace", "integrations"],
+      knownModules: NEXT,
+    });
+    for (const slug of ["builder-portal", "builder-stock-property", "backend-conversation"]) {
+      expect(bought.moduleSlugs, slug).toContain(slug);
+    }
+  });
+});
+
 describe("placement", () => {
   /** Production's library at prime@83a3218, as the follow settled it. */
   const LIVE = new Set(LIBRARY_AT_83A3218);
@@ -767,9 +815,11 @@ describe("placement", () => {
   });
 
   it("names only modules production holds, so a typo cannot hide a gap", () => {
+    // Or will hold, once the follow settles detection's test-file fix.
+    const held = new Set([...LIVE, ...LIBRARY_AFTER_TEST_ROUTE_FIX]);
     for (const [companion, anchor] of Object.entries(MODULE_COMPANIONS)) {
-      expect(LIVE.has(companion), companion).toBe(true);
-      expect(LIVE.has(anchor), `${companion} → ${anchor}`).toBe(true);
+      expect(held.has(companion), companion).toBe(true);
+      expect(held.has(anchor), `${companion} → ${anchor}`).toBe(true);
     }
   });
 
