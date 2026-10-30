@@ -4,24 +4,33 @@
  *
  * Flow:
  *  1. Authenticate the caller via its current key (scope `clones:rotate`).
- *  2. Mint a new key (same clone, same scopes).
- *  3. Schedule the old key for revocation after `grace_hours` (default 1h).
- *  4. Insert a notification on Mission Control with the new key prefix +
- *     full secret (one-time reveal) so operators can see the rotation live.
- *  5. Fire the `tokens.key.rotated` webhook to every subscribed endpoint.
+ *  2. Mint a new key (same clone, same scopes; the link key stays the link key).
+ *  3. Deliver it into the clone's function environment, and record it there.
+ *  4. Only then schedule the old key for revocation after `grace_hours`
+ *     (default 1h). A delivery that fails revokes the NEW key and leaves the
+ *     old one exactly as it was.
+ *  5. Notify operators with the new key's prefix, and fire the
+ *     `tokens.key.rotated` webhook to every subscribed endpoint.
+ *
+ * Mission Control delivers the key itself (key audit S5). The clone's own
+ * `mission-control-rotate-key` function was meant to store it and cannot:
+ * writing a project secret needs a management token, and a clone never holds
+ * one. Measured 30 Oct 2026, a rotation from any clone minted a key nobody
+ * received and revoked the old one an hour later, until the link pass minted
+ * a third. So the plaintext never leaves Mission Control now: the response
+ * carries the prefix and `delivered_to`, never the key.
  *
  * The rotated key is NOT written back into the clone's repository. That step
  * existed and is deleted: nothing anywhere read `.aurixa/credentials.json`,
  * and every write of it left a plaintext credential in git history that no
- * later commit removes. The caller receives the new key in this response,
- * which is the channel it asked on.
- *
- * Returns the new key plaintext exactly once to the caller.
+ * later commit removes.
  */
 import { createFileRoute } from "@tanstack/react-router";
 import { z } from "zod";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { generateApiKey, jsonResponse, resolveCloneApiKey } from "@/server/clone-api-keys.server";
+import { deliverRotatedLinkKey } from "@/server/rotatedLinkKey.server";
+import { MISSION_CONTROL_LINK_KEY_LABEL } from "@/server/missionControlLink.pure";
 import { notifyOperators, writeAuditLog } from "@/server/audit.server";
 import { fireTokenWebhook } from "@/server/token-webhooks.server";
 import { checkRateLimit } from "@/server/token-rate-limit.server";
@@ -84,7 +93,12 @@ export const Route = createFileRoute("/api/public/clones/rotate-key")({
           .from("clone_api_keys")
           .insert({
             clone_id: current.clone_id,
-            label: parsed.data.label ?? `${current.label ?? "key"} (self-rotated)`,
+            // The link key stays the link key, so the link pass keeps its scopes.
+            label:
+              parsed.data.label ??
+              (current.label === MISSION_CONTROL_LINK_KEY_LABEL
+                ? MISSION_CONTROL_LINK_KEY_LABEL
+                : `${current.label ?? "key"} (self-rotated)`),
             scopes: current.scopes,
             key_hash: hash,
             key_prefix: prefix,
@@ -96,6 +110,27 @@ export const Route = createFileRoute("/api/public/clones/rotate-key")({
           return jsonResponse({ ok: false, error: ins.error?.message ?? "insert_failed" }, 500);
         }
         const newId = ins.data.id;
+
+        // Delivered before the old key's life is ended: a clone that never
+        // received its new key keeps the one it holds.
+        const delivered = await deliverRotatedLinkKey(supabaseAdmin, current.clone_id, newId, raw);
+        if (!delivered.ok) {
+          const { error: undoErr } = await supabaseAdmin
+            .from("clone_api_keys")
+            .update({ revoked_at: new Date().toISOString() })
+            .eq("id", newId);
+          return jsonResponse(
+            {
+              ok: false,
+              error: "delivery_failed",
+              detail: undoErr
+                ? `The new key could not be delivered (${delivered.error}), and could not be revoked either: revoke key ${prefix}… from Mission Control. The current key is unchanged.`
+                : `The new key could not be delivered (${delivered.error}) and was revoked. The current key is unchanged.`,
+            },
+            502,
+          );
+        }
+
         const revokeAt = new Date(Date.now() + parsed.data.grace_hours * 3600_000).toISOString();
         // The write that ends the old key's life. Discarded, a failure leaves
         // BOTH keys live for ever while the caller is handed the new one and
@@ -135,8 +170,8 @@ export const Route = createFileRoute("/api/public/clones/rotate-key")({
             old_key_id: current.id,
             new_key_id: newId,
             new_key_prefix: prefix,
-            // SECURITY: the raw key is intentionally NOT stored here.
-            // It is returned exactly once in the HTTP response (see below).
+            // SECURITY: the raw key is intentionally NOT stored here, and is
+            // not returned either: it went straight to the clone's environment.
             revoke_at: revokeAt,
             grace_hours: parsed.data.grace_hours,
             reason: parsed.data.reason ?? null,
@@ -173,11 +208,11 @@ export const Route = createFileRoute("/api/public/clones/rotate-key")({
 
         return jsonResponse({
           ok: true,
-          key: raw,
           key_prefix: prefix,
           new_key_id: newId,
           old_key_id: current.id,
           revoke_at: revokeAt,
+          delivered_to: "function_environment",
         });
       },
       OPTIONS: async () => {
