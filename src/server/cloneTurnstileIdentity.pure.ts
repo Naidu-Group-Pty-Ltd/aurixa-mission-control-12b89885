@@ -101,6 +101,74 @@ export function isPrimeSiteKey(siteKey: string | null, primeSiteKey: string | nu
   return siteKey.trim() === primeSiteKey.trim();
 }
 
+// ─── Cloudflare's test pair — for a demo, never a customer ───────────
+
+/**
+ * Cloudflare's published always-pass test pair.
+ *
+ * A browser that automation drives cannot pass the managed check: the widget
+ * asks a person to tick it and does not accept the tick. Measured on NPC Test
+ * (V-08) and on `tutorial-demo-orrimere-c158c7` (30 Oct 2026, headed Chromium
+ * on Xvfb, three ticks, Sign In disabled for 90 s). The tutorial programme
+ * records every lesson that way. Cloudflare publishes a pair for exactly
+ * this: a site key whose visible widget always issues its dummy token, and a
+ * secret against which that token verifies.
+ *
+ * A clone on it has no CAPTCHA at all, which is why the pair is refused for
+ * anything a customer signs in to ({@link testPairRefusal}), why the panel
+ * says so for as long as it stands, and why restoring a real widget is one
+ * press. Both values are published by Cloudflare for testing; neither is a
+ * credential, so they are stated here.
+ *
+ * Kept in the existing columns: the site key IS the marker. No status of its
+ * own, so every reader that does not know about the pair reads a provisioned
+ * identity, which is what the clone has.
+ */
+export const TURNSTILE_TEST_SITE_KEY = "1x00000000000000000000AA";
+export const TURNSTILE_TEST_SECRET = "1x0000000000000000000000000000000AA";
+export const TURNSTILE_TEST_PAIR_NAME = "Cloudflare test pair (always passes)";
+
+export function isTestSiteKey(siteKey: string | null | undefined): boolean {
+  return (siteKey ?? "").trim() === TURNSTILE_TEST_SITE_KEY;
+}
+
+/**
+ * Why this clone may not be put on the test pair, or null when it may.
+ *
+ * The rule is the programme's: never the prime, never a workspace a customer
+ * signs in to. The prime is refused where every clone-secret write is refused,
+ * by `resolveCloneSecretTarget`. A customer is read from what Mission Control
+ * records about money and entitlement — a Stripe customer, or a plan the clone
+ * is entitled to — and the clone must also be marked a demo by its operator.
+ * Measured 30 Oct 2026: every clone but the tutorial demo is entitled to a
+ * plan, and the demo is tagged `demo`.
+ */
+export function testPairRefusal(clone: {
+  billing_stripe_customer_id: string | null;
+  entitled_plan_slug: string | null;
+  tags: readonly string[] | null;
+}): string | null {
+  if (clone.billing_stripe_customer_id) {
+    return (
+      "This clone has a Stripe customer, so it is somebody's workspace: its sign-in keeps a " +
+      "real security check."
+    );
+  }
+  if (clone.entitled_plan_slug) {
+    return (
+      `This clone is entitled to the ${clone.entitled_plan_slug} plan, so it is somebody's ` +
+      "workspace: its sign-in keeps a real security check."
+    );
+  }
+  if (!(clone.tags ?? []).includes("demo")) {
+    return (
+      "Only a clone tagged demo may use the test pair, which turns its security check off. Tag " +
+      "it on the clone page first if it is one."
+    );
+  }
+  return null;
+}
+
 // ─── Readiness — the server owns "what next" ─────────────────────────
 
 export type TurnstileStepId =
@@ -120,6 +188,8 @@ export type TurnstileReadiness = {
   steps: TurnstileStep[];
   next: TurnstileStepId | null;
   live: boolean;
+  /** On Cloudflare's always-pass test pair: live, and no security check. */
+  testPair: boolean;
 };
 
 /**
@@ -151,9 +221,11 @@ export function turnstileReadiness(
   push(
     "widget",
     Boolean(row?.site_key),
-    row?.site_key
-      ? `Widget ${row.site_key} covers ${row.domains.join(", ") || "no domain"}`
-      : "Create this clone's own Turnstile widget",
+    isTestSiteKey(row?.site_key)
+      ? "Cloudflare's test pair: every sign-in passes, automated or not, until a real widget is restored"
+      : row?.site_key
+        ? `Widget ${row.site_key} covers ${row.domains.join(", ") || "no domain"}`
+        : "Create this clone's own Turnstile widget",
   );
   push(
     "secret_written",
@@ -178,7 +250,7 @@ export function turnstileReadiness(
   );
 
   const next = steps.find((s) => s.state === "open")?.id ?? null;
-  return { steps, next, live: next === null };
+  return { steps, next, live: next === null, testPair: isTestSiteKey(row?.site_key) };
 }
 
 /**
@@ -195,6 +267,13 @@ export function canRotateSecret(row: TurnstileIdentityRow | null): {
   }
   if (row.status === "revoked") {
     return { ok: false, reason: "This clone's widget was revoked — provision a new one instead" };
+  }
+  if (isTestSiteKey(row.site_key)) {
+    return {
+      ok: false,
+      reason:
+        "This clone is on Cloudflare's test pair, which has no secret to rotate — restore a real widget instead",
+    };
   }
   return { ok: true };
 }
@@ -240,6 +319,8 @@ export type TurnstileSweepSkip =
   | "no_hostname_yet"
   | "backend_not_ready"
   | "revoked"
+  /** On Cloudflare's test pair, which an operator chose and only an operator ends. */
+  | "test_pair"
   | "cooling_off"
   | "complete";
 
@@ -261,6 +342,11 @@ export function decideTurnstileSweep(facts: TurnstileSweepFacts): TurnstileSweep
   // that as a gap and hand it back — the same reason `decideRedeploy` refuses
   // to rebuild a `detached` deployment.
   if (id?.status === "revoked") return { act: false, reason: "revoked" };
+
+  // An operator put this clone on Cloudflare's test pair. There is no widget
+  // at Cloudflare to adopt, re-check or rotate, and replacing it would undo a
+  // decision the sweep has no standing to make — the same reason as above.
+  if (isTestSiteKey(id?.site_key)) return { act: false, reason: "test_pair" };
 
   // The secret has to land somewhere: it is written to the clone's own
   // Supabase project, so without a usable backend there is nothing to write

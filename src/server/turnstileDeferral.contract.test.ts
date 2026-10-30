@@ -37,6 +37,14 @@ function code(source: string): string {
 
 const SRC = code(SERVER);
 
+/** One exported function's body, up to the next export. */
+function fnBody(name: string): string {
+  const at = SRC.indexOf(`export async function ${name}(`);
+  expect(at, `${name} must exist`).toBeGreaterThan(-1);
+  const next = SRC.indexOf("\nexport ", at + 1);
+  return SRC.slice(at, next === -1 ? undefined : next);
+}
+
 describe("a transient refusal defers rather than failing", () => {
   it("asks where the secret would go BEFORE minting one", () => {
     // Cloudflare returns the secret on create and never again, so a mint
@@ -151,7 +159,17 @@ describe("a clone is never asked for a CAPTCHA it cannot draw", () => {
   });
 
   it("publishes exactly once — a second block would restore the old order", () => {
-    expect(SRC.split("await publishSiteKey(").length - 1).toBe(1);
+    // Within the provisioning flow, which is where a second block would land.
+    // The test-pair switch publishes its own key, in the same order, below.
+    expect(fnBody("provisionTurnstileIdentity").split("await publishSiteKey(").length - 1).toBe(1);
+  });
+
+  it("the test-pair switch publishes its key before writing its secret, too", () => {
+    const sw = fnBody("switchToTurnstileTestPair");
+    const publish = sw.indexOf("await publishSiteKey(");
+    const deliver = sw.indexOf("await deliverSecret(");
+    expect(publish).toBeGreaterThan(-1);
+    expect(deliver).toBeGreaterThan(publish);
   });
 
   it("asks one predicate whether the backend can hold a secret", () => {

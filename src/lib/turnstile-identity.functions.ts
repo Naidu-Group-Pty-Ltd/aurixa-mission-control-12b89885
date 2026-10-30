@@ -109,6 +109,56 @@ export const revokeCloneTurnstile = createServerFn({ method: "POST" })
   });
 
 /**
+ * Put a demo clone on Cloudflare's always-pass test pair, so an automated
+ * recorder can sign in to it. Refused for the prime and for anything a
+ * customer signs in to — see `switchToTurnstileTestPair`.
+ */
+export const switchCloneTurnstileToTestPair = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .inputValidator(requireCloneId)
+  .handler(async ({ data, context }) => {
+    const { switchToTurnstileTestPair } = await import(
+      /* @vite-ignore */ "@/lib/_server-shims/turnstile-identity.server"
+    );
+    const res = await switchToTurnstileTestPair(context.supabase, data.cloneId, context.userId);
+    await context.supabase.from("audit_log").insert({
+      action: "clone_turnstile.test_pair",
+      entity_type: "clone",
+      entity_id: data.cloneId,
+      actor_user_id: context.userId,
+      metadata: {
+        ok: res.ok,
+        advanced: res.ok ? res.advanced : null,
+        error: res.ok ? null : res.error,
+      },
+    });
+    return res;
+  });
+
+/** Replace the test pair with a real widget, and rebuild so the bundle carries its key. */
+export const restoreCloneTurnstileWidget = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .inputValidator(requireCloneId)
+  .handler(async ({ data, context }) => {
+    const { restoreTurnstileWidget } = await import(
+      /* @vite-ignore */ "@/lib/_server-shims/turnstile-identity.server"
+    );
+    const res = await restoreTurnstileWidget(context.supabase, data.cloneId, context.userId);
+    await context.supabase.from("audit_log").insert({
+      action: "clone_turnstile.restore",
+      entity_type: "clone",
+      entity_id: data.cloneId,
+      actor_user_id: context.userId,
+      metadata: {
+        ok: res.ok,
+        advanced: res.ok ? res.advanced : null,
+        error: res.ok ? null : res.error,
+      },
+    });
+    return res;
+  });
+
+/**
  * Whether this Mission Control can mint widgets at all — the capability, not
  * the token's existence. See `probeTurnstileAccess`: a token scoped for DNS
  * verifies as active and refuses Turnstile, and a panel that cannot tell those
