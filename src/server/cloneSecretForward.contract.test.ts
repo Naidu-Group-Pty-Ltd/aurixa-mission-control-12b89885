@@ -170,6 +170,53 @@ describe("the authorisation applies without anyone pressing a button", () => {
   });
 });
 
+/*
+ * Owner decision D6: no forwarded value goes over what the clone's ledger
+ * records as its own. What is kept is the pure module's and is driven in
+ * `cloneOwnValues.test.ts`; this pins that both writers ask it, at the write.
+ */
+describe("a forward never writes over the clone's own (D6)", () => {
+  const pipeline = stripComments(read("src/server/backend-provisioning.server.ts"));
+
+  it("the provisioning pass reads the ledger at the write, before it plans one", () => {
+    const step = pipeline.slice(pipeline.indexOf('pauseIfDue("syncing secrets")'));
+    const asked = step.indexOf("forwardLedger = await input.forwardLedger();");
+    const held = step.indexOf(
+      "forwardLedger.read ? null : await readProjectSecretNames(projectRef)",
+    );
+    const kept = step.indexOf("keptFromForward({");
+    const write = step.indexOf("const secretShells = await syncCloneSecrets(");
+    expect(asked).toBeGreaterThan(-1);
+    expect(held).toBeGreaterThan(asked);
+    expect(kept).toBeGreaterThan(held);
+    expect(write).toBeGreaterThan(kept);
+    // The planner is told, and the line is said.
+    const call = step.slice(write, step.indexOf("describeKeptForwards({", write));
+    expect(call).toContain("kept: keptForwards,");
+    expect(call).toContain("ledgerUnread: forwardLedger.why");
+    expect(step).toContain('if (keptLine) await onStatusUpdate?.("migrating", keptLine);');
+  });
+
+  it("the runner supplies the ledger read, for this clone, as supabase-js answers it", () => {
+    const supplied = functions.slice(functions.indexOf("forwardLedger: async () =>"));
+    const body = supplied.slice(0, 500);
+    expect(body).toContain("readForwardLedger(");
+    expect(body).toContain('.from("clone_backend_secrets")');
+    expect(body).toContain('.eq("clone_id", input.cloneId)');
+  });
+
+  it("the push reads the ledger before it writes, and an unread one stops it", () => {
+    const push = server.slice(server.indexOf("export async function pushCloneSecretForwards"));
+    const read = push.indexOf("readForwardLedger(");
+    const stop = push.indexOf("if (!ledger.read) {");
+    const write = push.indexOf("setCloneSecretValues(projectRef, entries)");
+    expect(read).toBeGreaterThan(-1);
+    expect(stop).toBeGreaterThan(read);
+    expect(write).toBeGreaterThan(stop);
+    expect(push.slice(stop, stop + 200)).toContain('reason: "unreadable"');
+  });
+});
+
 describe("withdrawing an authorisation is not deleting a credential", () => {
   it("the removal says the clone still holds the value", () => {
     const block = functions.slice(

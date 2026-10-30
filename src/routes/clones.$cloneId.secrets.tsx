@@ -393,13 +393,21 @@ function ForwardedCredentialsPanel({
               if (!res?.ok) {
                 toast.error(res?.error ?? "Could not forward");
               } else if (res.written.length > 0) {
-                toast.success(`Forwarded ${res.written.join(", ")} to this clone`);
+                toast.success(
+                  `Forwarded ${res.written.join(", ")} to this clone`,
+                  res.note ? { description: res.note } : undefined,
+                );
               } else if (res.unchanged.length > 0) {
                 // Held value for value already, so nothing was sent — and
                 // nothing on the clone was redeployed for it.
                 toast.success(
                   `This clone already holds ${res.unchanged.join(", ")} — nothing needed sending`,
+                  res.note ? { description: res.note } : undefined,
                 );
+              } else if (res.kept.length > 0) {
+                // The clone's ledger keeps these from a forwarded value: its
+                // own key, one minted for it, or one taken off it (D6).
+                toast.success(res.note ?? "This clone's ledger keeps every authorised name");
               } else {
                 // Never a success toast over an empty write.
                 toast.error("Nothing was forwarded — see the reasons listed below");

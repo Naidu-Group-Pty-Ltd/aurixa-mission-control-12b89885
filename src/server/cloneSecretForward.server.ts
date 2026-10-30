@@ -25,7 +25,15 @@ import type { Database } from "@/integrations/supabase/types";
 import { resolveCloneSecretTarget, CloneSecretTargetError } from "./cloneAllowedOrigins.server";
 import type { CloneSecretRefusal } from "./cloneSecretTarget.pure";
 import { classifySecret } from "./prime-backend.server";
-import { namesToWrite, planCloneForwards, type ForwardOutcome } from "./cloneSecretForward.pure";
+import {
+  NEVER_FORWARDED_OVER,
+  describeKeptForwards,
+  keptFromForward,
+  namesToWrite,
+  planCloneForwards,
+  readForwardLedger,
+  type ForwardOutcome,
+} from "./cloneSecretForward.pure";
 import { recordSecretLedger } from "./secretLedger.server";
 
 type Db = SupabaseClient<Database>;
@@ -84,6 +92,14 @@ export type ForwardPushResult =
        * nothing needed writing, and nothing was redeployed for it.
        */
       unchanged: string[];
+      /**
+       * Authorised names not sent because this clone's ledger keeps them from
+       * a forwarded value: its own (`set`), minted for it, taken off it, or
+       * federated (`NEVER_FORWARDED_OVER`). Names only, with why.
+       */
+      kept: Array<{ name: string; why: string }>;
+      /** What to tell the operator about the kept names, when there are any. */
+      note?: string;
       /** Every authorised name and what happened to it. */
       outcomes: ForwardOutcome[];
     }
@@ -106,12 +122,12 @@ export async function pushCloneSecretForwards(
   if (!resolved.ok) {
     return { ok: false, cloneId, reason: "unreadable", error: resolved.error };
   }
-  const names = namesToWrite(resolved.outcomes);
-  if (names.length === 0) {
+  const planned = namesToWrite(resolved.outcomes);
+  if (planned.length === 0) {
     // Nothing to write is not a failure — a clone whose every authorised name
     // is already fleet-wide reaches this legitimately — but it is reported as
     // an empty write rather than as a successful one.
-    return { ok: true, cloneId, written: [], unchanged: [], outcomes: resolved.outcomes };
+    return { ok: true, cloneId, written: [], unchanged: [], kept: [], outcomes: resolved.outcomes };
   }
 
   let projectRef: string;
@@ -120,6 +136,48 @@ export async function pushCloneSecretForwards(
   } catch (e) {
     const reason = e instanceof CloneSecretTargetError ? e.reason : "unreadable";
     return { ok: false, cloneId, reason, error: msg(e) };
+  }
+
+  /*
+   * Owner decision D6: no forwarded value goes over what this clone's ledger
+   * records as its own (`set`) or minted for it, nor over a name taken off it
+   * or federated. The planner above reads no ledger, so before this the push
+   * wrote Mission Control's value back over the client's key and recorded it
+   * `inherited`, which restarts the recharge.
+   *
+   * A ledger that could not be read is not an empty one, and this clone has
+   * run, so a name its project does not hold may be one taken off it on
+   * purpose: the push sends nothing, and says so. The reconcile asks again in
+   * half an hour.
+   */
+  const ledger = readForwardLedger(
+    await supabase.from("clone_backend_secrets").select("name, status").eq("clone_id", cloneId),
+  );
+  if (!ledger.read) {
+    return {
+      ok: false,
+      cloneId,
+      reason: "unreadable",
+      error:
+        `This clone's secret ledger could not be read (${ledger.why}), so nothing was forwarded: ` +
+        "a name it records as the client's own or minted for it must not be written over, and a " +
+        "failed read is not an empty ledger.",
+    };
+  }
+  const kept = keptFromForward({ names: planned, ledger, held: null });
+  const names = planned.filter((n) => !kept.has(n));
+  const keptList = [...kept].map(([name, why]) => ({ name, why }));
+  const note = describeKeptForwards({ kept: [...kept.keys()], ledger, held: null }) ?? undefined;
+  if (names.length === 0) {
+    return {
+      ok: true,
+      cloneId,
+      written: [],
+      unchanged: [],
+      kept: keptList,
+      ...(note ? { note } : {}),
+      outcomes: resolved.outcomes,
+    };
   }
 
   const { setCloneSecretValues } = await import("./backend-provisioning.server");
@@ -150,6 +208,8 @@ export async function pushCloneSecretForwards(
     cloneId,
     written: res.written,
     unchanged: res.unchanged,
+    kept: keptList,
+    ...(note ? { note } : {}),
     outcomes: resolved.outcomes,
   };
 }
@@ -207,9 +267,13 @@ export async function reconcileCloneSecretForwards(supabase: Db): Promise<Forwar
     out.refused.push({ clone_id: "*", reason: "unreadable", error: ledger.error.message });
     return out;
   }
+  // Settled, for this sweep: delivered by the forward, or a name the push
+  // keeps from a forwarded value (`NEVER_FORWARDED_OVER`). Pushing a clone for
+  // a minted or withheld name would send nothing, every half hour, for ever.
+  const kept = (status: string | null) => NEVER_FORWARDED_OVER.has(status ?? "");
   const settled = new Set(
     (ledger.data ?? [])
-      .filter((r) => r.status === "inherited" || r.status === "set")
+      .filter((r) => r.status === "inherited" || r.status === "set" || kept(r.status))
       .map((r) => `${r.clone_id} ${r.name}`),
   );
 

@@ -507,6 +507,22 @@ async function runBackendProvisioning(
         authorisedForwardNames: (forwardAll ?? []).filter((r) => r.inherit).map((r) => r.name),
         dedicatedSecretNames,
         settledSecrets,
+        // What this clone's ledger keeps from a forwarded value: the client's
+        // own key (`set`), one minted for it, or a name taken off it or
+        // federated (owner decision D6). Read when the pipeline writes, and
+        // from here because the ledger is Mission Control's own table. A read
+        // that failed comes back as one, never as an empty ledger.
+        forwardLedger: async () => {
+          const { readForwardLedger } = await import(
+            /* @vite-ignore */ "@/lib/_server-shims/cloneSecretForward.pure"
+          );
+          return readForwardLedger(
+            await supabase
+              .from("clone_backend_secrets")
+              .select("name, status")
+              .eq("clone_id", input.cloneId),
+          );
+        },
         // Writes Mission Control's own tables (the key row, the endpoint row),
         // so it is supplied from here rather than inside the pipeline.
         linkMissionControl: async (ref: string) => {
@@ -1916,7 +1932,12 @@ export const pushCloneSecretForwardsNow = createServerFn({ method: "POST" })
       actorUserId: userId,
       // Names only. A value never reaches an audit row.
       metadata: res.ok
-        ? { written: res.written, unchanged: res.unchanged, outcomes: res.outcomes }
+        ? {
+            written: res.written,
+            unchanged: res.unchanged,
+            kept: res.kept,
+            outcomes: res.outcomes,
+          }
         : { reason: res.reason, error: res.error },
     });
     if (!res.ok) return { ok: false as const, error: res.error, reason: res.reason };
@@ -1924,6 +1945,11 @@ export const pushCloneSecretForwardsNow = createServerFn({ method: "POST" })
       ok: true as const,
       written: res.written,
       unchanged: res.unchanged,
+      // Names the clone's ledger keeps from a forwarded value, and the line
+      // that says so: a push that sent nothing over the client's own key must
+      // not read as one that found nothing to send.
+      kept: res.kept,
+      ...(res.note ? { note: res.note } : {}),
       outcomes: res.outcomes,
     };
   });

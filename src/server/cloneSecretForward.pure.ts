@@ -690,3 +690,143 @@ export function decideCloneWithhold(facts: CloneWithholdFacts): CloneWithholdOut
 
   return { act: "withhold", name: facts.name, reason };
 }
+
+/* ────────────────────────────────────────────────────────────────────────
+ * What a forward never writes over.
+ *
+ * The owner decided D6 on 30 Oct 2026: a platform key keeps running after
+ * handover and is withdrawn only when the client brings its own. The client's
+ * own value is recorded `set` (the Integrations broker records it so, and so
+ * does an operator setting a value for this clone), and a key minted for this
+ * clone on Aurixa's own vendor account is recorded `minted`.
+ *
+ * The fleet sweep has never written over either (`SETTLED` in
+ * `fleetSecretForward.server.ts`). The per-clone push and a repair read no
+ * ledger at all: each wrote Mission Control's value back over the client's
+ * key, or over the minted one, and recorded it `inherited`, which restarts
+ * the recharge and ends the per-clone attribution, with nothing saying so.
+ *
+ * `withheld` and `federated` join them for the reason the fleet sweep keeps
+ * them off the project (`NOT_ON_THE_PROJECT` there): written by a forward, a
+ * credential somebody took off the clone is back, or the clone silently stops
+ * federating.
+ *
+ * Read from the ledger at the write, and kept whether or not Mission Control
+ * holds a value: a repair that finds none writes a row (`authorised_no_value`,
+ * `missing`) that would replace the clone's own, and the next sweep then reads
+ * the name as owed. A ledger that could not be read is not an empty one:
+ * nothing the project already holds is written over, and when the project's
+ * own list cannot be read either, nothing is written. The sweeps deliver what
+ * is missing once the ledger reads, as each reads it itself.
+ * ──────────────────────────────────────────────────────────────────────── */
+
+/** The ledger statuses no forwarded value is written over, each with why. */
+export const NEVER_FORWARDED_OVER: ReadonlyMap<string, string> = new Map([
+  ["set", "this clone's ledger records its own value (`set`)"],
+  ["minted", "this clone's ledger records a key minted for it (`minted`)"],
+  ["withheld", "this clone's ledger records it as taken off the clone (`withheld`)"],
+  [
+    "federated",
+    "this clone's ledger records it as federated, with no value on the project (`federated`)",
+  ],
+]);
+
+/** A ledger read as supabase-js answers one: the rows, or `{ data: null, error }`. */
+export type CloneLedgerRead = {
+  data: ReadonlyArray<{ name: string; status: string | null }> | null;
+  error: { message: string } | null;
+};
+
+/** What the ledger keeps from a forward, or that it could not be read. */
+export type ForwardLedger =
+  | { read: true; kept: ReadonlyMap<string, { status: string; why: string }> }
+  | { read: false; why: string };
+
+export function readForwardLedger(ledger: CloneLedgerRead): ForwardLedger {
+  if (ledger.error) return { read: false, why: ledger.error.message };
+  // Neither rows nor an error is not an empty ledger either.
+  if (!ledger.data) return { read: false, why: "the read returned neither rows nor an error" };
+  const kept = new Map<string, { status: string; why: string }>();
+  for (const row of ledger.data) {
+    const status = row.status ?? "";
+    const why = NEVER_FORWARDED_OVER.get(status);
+    if (why) kept.set(row.name, { status, why });
+  }
+  return { read: true, kept };
+}
+
+/**
+ * The names among `names` no forwarded value may be written over, each with
+ * why.
+ *
+ * With the ledger read: every name it records `set`, `minted`, `withheld` or
+ * `federated`. With it unread: every name the project already holds (`held`),
+ * and every name at all when the project's list could not be read either.
+ * Asked by the writer only where a forwarded value would go, so a name another
+ * step owns, or one its class decides, is decided as it always was.
+ */
+export function keptFromForward(input: {
+  names: readonly string[];
+  ledger: ForwardLedger;
+  /** What the project holds now: asked only when the ledger could not be read; null when unlisted too. */
+  held: ReadonlySet<string> | null;
+}): Map<string, string> {
+  const { ledger, held } = input;
+  const kept = new Map<string, string>();
+  for (const name of input.names) {
+    if (ledger.read) {
+      const own = ledger.kept.get(name);
+      if (own) kept.set(name, own.why);
+    } else if (!held) {
+      kept.set(
+        name,
+        `neither the secret ledger (${ledger.why}) nor the project's secret list could be read, so no platform value was written`,
+      );
+    } else if (held.has(name)) {
+      kept.set(
+        name,
+        `the secret ledger could not be read (${ledger.why}) and the project already holds a value, so no platform value was written over it`,
+      );
+    }
+  }
+  return kept;
+}
+
+const listed = (names: readonly string[], cap = 6) =>
+  names.length <= cap
+    ? names.join(", ")
+    : `${names.slice(0, cap).join(", ")} and ${names.length - cap} more`;
+
+/**
+ * The status line for the forwarded names a write left alone, or null when
+ * there is nothing to say. `kept` is what the writer actually kept, so the
+ * line counts only names a forwarded value would have gone to.
+ */
+export function describeKeptForwards(input: {
+  kept: readonly string[];
+  ledger: ForwardLedger;
+  held: ReadonlySet<string> | null;
+}): string | null {
+  const { ledger, kept } = input;
+  if (ledger.read) {
+    if (kept.length === 0) return null;
+    return `No platform value written over ${kept.length} forwarded name(s) this clone's ledger keeps: ${listed(
+      kept.map((n) => `${n} (${ledger.kept.get(n)?.status ?? "kept"})`),
+    )}`;
+  }
+  const held = input.held;
+  if (!held) {
+    return (
+      `Secret ledger unreadable (${ledger.why}) and the project's secret list too: no platform ` +
+      "value was written, and the forward sweeps deliver what is missing once the ledger reads"
+    );
+  }
+  // Only the held ones were kept from a write; the rest had nothing to send.
+  const over = kept.filter((n) => held.has(n));
+  return (
+    `Secret ledger unreadable (${ledger.why}): no platform value written over ` +
+    (over.length === 0
+      ? "anything, as the project holds none of the forwarded names"
+      : `the ${over.length} forwarded name(s) the project already holds: ${listed(over)}`)
+  );
+}
