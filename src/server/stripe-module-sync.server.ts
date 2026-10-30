@@ -67,6 +67,8 @@ export type ModuleOp = {
   gstComponent: number;
   /** Tier slugs that already bundle this module at no extra cost. */
   includedIn: readonly string[];
+  /** Whether any plan that includes AML/CTF brings it at no extra cost. */
+  includedWithAml: boolean;
   /** Whether the catalog row is already selling at this price. */
   alreadyLive: boolean;
 };
@@ -169,6 +171,7 @@ export function planModuleSync(rows: readonly ModuleRow[]): ModuleSyncPlan {
       unitAmount: mod.monthlyInclGstCents,
       gstComponent: gstComponentCents(mod.monthlyInclGstCents),
       includedIn: mod.includedIn,
+      includedWithAml: mod.includedWithAml === true,
       alreadyLive:
         row.is_active && row.price_min_cents === mod.monthlyInclGstCents && !!row.stripe_price_id,
     });

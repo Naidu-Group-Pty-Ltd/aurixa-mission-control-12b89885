@@ -36,6 +36,7 @@ type Plan = {
     unitAmount: number;
     gstComponent: number;
     includedIn: string[];
+    includedWithAml?: boolean;
     alreadyLive: boolean;
   }>;
   skipped?: string[];
@@ -178,7 +179,9 @@ export function ModuleSyncCard() {
                       {aud(m.gstComponent)}
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
-                      {m.includedIn.length ? m.includedIn.join(", ") : "—"}
+                      {[...m.includedIn, ...(m.includedWithAml ? ["with AML/CTF"] : [])].join(
+                        ", ",
+                      ) || "—"}
                     </TableCell>
                     <TableCell className="text-right">
                       {m.alreadyLive && (

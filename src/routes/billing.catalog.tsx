@@ -56,6 +56,15 @@ function priceRange(min: number | null, max: number | null, currency = "AUD") {
   return `${money(min, currency)} – ${money(max, currency)}`;
 }
 
+/** Whether the catalogue says AML/CTF brings this add-on (`presentAddonRow`). */
+function isIncludedWithAml(metadata: unknown): boolean {
+  return (
+    !!metadata &&
+    typeof metadata === "object" &&
+    (metadata as { included_with_aml?: unknown }).included_with_aml === true
+  );
+}
+
 function CatalogPage() {
   const { tenant } = Route.useSearch();
   const fetchCatalog = useServerFn(listPricingCatalog);
@@ -217,14 +226,21 @@ function CatalogPage() {
                         </span>
                       )}
                     </div>
-                    {a.included_in_plans?.length > 0 && (
+                    {(a.included_in_plans?.length > 0 || isIncludedWithAml(a.metadata)) && (
                       <div className="flex flex-wrap gap-1">
                         <span className="text-xs text-muted-foreground mr-1">Included in:</span>
-                        {a.included_in_plans.map((p: string) => (
+                        {(a.included_in_plans ?? []).map((p: string) => (
                           <Badge key={p} variant="secondary" className="text-xs capitalize">
                             {p}
                           </Badge>
                         ))}
+                        {/* A partner portal comes with any plan that includes
+                            AML/CTF (29 Oct 2026), from the catalogue's flag. */}
+                        {isIncludedWithAml(a.metadata) && (
+                          <Badge variant="secondary" className="text-xs">
+                            any plan with AML/CTF
+                          </Badge>
+                        )}
                       </div>
                     )}
                   </CardContent>
