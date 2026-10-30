@@ -1375,4 +1375,13 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "rpc", fn: "close_api_usage_period" },
     ],
   },
+  {
+    migration: "20261030100000_usage_files_under_its_own_period.sql",
+    version: "20261030100000",
+    assertions: [
+      { kind: "rpc", fn: "api_usage_period_start" },
+      { kind: "rpc", fn: "api_usage_period_end" },
+      { kind: "rpc", fn: "api_usage_closable_periods" },
+    ],
+  },
 ];

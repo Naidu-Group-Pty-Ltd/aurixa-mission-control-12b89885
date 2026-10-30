@@ -83,37 +83,25 @@ export async function closeUsagePeriod(
  * A period is closeable once it has ended — never before. Closing an open cycle
  * would bill a tenant for half a month and leave the rest unattributable, since
  * closing freezes the rollups it summed.
+ *
+ * The database answers (`api_usage_closable_periods`, 20261030100000): each
+ * tenant's periods before its current one, counted on its cycle by the same
+ * function `record_api_usage_event` files usage with, that still have a
+ * currency to close or invoice. A period counted here from its start date
+ * alone ended a month on from it even when the tenant's next period started
+ * days later (a 31st anchor after February), and every past period was
+ * revisited daily until the limit stopped new ones being reached (key audit
+ * R7).
+ *
+ * A failed read throws, so the cron run fails and says so: "nothing to close"
+ * is an answer, and it is not the answer to a read that did not happen.
  */
 export async function findClosablePeriods(
-  now = new Date(),
   limit = 200,
 ): Promise<Array<{ tenant_id: string; period_start: string }>> {
-  const today = now.toISOString().slice(0, 10);
-  const { data, error } = await adminAny
-    .from("api_usage_rollups")
-    .select("tenant_id, period_start")
-    .lt("period_start", today)
-    .order("period_start", { ascending: true })
-    .limit(limit * 20);
-  if (error || !data) return [];
-
-  // One entry per (tenant, period); the rollup table has one row per secret.
-  const seen = new Set<string>();
-  const out: Array<{ tenant_id: string; period_start: string }> = [];
-  for (const row of data as Array<{ tenant_id: string; period_start: string }>) {
-    // A period is only over once the *next* one has started. `period_start` is
-    // the tenant's cycle anchor, so compare against a month on from it.
-    const end = new Date(`${row.period_start}T00:00:00.000Z`);
-    end.setUTCMonth(end.getUTCMonth() + 1);
-    if (end.getTime() > now.getTime()) continue;
-
-    const k = `${row.tenant_id}:${row.period_start}`;
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push(row);
-    if (out.length >= limit) break;
-  }
-  return out;
+  const { data, error } = await adminAny.rpc("api_usage_closable_periods", { _limit: limit });
+  if (error) throw new Error(`closable periods could not be read: ${error.message}`);
+  return (data ?? []) as Array<{ tenant_id: string; period_start: string }>;
 }
 
 export type InvoiceResult =
@@ -273,7 +261,7 @@ export type SweepResult = {
  * Failures are collected rather than thrown: one tenant without a Stripe
  * customer must not stop the other forty from being billed.
  */
-export async function sweepApiUsageSettlement(now = new Date()): Promise<SweepResult> {
+export async function sweepApiUsageSettlement(): Promise<SweepResult> {
   const out: SweepResult = {
     closed: 0,
     alreadyClosed: 0,
@@ -284,7 +272,7 @@ export async function sweepApiUsageSettlement(now = new Date()): Promise<SweepRe
     errors: [],
   };
 
-  for (const period of await findClosablePeriods(now)) {
+  for (const period of await findClosablePeriods()) {
     const closed = await closeUsagePeriod(period.tenant_id, period.period_start);
     if (closed.ok === false) {
       out.failed += 1;
@@ -307,7 +295,8 @@ export async function sweepApiUsageSettlement(now = new Date()): Promise<SweepRe
         out.skipped += 1;
       } else {
         out.invoiced += 1;
-        out.totalCentsByCurrency[charge.currency] = (out.totalCentsByCurrency[charge.currency] ?? 0) + invoiced.amountCents;
+        out.totalCentsByCurrency[charge.currency] =
+          (out.totalCentsByCurrency[charge.currency] ?? 0) + invoiced.amountCents;
       }
     }
   }
