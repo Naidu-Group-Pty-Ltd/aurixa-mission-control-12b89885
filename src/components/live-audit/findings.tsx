@@ -381,15 +381,17 @@ export function FindingSheet({
                 <Button
                   size="sm"
                   onClick={() => fix.mutate()}
-                  disabled={!fixable || !d.anthropicKey || fix.isPending}
+                  disabled={!fixable || !d.claudeEnabled || !d.anthropicKey || fix.isPending}
                   title={
-                    !d.anthropicKey
-                      ? "Waiting on the Anthropic key: every live-audit fix is written by Claude"
-                      : !fixable
-                        ? fixing
-                          ? "A fix is already in flight"
-                          : "Only an open defect is fixed"
-                        : undefined
+                    !d.claudeEnabled
+                      ? "Claude is off for the live audit: turn on Use Claude under Settings"
+                      : !d.anthropicKey
+                        ? "Waiting on the Anthropic key: every live-audit fix is written by Claude"
+                        : !fixable
+                          ? fixing
+                            ? "A fix is already in flight"
+                            : "Only an open defect is fixed"
+                          : undefined
                   }
                 >
                   <Wrench className="mr-1.5 h-3.5 w-3.5" />
@@ -406,7 +408,14 @@ export function FindingSheet({
                 </Button>
               </div>
             )}
-            {d.canAct && !d.anthropicKey && (
+            {d.canAct && !d.claudeEnabled && (
+              <p className="border-l-2 border-warning pl-3 text-xs text-muted-foreground">
+                Claude is off for the live audit, so no fix is drafted. Every live-audit fix is
+                written by Claude Code; turn on Use Claude under Settings once the live audit's
+                Anthropic key is provisioned.
+              </p>
+            )}
+            {d.canAct && d.claudeEnabled && !d.anthropicKey && (
               <p className="border-l-2 border-warning pl-3 text-xs text-muted-foreground">
                 Waiting on the Anthropic key. Every live-audit fix is written by Claude Code with
                 the key Mission Control syncs into Prime's Actions secrets; until it is set, nothing
