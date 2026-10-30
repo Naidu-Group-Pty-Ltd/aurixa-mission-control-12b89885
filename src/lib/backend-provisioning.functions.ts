@@ -244,6 +244,11 @@ async function runBackendProvisioning(
       // needed the whole set was refused on every attempt, so the pipeline
       // could reach the edge-function stage and never get through it.
       functionLimit: EDGE_FUNCTION_FETCH_LIMIT,
+      // The scan this commit already had, so a deploying pass fetches only
+      // what it deploys. The snapshot uses it only if it lands on this exact
+      // commit; otherwise it scans, streaming, and the write below records it.
+      cachedScan:
+        headSha && cachedSecretNames ? { gitSha: headSha, secretNames: cachedSecretNames } : null,
     });
     if (rawSnapshot.migrations.length === 0) {
       throw new Error(
