@@ -27,7 +27,6 @@ import { stripComments } from "../server/sourceComments.pure";
 const ROUTES = join(__dirname);
 const read = (f: string) => readFileSync(join(ROUTES, f), "utf8");
 
-
 /**
  * The body of a named `async function`, by brace counting.
  *
@@ -129,6 +128,30 @@ describe("a reclaim returns rows to the shape its own claim reads", () => {
     const body = bodyOf(read("hooks.backend-provisioning-drain.tsx"), "reclaimStalled");
     expect(body).toMatch(/\.gte\("attempts", MAX_ATTEMPTS\)/);
     expect(body).toMatch(/status:\s*"failed"/);
+  });
+
+  it("backend drain: a dead pass is costed on where it died, and the requeue says where", () => {
+    /*
+      Measured on `tutorial-demo-orrimere-c158c7`, 29–30 Oct 2026: five kills
+      in sixty-five minutes, each noticed fifteen minutes late and each spent
+      as an attempt, failed a job whose pass at 00:35 had got further than any
+      before it. The rules live in provisioningStall.pure.ts; this pins that the
+      reclaim applies them, and records each death BEFORE it relies on it.
+    */
+    const src = read("hooks.backend-provisioning-drain.tsx");
+    const body = stripComments(bodyOf(src, "reclaimStalled"));
+    expect(body).toMatch(/isDeadPass\(/);
+    expect(body).toMatch(/judgeDeadPass\(/);
+    expect(body).toMatch(/writeAuditLog\(\{\s*action: PASS_DIED_ACTION/);
+    // A hand-back is only as good as its record.
+    expect(body).toMatch(/const handBack = verdict\.handBack && recorded;/);
+    expect(body).toMatch(/status_detail: requeueDetail\(point\)/);
+    // Fenced on the claim it judged, so a live pass is never requeued.
+    expect(body).toMatch(/\.eq\("worker_started_at", row\.worker_started_at\)/);
+    // And the failure names the last point.
+    expect(body).toMatch(/error_message: exhaustedMessage\(lastPoint, MAX_ATTEMPTS\)/);
+    // The fifteen-minute blanket cutoff is gone; the backstop lives in the pure module.
+    expect(src).not.toMatch(/const STALL_MINUTES = /);
   });
 
   it("backend drain: reclaim checks every update and throws", () => {
