@@ -916,6 +916,19 @@ describe("a prime-only feature is never written to a clone", () => {
     expect(held).toHaveLength(0);
   });
 
+  it("holds every file under a prime-only folder, and the rest of docs/ travels", () => {
+    const report = "docs/tutorial-audit/AUDIT_REPORT.md";
+    const tool = "docs/tutorial-programme/tools/rebuild.sh";
+    const shared = "docs/operations/CI_SCOPE.md";
+    const { write, held } = partitionCascadePaths([report, tool, shared], []);
+    expect(write).toEqual([shared]);
+    expect(held.map((h) => h.path)).toEqual([report, tool]);
+    for (const h of held) {
+      expect(h.reason).toBe("protected");
+      expect(h.pattern).toBe("(prime-only: tutorial-programme)");
+    }
+  });
+
   it("still applies the clone's own exclusions to a deletion", () => {
     const rules: SyncExclusion[] = [{ pattern: "src/pages/**", reason: "protected" }];
     const { write, held } = partitionCascadePaths([dispatcher, page], rules, { purpose: "delete" });

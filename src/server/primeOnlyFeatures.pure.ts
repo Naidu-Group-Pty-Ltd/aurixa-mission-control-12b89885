@@ -78,6 +78,12 @@ export type PrimeOnlyFeature = {
   readonly reason: string;
   /** Exact repository paths. */
   readonly files: readonly string[];
+  /**
+   * Repository directories, each ending in `/`, matched by prefix: every file
+   * under one is the prime's. Only for a tree nothing builds, deploys or
+   * applies, which is why none sits under `supabase/`.
+   */
+  readonly directories: readonly string[];
   /** Function names, matched by the directory `supabase/functions/<name>/`. */
   readonly functions: readonly string[];
   /** pg_cron jobname globs. */
@@ -104,6 +110,7 @@ export const PRIME_ONLY_FEATURES: readonly PrimeOnlyFeature[] = [
       "supabase/functions/_shared/ghl-worker-fetch.ts",
       "supabase/functions/_shared/migration-jobs.ts",
     ],
+    directories: [],
     functions: [
       "backfill-opportunity-mappings",
       "ghl-account-preview",
@@ -159,6 +166,7 @@ export const PRIME_ONLY_FEATURES: readonly PrimeOnlyFeature[] = [
       "scripts/deploy/edge-bundle-capture.mjs",
       "src/lib/deploy/__tests__/edgeFunctionBundles.spec.ts",
     ],
+    directories: [],
     functions: [],
     cronJobs: [],
     buckets: [],
@@ -174,6 +182,30 @@ export const PRIME_ONLY_FEATURES: readonly PrimeOnlyFeature[] = [
     title: "Live audit",
     reason: "Prime-only: the live audit is proven on the prime before it reaches a clone.",
     files: [".github/workflows/live-audit.yml"],
+    directories: [],
+    functions: [],
+    cronJobs: [],
+    buckets: [],
+  },
+  {
+    // The house's tutorial audit and programme (npc-property-dashbord#3418):
+    // its audit of the prime for the Command Center tutorial videos, and the
+    // production records built on it. They cite other deployments by Supabase
+    // project ref and domain, list security findings not yet fixed, and record
+    // this platform's provisioning of the tutorial demo. None of that is a
+    // clone's to hold. Carried, the audit's CSVs would also turn each clone's
+    // secret scan red on the cascade's own pull request: two prose phrases in
+    // them pass only on the prime's `.gitleaks.toml` allowance, and a clone
+    // keeps its own (`DEFAULT_MIRROR_EXCLUSIONS`).
+    //
+    // Held by directory, so a record added to either folder is held with no
+    // change here.
+    key: "tutorial-programme",
+    title: "Tutorial audit and programme",
+    reason:
+      "Prime-only: the house's tutorial records name other deployments and never reach a clone.",
+    files: [],
+    directories: ["docs/tutorial-audit/", "docs/tutorial-programme/"],
     functions: [],
     cronJobs: [],
     buckets: [],
@@ -185,9 +217,11 @@ const FUNCTIONS_PREFIX = "supabase/functions/";
 const byFile = new Map<string, PrimeOnlyFeature>();
 const byFunction = new Map<string, PrimeOnlyFeature>();
 const byBucket = new Map<string, PrimeOnlyFeature>();
+const byDirectory: { root: string; feature: PrimeOnlyFeature }[] = [];
 const cronRules: { rx: RegExp; feature: PrimeOnlyFeature }[] = [];
 for (const feature of PRIME_ONLY_FEATURES) {
   for (const f of feature.files) byFile.set(f, feature);
+  for (const d of feature.directories) byDirectory.push({ root: d, feature });
   for (const fn of feature.functions) byFunction.set(fn, feature);
   for (const b of feature.buckets) byBucket.set(b, feature);
   for (const glob of feature.cronJobs) cronRules.push({ rx: globToRegex(glob), feature });
@@ -208,7 +242,9 @@ export function primeOnlyFeatureForPath(path: string): PrimeOnlyFeature | null {
   const exact = byFile.get(path);
   if (exact) return exact;
   const fn = functionDirectoryOf(path);
-  return fn ? (byFunction.get(fn) ?? null) : null;
+  const owner = fn ? byFunction.get(fn) : undefined;
+  if (owner) return owner;
+  return byDirectory.find((d) => path.startsWith(d.root))?.feature ?? null;
 }
 
 export function isPrimeOnlyPath(path: string): boolean {
