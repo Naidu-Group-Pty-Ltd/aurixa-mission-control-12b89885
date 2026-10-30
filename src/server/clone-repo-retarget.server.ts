@@ -429,6 +429,13 @@ export type RetargetAction = {
 export type RetargetResult = {
   ok: boolean;
   actions: RetargetAction[];
+  /**
+   * The caller's budget ran out between steps (`shouldStop`). The steps not
+   * reached were not attempted, and everything before them stands: each write
+   * is its own commit. Running it again finishes it, because a step already
+   * done reads as `unchanged`, `absent` or `deleted` and writes nothing.
+   */
+  stoppedEarly?: boolean;
 };
 
 type RepoRef = { owner: string; repo: string; branch?: string };
@@ -460,11 +467,24 @@ export async function retargetCloneRepo(
      * where those files belong.
      */
     fromParentClone?: boolean;
+    /**
+     * Asked between steps; true stops the run there (`stoppedEarly`).
+     *
+     * Provisioning runs this inside a request pg_net abandons at 60 seconds,
+     * after a pipeline that has spent most of them, and a run cut off mid-way
+     * by the runtime leaves no record of how far it got. Measured on
+     * `tutorial-demo-orrimere-c158c7`, 30 Oct 2026: it began 32 seconds into
+     * the pass, wrote seven commits over two passes, and each pass was killed
+     * before the backend could be marked ready.
+     */
+    shouldStop?: () => boolean;
   } = {},
 ): Promise<RetargetResult> {
   const octokit = getAppOctokit();
   const actions: RetargetAction[] = [];
   const branch = ref.branch;
+  const stopNow = () => opts.shouldStop?.() === true;
+  const stopped = (): RetargetResult => ({ ok: false, actions, stoppedEarly: true });
 
   const readFile = async (path: string): Promise<{ text: string; sha: string } | null> => {
     try {
@@ -585,6 +605,7 @@ export async function retargetCloneRepo(
   }
 
   // 2. config.toml
+  if (stopNow()) return stopped();
   try {
     const f = await readFile(CONFIG_TOML_PATH);
     if (!f) {
@@ -608,6 +629,7 @@ export async function retargetCloneRepo(
     });
   }
 
+  if (stopNow()) return stopped();
   // 2b. The isolation spec a clone copied from a parent inherits naming the
   //     parent's project. Absent is the ordinary case — the prime carries no
   //     such spec, so neither does anything created from it. It is read at the
@@ -653,6 +675,7 @@ export async function retargetCloneRepo(
 
   // 3. The workflows' hard-coded fallbacks
   for (const path of RETARGET_WORKFLOWS) {
+    if (stopNow()) return stopped();
     try {
       const f = await readFile(path);
       if (!f) {
@@ -679,6 +702,7 @@ export async function retargetCloneRepo(
     }
   }
 
+  if (stopNow()) return stopped();
   // 4. The CLI's own link file, which outranks config.toml for a bare
   //    `supabase` command and is checked in naming the prime.
   try {
@@ -704,6 +728,7 @@ export async function retargetCloneRepo(
     });
   }
 
+  if (stopNow()) return stopped();
   // 5. The prime's Dependabot config, which describes a dependency graph this
   //    repository does not own — package.json and package-lock.json are
   //    cascaded repository invariants, so nothing merged here can survive.
@@ -743,6 +768,7 @@ export async function retargetCloneRepo(
   //     and never fails the retarget.
   if (opts.fromParentClone) {
     for (const path of PARENT_DEPLOYMENT_OWN_FILES) {
+      if (stopNow()) return stopped();
       try {
         const f = await readFile(path);
         if (!f) {
@@ -782,6 +808,7 @@ export async function retargetCloneRepo(
   //     is a failure, not a smaller tree, because what it left out would stay.
   if (opts.fromParentClone) {
     for (const root of PARENT_DEPLOYMENT_OWN_TREES) {
+      if (stopNow()) return stopped();
       try {
         const removed = await removeTree(root);
         actions.push(
@@ -799,6 +826,11 @@ export async function retargetCloneRepo(
     }
   }
 
+  // Steps 6 and 7 are one unit and are never stopped between: 6 writes this
+  // deployment's own key into the shipped files, and 7 teaches the secret scan
+  // to allow it. Stopped between them, the repository would refuse its own key
+  // until the next pass.
+  if (stopNow()) return stopped();
   // 6. The shipped Supabase pair — the artefact that reaches a customer.
   //
   //    Each file is independent, and each is written only when it still names
@@ -922,6 +954,7 @@ export async function retargetCloneRepo(
     }
   }
 
+  if (stopNow()) return stopped();
   // 8. The guard that will keep step 6 true after this run is over.
   //
   //    Nothing above re-checks itself. A cascade, a template refresh or a hand
