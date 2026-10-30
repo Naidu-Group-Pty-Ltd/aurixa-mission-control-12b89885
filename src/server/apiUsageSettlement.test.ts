@@ -1,6 +1,24 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { closeResultFrom } from "./apiUsageSettlement.pure";
+
+/** The newest migration's definition of `public.<fn>`, up to the next function it defines. */
+function latestDefinition(fn: string): { file: string; sql: string } {
+  const files = readdirSync("supabase/migrations")
+    .filter((f) => f.endsWith(".sql"))
+    .sort()
+    .reverse();
+  const head = new RegExp(`create\\s+or\\s+replace\\s+function\\s+public\\.${fn}\\(`, "i");
+  for (const file of files) {
+    const sql = readFileSync(`supabase/migrations/${file}`, "utf8");
+    const at = sql.search(head);
+    if (at < 0) continue;
+    const rest = sql.slice(at + 1);
+    const next = rest.search(/create\s+or\s+replace\s+function\s/i);
+    return { file, sql: sql.slice(at, next < 0 ? undefined : at + 1 + next) };
+  }
+  throw new Error(`no migration defines public.${fn}`);
+}
 
 /**
  * A period closes into one charge per currency, and a charge under the
@@ -213,5 +231,38 @@ describe("the period usage is filed under", () => {
     );
     expect(overview).toContain("_period_start: data.period_start,");
     expect(overview).not.toContain("defaultPeriod()");
+  });
+});
+
+/**
+ * Every tenant gets its allowance every billing period, whether or not Stripe
+ * recorded a renewal, and only usage above it is invoiced (the owner's
+ * decision, 30 Oct 2026). No Stripe renewal has ever been recorded, so a
+ * tenant's anchor still reads the day its plan started; the free units come
+ * from the rate row for each period's own rollups at close, and the period is
+ * the one counted on from that anchor (20261030110000). Dry-run on a copy of
+ * production: each October period closes with Airtable's 5,000 free requests
+ * taken off before any is charged, and its Lovable tokens inside their
+ * 100,000 free.
+ */
+describe("the allowance each period gets", () => {
+  it("is the rate's free units, applied afresh to each period's rollups at close", () => {
+    const close = latestDefinition("close_api_usage_period").sql;
+    expect(close).toContain("coalesce(pr.included_free_units, 0) as free_units");
+    expect(close).toContain("_free := least(_row.free_units, _row.billable_quantity);");
+    expect(close).toContain(
+      "where r.tenant_id = _tenant_id and r.period_start = _period_start and r.currency = _currency",
+    );
+  });
+
+  it("falls in the period counted on from the anchor, whether or not Stripe moved it", () => {
+    const record = latestDefinition("record_api_usage_event").sql;
+    expect(record).toContain(
+      "SELECT public.api_usage_period_start(t.current_period_start::date,_when) INTO _period",
+    );
+    const closable = latestDefinition("api_usage_closable_periods").sql;
+    expect(closable).toContain(
+      "r.period_start < public.api_usage_period_start(t.current_period_start::date, now())",
+    );
   });
 });
