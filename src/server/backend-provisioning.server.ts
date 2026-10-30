@@ -26,6 +26,7 @@ import {
 } from "./chunkCursorStore.pure";
 import { primeLedgerHoleNotes } from "./fleetBlockageRecord.pure";
 import type { CorpusMeta } from "./fleetCorpusScope.pure";
+import { withVersionsHeldThroughPrime, type PrimeHoldings } from "./primeHoldings.pure";
 import {
   frontierFromReplay,
   frontierUnreadable,
@@ -3264,6 +3265,14 @@ export async function applyPrimeMigrations(
     corpus: readonly CorpusMeta[];
     /** Ids the scope cleared. */
     runnableIds: ReadonlySet<string>;
+    /**
+     * The prime ledger versions holding each corpus file's bytes
+     * (`openScopedPrimeCorpus`). A clone stamped from the prime records those
+     * versions and never the files' own, so without this every file the prime
+     * ran under another version reads as missing and is sent again. Absent:
+     * the clone's versions alone, as before. See `primeHoldings.pure.ts`.
+     */
+    primeHoldings?: PrimeHoldings;
   },
   /**
    * Stop BETWEEN migrations once the caller's invocation budget is spent.
@@ -3365,7 +3374,15 @@ export async function applyPrimeMigrations(
         "so what it has applied is not known.",
     );
   }
-  const applied = new Set(ledger.rows.map((r) => r.version));
+  // What the clone records, and — for a scoped caller — what it holds under the
+  // version the prime ran it as. Every decision below reads this one set: the
+  // partition, the holes, the cursor and the skip, so none can send what
+  // another treats as held.
+  const applied = withVersionsHeldThroughPrime(
+    new Set(ledger.rows.map((r) => r.version)),
+    scope?.corpus ?? [],
+    scope?.primeHoldings,
+  );
 
   // Pre-flight: refuse a replay that cannot succeed, rather than starting one
   // that halts on migration #1 and reports the migration as the fault.
