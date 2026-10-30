@@ -78,6 +78,8 @@ describe("whose sentence is standing on the row", () => {
     // provisioning run's progress line.
     "Applying migration 3/11: 20261203000000_seed.sql",
     "Worker stalled — requeued",
+    "Worker stalled during “Replicating realtime publication from prime...” — requeued",
+    "Worker stalled before its first stage — requeued",
     "Provisioning ceiling exceeded",
     "Live on the provider origin. No subdomain is reserved for this clone.",
   ];

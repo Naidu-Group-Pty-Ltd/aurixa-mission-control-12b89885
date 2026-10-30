@@ -171,6 +171,35 @@ async function runBackendProvisioning(
         ? await listProjectEdgeFunctionSlugs(existingRow.supabase_project_ref).catch(() => [])
         : [];
 
+    // What this clone's CRM line does not carry is out of the snapshot from
+    // here on, so the deploy set, the declared contract and parity agree —
+    // the rule `withoutPrimeOnlyFunctions` applies to the prime's own
+    // feature (`crmLineFeatures.pure.ts`). `*` so a deployment without
+    // `crm_mode` reads it as absent and withholds nothing.
+    //
+    // Read BEFORE the snapshot, because what the line withholds and what it
+    // carries as its own copies are never deployed from the prime's source —
+    // so the snapshot must not select or hold them either. Read after it, they
+    // were fetched and held on every pass and then dropped: on the independent
+    // line the clone never holds its withheld functions, so every pass looked
+    // like one with bundles left to deploy.
+    const { data: cloneLineRow } = await supabase
+      .from("clones")
+      .select("*")
+      .eq("id", input.cloneId)
+      .maybeSingle();
+    const crmMode = ((cloneLineRow as { crm_mode?: string | null } | null)?.crm_mode ?? null) as
+      | string
+      | null;
+    const { crmLineVariantFunctionNames, crmLineWithheldFunctionNames } = await import(
+      /* @vite-ignore */ "@/server/crmLineFeatures.pure"
+    );
+    const lineWithheld = new Set(crmLineWithheldFunctionNames(crmMode));
+    // The line's own copies are carried, so they stay declared, but their
+    // bundles come from the clone's tree (`deployCloneOwnedFunctions`, run
+    // once the repository points at the new project), never the prime's.
+    const lineVariants = new Set(crmLineVariantFunctionNames(crmMode));
+
     await updateStatus(
       "provisioning",
       `Snapshotting backend architecture from ${source.owner}/${source.repo}@${source.branch}...`,
@@ -237,13 +266,18 @@ async function runBackendProvisioning(
       // Do not pay for bundles the target already holds. The deploy step has
       // always skipped live functions — but only AFTER the snapshot had
       // fetched every one of them, so the work was bought and discarded on
-      // every pass.
-      skipFunctionSlugs: liveFunctionSlugs,
+      // every pass. Nor for the ones the line never takes from the prime.
+      skipFunctionSlugs: [...liveFunctionSlugs, ...lineWithheld, ...lineVariants],
       // And cap what remains. 423 bundles over ~1,033 files does not fit one
       // invocation's share of the installation's hourly quota: the pass that
       // needed the whole set was refused on every attempt, so the pipeline
       // could reach the edge-function stage and never get through it.
       functionLimit: EDGE_FUNCTION_FETCH_LIMIT,
+      // The scan this commit already had, so a deploying pass fetches only
+      // what it deploys. The snapshot uses it only if it lands on this exact
+      // commit; otherwise it scans, streaming, and the write below records it.
+      cachedScan:
+        headSha && cachedSecretNames ? { gitSha: headSha, secretNames: cachedSecretNames } : null,
     });
     if (rawSnapshot.migrations.length === 0) {
       throw new Error(
@@ -291,27 +325,9 @@ async function runBackendProvisioning(
           }
         : rawSnapshot;
 
-    // What this clone's CRM line does not carry is out of the snapshot from
-    // here on, so the deploy set, the declared contract and parity agree —
-    // the rule `withoutPrimeOnlyFunctions` applies to the prime's own
-    // feature (`crmLineFeatures.pure.ts`). `*` so a deployment without
-    // `crm_mode` reads it as absent and withholds nothing.
-    const { data: cloneLineRow } = await supabase
-      .from("clones")
-      .select("*")
-      .eq("id", input.cloneId)
-      .maybeSingle();
-    const crmMode = ((cloneLineRow as { crm_mode?: string | null } | null)?.crm_mode ?? null) as
-      | string
-      | null;
-    const { crmLineVariantFunctionNames, crmLineWithheldFunctionNames } = await import(
-      /* @vite-ignore */ "@/server/crmLineFeatures.pure"
-    );
-    const lineWithheld = new Set(crmLineWithheldFunctionNames(crmMode));
-    // The line's own copies are carried, so they stay declared, but their
-    // bundles come from the clone's tree (`deployCloneOwnedFunctions`, run
-    // once the repository points at the new project), never the prime's.
-    const lineVariants = new Set(crmLineVariantFunctionNames(crmMode));
+    // The line's withheld functions and its own copies leave the snapshot here
+    // too (see `lineWithheld` above): the fetch no longer selects them, and a
+    // snapshot spliced from the cache still lists what the line withholds.
     const snapshot: typeof rawSnapshot =
       lineWithheld.size === 0 && lineVariants.size === 0
         ? splicedSnapshot
@@ -576,6 +592,15 @@ async function runBackendProvisioning(
     // prime in config.toml, in the workflows' hard-coded fallback and in the
     // CLI's checked-in link file — and the only thing stopping it acting on
     // the prime is that no SUPABASE_ACCESS_TOKEN has been added yet.
+    //
+    // Budgeted, and after it every finishing step is too: see
+    // provisioningFinish.pure.ts, which records what an unbudgeted tail cost.
+    const { BudgetPause: FinishPause, pastDeadline } = await import(
+      /* @vite-ignore */ "@/lib/_server-shims/provisioningBudget"
+    );
+    const { finishingStepFits, deferredLine, PARITY_DEFERRED_REASON } = await import(
+      /* @vite-ignore */ "@/server/provisioningFinish.pure"
+    );
     let repoRetarget: Awaited<ReturnType<typeof retargetCloneRepo>> | null = null;
     if (cloneRow?.github_owner && cloneRow?.github_repo) {
       try {
@@ -598,7 +623,12 @@ async function runBackendProvisioning(
           // A clone copied from a parent clone carries the parent's own
           // files (`PARENT_DEPLOYMENT_OWN_FILES`), and the retarget drops
           // them. A parent records no parent, so its own copies are safe.
-          { fromParentClone: Boolean(cloneRow.parent_clone_id) },
+          {
+            fromParentClone: Boolean(cloneRow.parent_clone_id),
+            // Between steps, never inside one: a stop is a pause, and the
+            // commits already made are what the next pass carries on from.
+            shouldStop: () => pastDeadline(input.deadlineAt),
+          },
         );
         // Each failure carries its own reason, and they are not all the same
         // kind of thing: "this file still names another project" and "nothing
@@ -623,6 +653,14 @@ async function runBackendProvisioning(
         );
       }
     }
+    // Thrown here, outside the step's own catch, which would otherwise record
+    // a pause as a failed re-target and run on to `ready` without it — and the
+    // deployment gate refuses a backend whose repository was not re-pointed.
+    if (repoRetarget?.stoppedEarly) {
+      throw new FinishPause(
+        `re-pointing the clone repository — ${repoRetarget.actions.length} step(s) done this pass, the rest carried to the next`,
+      );
+    }
 
     /*
      * The functions this clone carries and the prime does not, from the
@@ -641,25 +679,30 @@ async function runBackendProvisioning(
      * on a reading nothing should act on, so the lane re-reads it then rather
      * than refusing on the snapshot's word.
      */
-    try {
-      const { deployCloneOwnedFunctions, describeCloneOwnedOutcome } = await import(
-        /* @vite-ignore */ "@/lib/_server-shims/cloneOwnedFunctions.server"
-      );
-      const owned = await deployCloneOwnedFunctions({
-        supabase,
-        octokit,
-        cloneId: input.cloneId,
-        primeDeclaredSlugs:
-          snapshot.declaredFunctionSlugs.length > 0 ? snapshot.declaredFunctionSlugs : null,
-        projectRef: result.projectRef,
-      });
-      await updateStatus("migrating", describeCloneOwnedOutcome(owned));
-    } catch (err) {
-      await updateStatus(
-        "migrating",
-        `Clone-owned functions step failed (${err instanceof Error ? err.message : String(err)}) — ` +
-          "the half-hourly catch-up will retry",
-      );
+    if (finishingStepFits("cloneOwnedFunctions", input.deadlineAt, Date.now())) {
+      try {
+        await updateStatus("migrating", "Deploying the functions this clone carries itself...");
+        const { deployCloneOwnedFunctions, describeCloneOwnedOutcome } = await import(
+          /* @vite-ignore */ "@/lib/_server-shims/cloneOwnedFunctions.server"
+        );
+        const owned = await deployCloneOwnedFunctions({
+          supabase,
+          octokit,
+          cloneId: input.cloneId,
+          primeDeclaredSlugs:
+            snapshot.declaredFunctionSlugs.length > 0 ? snapshot.declaredFunctionSlugs : null,
+          projectRef: result.projectRef,
+        });
+        await updateStatus("migrating", describeCloneOwnedOutcome(owned));
+      } catch (err) {
+        await updateStatus(
+          "migrating",
+          `Clone-owned functions step failed (${err instanceof Error ? err.message : String(err)}) — ` +
+            "the half-hourly catch-up will retry",
+        );
+      }
+    } else {
+      await updateStatus("migrating", deferredLine("cloneOwnedFunctions"));
     }
 
     /*
@@ -686,58 +729,68 @@ async function runBackendProvisioning(
      * Non-fatal, like the keys: a clone with no workspace reaches Anthropic
      * exactly as every clone does today.
      */
-    try {
-      const { provisionAnthropicWorkspace } = await import(
-        /* @vite-ignore */ "@/server/anthropicWorkspace.server"
-      );
-      const ws = await provisionAnthropicWorkspace(supabase, input.cloneId, {
-        actorUserId: userId,
-      });
-      await updateStatus(
-        "migrating",
-        ws.provisioned
-          ? `Anthropic workspace: ${ws.workspaceId} now carries this clone's model spend`
-          : `Anthropic workspace not created (${ws.reason ?? "skipped"}): ${ws.detail ?? ""}`.trim(),
-      );
-      if (ws.warning) await updateStatus("migrating", ws.warning);
-    } catch (err) {
-      await updateStatus(
-        "migrating",
-        `Anthropic workspace step failed (${err instanceof Error ? err.message : String(err)}) — ` +
-          "this clone's Anthropic calls bill to the organisation's default workspace and the " +
-          "reconcile sweep will retry",
-      );
-    }
-
-    try {
-      const { provisionLlmKeys } = await import(
-        /* @vite-ignore */ "@/server/llmKeyProvisioning.server"
-      );
-      const llm = await provisionLlmKeys(supabase, input.cloneId, { actorUserId: userId });
-      if (llm.ok) {
-        const minted = llm.outcomes.filter((o) => o.minted).map((o) => o.name);
-        // Names and counts, never a value — and the skips are said too, or
-        // "0 minted" reads as a failure when it is four correct stand-downs.
-        const skipped = llm.outcomes
-          .filter((o) => !o.minted)
-          .map((o) => `${o.name} (${"reason" in o ? o.reason : "skipped"})`);
-        await updateStatus(
-          "migrating",
-          `Model keys: ${minted.length} minted${minted.length ? ` — ${minted.join(", ")}` : ""}` +
-            (skipped.length ? `; not minted: ${skipped.join(", ")}` : ""),
+    if (finishingStepFits("anthropicWorkspace", input.deadlineAt, Date.now())) {
+      try {
+        await updateStatus("migrating", "Provisioning this clone's Anthropic workspace...");
+        const { provisionAnthropicWorkspace } = await import(
+          /* @vite-ignore */ "@/server/anthropicWorkspace.server"
         );
-      } else {
+        const ws = await provisionAnthropicWorkspace(supabase, input.cloneId, {
+          actorUserId: userId,
+        });
         await updateStatus(
           "migrating",
-          `Model keys not minted (${llm.reason}: ${llm.error}) — this clone keeps the forwarded ` +
-            "fleet keys and the reconcile sweep will retry",
+          ws.provisioned
+            ? `Anthropic workspace: ${ws.workspaceId} now carries this clone's model spend`
+            : `Anthropic workspace not created (${ws.reason ?? "skipped"}): ${ws.detail ?? ""}`.trim(),
+        );
+        if (ws.warning) await updateStatus("migrating", ws.warning);
+      } catch (err) {
+        await updateStatus(
+          "migrating",
+          `Anthropic workspace step failed (${err instanceof Error ? err.message : String(err)}) — ` +
+            "this clone's Anthropic calls bill to the organisation's default workspace and the " +
+            "reconcile sweep will retry",
         );
       }
-    } catch (err) {
-      await updateStatus(
-        "migrating",
-        `Model key minting skipped: ${err instanceof Error ? err.message : String(err)}`,
-      );
+    } else {
+      await updateStatus("migrating", deferredLine("anthropicWorkspace"));
+    }
+
+    if (finishingStepFits("llmKeys", input.deadlineAt, Date.now())) {
+      try {
+        await updateStatus("migrating", "Minting this clone's model keys...");
+        const { provisionLlmKeys } = await import(
+          /* @vite-ignore */ "@/server/llmKeyProvisioning.server"
+        );
+        const llm = await provisionLlmKeys(supabase, input.cloneId, { actorUserId: userId });
+        if (llm.ok) {
+          const minted = llm.outcomes.filter((o) => o.minted).map((o) => o.name);
+          // Names and counts, never a value — and the skips are said too, or
+          // "0 minted" reads as a failure when it is four correct stand-downs.
+          const skipped = llm.outcomes
+            .filter((o) => !o.minted)
+            .map((o) => `${o.name} (${"reason" in o ? o.reason : "skipped"})`);
+          await updateStatus(
+            "migrating",
+            `Model keys: ${minted.length} minted${minted.length ? ` — ${minted.join(", ")}` : ""}` +
+              (skipped.length ? `; not minted: ${skipped.join(", ")}` : ""),
+          );
+        } else {
+          await updateStatus(
+            "migrating",
+            `Model keys not minted (${llm.reason}: ${llm.error}) — this clone keeps the forwarded ` +
+              "fleet keys and the reconcile sweep will retry",
+          );
+        }
+      } catch (err) {
+        await updateStatus(
+          "migrating",
+          `Model key minting skipped: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    } else {
+      await updateStatus("migrating", deferredLine("llmKeys"));
     }
 
     // Compare the result with the prime before calling it ready.
@@ -749,38 +802,43 @@ async function runBackendProvisioning(
     // retry of the missing pieces, not a re-provision.
     let parity: Awaited<ReturnType<typeof computeParity>> | null = null;
     let parityError: string | null = null;
-    try {
-      await updateStatus("migrating", "Comparing the new backend with the prime...");
-      parity = await computeParity(primeBackendRef, result.projectRef, {
-        // What the clone was CONTRACTED to carry. Read from the prime repo's
-        // tree, so it is complete even on a pass that fetched no bundle
-        // source — see `declaredFunctionSlugs`.
-        declaredEdgeFunctions: snapshot.declaredFunctionSlugs,
-        crmMode,
-        // A credential this clone is supposed to lack is not a gap in its
-        // parity — see `diffSecrets`, and the measured reading that sent an
-        // operator to forward an Airtable token fleet-wide.
-        withheldSecretNames: await (async () => {
-          const { readWithheldSecretNames } = await import("@/server/handoff-parity.server");
-          return readWithheldSecretNames(supabase, input.cloneId);
-        })(),
-        // Whose each surplus object is. Best effort — a clone that came up
-        // short is recorded as short, and an unread index reads
-        // `undetermined` rather than making a claim about the tenant.
-        migrationObjectIndex: await (async () => {
-          try {
-            if (!source) return null;
-            const { getAppOctokit } = await import("@/server/github-app.server");
-            const { fetchMigrationObjectIndex } = await import("@/server/prime-backend.server");
-            return await fetchMigrationObjectIndex(getAppOctokit(), source);
-          } catch {
-            return null;
-          }
-        })(),
-      });
-    } catch (err) {
-      parityError = err instanceof Error ? err.message : String(err);
-      await updateStatus("migrating", `Parity check could not run: ${parityError}`);
+    if (finishingStepFits("parity", input.deadlineAt, Date.now())) {
+      try {
+        await updateStatus("migrating", "Comparing the new backend with the prime...");
+        parity = await computeParity(primeBackendRef, result.projectRef, {
+          // What the clone was CONTRACTED to carry. Read from the prime repo's
+          // tree, so it is complete even on a pass that fetched no bundle
+          // source — see `declaredFunctionSlugs`.
+          declaredEdgeFunctions: snapshot.declaredFunctionSlugs,
+          crmMode,
+          // A credential this clone is supposed to lack is not a gap in its
+          // parity — see `diffSecrets`, and the measured reading that sent an
+          // operator to forward an Airtable token fleet-wide.
+          withheldSecretNames: await (async () => {
+            const { readWithheldSecretNames } = await import("@/server/handoff-parity.server");
+            return readWithheldSecretNames(supabase, input.cloneId);
+          })(),
+          // Whose each surplus object is. Best effort — a clone that came up
+          // short is recorded as short, and an unread index reads
+          // `undetermined` rather than making a claim about the tenant.
+          migrationObjectIndex: await (async () => {
+            try {
+              if (!source) return null;
+              const { getAppOctokit } = await import("@/server/github-app.server");
+              const { fetchMigrationObjectIndex } = await import("@/server/prime-backend.server");
+              return await fetchMigrationObjectIndex(getAppOctokit(), source);
+            } catch {
+              return null;
+            }
+          })(),
+        });
+      } catch (err) {
+        parityError = err instanceof Error ? err.message : String(err);
+        await updateStatus("migrating", `Parity check could not run: ${parityError}`);
+      }
+    } else {
+      parityError = PARITY_DEFERRED_REASON;
+      await updateStatus("migrating", deferredLine("parity"));
     }
 
     const failedFunctions = result.edgeFunctions.filter((f) => !f.success);

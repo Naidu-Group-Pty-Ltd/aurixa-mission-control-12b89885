@@ -8,24 +8,35 @@
 //
 // Concurrency safety:
 //  - Atomic claim: UPDATE ... WHERE status='pending' AND worker_started_at IS NULL
-//  - Stall reclaim: unfinished rows whose worker_started_at is older than
-//    STALL_MINUTES are reset to pending — STATUS and timestamp both, because
-//    the claim reads status (previous Worker invocation likely timed out).
-//    A stall on the final attempt is terminated as failed instead of queued.
+//  - Stall reclaim: a claimed row whose pass is dead (see `isDeadPass`) is
+//    reset to pending — STATUS and timestamp both, because the claim reads
+//    status. Its death costs an attempt only where the job has died before
+//    (`judgeDeadPass`), and the requeue names where it died. A stall on the
+//    final attempt is terminated as failed instead of queued.
 //  - Serial per invocation (CONCURRENCY=1): provisioning is heavy, we'd
 //    rather burn wall clock than saturate the Supabase Management API.
 import { createFileRoute } from "@tanstack/react-router";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
-import { notifyOperators } from "@/server/audit.server";
+import { notifyOperators, writeAuditLog } from "@/server/audit.server";
 import { verifyCronAuth } from "@/server/cron-auth.server";
 import { beginGithubLane } from "@/server/githubUsageMeter";
 import { decryptSecret } from "@/server/crypto.server";
 import { runQueuedBackendProvisioning } from "@/lib/backend-provisioning.functions";
 import { decideSpend } from "@/server/cascade/githubBudget.pure";
 import { readGitHubRemaining } from "@/server/githubAllowance.server";
+import {
+  DEAD_PASS_SILENT_MINUTES,
+  PASS_DIED_ACTION,
+  deathPointOf,
+  exhaustedMessage,
+  isDeadPass,
+  judgeDeadPass,
+  passDeathsFrom,
+  requeueDetail,
+  type PassDeath,
+} from "@/server/provisioningStall.pure";
 
 const admin = supabaseAdmin;
-const STALL_MINUTES = 15;
 const MAX_JOBS_PER_RUN = 2;
 const MAX_ATTEMPTS = 3;
 
@@ -34,7 +45,8 @@ const MAX_ATTEMPTS = 3;
 // reclaims the worker soon after, so an unbudgeted run dies mid-write with no
 // record — which is exactly how the first engine-provisioned clone burned all
 // three attempts on one step. A pause is requeued as forward progress
-// (attempts reset to 0); only a hard death costs an attempt.
+// (attempts reset to 0); only a hard death costs an attempt, and only at a
+// point the job has died at before (`judgeDeadPass`).
 const INVOCATION_BUDGET_MS = 50_000;
 
 // The two bounds the attempt-neutral recycling answers to. They ask DIFFERENT
@@ -98,12 +110,39 @@ const UPSTREAM_LIMIT_BACKOFF_MS = 15 * 60 * 1000;
 
 const IN_FLIGHT_STATUSES = ["provisioning", "migrating", "seeding_admin"] as const;
 
+/**
+ * Every earlier death of this job, oldest first, or null when they could not be
+ * read — which `judgeDeadPass` counts against the job rather than guessing.
+ *
+ * Read from the audit log because that is where each death is recorded: a
+ * killed pass leaves nothing else behind, and the row's own `status_detail` is
+ * overwritten by the next claim.
+ */
+async function deathsOfThisJob(
+  cloneId: string,
+  queuedAt: string | null,
+): Promise<PassDeath[] | null> {
+  const { data, error } = await admin
+    .from("audit_log")
+    .select("metadata, created_at")
+    .eq("entity_type", "clone")
+    .eq("entity_id", cloneId)
+    .eq("action", PASS_DIED_ACTION)
+    // This job's deaths only: an enqueue starts a new job with fresh attempts.
+    .gte("created_at", queuedAt ?? new Date(0).toISOString())
+    .order("created_at", { ascending: true })
+    .limit(200);
+  if (error) {
+    console.error("[backend-provisioning reclaim] could not read the job's deaths:", error.message);
+    return null;
+  }
+  return passDeathsFrom(data ?? []);
+}
+
 async function reclaimStalled() {
-  const cutoff = new Date(Date.now() - STALL_MINUTES * 60 * 1000).toISOString();
   const requeue = {
     status: "pending" as const,
     worker_started_at: null,
-    status_detail: "Worker stalled — requeued",
   };
 
   // A requeue is a STATUS, not a sentence. Until 30 Aug 2026 this update
@@ -123,14 +162,71 @@ async function reclaimStalled() {
   // does: a reclaim that half-happened is invisible exactly when it
   // matters, and the route's catch turns a throw into a non-200 that
   // `cron_delivery_health()` can see.
-  const { error: stalledErr } = await admin
+  //
+  // Read, judged and requeued one row at a time, because each death is costed
+  // on where it happened (see provisioningStall.pure.ts). It used to be one
+  // update over every claim older than fifteen minutes, which cost every kill
+  // an attempt wherever it happened and a quarter of an hour before the next
+  // claim: measured on `tutorial-demo-orrimere-c158c7`, 29–30 Oct 2026, five
+  // kills in sixty-five minutes failed a job whose last-but-one pass had got
+  // further than any before it.
+  const silentCutoff = new Date(Date.now() - DEAD_PASS_SILENT_MINUTES * 60 * 1000).toISOString();
+  const { data: claimedRows, error: stalledErr } = await admin
     .from("clone_backends")
-    .update(requeue)
-    .lt("worker_started_at", cutoff)
+    .select("clone_id, attempts, status_detail, worker_started_at, updated_at, queued_at")
+    .lt("worker_started_at", silentCutoff)
     .is("worker_finished_at", null)
     .in("status", ["pending", ...IN_FLIGHT_STATUSES]);
   if (stalledErr) {
     throw new Error(`backend-provisioning reclaim: stalled claims: ${stalledErr.message}`);
+  }
+  for (const row of claimedRows ?? []) {
+    if (!row.worker_started_at) continue;
+    const dead = isDeadPass({
+      workerStartedAt: row.worker_started_at,
+      updatedAt: row.updated_at ?? null,
+      now: Date.now(),
+    });
+    if (!dead) continue;
+
+    const point = deathPointOf(row.status_detail);
+    const verdict = judgeDeadPass({
+      point,
+      history: await deathsOfThisJob(row.clone_id, row.queued_at ?? null),
+    });
+    // The hand-back is only as good as its record: the next death is judged
+    // against this row, so an attempt is handed back only once it landed.
+    const recorded = await writeAuditLog({
+      action: PASS_DIED_ACTION,
+      entityType: "clone",
+      entityId: row.clone_id,
+      metadata: {
+        point,
+        attempt: row.attempts,
+        handed_back: verdict.handBack,
+        why: verdict.why,
+        worker_started_at: row.worker_started_at,
+      },
+    });
+    const handBack = verdict.handBack && recorded;
+
+    const { error: requeueErr } = await admin
+      .from("clone_backends")
+      .update({
+        ...requeue,
+        status_detail: requeueDetail(point),
+        ...(handBack ? { attempts: Math.max(0, (row.attempts ?? 0) - 1) } : {}),
+      })
+      .eq("clone_id", row.clone_id)
+      // Fenced on the claim it judged: a row reclaimed and claimed again
+      // meanwhile belongs to a live pass and is left alone.
+      .eq("worker_started_at", row.worker_started_at)
+      .is("worker_finished_at", null);
+    if (requeueErr) {
+      throw new Error(
+        `backend-provisioning reclaim: could not requeue ${row.clone_id}: ${requeueErr.message}`,
+      );
+    }
   }
 
   // Rows the pre-fix reclaim already touched are out of reach of the
@@ -142,7 +238,7 @@ async function reclaimStalled() {
   // are gone.
   const { error: orphanErr } = await admin
     .from("clone_backends")
-    .update(requeue)
+    .update({ ...requeue, status_detail: "Worker stalled — requeued" })
     .is("worker_started_at", null)
     .is("worker_finished_at", null)
     .in("status", IN_FLIGHT_STATUSES);
@@ -158,23 +254,41 @@ async function reclaimStalled() {
   // stall path's copy of that rule, clearing the queued password exactly
   // as drainOne's terminal branch does. Enqueueing again from the clone
   // page resets attempts to 0, so the remedy in the message is real.
-  const { error: exhaustedErr } = await admin
+  //
+  // The error names where the last pass died, from the job's own record of its
+  // deaths, so an operator is not left to reconstruct it from the row.
+  const { data: exhaustedRows, error: exhaustedErr } = await admin
     .from("clone_backends")
-    .update({
-      status: "failed",
-      worker_finished_at: new Date().toISOString(),
-      queued_admin_password_enc: null,
-      error_message:
-        `Provisioning worker stalled ${MAX_ATTEMPTS} times — each run died before finishing. ` +
-        `Check the drain's delivery health, then retry from the clone page (retrying re-queues with fresh attempts).`,
-      status_detail: "Worker stalled — attempts exhausted",
-    })
+    .select("clone_id, queued_at")
     .eq("status", "pending")
     .is("worker_started_at", null)
     .is("worker_finished_at", null)
     .gte("attempts", MAX_ATTEMPTS);
   if (exhaustedErr) {
     throw new Error(`backend-provisioning reclaim: exhausted rows: ${exhaustedErr.message}`);
+  }
+  for (const row of exhaustedRows ?? []) {
+    const deaths = await deathsOfThisJob(row.clone_id, row.queued_at ?? null);
+    const lastPoint = deaths && deaths.length > 0 ? deaths[deaths.length - 1].point : null;
+    const { error: failErr } = await admin
+      .from("clone_backends")
+      .update({
+        status: "failed",
+        worker_finished_at: new Date().toISOString(),
+        queued_admin_password_enc: null,
+        error_message: exhaustedMessage(lastPoint, MAX_ATTEMPTS),
+        status_detail: "Worker stalled — attempts exhausted",
+      })
+      .eq("clone_id", row.clone_id)
+      .eq("status", "pending")
+      .is("worker_started_at", null)
+      .is("worker_finished_at", null)
+      .gte("attempts", MAX_ATTEMPTS);
+    if (failErr) {
+      throw new Error(
+        `backend-provisioning reclaim: could not fail exhausted ${row.clone_id}: ${failErr.message}`,
+      );
+    }
   }
 
   // Unclaimable: a parked row `claimOne` can never take, because its queued

@@ -1381,8 +1381,51 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     ],
   },
   {
-    migration: "20261030100000_aml_brings_partner_portals.sql",
+    migration: "20261030100000_website_briefing_images.sql",
     version: "20261030100000",
+    assertions: [
+      { kind: "column", table: "website_briefings", column: "media_thumbnail" },
+      { kind: "column", table: "website_briefing_uploads", column: "kind" },
+    ],
+  },
+  {
+    migration: "20261030110000_usage_files_under_its_own_period.sql",
+    version: "20261030110000",
+    assertions: [
+      { kind: "rpc", fn: "api_usage_period_start" },
+      { kind: "rpc", fn: "api_usage_period_end" },
+      { kind: "rpc", fn: "api_usage_closable_periods" },
+    ],
+  },
+  {
+    migration: "20261030133000_live_audit_notification_kinds.sql",
+    version: "20261030133000",
+    assertions: [{ kind: "enum", type: "notification_kind" }],
+  },
+  {
+    migration: "20261030133100_live_audit.sql",
+    version: "20261030133100",
+    assertions: [
+      { kind: "table", table: "live_audit_settings" },
+      { kind: "table", table: "live_audit_runs" },
+      { kind: "table", table: "live_audit_findings" },
+      { kind: "table", table: "live_audit_observations" },
+      { kind: "table", table: "live_audit_events" },
+      { kind: "table", table: "live_audit_fixes" },
+      { kind: "table", table: "live_audit_callback_receipts" },
+      { kind: "rows", table: "live_audit_settings", atLeast: 1 },
+      { kind: "check", table: "live_audit_settings", column: "mode", value: "live" },
+      { kind: "check", table: "live_audit_findings", column: "state", value: "fix_merged" },
+      { kind: "rpc", fn: "live_audit_ingest_findings" },
+      { kind: "rpc", fn: "live_audit_finalize_run" },
+      { kind: "rpc", fn: "live_audit_set_nightly_schedule" },
+      { kind: "cron", jobname: "live-audit-nightly" },
+      { kind: "cron", jobname: "live-audit-sweep" },
+    ],
+  },
+  {
+    migration: "20261030150000_aml_brings_partner_portals.sql",
+    version: "20261030150000",
     assertions: [{ kind: "rows", table: "addon_modules", atLeast: 33 }],
   },
 ];

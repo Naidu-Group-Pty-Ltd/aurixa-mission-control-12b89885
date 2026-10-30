@@ -112,11 +112,17 @@ describe("the snapshot fetches blobs batched, never one round trip each", () => 
        thousand REST calls never did. */
     const src = primeBackend();
     const fn = src.slice(src.indexOf("export async function fetchPrimeBackendSnapshot"));
-    expect(fn).toMatch(/await fetchBlobTextsForCommit\(octokit, ref, commitSha, neededEntries\)/);
+    expect(fn).toMatch(
+      /await fetchBlobTextsForCommit\(\s*octokit,\s*ref,\s*commitSha,\s*neededEntries\.filter\(\(e\) => heldSet\.has\(e\.rel\)\),\s*\)/,
+    );
     /* The snapshot reaches the batch through the commit-keyed cache, so both
        links are asserted: losing either one puts a thousand REST calls back. */
     const cached = src.slice(src.indexOf("async function fetchBlobTextsForCommit"));
     expect(cached).toMatch(/await fetchBlobTextsBatched\(octokit, ref, missing\)/);
+    /* And the part of the scan set that is streamed rather than held travels
+       by the same batches — a window at a time, never a round trip per blob. */
+    const streamed = src.slice(src.indexOf("async function scanBlobsForSecretNames"));
+    expect(streamed.slice(0, 900)).toMatch(/await fetchBlobTextsBatched\(octokit, ref, slice\)/);
     expect(fn).toMatch(/await mapPool\(migrationMetas/);
     /* The defect's exact shape: one awaited round trip per iteration of a
        bare for-loop. Neither loop may come back. */
@@ -618,7 +624,7 @@ describe("a resumed pass does not buy what it cannot use", () => {
     /* The early return must sit BEFORE the bundle fetch, or declining costs
        exactly as much as not declining. */
     const guardAt = src.indexOf("if (!includeFunctionSource)");
-    const fetchAt = src.indexOf("fetchBlobTextsForCommit(octokit, ref, commitSha, neededEntries)");
+    const fetchAt = src.indexOf("neededEntries.filter((e) => heldSet.has(e.rel))");
     expect(guardAt).toBeGreaterThan(-1);
     expect(fetchAt).toBeGreaterThan(-1);
     expect(guardAt).toBeLessThan(fetchAt);
@@ -892,18 +898,20 @@ describe("the edge-function fetch is budgeted like everything else", () => {
     expect(src).toMatch(/skipFunctionSlugs\?: readonly string\[\]/);
     /* Skipping decides what is DEPLOYED, and it decides it before the deploy
        set is built — the expensive half of the economy, the Management API
-       calls, is what it exists to save. It deliberately does not narrow the
-       fetch, because the fetch is what the secret scan reads (next test). It
-       runs AFTER the fetch now, because the redeploy lane plans part of its
-       skip list from the bundles' contents at the commit read (`planSkip`). */
+       calls, is what it exists to save. Where a planner needs the bundles'
+       contents (`planSkip`, the redeploy lane) it runs after the fetch.
+       Elsewhere it runs BEFORE it, and decides what the pass HOLDS: on 29 Oct
+       2026 holding the whole tree killed three provisioning passes. */
     const skipAt = src.indexOf("allBundles.filter((b) => !skip.has(b.slug))");
-    const fetchAt = src.indexOf("fetchBlobTextsForCommit(octokit, ref, commitSha, neededEntries)");
+    const fetchAt = src.indexOf("neededEntries.filter((e) => heldSet.has(e.rel))");
     const assembleAt = src.indexOf("const functions: PrimeEdgeFunction[] = selected.map(");
     expect(skipAt).toBeGreaterThan(-1);
     expect(fetchAt).toBeGreaterThan(-1);
     expect(skipAt).toBeLessThan(assembleAt);
-    // The fetch is never sized by the skip list — it reads `allBundles`.
-    expect(src.slice(fetchAt - 1500, fetchAt)).toMatch(/for \(const bundle of allBundles\) \{/);
+    // What the skip list never sizes is the SCAN: it reads `allBundles`, held
+    // and streamed together, so a skipped bundle's secrets are still found.
+    expect(src.slice(fetchAt - 2500, fetchAt)).toMatch(/for \(const bundle of allBundles\) \{/);
+    expect(src).toMatch(/neededEntries\.filter\(\(e\) => !heldSet\.has\(e\.rel\)\)/);
   });
 
   it("scans EVERY bundle the prime defines, and assembles only the selected ones", () => {
@@ -931,9 +939,7 @@ describe("the edge-function fetch is budgeted like everything else", () => {
     expect(src).toMatch(
       /const deployable = inDeployOrder\(\s*allBundles\.filter\(\(b\) => !skip\.has\(b\.slug\)\),\s*opts\?\.deployOrder,\s*\);/,
     );
-    expect(src).toMatch(
-      /const selected = functionSourceTruncated \? deployable\.slice\(0, limit\) : deployable/,
-    );
+    expect(src).toMatch(/selected: truncated \? deployable\.slice\(0, limit\) : deployable/);
     // Assembly still respects both economies — that is what keeps a pass
     // carrying a payload it can actually deploy.
     expect(src).toMatch(/const functions: PrimeEdgeFunction\[\] = selected\.map\(/);
@@ -957,11 +963,33 @@ describe("the edge-function fetch is budgeted like everything else", () => {
     const snapAt = src.indexOf("await fetchPrimeBackendSnapshot(");
     expect(askAt).toBeGreaterThan(-1);
     expect(askAt).toBeLessThan(snapAt);
-    expect(src).toMatch(/skipFunctionSlugs: liveFunctionSlugs/);
+    expect(src).toMatch(/skipFunctionSlugs: \[\.\.\.liveFunctionSlugs, /);
     expect(src).toMatch(/functionLimit: EDGE_FUNCTION_FETCH_LIMIT/);
     /* A failed listing must not be read as "the clone holds everything" — it
        resolves to an empty skip list, which fetches more, never less. */
     expect(src).toMatch(/\.catch\(\(\) => \[\]\)/);
+  });
+
+  it("the runner never selects from the prime what the clone's CRM line does not take from it", () => {
+    /* On the independent line the withheld GoHighLevel functions are never
+       live, so a pass that skipped only live functions selected and held them
+       on every pass and dropped them after. The line is read BEFORE the
+       snapshot, and both of its sets go into the skip list. */
+    const src = runner();
+    const lineAt = src.indexOf("crmLineWithheldFunctionNames(crmMode)");
+    const snapAt = src.indexOf("await fetchPrimeBackendSnapshot(");
+    expect(lineAt).toBeGreaterThan(-1);
+    expect(lineAt).toBeLessThan(snapAt);
+    expect(src).toMatch(
+      /skipFunctionSlugs: \[\.\.\.liveFunctionSlugs, \.\.\.lineWithheld, \.\.\.lineVariants\]/,
+    );
+    /* Read once: a second read after the snapshot could disagree with it. */
+    expect(src.match(/crmLineWithheldFunctionNames\(crmMode\)/g)).toHaveLength(1);
+    /* And a snapshot spliced from the cache is still narrowed by the line —
+       the cache records what the PRIME declares. */
+    const after = src.slice(snapAt);
+    expect(after).toMatch(/!lineWithheld\.has\(fn\.slug\) && !lineVariants\.has\(fn\.slug\)/);
+    expect(after).toMatch(/\(slug\) => !lineWithheld\.has\(slug\)/);
   });
 
   it("a truncated pass can never mark the clone ready", () => {

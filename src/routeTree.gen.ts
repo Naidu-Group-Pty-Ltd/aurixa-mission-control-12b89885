@@ -25,6 +25,7 @@ import { Route as FleetManagerRouteImport } from './routes/fleet-manager'
 import { Route as HandoffsRouteImport } from './routes/handoffs'
 import { Route as HealthRouteImport } from './routes/health'
 import { Route as LeadsRouteImport } from './routes/leads'
+import { Route as LiveAuditRouteImport } from './routes/live-audit'
 import { Route as MarketingRouteImport } from './routes/marketing'
 import { Route as MetricsRouteImport } from './routes/metrics'
 import { Route as ModulesRouteImport } from './routes/modules'
@@ -114,6 +115,8 @@ import { Route as HooksHandoffObservabilityPollRouteImport } from './routes/hook
 import { Route as HooksHandoffParityRefreshRouteImport } from './routes/hooks.handoff-parity-refresh'
 import { Route as HooksHeldFileDriftRouteImport } from './routes/hooks.held-file-drift'
 import { Route as HooksLeadStageEmailsRouteImport } from './routes/hooks.lead-stage-emails'
+import { Route as HooksLiveAuditNightlyRouteImport } from './routes/hooks.live-audit-nightly'
+import { Route as HooksLiveAuditSweepRouteImport } from './routes/hooks.live-audit-sweep'
 import { Route as HooksMarketingSnapshotsRouteImport } from './routes/hooks.marketing-snapshots'
 import { Route as HooksMigrationDriftRouteImport } from './routes/hooks.migration-drift'
 import { Route as HooksMigrationEnqueueRouteImport } from './routes/hooks.migration-enqueue'
@@ -197,6 +200,8 @@ import { Route as ApiPublicHooksCalcomRouteImport } from './routes/api.public.ho
 import { Route as ApiPublicHooksCodexRemediationRouteImport } from './routes/api.public.hooks.codex-remediation'
 import { Route as ApiPublicHooksCodexSecurityRouteImport } from './routes/api.public.hooks.codex-security'
 import { Route as ApiPublicHooksDocusignRouteImport } from './routes/api.public.hooks.docusign'
+import { Route as ApiPublicHooksLiveAuditRouteImport } from './routes/api.public.hooks.live-audit'
+import { Route as ApiPublicHooksLiveAuditFixRouteImport } from './routes/api.public.hooks.live-audit-fix'
 import { Route as ApiPublicIntegrationsSecretsRouteImport } from './routes/api.public.integrations.secrets'
 import { Route as ApiPublicLeadsCaptureRouteImport } from './routes/api.public.leads.capture'
 import { Route as ApiPublicListingsOperationRouteImport } from './routes/api.public.listings.$operation'
@@ -328,6 +333,11 @@ const HealthRoute = HealthRouteImport.update({
 const LeadsRoute = LeadsRouteImport.update({
   id: '/leads',
   path: '/leads',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LiveAuditRoute = LiveAuditRouteImport.update({
+  id: '/live-audit',
+  path: '/live-audit',
   getParentRoute: () => rootRouteImport,
 } as any)
 const MarketingRoute = MarketingRouteImport.update({
@@ -794,6 +804,16 @@ const HooksLeadStageEmailsRoute = HooksLeadStageEmailsRouteImport.update({
   path: '/hooks/lead-stage-emails',
   getParentRoute: () => rootRouteImport,
 } as any)
+const HooksLiveAuditNightlyRoute = HooksLiveAuditNightlyRouteImport.update({
+  id: '/hooks/live-audit-nightly',
+  path: '/hooks/live-audit-nightly',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HooksLiveAuditSweepRoute = HooksLiveAuditSweepRouteImport.update({
+  id: '/hooks/live-audit-sweep',
+  path: '/hooks/live-audit-sweep',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const HooksMarketingSnapshotsRoute = HooksMarketingSnapshotsRouteImport.update({
   id: '/hooks/marketing-snapshots',
   path: '/hooks/marketing-snapshots',
@@ -1229,6 +1249,17 @@ const ApiPublicHooksDocusignRoute = ApiPublicHooksDocusignRouteImport.update({
   path: '/api/public/hooks/docusign',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiPublicHooksLiveAuditRoute = ApiPublicHooksLiveAuditRouteImport.update({
+  id: '/api/public/hooks/live-audit',
+  path: '/api/public/hooks/live-audit',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPublicHooksLiveAuditFixRoute =
+  ApiPublicHooksLiveAuditFixRouteImport.update({
+    id: '/api/public/hooks/live-audit-fix',
+    path: '/api/public/hooks/live-audit-fix',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicIntegrationsSecretsRoute =
   ApiPublicIntegrationsSecretsRouteImport.update({
     id: '/api/public/integrations/secrets',
@@ -1542,6 +1573,7 @@ export interface FileRoutesByFullPath {
   '/handoffs': typeof HandoffsRouteWithChildren
   '/health': typeof HealthRoute
   '/leads': typeof LeadsRoute
+  '/live-audit': typeof LiveAuditRoute
   '/marketing': typeof MarketingRouteWithChildren
   '/metrics': typeof MetricsRoute
   '/modules': typeof ModulesRouteWithChildren
@@ -1628,6 +1660,8 @@ export interface FileRoutesByFullPath {
   '/hooks/handoff-parity-refresh': typeof HooksHandoffParityRefreshRoute
   '/hooks/held-file-drift': typeof HooksHeldFileDriftRoute
   '/hooks/lead-stage-emails': typeof HooksLeadStageEmailsRoute
+  '/hooks/live-audit-nightly': typeof HooksLiveAuditNightlyRoute
+  '/hooks/live-audit-sweep': typeof HooksLiveAuditSweepRoute
   '/hooks/marketing-snapshots': typeof HooksMarketingSnapshotsRoute
   '/hooks/migration-drift': typeof HooksMigrationDriftRoute
   '/hooks/migration-enqueue': typeof HooksMigrationEnqueueRoute
@@ -1714,6 +1748,8 @@ export interface FileRoutesByFullPath {
   '/api/public/hooks/codex-remediation': typeof ApiPublicHooksCodexRemediationRoute
   '/api/public/hooks/codex-security': typeof ApiPublicHooksCodexSecurityRoute
   '/api/public/hooks/docusign': typeof ApiPublicHooksDocusignRoute
+  '/api/public/hooks/live-audit': typeof ApiPublicHooksLiveAuditRoute
+  '/api/public/hooks/live-audit-fix': typeof ApiPublicHooksLiveAuditFixRoute
   '/api/public/integrations/secrets': typeof ApiPublicIntegrationsSecretsRoute
   '/api/public/leads/capture': typeof ApiPublicLeadsCaptureRoute
   '/api/public/listings/$operation': typeof ApiPublicListingsOperationRoute
@@ -1784,6 +1820,7 @@ export interface FileRoutesByTo {
   '/handoffs': typeof HandoffsRouteWithChildren
   '/health': typeof HealthRoute
   '/leads': typeof LeadsRoute
+  '/live-audit': typeof LiveAuditRoute
   '/metrics': typeof MetricsRoute
   '/modules': typeof ModulesRouteWithChildren
   '/notifications': typeof NotificationsRoute
@@ -1868,6 +1905,8 @@ export interface FileRoutesByTo {
   '/hooks/handoff-parity-refresh': typeof HooksHandoffParityRefreshRoute
   '/hooks/held-file-drift': typeof HooksHeldFileDriftRoute
   '/hooks/lead-stage-emails': typeof HooksLeadStageEmailsRoute
+  '/hooks/live-audit-nightly': typeof HooksLiveAuditNightlyRoute
+  '/hooks/live-audit-sweep': typeof HooksLiveAuditSweepRoute
   '/hooks/marketing-snapshots': typeof HooksMarketingSnapshotsRoute
   '/hooks/migration-drift': typeof HooksMigrationDriftRoute
   '/hooks/migration-enqueue': typeof HooksMigrationEnqueueRoute
@@ -1954,6 +1993,8 @@ export interface FileRoutesByTo {
   '/api/public/hooks/codex-remediation': typeof ApiPublicHooksCodexRemediationRoute
   '/api/public/hooks/codex-security': typeof ApiPublicHooksCodexSecurityRoute
   '/api/public/hooks/docusign': typeof ApiPublicHooksDocusignRoute
+  '/api/public/hooks/live-audit': typeof ApiPublicHooksLiveAuditRoute
+  '/api/public/hooks/live-audit-fix': typeof ApiPublicHooksLiveAuditFixRoute
   '/api/public/integrations/secrets': typeof ApiPublicIntegrationsSecretsRoute
   '/api/public/leads/capture': typeof ApiPublicLeadsCaptureRoute
   '/api/public/listings/$operation': typeof ApiPublicListingsOperationRoute
@@ -2025,6 +2066,7 @@ export interface FileRoutesById {
   '/handoffs': typeof HandoffsRouteWithChildren
   '/health': typeof HealthRoute
   '/leads': typeof LeadsRoute
+  '/live-audit': typeof LiveAuditRoute
   '/marketing': typeof MarketingRouteWithChildren
   '/metrics': typeof MetricsRoute
   '/modules': typeof ModulesRouteWithChildren
@@ -2111,6 +2153,8 @@ export interface FileRoutesById {
   '/hooks/handoff-parity-refresh': typeof HooksHandoffParityRefreshRoute
   '/hooks/held-file-drift': typeof HooksHeldFileDriftRoute
   '/hooks/lead-stage-emails': typeof HooksLeadStageEmailsRoute
+  '/hooks/live-audit-nightly': typeof HooksLiveAuditNightlyRoute
+  '/hooks/live-audit-sweep': typeof HooksLiveAuditSweepRoute
   '/hooks/marketing-snapshots': typeof HooksMarketingSnapshotsRoute
   '/hooks/migration-drift': typeof HooksMigrationDriftRoute
   '/hooks/migration-enqueue': typeof HooksMigrationEnqueueRoute
@@ -2197,6 +2241,8 @@ export interface FileRoutesById {
   '/api/public/hooks/codex-remediation': typeof ApiPublicHooksCodexRemediationRoute
   '/api/public/hooks/codex-security': typeof ApiPublicHooksCodexSecurityRoute
   '/api/public/hooks/docusign': typeof ApiPublicHooksDocusignRoute
+  '/api/public/hooks/live-audit': typeof ApiPublicHooksLiveAuditRoute
+  '/api/public/hooks/live-audit-fix': typeof ApiPublicHooksLiveAuditFixRoute
   '/api/public/integrations/secrets': typeof ApiPublicIntegrationsSecretsRoute
   '/api/public/leads/capture': typeof ApiPublicLeadsCaptureRoute
   '/api/public/listings/$operation': typeof ApiPublicListingsOperationRoute
@@ -2269,6 +2315,7 @@ export interface FileRouteTypes {
     | '/handoffs'
     | '/health'
     | '/leads'
+    | '/live-audit'
     | '/marketing'
     | '/metrics'
     | '/modules'
@@ -2355,6 +2402,8 @@ export interface FileRouteTypes {
     | '/hooks/handoff-parity-refresh'
     | '/hooks/held-file-drift'
     | '/hooks/lead-stage-emails'
+    | '/hooks/live-audit-nightly'
+    | '/hooks/live-audit-sweep'
     | '/hooks/marketing-snapshots'
     | '/hooks/migration-drift'
     | '/hooks/migration-enqueue'
@@ -2441,6 +2490,8 @@ export interface FileRouteTypes {
     | '/api/public/hooks/codex-remediation'
     | '/api/public/hooks/codex-security'
     | '/api/public/hooks/docusign'
+    | '/api/public/hooks/live-audit'
+    | '/api/public/hooks/live-audit-fix'
     | '/api/public/integrations/secrets'
     | '/api/public/leads/capture'
     | '/api/public/listings/$operation'
@@ -2511,6 +2562,7 @@ export interface FileRouteTypes {
     | '/handoffs'
     | '/health'
     | '/leads'
+    | '/live-audit'
     | '/metrics'
     | '/modules'
     | '/notifications'
@@ -2595,6 +2647,8 @@ export interface FileRouteTypes {
     | '/hooks/handoff-parity-refresh'
     | '/hooks/held-file-drift'
     | '/hooks/lead-stage-emails'
+    | '/hooks/live-audit-nightly'
+    | '/hooks/live-audit-sweep'
     | '/hooks/marketing-snapshots'
     | '/hooks/migration-drift'
     | '/hooks/migration-enqueue'
@@ -2681,6 +2735,8 @@ export interface FileRouteTypes {
     | '/api/public/hooks/codex-remediation'
     | '/api/public/hooks/codex-security'
     | '/api/public/hooks/docusign'
+    | '/api/public/hooks/live-audit'
+    | '/api/public/hooks/live-audit-fix'
     | '/api/public/integrations/secrets'
     | '/api/public/leads/capture'
     | '/api/public/listings/$operation'
@@ -2751,6 +2807,7 @@ export interface FileRouteTypes {
     | '/handoffs'
     | '/health'
     | '/leads'
+    | '/live-audit'
     | '/marketing'
     | '/metrics'
     | '/modules'
@@ -2837,6 +2894,8 @@ export interface FileRouteTypes {
     | '/hooks/handoff-parity-refresh'
     | '/hooks/held-file-drift'
     | '/hooks/lead-stage-emails'
+    | '/hooks/live-audit-nightly'
+    | '/hooks/live-audit-sweep'
     | '/hooks/marketing-snapshots'
     | '/hooks/migration-drift'
     | '/hooks/migration-enqueue'
@@ -2923,6 +2982,8 @@ export interface FileRouteTypes {
     | '/api/public/hooks/codex-remediation'
     | '/api/public/hooks/codex-security'
     | '/api/public/hooks/docusign'
+    | '/api/public/hooks/live-audit'
+    | '/api/public/hooks/live-audit-fix'
     | '/api/public/integrations/secrets'
     | '/api/public/leads/capture'
     | '/api/public/listings/$operation'
@@ -2994,6 +3055,7 @@ export interface RootRouteChildren {
   HandoffsRoute: typeof HandoffsRouteWithChildren
   HealthRoute: typeof HealthRoute
   LeadsRoute: typeof LeadsRoute
+  LiveAuditRoute: typeof LiveAuditRoute
   MarketingRoute: typeof MarketingRouteWithChildren
   MetricsRoute: typeof MetricsRoute
   ModulesRoute: typeof ModulesRouteWithChildren
@@ -3077,6 +3139,8 @@ export interface RootRouteChildren {
   HooksHandoffParityRefreshRoute: typeof HooksHandoffParityRefreshRoute
   HooksHeldFileDriftRoute: typeof HooksHeldFileDriftRoute
   HooksLeadStageEmailsRoute: typeof HooksLeadStageEmailsRoute
+  HooksLiveAuditNightlyRoute: typeof HooksLiveAuditNightlyRoute
+  HooksLiveAuditSweepRoute: typeof HooksLiveAuditSweepRoute
   HooksMarketingSnapshotsRoute: typeof HooksMarketingSnapshotsRoute
   HooksMigrationDriftRoute: typeof HooksMigrationDriftRoute
   HooksMigrationEnqueueRoute: typeof HooksMigrationEnqueueRoute
@@ -3138,6 +3202,8 @@ export interface RootRouteChildren {
   ApiPublicHooksCodexRemediationRoute: typeof ApiPublicHooksCodexRemediationRoute
   ApiPublicHooksCodexSecurityRoute: typeof ApiPublicHooksCodexSecurityRoute
   ApiPublicHooksDocusignRoute: typeof ApiPublicHooksDocusignRoute
+  ApiPublicHooksLiveAuditRoute: typeof ApiPublicHooksLiveAuditRoute
+  ApiPublicHooksLiveAuditFixRoute: typeof ApiPublicHooksLiveAuditFixRoute
   ApiPublicIntegrationsSecretsRoute: typeof ApiPublicIntegrationsSecretsRoute
   ApiPublicLeadsCaptureRoute: typeof ApiPublicLeadsCaptureRoute
   ApiPublicListingsOperationRoute: typeof ApiPublicListingsOperationRoute
@@ -3300,6 +3366,13 @@ declare module '@tanstack/react-router' {
       path: '/leads'
       fullPath: '/leads'
       preLoaderRoute: typeof LeadsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/live-audit': {
+      id: '/live-audit'
+      path: '/live-audit'
+      fullPath: '/live-audit'
+      preLoaderRoute: typeof LiveAuditRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/marketing': {
@@ -3925,6 +3998,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof HooksLeadStageEmailsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/hooks/live-audit-nightly': {
+      id: '/hooks/live-audit-nightly'
+      path: '/hooks/live-audit-nightly'
+      fullPath: '/hooks/live-audit-nightly'
+      preLoaderRoute: typeof HooksLiveAuditNightlyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/hooks/live-audit-sweep': {
+      id: '/hooks/live-audit-sweep'
+      path: '/hooks/live-audit-sweep'
+      fullPath: '/hooks/live-audit-sweep'
+      preLoaderRoute: typeof HooksLiveAuditSweepRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/hooks/marketing-snapshots': {
       id: '/hooks/marketing-snapshots'
       path: '/hooks/marketing-snapshots'
@@ -4506,6 +4593,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicHooksDocusignRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/hooks/live-audit': {
+      id: '/api/public/hooks/live-audit'
+      path: '/api/public/hooks/live-audit'
+      fullPath: '/api/public/hooks/live-audit'
+      preLoaderRoute: typeof ApiPublicHooksLiveAuditRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/hooks/live-audit-fix': {
+      id: '/api/public/hooks/live-audit-fix'
+      path: '/api/public/hooks/live-audit-fix'
+      fullPath: '/api/public/hooks/live-audit-fix'
+      preLoaderRoute: typeof ApiPublicHooksLiveAuditFixRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/integrations/secrets': {
       id: '/api/public/integrations/secrets'
       path: '/api/public/integrations/secrets'
@@ -5048,6 +5149,7 @@ const rootRouteChildren: RootRouteChildren = {
   HandoffsRoute: HandoffsRouteWithChildren,
   HealthRoute: HealthRoute,
   LeadsRoute: LeadsRoute,
+  LiveAuditRoute: LiveAuditRoute,
   MarketingRoute: MarketingRouteWithChildren,
   MetricsRoute: MetricsRoute,
   ModulesRoute: ModulesRouteWithChildren,
@@ -5132,6 +5234,8 @@ const rootRouteChildren: RootRouteChildren = {
   HooksHandoffParityRefreshRoute: HooksHandoffParityRefreshRoute,
   HooksHeldFileDriftRoute: HooksHeldFileDriftRoute,
   HooksLeadStageEmailsRoute: HooksLeadStageEmailsRoute,
+  HooksLiveAuditNightlyRoute: HooksLiveAuditNightlyRoute,
+  HooksLiveAuditSweepRoute: HooksLiveAuditSweepRoute,
   HooksMarketingSnapshotsRoute: HooksMarketingSnapshotsRoute,
   HooksMigrationDriftRoute: HooksMigrationDriftRoute,
   HooksMigrationEnqueueRoute: HooksMigrationEnqueueRoute,
@@ -5194,6 +5298,8 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicHooksCodexRemediationRoute: ApiPublicHooksCodexRemediationRoute,
   ApiPublicHooksCodexSecurityRoute: ApiPublicHooksCodexSecurityRoute,
   ApiPublicHooksDocusignRoute: ApiPublicHooksDocusignRoute,
+  ApiPublicHooksLiveAuditRoute: ApiPublicHooksLiveAuditRoute,
+  ApiPublicHooksLiveAuditFixRoute: ApiPublicHooksLiveAuditFixRoute,
   ApiPublicIntegrationsSecretsRoute: ApiPublicIntegrationsSecretsRoute,
   ApiPublicLeadsCaptureRoute: ApiPublicLeadsCaptureRoute,
   ApiPublicListingsOperationRoute: ApiPublicListingsOperationRoute,

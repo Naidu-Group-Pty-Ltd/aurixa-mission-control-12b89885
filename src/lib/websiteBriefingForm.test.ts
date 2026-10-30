@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  chaptersInOrder,
   exploreLabelFor,
   factsFromForm,
   formFromRow,
@@ -80,6 +81,18 @@ describe("the editor form", () => {
   it("the problems beside Publish are the problems of what Save would write", () => {
     const form = { ...formFromRow(row), summary: "Too short." };
     expect(publishProblems(factsFromForm(row, form)).join()).toMatch(/70 to 320/);
+  });
+
+  it("puts chapters in time order, an unreadable time last, ties as they were", () => {
+    expect(
+      chaptersInOrder([
+        { time: "1:05", label: "c" },
+        { time: "", label: "new" },
+        { time: "0:00", label: "a" },
+        { time: "0:30", label: "b1" },
+        { time: "30", label: "b2" },
+      ]).map((c) => c.label),
+    ).toEqual(["a", "b1", "b2", "c", "new"]);
   });
 
   it("suggests the explore label for a page, and notices edits", () => {
