@@ -1352,3 +1352,33 @@ begun approving by 61 s, and its third, extrapolated from its inserts, would
 have ended it at about 72 s, so the model sits inside production's spread.
 For #417's code it reaches the end of detection at 19.9 s warm and 27.8 s
 cold, with the same output.
+
+### The first try under #417, read back at 22:34 UTC
+
+The backoff ended at 22:04, so the 22:19 tick was the first try with #417
+live (deployment `8ae688ff`, 16:47:55). It detected and the 22:34 tick
+settled, as designed. Read only, after 22:35:
+
+- **The run.** `7e505791` at prime@`83a3218` (the head then, #3421's merge),
+  started 22:19:05 and `completed` at 22:34:06, with its tree hash: 12,038
+  files, 143 modules found, all 143 rewritten, none new.
+- **The audit row.** `module_library.follow` at 22:34:12: outcome `settled`,
+  attempt 4, `resumed`, no warnings, nothing refused, kept out or rejected.
+  It published 121 entries (new, unapproved or changed) and found 22
+  unchanged, and pruned the diagnostics of the six earlier runs (22:34:11–12).
+- **Modules.** 143 `approved`, every one naming the run. The 14 `archived` all
+  carry the follow's mark, from `20d88195`'s settle at 14:50. None is
+  `proposed`.
+- **The library.** 143 approved latest entries, none with an approver: 121 at
+  `83a3218` from this run, and 22 settled earlier and unchanged.
+- **Notices.** One `library_entry_approved` ("121 entries", 22:34:08), and no
+  `library_follow_held`.
+- **Clones.** Recorded plans `scale`, `scale`, `launch` and `scale` (Orrimere
+  none), installs 134, 135, 22 and 37, and no pin: as before the first tick.
+
+One thing left over. The 14 archived modules' latest entries are still July's
+v1, `pending`. The follow publishes only for a live module, so an archived
+module's last entry keeps its status. Nothing installs a `pending` entry, but
+the library page lists them as waiting for review. Deprecating an archived
+module's latest entry when the follow archives it would close that, and is
+not done yet.
