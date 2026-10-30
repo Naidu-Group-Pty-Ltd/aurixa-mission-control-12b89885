@@ -164,6 +164,11 @@ export async function pushFleetSecretForwards(
   const withheldNames = new Set(
     (ledger.data ?? []).filter((r) => NOT_ON_THE_PROJECT.has(r.status ?? "")).map((r) => r.name),
   );
+  // Of those, the ones that federate. Removed the same way, and stamped as
+  // what they are (`enforceWithheld`).
+  const federatedNames = new Set(
+    (ledger.data ?? []).filter((r) => r.status === FEDERATED).map((r) => r.name),
+  );
 
   /*
    * The clone's CRM line, and the credentials it never holds.
@@ -219,7 +224,14 @@ export async function pushFleetSecretForwards(
     return { ok: false, cloneId, reason, error: msg(e) };
   }
 
-  const removed = await enforceWithheld(supabase, cloneId, projectRef, withheldNames, opts);
+  const removed = await enforceWithheld(
+    supabase,
+    cloneId,
+    projectRef,
+    withheldNames,
+    federatedNames,
+    opts,
+  );
 
   if (names.length === 0) {
     return { ok: true, cloneId, written: [], unchanged: [], removed, withoutValue, outcomes };
@@ -272,12 +284,21 @@ export async function pushFleetSecretForwards(
  * A failure to delete is logged and never thrown: this runs inside the forward
  * sweep, and taking the sweep down over one stale name would stop every OTHER
  * clone settling.
+ *
+ * A `federated` name is stamped `federated` again, not `withheld`. The value
+ * found on the project was a stray (a key the client or anyone else put there
+ * directly); the federation still holds, and `FEDERATED` above is a separate
+ * status precisely because two provisioners read `withheld` as a person taking
+ * the credential off, and `federationComplete` and the rating read the status
+ * by name. Stamped `withheld`, one removal ended the clone's attribution and
+ * moved its calls from `inherited` to `brokered`.
  */
 async function enforceWithheld(
   supabase: Db,
   cloneId: string,
   projectRef: string,
   withheldNames: ReadonlySet<string>,
+  federatedNames: ReadonlySet<string>,
   opts: { actorUserId?: string | null },
 ): Promise<string[]> {
   if (withheldNames.size === 0) return [];
@@ -298,13 +319,14 @@ async function enforceWithheld(
 
   // Stamp it. `withheld` with a null `last_set_at` is what a policy recorded
   // but never carried out looks like, and it read the same as one that had
-  // been.
+  // been. A federated name keeps its status, stamped the way the federation
+  // stamps its own withdrawal of the key.
   const now = new Date().toISOString();
   const { error } = await supabase.from("clone_backend_secrets").upsert(
     stale.map((name) => ({
       clone_id: cloneId,
       name,
-      status: WITHHELD,
+      status: federatedNames.has(name) ? FEDERATED : WITHHELD,
       last_set_at: now,
       last_error: null,
       set_by: opts.actorUserId ?? null,

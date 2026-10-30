@@ -203,6 +203,17 @@ describe("an error code is observed, never assumed", () => {
     expect(readSqlFailure("ERROR: boom SQLSTATE 42883").sqlstate).toBe("42883");
   });
 
+  it("reads the code the Management API's query endpoint writes after ERROR:", () => {
+    // Verbatim from npc-test-76b3b3, 12 Sep 2026 (fleetMigrationEligibility.test.ts).
+    const real =
+      "20250124160000_prepare_extensions_schema.sql: SQL execution failed on " +
+      'umrtusxohxjxzodxorim: 400 — {"message":"Failed to run sql query: ERROR:  42601: ' +
+      'syntax error at or near \\"current_schema\\"\\nLINE 29:   current_schema TEXT NOT NULL,"}';
+    expect(readSqlFailure(real).sqlstate).toBe("42601");
+    // A lower-case word after ERROR: is prose, not a code.
+    expect(readSqlFailure("ERROR: abcde: nothing").sqlstate).toBeNull();
+  });
+
   it("answers null rather than inventing one, and keeps the raw text", () => {
     const r = readSqlFailure("the gateway closed the connection");
     expect(r.sqlstate).toBeNull();

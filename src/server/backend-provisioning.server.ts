@@ -1390,6 +1390,13 @@ export type CloneSecretFacts = {
    * nothing, so the ledger stops reading `missing` for a secret that is there.
    */
   settled?: ReadonlyMap<string, string>;
+  /**
+   * Forwarded names no platform value may be written over, each with why
+   * (`keptFromForward`, owner decision D6). Asked only where a forwarded value
+   * would be written, so a name another step owns, or one its class decides,
+   * is decided as before.
+   */
+  kept?: ReadonlyMap<string, string>;
 };
 
 function nonEmpty(v: string | null | undefined): string | null {
@@ -4897,7 +4904,15 @@ export type SecretShellStatus =
    * The remedy is different too, which is the point: set the value on Mission
    * Control, or withdraw the forward. Neither is "fill this in on the clone".
    */
-  | "authorised_no_value";
+  | "authorised_no_value"
+  /**
+   * A forwarded name no platform value was written over (`keptFromForward`):
+   * the clone's ledger records its own value or a key minted for it, or the
+   * name as taken off it or federated, or the ledger could not be read.
+   * Nothing is written, and neither is a ledger row: the one there stands
+   * (`ledgerStatusForShell`).
+   */
+  | "kept_clone_value";
 
 export type SecretShellResult = {
   name: string;
@@ -5067,7 +5082,15 @@ export function planCloneSecrets(
     }
 
     const val = inheritedValues[name];
-    if (typeof val === "string" && val.length > 0) {
+    const kept = facts?.kept?.get(name);
+    if (kept !== undefined) {
+      // The clone's own value, a key minted for it, or a name kept off its
+      // project: Mission Control's value is not written over it, and the
+      // ledger row that says so stands. Whether or not a value is held here:
+      // `authorised_no_value` over a `minted` row is the same loss, one sweep
+      // later.
+      results.set(name, { name, status: "kept_clone_value", success: true, error: kept });
+    } else if (typeof val === "string" && val.length > 0) {
       toWrite.push({ name, value: val });
       results.set(name, { name, status: "inherited", success: true });
     } else if (authorisedForwards?.has(name)) {
@@ -5873,6 +5896,14 @@ export type ProvisionBackendInput = {
    * than re-decided here.
    */
   settledSecrets?: Record<string, string>;
+  /**
+   * Reads this clone's secret ledger, at the write, for the names no forwarded
+   * value may go over (`readForwardLedger`; owner decision D6). Supplied by the
+   * caller, as the Mission Control link is, because the ledger is Mission
+   * Control's own table. Required: a pass that cannot ask would write the
+   * fleet's keys over the client's own and record them `inherited`.
+   */
+  forwardLedger: () => Promise<import("./cloneSecretForward.pure").ForwardLedger>;
   /** Where this deployment of Mission Control is reached; resolved from the environment when absent. */
   missionControlOrigin?: string | null;
   /**
@@ -5929,6 +5960,20 @@ export type ProvisionBackendInput = {
    * recorded anyway would teach the next pass to skip a stamp that never ran.
    */
   onSchemaVerified?: () => Promise<void>;
+  /**
+   * The migration-effect stage, run once the schema is verified and the
+   * ledger stamped: replay the prime's owner-approved privilege and policy
+   * files whose effect the stamp recorded without running, and report every
+   * other declared effect the clone lacks (`migrationEffectReplay.server.ts`).
+   *
+   * Supplied by the caller, as `linkMissionControl` is, because it resolves
+   * the clone through Mission Control's own tables and records its outcome
+   * there; the stamp it answers to is the caller's to know. Absent, the stage
+   * does not run.
+   */
+  replayMigrationEffects?: (
+    projectRef: string,
+  ) => Promise<import("./migrationEffectReplay.server").EffectStageResult>;
   /**
    * Converge a backend that is already provisioned, rather than build one.
    *
@@ -6330,6 +6375,58 @@ export async function provisionCloneBackend(
       throw new Error(
         `Migration ${migrationFailure.name} failed: ${migrationFailure.error ?? "unknown"} ` +
           `(project ${projectRef} kept — retry resumes from the failed migration)`,
+      );
+    }
+  }
+
+  // Step 4b: the effects the stamp recorded and the catalogue copy never
+  // carried.
+  //
+  // The stamp lists every version the prime records, so a file that takes a
+  // privilege back, restates a policy for the clones or seeds a row is
+  // recorded here as run while its effect is absent. Measured 30 Oct 2026 on
+  // Orrimere, built the day before: 35 of the prime's 63 `-- @effect:` probes
+  // returned no row, and the publishable key could write `api_usage_log`. So
+  // once the schema is verified and the ledger stamped, the stage replays the
+  // files the owner approved for this (`MIGRATION_EFFECT_REPLAYS.json`), each
+  // after a dry run that rolls back, and reports every other probe that
+  // returns no row.
+  //
+  // Here rather than at the end, so its budget comes from the front of a pass:
+  // the tail is where the finishing steps already starve. Owed once per stamp,
+  // which the stage reads from its own audit record, so the passes that
+  // deploy functions afterwards pay one read of Mission Control's audit log
+  // and nothing else. Only the introspected schema needs it: the replay
+  // strategy runs every file, effects and all.
+  //
+  // Non-fatal, like the API settings: a failure is the status line and the
+  // stage's row, and the pass goes on. A stage the budget stopped is the one
+  // exception, thrown OUTSIDE the catch — inside it a pause would read as the
+  // stage being skipped, and the pass would run on with files undecided. It
+  // carries no resume stage, so the stored marker is left alone; the next
+  // pass asks the clone, which already holds what this one replayed.
+  //
+  // The budget is checked inside, once the stage knows it is owed, rather
+  // than by a `pauseIfDue` here: on the passes it is not, a pause in front of
+  // it would name a stage that was never going to run.
+  if (strategy === "introspection" && input.replayMigrationEffects) {
+    let effects: import("./migrationEffectReplay.server").EffectStageResult | null = null;
+    try {
+      effects = await input.replayMigrationEffects(projectRef);
+      if (effects.ran) await onStatusUpdate?.("migrating", effects.line);
+    } catch (err) {
+      await onStatusUpdate?.(
+        "migrating",
+        `Migration effect stage skipped: ${err instanceof Error ? err.message : String(err)} — the next pass asks again`,
+      );
+    }
+    if (effects?.stoppedAtDeadline) {
+      // What it decided travels with the pause, which overwrites the line
+      // above: a stage that stopped part way must not read as one not begun.
+      throw new BudgetPause(
+        effects.ran
+          ? `${effects.line} The rest resume next tick.`
+          : "replaying the prime's approved privilege and policy files",
       );
     }
   }
@@ -6852,6 +6949,20 @@ export async function provisionCloneBackend(
     "migrating",
     `Syncing ${snapshot.secretNames.length} secret(s) — inheriting whitelisted values...`,
   );
+  // Owner decision D6: no forwarded value goes over what this clone's ledger
+  // records as its own (`set`) or minted for it, nor over a name taken off it
+  // or federated. Read here, at the write. Unread, it is not an empty ledger,
+  // so no forwarded value is written at all, as the fleet sweep and the push
+  // stand down too; the sweeps deliver what is missing once it reads
+  // (`keptFromForward`).
+  const { keptFromForward, describeKeptForwards } = await import("./cloneSecretForward.pure");
+  let forwardLedger: import("./cloneSecretForward.pure").ForwardLedger;
+  try {
+    forwardLedger = await input.forwardLedger();
+  } catch (err) {
+    forwardLedger = { read: false, why: err instanceof Error ? err.message : String(err) };
+  }
+  const keptForwards = keptFromForward({ names: snapshot.secretNames, ledger: forwardLedger });
   const secretShells = await syncCloneSecrets(
     projectRef,
     snapshot.secretNames,
@@ -6881,8 +6992,14 @@ export async function provisionCloneBackend(
       displayName: input.cloneName,
       missionControlOrigin: input.missionControlOrigin ?? resolveMissionControlOrigin(process.env),
       settled: new Map(Object.entries(input.settledSecrets ?? {})),
+      kept: keptForwards,
     },
   );
+  const keptLine = describeKeptForwards({
+    kept: secretShells.filter((s) => s.status === "kept_clone_value").map((s) => s.name),
+    ledger: forwardLedger,
+  });
+  if (keptLine) await onStatusUpdate?.("migrating", keptLine);
 
   // Step 7: Seed admin — UNLESS this is a repair.
   //

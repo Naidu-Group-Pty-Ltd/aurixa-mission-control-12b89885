@@ -1147,6 +1147,11 @@ export function ledgerStatusForShell(
     case "skipped_platform":
     case "skipped_deployment_config":
       return null;
+    // The clone's own value, a minted key, or a name kept off the project:
+    // the row the ledger already holds is the record, and writing one here
+    // would turn the client's `set` into whatever this pass thought.
+    case "kept_clone_value":
+      return null;
     // Operator-facing on purpose: a clone whose CAPTCHA secret has not been
     // minted yet must SHOW as missing, because until it is the login either
     // has no CAPTCHA at all or refuses everyone.

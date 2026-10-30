@@ -484,6 +484,13 @@ async function runBackendProvisioning(
         settledSecrets.REQUIRE_TURNSTILE = turnstileIdentity.fail_closed_at;
     }
 
+    // The stamp the migration-effect stage answers to: the one this pass
+    // records if it verifies the schema, else the one the row already holds.
+    // The stage is owed once per stamp (`settledEarlier`), so it has to be the
+    // same instant the row is given, and it is set before the write rather
+    // than read back after it.
+    let verifiedAtThisPass: string | null = null;
+
     const result = await provisionCloneBackend(
       {
         cloneName: input.cloneName,
@@ -500,6 +507,22 @@ async function runBackendProvisioning(
         authorisedForwardNames: (forwardAll ?? []).filter((r) => r.inherit).map((r) => r.name),
         dedicatedSecretNames,
         settledSecrets,
+        // What this clone's ledger keeps from a forwarded value: the client's
+        // own key (`set`), one minted for it, or a name taken off it or
+        // federated (owner decision D6). Read when the pipeline writes, and
+        // from here because the ledger is Mission Control's own table. A read
+        // that failed comes back as one, never as an empty ledger.
+        forwardLedger: async () => {
+          const { readForwardLedger } = await import(
+            /* @vite-ignore */ "@/lib/_server-shims/cloneSecretForward.pure"
+          );
+          return readForwardLedger(
+            await supabase
+              .from("clone_backend_secrets")
+              .select("name, status")
+              .eq("clone_id", input.cloneId),
+          );
+        },
         // Writes Mission Control's own tables (the key row, the endpoint row),
         // so it is supplied from here rather than inside the pipeline.
         linkMissionControl: async (ref: string) => {
@@ -526,15 +549,37 @@ async function runBackendProvisioning(
         // working clone for a faster one. A lost write costs one more
         // verification pass, which is exactly what happens today.
         onSchemaVerified: async () => {
+          verifiedAtThisPass = new Date().toISOString();
           const { error } = await supabase
             .from("clone_backends")
-            .update({ schema_verified_at: new Date().toISOString() })
+            .update({ schema_verified_at: verifiedAtThisPass })
             .eq("clone_id", input.cloneId);
           if (error) {
             console.error(
               `[backend-provisioning] could not record schema verification for clone ${input.cloneId}: ${error.message}`,
             );
           }
+        },
+        // The approved privilege and policy files a clone built from the
+        // catalogue never received, replayed after a dry run, and every other
+        // declared effect reported (the owner's decision of 30 Oct 2026). Here
+        // because it resolves the clone through Mission Control's own tables
+        // and records its outcome there. At the commit this pass's snapshot
+        // was read at, so the manifest and the files are the ones the pass
+        // built from.
+        replayMigrationEffects: async (ref: string) => {
+          const { runEffectReplayStage } = await import(
+            /* @vite-ignore */ "@/server/migrationEffectReplay.server"
+          );
+          return runEffectReplayStage(supabase, {
+            cloneId: input.cloneId,
+            projectRef: ref,
+            stampedAt: verifiedAtThisPass ?? existingRow?.schema_verified_at ?? null,
+            expectedSha: snapshot.sourceSha,
+            deadlineAt: input.deadlineAt ?? null,
+            source,
+            octokit,
+          });
         },
         // Persist the ref the moment the project exists — a death after
         // creation must resume onto it, never orphan it (see the input doc).
@@ -1887,7 +1932,12 @@ export const pushCloneSecretForwardsNow = createServerFn({ method: "POST" })
       actorUserId: userId,
       // Names only. A value never reaches an audit row.
       metadata: res.ok
-        ? { written: res.written, unchanged: res.unchanged, outcomes: res.outcomes }
+        ? {
+            written: res.written,
+            unchanged: res.unchanged,
+            kept: res.kept,
+            outcomes: res.outcomes,
+          }
         : { reason: res.reason, error: res.error },
     });
     if (!res.ok) return { ok: false as const, error: res.error, reason: res.reason };
@@ -1895,6 +1945,11 @@ export const pushCloneSecretForwardsNow = createServerFn({ method: "POST" })
       ok: true as const,
       written: res.written,
       unchanged: res.unchanged,
+      // Names the clone's ledger keeps from a forwarded value, and the line
+      // that says so: a push that sent nothing over the client's own key must
+      // not read as one that found nothing to send.
+      kept: res.kept,
+      ...(res.note ? { note: res.note } : {}),
       outcomes: res.outcomes,
     };
   });
