@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
+  D6_KEEP_AND_BILL,
   MISSION_CONTROL_LINK_SECRET,
   PLATFORM_PAID_STATUSES,
   platformCredentialRotations,
@@ -49,9 +50,56 @@ describe("platformCredentialRotations", () => {
   it("is bookkeeping that names the owner's decision, so a row closes only on evidence", () => {
     for (const row of platformCredentialRotations(ledger)) {
       expect(row.target).toBe("other");
-      expect(row.hint).toContain("owner decision D6");
-      expect(row.hint).toContain("Record which as evidence.");
+      expect(row.hint).toContain(D6_KEEP_AND_BILL);
+      expect(row.hint).toMatch(
+        /with evidence that the (key is kept and billed under D6|link is kept)/,
+      );
     }
+  });
+
+  /**
+   * D6, decided by the owner on 30 Oct 2026: keep and bill them. A platform
+   * key keeps running after handover and is billed through the usage
+   * forwarder (live since 09:00 that day), and is withdrawn only when the
+   * client brings its own.
+   */
+  it("keeps every platform key by default, and withdraws one only for the client's own value", () => {
+    const keys = platformCredentialRotations(ledger).filter(
+      (r) => r.key_ref !== `platform.${MISSION_CONTROL_LINK_SECRET}`,
+    );
+    expect(keys).toHaveLength(3);
+    for (const row of keys) {
+      const name = row.key_ref.slice("platform.".length);
+      expect(row.hint).toContain("It stays after handover");
+      expect(row.hint).toContain("By default it stays: mark this row skipped");
+      expect(row.hint).toContain(
+        `withdrawn only when the client supplies its own value for ${name}`,
+      );
+      // Nothing is offered as the default but keeping it.
+      expect(row.hint).not.toMatch(/\beither\b|\bor keep\b/i);
+    }
+    expect(D6_KEEP_AND_BILL).toContain("billed through the usage forwarder");
+  });
+
+  it("says how each kind of key is withdrawn once the client's own value replaces it", () => {
+    const hint = (status: string) => platformCredentialRotations([{ name: "K", status }])[0].hint;
+    expect(hint("inherited")).toContain(
+      "set theirs on the client's project, which replaces Aurixa's",
+    );
+    expect(hint("minted")).toContain("then revoke the minted key at the vendor");
+    expect(hint("federated")).toContain("then end the federation");
+  });
+
+  it("never withdraws the Mission Control link by default, because billing reports through it", () => {
+    const link = platformCredentialRotations(ledger).find(
+      (r) => r.key_ref === `platform.${MISSION_CONTROL_LINK_SECRET}`,
+    );
+    expect(link?.hint).toContain("never withdrawn by default");
+    expect(link?.hint).toContain(
+      "the usage forwarder that bills the platform keys after handover reports through it",
+    );
+    expect(link?.hint).toContain("the client bringing its own keys does not withdraw it");
+    expect(link?.hint).not.toMatch(/Revoke it/);
   });
 
   it("treats exactly the statuses billing calls platform-paid", () => {
