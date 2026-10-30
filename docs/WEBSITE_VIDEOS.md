@@ -138,7 +138,7 @@ under its play button, and a shared link's preview, with the pictures chosen.
 
 An `images` grant is finished only from Pictures and a `package` grant only
 from Video, so neither can point a listing at something it does not hold.
-Until `20261029230000_website_briefing_images.sql` applies, the panel says the
+Until `20261030100000_website_briefing_images.sql` applies, the panel says the
 pictures need it, and the video uploads as before.
 
 ## Rebuilding the website
@@ -200,7 +200,7 @@ committed `briefings.data.ts` unchanged.
 | File | What it is |
 | ---- | ---------- |
 | `supabase/migrations/20261028160200_website_briefings.sql` | The listings, the upload grants, and the three seeded briefings |
-| `supabase/migrations/20261029230000_website_briefing_images.sql` | The thumbnail, and an upload grant's kind |
+| `supabase/migrations/20261030100000_website_briefing_images.sql` | The thumbnail, and an upload grant's kind |
 | `src/lib/websiteBriefings.pure.ts` | The rules, the upload plans, the pictures' shapes, reading a stream back, the library order, the wire shape |
 | `src/lib/websiteBriefingForm.ts` | The editor's form, and the payload Save writes |
 | `src/lib/briefingUpload.ts` | The browser's upload: sign, then put phase by phase |

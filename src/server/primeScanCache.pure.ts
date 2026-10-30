@@ -97,14 +97,20 @@ export function passCanReachEdgeFunctions(input: {
  * one. The function CAP is deliberately not consulted: the scan reads every
  * bundle the repo defines regardless of how many this pass may deploy, which
  * is precisely why it is expensive.
+ *
+ * A snapshot whose names CAME from the cache (`secretScanFromCache`) performed
+ * no scan, so it records nothing: writing it back would restamp a row with
+ * its own contents and call that a reading.
  */
 export function scanIsCacheable(snapshot: {
   functionSourceOmitted: boolean;
   sourceSha: string;
   secretNames: readonly string[];
+  secretScanFromCache?: boolean;
 }): boolean {
   return (
     !snapshot.functionSourceOmitted &&
+    !snapshot.secretScanFromCache &&
     snapshot.sourceSha.length > 0 &&
     snapshot.secretNames.length > 0
   );

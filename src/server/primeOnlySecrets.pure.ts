@@ -107,6 +107,33 @@ export const PRIME_ONLY_SECRETS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Mission Control's own control-plane credentials, and why each one may never
+ * sit on a tenant's project.
+ *
+ * Not Supabase management tokens, and refused for the same reason those are:
+ * whoever holds one can act on every tenant at once, and no narrower copy can
+ * be minted for a clone. Both were nonetheless forwarded to every clone, by
+ * fleet rows marked `inherit` (key audit S1 and S2, 29 Oct 2026: `inherited`
+ * on all five clones). A fleet row is deletable data; this is the refusal that
+ * survives it, and `reconcileProhibitedSecrets` removes them by effect.
+ */
+export const CONTROL_PLANE_SECRETS: ReadonlyMap<string, string> = new Map([
+  [
+    "GITHUB_WEBHOOK_SECRET",
+    "GITHUB_WEBHOOK_SECRET is Mission Control's GitHub webhook signing secret. /hooks/github " +
+      "trusts any request signed with it as GitHub's own, and those requests start cascade work " +
+      "on every repository in the fleet. Nothing a clone runs reads it.",
+  ],
+  [
+    "VAPI_API_KEY",
+    "VAPI_API_KEY here is Aurixa's organisation-wide Vapi key. A Vapi private key reaches " +
+      "everything in its organisation — every tenant's assistants, numbers, calls and recordings, " +
+      "and the prime's. Each clone's own Vapi organisation is held by Mission Control " +
+      "(cloneVapiCustody.pure.ts), and the owner's rule is that a tenant never gets into it.",
+  ],
+]);
+
+/**
  * Open-ended classes, matched on the whole name.
  *
  * A Supabase PAT is minted with the literal prefix `sbp_`, and a name
@@ -133,13 +160,20 @@ export function isPrimeOnlySecret(name: string): boolean {
   const n = (name ?? "").trim();
   if (!n) return false;
   if (CLONE_OWN_PLATFORM_VALUES.has(n)) return false;
-  if (PRIME_ONLY_SECRETS.has(n)) return true;
+  if (PRIME_ONLY_SECRETS.has(n) || CONTROL_PLANE_SECRETS.has(n)) return true;
   return PRIME_ONLY_PATTERNS.some((rx) => rx.test(n));
 }
 
 /** Why a name is refused, in the words an operator reads. Null when it is allowed. */
 export function primeOnlyRefusal(name: string): string | null {
   if (!isPrimeOnlySecret(name)) return null;
+  const controlPlane = CONTROL_PLANE_SECRETS.get((name ?? "").trim());
+  if (controlPlane) {
+    return (
+      `${controlPlane} It is never forwarded, and it is removed from any workspace found ` +
+      `holding it.`
+    );
+  }
   return (
     `${name} grants administrative control over Supabase projects. A Supabase personal access ` +
     `token is scoped to an ACCOUNT rather than a project, so a copy on this workspace would ` +
@@ -161,4 +195,27 @@ export function primeOnlyRefusal(name: string): string | null {
  */
 export function prohibitedHoldings(heldNames: readonly string[]): string[] {
   return [...new Set(heldNames.filter((n) => isPrimeOnlySecret(n)))].sort();
+}
+
+/**
+ * Prime-only names the ledger says this clone holds, which its project does not.
+ *
+ * The sweep stamps `withheld` on what it removes, and only that, so a ledger
+ * row that never matched the project kept its claim. Measured 30 Oct 2026:
+ * Preflight's `GITHUB_WEBHOOK_SECRET` read `inherited` from 7 Sep, though the
+ * sweep's own read found the project had never held it. These are corrected to
+ * `withheld` as well, because that is now true of every one of them.
+ */
+export function absentProhibitedClaims(
+  ledger: ReadonlyArray<{ name: string; status: string }>,
+  heldNames: readonly string[],
+): string[] {
+  const held = new Set(heldNames);
+  return [
+    ...new Set(
+      ledger
+        .filter((r) => isPrimeOnlySecret(r.name) && r.status !== "withheld" && !held.has(r.name))
+        .map((r) => r.name),
+    ),
+  ].sort();
 }

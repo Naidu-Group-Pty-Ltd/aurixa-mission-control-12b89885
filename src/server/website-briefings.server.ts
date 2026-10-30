@@ -88,7 +88,7 @@ function isColumnPending(error: { code?: string | null } | null): boolean {
   return error?.code === "PGRST204" || error?.code === "42703";
 }
 
-export const PICTURES_MIGRATION = "20261029230000_website_briefing_images";
+export const PICTURES_MIGRATION = "20261030100000_website_briefing_images";
 const PICTURES_PENDING = `Pictures uploaded on their own need the database update that adds them (migration ${PICTURES_MIGRATION}). Ask an admin to apply it.`;
 
 // ── Reads ───────────────────────────────────────────────────────────────────

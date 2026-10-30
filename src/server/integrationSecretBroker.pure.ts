@@ -66,6 +66,7 @@
  */
 
 import { crmLineSecretRefusal } from "./crmLineFeatures.pure";
+import { primeOnlyRefusal } from "./primeOnlySecrets.pure";
 
 /**
  * Exact names no tenant may set on its own project through this broker.
@@ -163,6 +164,12 @@ export function tenantSecretRefusal(name: string): string | null {
   if (!SECRET_NAME.test(name)) {
     return `${JSON.stringify(name)} is not a Supabase secret name.`;
   }
+  // A credential no tenant's project may hold, whoever writes it: the sweep
+  // removes it within the half hour, so writing it here would only make a
+  // Save that undoes itself. Asked before the deny-list so the reason given
+  // is the name's own.
+  const controlPlane = primeOnlyRefusal(name);
+  if (controlPlane) return controlPlane;
   const forbidden =
     FORBIDDEN_TENANT_SECRETS.has(name) || FORBIDDEN_TENANT_PREFIXES.some((p) => name.startsWith(p));
   if (!forbidden) return null;
@@ -247,6 +254,58 @@ export function planIntegrationSecretWrite(body: unknown): IntegrationSecretPlan
   }
 
   return { write, refused, fatal: null };
+}
+
+/**
+ * What the ledger records a name this broker wrote as.
+ *
+ * ## Why not always `set` (key audit R3, 29 Oct 2026)
+ *
+ * `set` is the status a tenant's own key has, and it is what stops a call
+ * being recharged: `resolve_api_key_billability` rates it `byok`. Every name
+ * this endpoint wrote was recorded `set`, so two writes that changed nobody's
+ * money turned a platform-paid key into a free one for good:
+ *
+ * - **A save that changed nothing.** The page re-posting a value the project
+ *   already holds (`unchanged`) re-stamped an `inherited` or `minted` row
+ *   `set`. Nobody brought a key; the record says somebody did.
+ * - **The platform's own value.** A tenant pasting the key the platform
+ *   forwarded to it (or an operator re-entering it) is still the platform's
+ *   money on every call. The audit's direction: compare the posted value with
+ *   the platform's own before calling it the tenant's.
+ *
+ * ## The rules
+ *
+ * 1. Unchanged, and recorded as Aurixa's money (`inherited`, `minted`,
+ *    `federated`): the record stands. Nothing was written.
+ * 2. Unchanged, and the record could not be read: left as it is. Guessing in
+ *    either direction moves money on no evidence.
+ * 3. The value is Mission Control's own value for the name: `inherited`.
+ * 4. Anything else is the tenant's own key: `set`. Superseding a key the
+ *    platform provided is the product, and stops its recharge.
+ *
+ * `null` means "write no row". Pure: the caller compares the value (in
+ * constant time) and reads the existing row.
+ */
+export type IntegrationLedgerStatus = "set" | "inherited" | "minted" | "federated";
+
+const PLATFORM_MONEY: ReadonlySet<string> = new Set(["inherited", "minted", "federated"]);
+
+export function integrationLedgerStatus(facts: {
+  /** The project already held exactly this value, so nothing was sent. */
+  unchanged: boolean;
+  /** The ledger's status for the name before this write: null for no row, undefined when unreadable. */
+  existing: string | null | undefined;
+  /** The posted value is Mission Control's own value for this name. */
+  isPlatformValue: boolean;
+}): IntegrationLedgerStatus | null {
+  if (facts.unchanged) {
+    if (facts.existing === undefined) return null;
+    if (facts.existing !== null && PLATFORM_MONEY.has(facts.existing)) {
+      return facts.existing as IntegrationLedgerStatus;
+    }
+  }
+  return facts.isPlatformValue ? "inherited" : "set";
 }
 
 /**

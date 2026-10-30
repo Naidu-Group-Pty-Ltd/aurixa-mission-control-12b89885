@@ -44,7 +44,7 @@
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
-import { prohibitedHoldings } from "./primeOnlySecrets.pure";
+import { absentProhibitedClaims, prohibitedHoldings } from "./primeOnlySecrets.pure";
 import { deleteCloneSecretValues } from "./backend-provisioning.server";
 import { resolveCloneSecretTarget, CloneSecretTargetError } from "./cloneAllowedOrigins.server";
 
@@ -93,9 +93,9 @@ export async function readHeldSecretNames(
 
 export type ProhibitedSweepOutcome =
   /** Read the project, found nothing prohibited. The only clean reading. */
-  | { clone: string; state: "clean" }
+  | { clone: string; state: "clean"; ledgerCorrected?: string[] }
   /** Found and removed, confirmed absent by a second read. */
-  | { clone: string; state: "removed"; names: string[] }
+  | { clone: string; state: "removed"; names: string[]; ledgerCorrected?: string[] }
   /** Found, the delete was accepted, and a re-read still sees them. */
   | { clone: string; state: "still_present"; names: string[] }
   /** Found, the delete itself failed. */
@@ -128,8 +128,17 @@ export async function sweepCloneProhibitedSecrets(
   const held = await readHeldSecretNames(projectRef);
   if (!held.ok) return { clone: cloneName, state: "unreadable", error: held.error };
 
+  // Ledger claims the project contradicts: stamped below, never blocking the
+  // removal (`staleProhibitedClaims` answers [] on a failed read, and says so).
+  const stale = await staleProhibitedClaims(supabase, cloneId, held.names);
+
   const prohibited = prohibitedHoldings(held.names);
-  if (prohibited.length === 0) return { clone: cloneName, state: "clean" };
+  if (prohibited.length === 0) {
+    await recordWithheld(supabase, cloneId, stale);
+    return stale.length > 0
+      ? { clone: cloneName, state: "clean", ledgerCorrected: stale }
+      : { clone: cloneName, state: "clean" };
+  }
 
   console.warn("[prohibited-secrets] removing management credentials from a clone", {
     clone: cloneName,
@@ -152,8 +161,43 @@ export async function sweepCloneProhibitedSecrets(
     return { clone: cloneName, state: "still_present", names: remaining };
   }
 
-  await recordWithheld(supabase, cloneId, prohibited);
-  return { clone: cloneName, state: "removed", names: prohibited };
+  await recordWithheld(supabase, cloneId, [...prohibited, ...stale]);
+  return stale.length > 0
+    ? { clone: cloneName, state: "removed", names: prohibited, ledgerCorrected: stale }
+    : { clone: cloneName, state: "removed", names: prohibited };
+}
+
+/**
+ * The prime-only names this clone's ledger claims and its project does not
+ * hold (`absentProhibitedClaims`). A failed ledger read is logged and answers
+ * no corrections: the stamp is bookkeeping, and the removal never waits on it.
+ */
+async function staleProhibitedClaims(
+  supabase: Db,
+  cloneId: string,
+  heldNames: readonly string[],
+): Promise<string[]> {
+  try {
+    const { data, error } = await supabase
+      .from("clone_backend_secrets")
+      .select("name, status")
+      .eq("clone_id", cloneId)
+      .neq("status", "withheld");
+    if (error) {
+      console.error("[prohibited-secrets] ledger not read, so no stale claim corrected", {
+        cloneId,
+        error: error.message,
+      });
+      return [];
+    }
+    return absentProhibitedClaims((data ?? []) as Array<{ name: string; status: string }>, heldNames);
+  } catch (e) {
+    console.error("[prohibited-secrets] ledger read threw, so no stale claim corrected", {
+      cloneId,
+      error: e instanceof Error ? e.message : String(e),
+    });
+    return [];
+  }
 }
 
 /**

@@ -1351,8 +1351,33 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     assertions: [{ kind: "none", reason: "drops an index, creates no object" }],
   },
   {
-    migration: "20261029230000_website_briefing_images.sql",
+    migration: "20261029230000_control_plane_secrets_not_forwarded.sql",
     version: "20261029230000",
+    assertions: [
+      { kind: "none", reason: "updates two prime_secret_forwards rows, creates no object" },
+    ],
+  },
+  {
+    migration: "20261030080000_billing_functions_service_role_only.sql",
+    version: "20261030080000",
+    assertions: [
+      {
+        kind: "none",
+        reason: "revokes EXECUTE on eleven functions from the browser roles, creates no object",
+      },
+    ],
+  },
+  {
+    migration: "20261030090000_usage_charges_keep_currencies_apart.sql",
+    version: "20261030090000",
+    assertions: [
+      { kind: "check", table: "api_usage_charges", column: "status", value: "below_threshold" },
+      { kind: "rpc", fn: "close_api_usage_period" },
+    ],
+  },
+  {
+    migration: "20261030100000_website_briefing_images.sql",
+    version: "20261030100000",
     assertions: [
       { kind: "column", table: "website_briefings", column: "media_thumbnail" },
       { kind: "column", table: "website_briefing_uploads", column: "kind" },

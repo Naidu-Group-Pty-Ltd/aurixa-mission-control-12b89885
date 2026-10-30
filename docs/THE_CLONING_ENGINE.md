@@ -1249,7 +1249,9 @@ for `TURNSTILE_SECRET_KEY`, `REQUIRE_TURNSTILE`, `RESEND_API_KEY` and
 `RESEND_FROM_EMAIL` on every clone that had all four, because the batch only
 knew what IT had written and the identity steps write directly. The batch now
 takes `settled` — names another step wrote, with the time it did — records them
-`set` at that time and writes nothing; a `REQUIRE_TURNSTILE` the batch could
+as that step wrote them at that time (`settledLedgerStatus`: the minted Resend
+key `minted`, since 29 Oct 2026, and the rest `set`) and writes nothing; a
+`REQUIRE_TURNSTILE` the batch could
 neither settle nor derive is `tenant_scoped`, because the prime's `true` on a
 clone with no widget refuses every login.
 

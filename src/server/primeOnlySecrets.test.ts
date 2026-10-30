@@ -1,12 +1,15 @@
 import { describe, it, expect } from "vitest";
 import {
+  CONTROL_PLANE_SECRETS,
   isPrimeOnlySecret,
   primeOnlyRefusal,
   prohibitedHoldings,
   PRIME_ONLY_SECRETS,
+  absentProhibitedClaims,
 } from "./primeOnlySecrets.pure";
 import { classifySecret } from "./prime-backend.server";
-import { classRefusalFor } from "./cloneSecretForward.pure";
+import { classRefusalFor, decideFleetForward, refusalFor } from "./cloneSecretForward.pure";
+import { tenantSecretRefusal } from "./integrationSecretBroker.pure";
 
 describe("the name that started this", () => {
   it("SB_MANAGEMENT_ACCESS_TOKEN is prime-only", () => {
@@ -125,5 +128,89 @@ describe("the duplicated platform list is kept honest", () => {
     for (const name of CLONE_OWN_PLATFORM_VALUES) {
       expect(isPrimeOnlySecret(name), `${name} must never be swept`).toBe(false);
     }
+  });
+});
+
+describe("Mission Control's control-plane secrets never sit on a tenant's project (key audit S1, S2)", () => {
+  it("are exactly the GitHub webhook signing secret and the organisation-wide Vapi key", () => {
+    // Pinned, so adding one is a reviewed edit rather than a line in a Map.
+    expect([...CONTROL_PLANE_SECRETS.keys()].sort()).toEqual([
+      "GITHUB_WEBHOOK_SECRET",
+      "VAPI_API_KEY",
+    ]);
+  });
+
+  for (const name of ["GITHUB_WEBHOOK_SECRET", "VAPI_API_KEY"]) {
+    it(`${name} is refused by class, in its own words, and swept by effect`, () => {
+      expect(isPrimeOnlySecret(name)).toBe(true);
+      expect(classifySecret(name)).toBe("prime_only");
+      const why = primeOnlyRefusal(name) ?? "";
+      expect(why).toContain(name);
+      expect(why).not.toContain("Supabase projects");
+      expect(why).toContain("removed from any workspace found holding it");
+      expect(prohibitedHoldings(["OPENAI_API_KEY", name, "SUPABASE_URL"])).toEqual([name]);
+    });
+
+    it(`${name} is not forwarded even by a fleet row marked inherit, and says why`, () => {
+      const out = decideFleetForward({
+        name,
+        secretClass: classifySecret(name),
+        inherit: true,
+        presentInEnv: true,
+        settledOnClone: false,
+        inheritedOnClone: false,
+        withheldOnClone: false,
+        crmMode: null,
+      });
+      expect(out.act).toBe("refuse");
+      expect((out as { why: string }).why).toBe(primeOnlyRefusal(name));
+    });
+
+    it(`${name} cannot be written from a tenant's Integrations page`, () => {
+      expect(tenantSecretRefusal(name)).toBe(primeOnlyRefusal(name));
+    });
+  }
+
+  it("leaves a Supabase management token's reason as it was", () => {
+    expect(refusalFor("SB_MANAGEMENT_ACCESS_TOKEN", "prime_only")).toContain(
+      "administrative control",
+    );
+    expect(refusalFor("OPENAI_API_KEY", "vendor")).toBeUndefined();
+  });
+
+  it("does not reach the names beside them", () => {
+    // The Vapi webhook secret is the tenant's own, set on its Integrations
+    // page; the Didit webhook secret is the fleet's one Didit application and
+    // waits on the owner's decision (D3).
+    for (const n of [
+      "VAPI_WEBHOOK_SECRET",
+      "DIDIT_WEBHOOK_SECRET",
+      "GITHUB_TOKEN_READONLY",
+      "VAPI_PUBLIC_KEY",
+    ]) {
+      expect(isPrimeOnlySecret(n), n).toBe(false);
+    }
+  });
+});
+
+describe("absentProhibitedClaims", () => {
+  it("names the prime-only claims the project does not bear out, once and sorted", () => {
+    expect(
+      absentProhibitedClaims(
+        [
+          { name: "VAPI_API_KEY", status: "inherited" },
+          { name: "GITHUB_WEBHOOK_SECRET", status: "inherited" },
+          { name: "GITHUB_WEBHOOK_SECRET", status: "inherited" },
+          { name: "SB_MANAGEMENT_ACCESS_TOKEN", status: "withheld" },
+          { name: "OPENAI_API_KEY", status: "inherited" },
+        ],
+        ["VAPI_API_KEY"],
+      ),
+    ).toEqual(["GITHUB_WEBHOOK_SECRET"]);
+  });
+
+  it("has nothing to say about a ledger the project agrees with", () => {
+    expect(absentProhibitedClaims([{ name: "VAPI_API_KEY", status: "inherited" }], ["VAPI_API_KEY"])).toEqual([]);
+    expect(absentProhibitedClaims([], [])).toEqual([]);
   });
 });

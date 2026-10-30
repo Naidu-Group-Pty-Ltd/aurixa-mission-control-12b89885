@@ -75,6 +75,7 @@ const CHARGE_STATUS_STYLE: Record<string, string> = {
   open: "bg-muted text-muted-foreground",
   closed: "bg-warning/15 text-warning",
   invoiced: "bg-success/15 text-success",
+  below_threshold: "bg-muted text-muted-foreground",
   waived: "bg-muted text-muted-foreground",
   failed: "bg-destructive/15 text-destructive",
 };
@@ -532,7 +533,7 @@ function ChargesTable({ charges, canManage, onChanged }) {
                 </TableCell>
                 <TableCell>
                   <Badge className={CHARGE_STATUS_STYLE[c.status] ?? ""} variant="secondary">
-                    {c.status}
+                    {c.status.replace("_", " ")}
                   </Badge>
                   {c.last_error && (
                     <div className="mt-1 text-xs text-destructive">{c.last_error}</div>

@@ -25,10 +25,25 @@ secret value" action updates:
 | status | meaning | billed |
 |---|---|---|
 | `inherited` | provisioning forwarded our key onto the clone | **yes** |
-| `set` | the clone/operator wrote its own key | no — BYOK |
-| `missing` | no key landed on the clone | no |
-| `failed` | the secret sync errored | no |
+| `minted` | a key minted for this clone on Aurixa's account (OpenAI, OpenRouter, the email identity's Resend key) | **yes** (`inherited`) |
+| `federated` | a short-lived token in Aurixa's organisation, bound to this clone | **yes** (`inherited`) |
+| `withheld` | taken off the clone; Mission Control makes the call for it | **yes** (`brokered`) |
+| `set` | the clone's own key, or a value Mission Control set for it | no — BYOK |
+| `missing`, `failed`, `authorised_no_value` | no working key on either side | no |
 | *(no row)* | we never lent this clone this key | no — and it is flagged |
+
+Two writers once recorded Aurixa's money as `set` (key audit R3, 29 Oct 2026),
+and both now decide per name:
+
+- **The email identity's Resend key** is minted on Aurixa's Resend account, so
+  it is `minted` (`settledLedgerStatus`). It was `set` on all four clones that
+  had one, so every email rated `byok`. The hourly email audit corrects a row
+  it finds `set`. Whether email is billed or absorbed is the rate row's
+  `absorbed` flag, never this record.
+- **The Integrations page** (`/api/public/integrations/secrets`) recorded every
+  write `set`. It now keeps a platform-paid record when the save changed
+  nothing, records Mission Control's own value as `inherited`, and records only
+  a key the tenant brought as `set` (`integrationLedgerStatus`).
 
 The last row matters. An event we cannot tie to a key we lent is recorded and
 surfaced as `unknown_secret`, never charged. **We do not bill on a guess.** At
@@ -45,7 +60,11 @@ The rule lives in two places, on purpose:
 - `public.resolve_api_key_billability(clone_id, secret_name)` — used inside the
   ingest transaction, because the lookup and the rollup update must be atomic.
 - `src/lib/api-usage-rating.ts` → `resolveBillingReason()` — the same rule,
-  pure, pinned by `api-usage-rating.test.ts`. Change one, change both.
+  pure, pinned by `api-usage-rating.test.ts`. Change one, change both. It has
+  no runtime caller, so nothing but that discipline keeps it true: until
+  29 Oct 2026 it rated `minted` and `federated` as `no_key` and kept a failed
+  call on a tenant's own key `byok`, where the SQL bills the first two and
+  calls every failed call `error_call` (key audit A1).
 
 ## Why the secret name is the key
 

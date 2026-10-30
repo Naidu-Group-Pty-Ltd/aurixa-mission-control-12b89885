@@ -163,3 +163,86 @@ describe("the removal is left in the ledger", () => {
     expect(out.state).toBe("removed");
   });
 });
+
+describe("a ledger claim the project contradicts is corrected", () => {
+  // Measured 30 Oct 2026: Preflight's GITHUB_WEBHOOK_SECRET read `inherited`
+  // from 7 Sep, and the sweep's own read found the project never held it.
+  function ledgerDb(rows: Array<{ name: string; status: string }>, failRead = false) {
+    return {
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            neq: async () =>
+              failRead ? { data: null, error: { message: "ledger down" } } : { data: rows, error: null },
+          }),
+        }),
+        upsert: async (written: unknown) => {
+          ledgerWrites.push(written);
+          return { error: null };
+        },
+      }),
+    };
+  }
+
+  it("stamps an absent prime-only name withheld, and the clean outcome names it", async () => {
+    heldSequence = [["OPENAI_API_KEY"]];
+    const m = await import("./cloneProhibitedSecrets.server");
+    const out = await m.sweepCloneProhibitedSecrets(
+      ledgerDb([
+        { name: "GITHUB_WEBHOOK_SECRET", status: "inherited" },
+        { name: "OPENAI_API_KEY", status: "inherited" },
+      ]) as never,
+      "c",
+      "Preflight Property Group",
+    );
+    expect(out).toEqual({ clone: "Preflight Property Group", state: "clean", ledgerCorrected: ["GITHUB_WEBHOOK_SECRET"] });
+    expect(deleteCalls).toHaveLength(0);
+    expect(ledgerWrites).toEqual([
+      [{ clone_id: "c", name: "GITHUB_WEBHOOK_SECRET", status: "withheld", last_set_at: null }],
+    ]);
+  });
+
+  it("removes what the project holds and corrects what it does not, in one stamp", async () => {
+    heldSequence = [["VAPI_API_KEY"], []];
+    const m = await import("./cloneProhibitedSecrets.server");
+    const out = await m.sweepCloneProhibitedSecrets(
+      ledgerDb([
+        { name: "VAPI_API_KEY", status: "inherited" },
+        { name: "GITHUB_WEBHOOK_SECRET", status: "inherited" },
+      ]) as never,
+      "c",
+      "clone",
+    );
+    expect(out).toEqual({
+      clone: "clone",
+      state: "removed",
+      names: ["VAPI_API_KEY"],
+      ledgerCorrected: ["GITHUB_WEBHOOK_SECRET"],
+    });
+    expect(ledgerWrites).toHaveLength(1);
+    expect((ledgerWrites[0] as Array<{ name: string }>).map((r) => r.name).sort()).toEqual([
+      "GITHUB_WEBHOOK_SECRET",
+      "VAPI_API_KEY",
+    ]);
+  });
+
+  it("a failed ledger read corrects nothing and never holds up the removal", async () => {
+    heldSequence = [["VAPI_API_KEY"], []];
+    const m = await import("./cloneProhibitedSecrets.server");
+    const out = await m.sweepCloneProhibitedSecrets(ledgerDb([], true) as never, "c", "clone");
+    expect(out).toEqual({ clone: "clone", state: "removed", names: ["VAPI_API_KEY"] });
+    expect(deleteCalls).toHaveLength(1);
+  });
+
+  it("leaves a name that is not prime-only alone, however its row reads", async () => {
+    heldSequence = [[]];
+    const m = await import("./cloneProhibitedSecrets.server");
+    const out = await m.sweepCloneProhibitedSecrets(
+      ledgerDb([{ name: "OPENAI_API_KEY", status: "inherited" }]) as never,
+      "c",
+      "clone",
+    );
+    expect(out).toEqual({ clone: "clone", state: "clean" });
+    expect(ledgerWrites).toHaveLength(0);
+  });
+});
