@@ -415,6 +415,9 @@ function NewClone() {
           // provisioning writes the authoritative set to `clone_modules` and
           // the backend pipeline reads it from there. (Audit finding #12.)
           backend: dedicatedBackend ? { region: backendRegion, adminEmail, adminPassword } : null,
+          // The box travels as itself. Read through the domain alone, ticked
+          // with the domain left blank arrived as `null`, the same as unticked.
+          startSendingIdentity: armEmail,
           sendingDomain: armEmail ? sendingDomain.trim() || null : null,
           idempotencyKey,
           // Which line, and therefore which parent the repository is copied
@@ -539,8 +542,24 @@ function NewClone() {
       // recorded, and the deployment drain calls it with no domain at all —
       // so a browser that never got this far did not fail, it started an
       // identity on a domain nobody chose.
-      if (armEmail) {
-        toast.info("Sending identity started — its domain verifies once DNS propagates.");
+      //
+      // What is said here is the server's answer. This toasted "started"
+      // whenever the box was ticked, and on 29 Oct 2026 it said so over a
+      // demo clone the server had started nothing for.
+      const identity = result.sendingIdentity;
+      if (identity.status === "started") {
+        toast.info(
+          `Sending identity started${identity.sendingDomain ? ` on ${identity.sendingDomain}` : ""}` +
+            " — its domain verifies once DNS propagates.",
+        );
+      } else if (identity.status === "refused") {
+        toast.warning("Sending identity not started. The clone page can retry it.", {
+          description: identity.error,
+        });
+      } else if (armEmail) {
+        toast.warning(
+          "A sending identity was asked for and the server started none. Start it from the clone page.",
+        );
       }
 
       setBusy(false);

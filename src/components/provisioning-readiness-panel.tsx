@@ -252,15 +252,30 @@ export function ProvisioningReadinessPanel({
                         ))}
                     </ul>
                   )}
+
+                  {/*
+                    Unset and covered by a default, so not a gap and not part
+                    of any verdict. Said anyway: "no gaps" alone does not say
+                    that a default, rather than a value somebody chose, is in
+                    force.
+                  */}
+                  {capability.credentials
+                    .filter((c) => c.state === "default")
+                    .map((c) => (
+                      <p key={c.name} className="mt-1 text-xs text-muted-foreground">
+                        <span className="font-mono">{c.name}</span> is not set, so its default
+                        applies — {c.purpose}
+                      </p>
+                    ))}
                 </li>
               ))}
             </ul>
 
             {degraded.length > 0 && (
               <p className="text-xs text-muted-foreground">
-                Degraded means an optional credential is absent. The step still runs — on a default,
-                or without the one refinement that credential buys. It is not a failure and it does
-                not stop a clone being created.
+                Degraded means an optional credential is absent with no default in its place. The
+                step still runs, without the refinement that credential buys. It is not a failure
+                and it does not stop a clone being created.
               </p>
             )}
 

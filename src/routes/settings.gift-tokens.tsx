@@ -12,6 +12,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { toast } from "sonner";
 import { Gift, Sparkles, AlertTriangle } from "lucide-react";
 import { bulkGiftTokens, previewGiftTargets, listGiftCampaigns } from "@/lib/gift-tokens.functions";
+import { describeGiftCampaignExpiry } from "@/lib/giftCampaigns.pure";
 import { listPlans, listTenants } from "@/lib/tokens.functions";
 
 export const Route = createFileRoute("/settings/gift-tokens")({
@@ -329,7 +330,7 @@ function GiftTokensPage() {
             <p className="text-sm text-muted-foreground">No promotions yet.</p>
           ) : (
             <div className="space-y-2">
-              {(campaignsQ.data?.campaigns ?? []).map((c: any) => (
+              {(campaignsQ.data?.campaigns ?? []).map((c) => (
                 <div
                   key={c.campaignId}
                   className="flex items-center justify-between border border-border px-3 py-2 text-sm"
@@ -339,6 +340,11 @@ function GiftTokensPage() {
                     <div className="font-mono text-xs text-muted-foreground">
                       {c.campaignId} · {new Date(c.createdAt).toLocaleString()}
                       {c.grantedBy ? ` · by ${c.grantedBy}` : ""}
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      {describeGiftCampaignExpiry(c.expiry, (iso) =>
+                        new Date(iso).toLocaleString(),
+                      )}
                     </div>
                   </div>
                   <div className="text-right">

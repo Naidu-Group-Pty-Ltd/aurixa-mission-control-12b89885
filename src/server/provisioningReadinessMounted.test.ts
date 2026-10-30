@@ -140,11 +140,27 @@ describe("a clone's own credentials are armed by the act that creates it", () =>
    * clone that got one later got it on a domain nobody chose. The operator's
    * typed domain now travels WITH the submit and `provisionCloneCore` starts
    * it, where no browser can lose it.
+   *
+   * And the box travels as itself. Read through the domain alone, a box
+   * ticked with the domain left blank arrived as `null`, the same as an
+   * unticked one, so nothing started; measured 29 Oct 2026 on a demo clone
+   * with no identity row, over a wizard that had toasted "started".
    */
-  it("starts the sending identity on the server, with the domain the operator typed", () => {
+  it("starts the sending identity on the server, from the box and the domain beside it", () => {
+    expect(WIZARD).toMatch(/startSendingIdentity:\s*armEmail\b/);
     expect(WIZARD).toMatch(/sendingDomain:\s*armEmail\s*\?/);
     expect(CORE).toMatch(/await\s+advanceEmailIdentity\s*\(/);
-    expect(CORE).toMatch(/sendingDomain:\s*data\.sendingDomain/);
+    expect(CORE).toMatch(/data\.startSendingIdentity\s*\?\?/);
+    expect(CORE).toMatch(/sendingDomain:\s*typedDomain\s*\?\?\s*undefined/);
+  });
+
+  it("says what the server did with it, not what the box asked for", () => {
+    expect(WIZARD).toContain("result.sendingIdentity");
+    expect(WIZARD).toMatch(/status === "started"/);
+    expect(WIZARD).toMatch(/status === "refused"/);
+    expect(WIZARD).not.toMatch(
+      /if\s*\(\s*armEmail\s*\)\s*\{\s*toast\.info\(\s*"Sending identity started/,
+    );
   });
 
   /**
