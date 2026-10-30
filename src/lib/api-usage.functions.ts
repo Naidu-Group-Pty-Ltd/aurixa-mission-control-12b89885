@@ -68,13 +68,19 @@ export const getApiUsageOverview = createServerFn({ method: "GET" })
     });
     if (error) return { ok: false as const, error: error.message };
 
-    const { data: charges } = await adminAny
+    // Named, so a held charge says whose it is: the dashboard, Preflight and
+    // the CRM have no display name, only their clone's.
+    const { data: charges, error: chargesError } = await adminAny
       .from("api_usage_charges")
       .select(
-        "id, tenant_id, clone_id, period_start, period_end, currency, amount_cents, amount_micros, cost_micros, status, stripe_invoice_item_id, last_error, closed_at, invoiced_at",
+        "id, tenant_id, clone_id, period_start, period_end, currency, amount_cents, amount_micros, cost_micros, status, stripe_invoice_item_id, last_error, closed_at, invoiced_at, tenant:tenants(display_name, external_ref), clone:clones(name)",
       )
       .order("period_start", { ascending: false })
       .limit(100);
+    // An unread list is not an empty one.
+    if (chargesError) {
+      return { ok: false as const, error: `charges could not be read: ${chargesError.message}` };
+    }
 
     // Un-catalogued or unattributable calls are the two ways this system fails
     // quietly: the first meters at zero, the second never reaches an invoice.
