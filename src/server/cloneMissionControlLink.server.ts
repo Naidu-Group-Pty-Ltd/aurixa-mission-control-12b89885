@@ -35,7 +35,9 @@ import {
   ENV_MISSION_CONTROL_WEBHOOK_SECRET,
   MISSION_CONTROL_LINK_ENV_NAMES,
   MISSION_CONTROL_LINK_KEY_LABEL,
+  LINK_KEY_COLUMNS,
   decideMissionControlLinkRepair,
+  linkKeyFactFrom,
   planMissionControlLink,
   resolveMissionControlOrigin,
   type LinkKeyFact,
@@ -96,29 +98,10 @@ export async function ensureCloneMissionControlLink(
 
   const keysRes = await supabase
     .from("clone_api_keys")
-    .select("id, label, scopes, revoked_at, revoke_at, delivered_project_ref, delivered_env_at")
+    .select(LINK_KEY_COLUMNS)
     .eq("clone_id", cloneId);
   if (keysRes.error) return { ok: false, stage: "keys_read", error: keysRes.error.message };
-  const keys: LinkKeyFact[] = (keysRes.data ?? []).map((k) => {
-    const row = k as {
-      id: string;
-      label?: string | null;
-      scopes?: string[] | null;
-      revoked_at?: string | null;
-      revoke_at?: string | null;
-      delivered_project_ref?: string | null;
-      delivered_env_at?: string | null;
-    };
-    return {
-      id: row.id,
-      label: row.label ?? null,
-      scopes: row.scopes ?? [],
-      revokedAt: row.revoked_at ?? null,
-      revokeAt: row.revoke_at ?? null,
-      deliveredProjectRef: row.delivered_project_ref ?? null,
-      deliveredEnvAt: row.delivered_env_at ?? null,
-    };
-  });
+  const keys: LinkKeyFact[] = (keysRes.data ?? []).map(linkKeyFactFrom);
 
   const epRes = await supabase
     .from("token_webhook_endpoints")
