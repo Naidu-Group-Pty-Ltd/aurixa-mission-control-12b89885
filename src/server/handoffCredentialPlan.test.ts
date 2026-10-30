@@ -9,6 +9,24 @@ import {
 import { integrationLedgerStatus, tenantSecretRefusal } from "./integrationSecretBroker.pure";
 
 /**
+ * The names a billable rate covers, as `api_provider_rates` read on 30 Oct
+ * 2026: every key on every clone's plan, and none of the settings or the
+ * shared secret beside them.
+ */
+const BILLED = new Set([
+  "ANTHROPIC_API_KEY",
+  "FIRECRAWL_API_KEY",
+  "LOVABLE_API_KEY",
+  "OPENAI_API_KEY",
+  "OPENROUTER_API_KEY",
+  "PERPLEXITY_API_KEY",
+  "RESEND_API_KEY",
+]);
+
+const planOf = (ledger: Array<{ name: string; status: string }>, billed = BILLED) =>
+  platformCredentialRotations(ledger, billed);
+
+/**
  * A handoff accounts for every credential Aurixa pays for (key audit S4,
  * 29 Oct 2026). Measured that day, each clone's ledger held 10 or 11 forwarded
  * keys and 2 or 3 minted ones, and the handoff plan named none of them.
@@ -25,7 +43,7 @@ describe("platformCredentialRotations", () => {
   ];
 
   it("plans a row for each name Aurixa supplied, in name order, and the link last", () => {
-    expect(platformCredentialRotations(ledger).map((r) => r.key_ref)).toEqual([
+    expect(planOf(ledger).map((r) => r.key_ref)).toEqual([
       "platform.ANTHROPIC_API_KEY",
       "platform.OPENAI_API_KEY",
       "platform.RESEND_API_KEY",
@@ -34,7 +52,7 @@ describe("platformCredentialRotations", () => {
   });
 
   it("leaves out what the client brought and what never reached the clone", () => {
-    const refs = platformCredentialRotations(ledger).map((r) => r.key_ref);
+    const refs = planOf(ledger).map((r) => r.key_ref);
     for (const name of ["GOHIGHLEVEL_API_KEY_NEW", "VAPI_API_KEY", "GAMMA_API_KEY"]) {
       expect(refs).not.toContain(`platform.${name}`);
     }
@@ -42,16 +60,15 @@ describe("platformCredentialRotations", () => {
 
   it("plans the Mission Control link whatever its ledger says, once", () => {
     for (const status of ["failed", "missing", "set", "inherited"]) {
-      const rows = platformCredentialRotations([{ name: MISSION_CONTROL_LINK_SECRET, status }]);
+      const rows = planOf([{ name: MISSION_CONTROL_LINK_SECRET, status }]);
       expect(rows.map((r) => r.key_ref)).toEqual([`platform.${MISSION_CONTROL_LINK_SECRET}`]);
     }
-    expect(platformCredentialRotations([])).toHaveLength(1);
+    expect(planOf([])).toHaveLength(1);
   });
 
-  it("is bookkeeping that names the owner's decision, so a row closes only on evidence", () => {
-    for (const row of platformCredentialRotations(ledger)) {
+  it("is bookkeeping, so every row closes only on the operator's evidence", () => {
+    for (const row of planOf(ledger)) {
       expect(row.target).toBe("other");
-      expect(row.hint).toContain(D6_KEEP_AND_BILL);
       expect(row.hint).toMatch(
         /with evidence that the (key is kept and billed under D6|link is kept)/,
       );
@@ -64,14 +81,14 @@ describe("platformCredentialRotations", () => {
    * forwarder (live since 09:00 that day), and is withdrawn only when the
    * client brings its own.
    */
-  it("keeps every platform key by default, and withdraws one only for the client's own value", () => {
-    const keys = platformCredentialRotations(ledger).filter(
+  it("keeps every billed key by default, and withdraws one only for the client's own value", () => {
+    const keys = planOf(ledger).filter(
       (r) => r.key_ref !== `platform.${MISSION_CONTROL_LINK_SECRET}`,
     );
     expect(keys).toHaveLength(3);
     for (const row of keys) {
       const name = row.key_ref.slice("platform.".length);
-      expect(row.hint).toContain("It stays after handover");
+      expect(row.hint).toContain(`It stays after handover (${D6_KEEP_AND_BILL}).`);
       expect(row.hint).toContain("By default it stays: mark this row skipped");
       expect(row.hint).toContain(
         `withdrawn only when the client enters its own value for ${name} on the clone's Integrations page`,
@@ -89,8 +106,7 @@ describe("platformCredentialRotations", () => {
    * the ledger keeps reading Aurixa's.
    */
   it("sends the client's own value through the Integrations page, never onto the project", () => {
-    const hint = (status: string) =>
-      platformCredentialRotations([{ name: "PERPLEXITY_API_KEY", status }])[0].hint;
+    const hint = (status: string) => planOf([{ name: "PERPLEXITY_API_KEY", status }])[0].hint;
     for (const status of PLATFORM_PAID_STATUSES) {
       expect(hint(status)).toContain(
         "enters its own value for PERPLEXITY_API_KEY on the clone's Integrations page. Mission Control's broker writes it and records it as the client's own (`set`), and that record is what stops the recharge.",
@@ -117,51 +133,18 @@ describe("platformCredentialRotations", () => {
     }
   });
 
-  /**
-   * Measured 30 Oct 2026: every clone's ledger carries these thirteen
-   * platform rows, and the broker refuses one of them (`AIRTABLE_TABLE_NAME`,
-   * the fleet's shared Listings configuration). A hint sending the client to
-   * the Integrations page for it would send it to a page that answers no.
-   */
-  it("never sends anyone to the Integrations page for a name the broker refuses", () => {
-    const measured = [
-      ["AIRTABLE_TABLE_NAME", "inherited"],
-      ["ANTHROPIC_API_KEY", "inherited"],
-      ["DIDIT_FACE_MATCH_THRESHOLD", "inherited"],
-      ["DIDIT_LIVENESS_THRESHOLD", "inherited"],
-      ["DIDIT_WEBHOOK_SECRET", "inherited"],
-      ["DIDIT_WORKFLOW_ID", "inherited"],
-      ["FIRECRAWL_API_KEY", "inherited"],
-      ["GITHUB_APP_ID", "inherited"],
-      ["LOVABLE_API_KEY", "inherited"],
-      ["OPENAI_API_KEY", "minted"],
-      ["OPENROUTER_API_KEY", "minted"],
-      ["PERPLEXITY_API_KEY", "inherited"],
-      ["RESEND_API_KEY", "minted"],
-    ].map(([name, status]) => ({ name, status }));
-    const rows = platformCredentialRotations(measured).filter(
-      (r) => r.key_ref !== `platform.${MISSION_CONTROL_LINK_SECRET}`,
+  it("never sends anyone to the Integrations page for a billed name the broker refuses", () => {
+    const [row] = planOf(
+      [{ name: "AIRTABLE_TOKEN", status: "inherited" }],
+      new Set(["AIRTABLE_TOKEN"]),
     );
-    expect(rows).toHaveLength(13);
-    const refused: string[] = [];
-    for (const row of rows) {
-      const name = row.key_ref.slice("platform.".length);
-      const accepted = tenantSecretRefusal(name) === null;
-      if (!accepted) refused.push(name);
-      expect(row.hint.includes("on the clone's Integrations page. Mission Control's broker")).toBe(
-        accepted,
-      );
-      expect(row.hint.includes(`The client cannot bring its own value for ${name}`)).toBe(
-        !accepted,
-      );
-      expect(row.hint).toContain(D6_KEEP_AND_BILL);
-      expect(row.hint).toContain("By default it stays: mark this row skipped");
-    }
-    expect(refused).toEqual(["AIRTABLE_TABLE_NAME"]);
+    expect(tenantSecretRefusal("AIRTABLE_TOKEN")).not.toBeNull();
+    expect(row.hint).toContain("The client cannot bring its own value for AIRTABLE_TOKEN");
+    expect(row.hint).not.toContain("on the clone's Integrations page. Mission Control's broker");
   });
 
   it("never withdraws the Mission Control link by default, because billing reports through it", () => {
-    const link = platformCredentialRotations(ledger).find(
+    const link = planOf(ledger).find(
       (r) => r.key_ref === `platform.${MISSION_CONTROL_LINK_SECRET}`,
     );
     expect(link?.hint).toContain("never withdrawn by default");
@@ -177,11 +160,123 @@ describe("platformCredentialRotations", () => {
   });
 
   it("names a duplicate once", () => {
-    const rows = platformCredentialRotations([
+    const rows = planOf([
       { name: "OPENAI_API_KEY", status: "inherited" },
       { name: "OPENAI_API_KEY", status: "inherited" },
     ]);
     expect(rows.filter((r) => r.key_ref === "platform.OPENAI_API_KEY")).toHaveLength(1);
+  });
+});
+
+/**
+ * Measured 30 Oct 2026: every clone's ledger carries these thirteen platform
+ * rows. Seven are keys a billable rate covers; five are settings and one is a
+ * secret every clone shares, and no rate bills any of those six. Each stays on
+ * the plan, because the handover record names everything Aurixa supplied, and
+ * none of the six may say it is billed.
+ */
+describe("what Aurixa supplied that nothing bills", () => {
+  const MEASURED = [
+    ["AIRTABLE_TABLE_NAME", "inherited"],
+    ["ANTHROPIC_API_KEY", "inherited"],
+    ["DIDIT_FACE_MATCH_THRESHOLD", "inherited"],
+    ["DIDIT_LIVENESS_THRESHOLD", "inherited"],
+    ["DIDIT_WEBHOOK_SECRET", "inherited"],
+    ["DIDIT_WORKFLOW_ID", "inherited"],
+    ["FIRECRAWL_API_KEY", "inherited"],
+    ["GITHUB_APP_ID", "inherited"],
+    ["LOVABLE_API_KEY", "inherited"],
+    ["OPENAI_API_KEY", "minted"],
+    ["OPENROUTER_API_KEY", "minted"],
+    ["PERPLEXITY_API_KEY", "inherited"],
+    ["RESEND_API_KEY", "minted"],
+  ].map(([name, status]) => ({ name, status }));
+  const SETTINGS = [
+    "AIRTABLE_TABLE_NAME",
+    "DIDIT_FACE_MATCH_THRESHOLD",
+    "DIDIT_LIVENESS_THRESHOLD",
+    "DIDIT_WORKFLOW_ID",
+    "GITHUB_APP_ID",
+  ];
+  const hints = new Map(
+    planOf(MEASURED).map((r) => [r.key_ref.slice("platform.".length), r.hint] as const),
+  );
+  const BILLED_SAYS = /kept and billed|billed through the usage forwarder|recharge/;
+
+  it("keeps all thirteen on the plan", () => {
+    expect([...hints.keys()].filter((n) => n !== MISSION_CONTROL_LINK_SECRET)).toEqual(
+      MEASURED.map((m) => m.name),
+    );
+  });
+
+  it("says a billed key is billed, and sends its client's own value through the broker", () => {
+    for (const name of BILLED) {
+      expect(hints.get(name)).toContain(D6_KEEP_AND_BILL);
+      expect(hints.get(name)).toContain(
+        "on the clone's Integrations page. Mission Control's broker",
+      );
+    }
+  });
+
+  it("says a setting is a setting, that nothing bills it, and that nothing is withdrawn", () => {
+    for (const name of SETTINGS) {
+      const hint = hints.get(name) ?? "";
+      expect(hint).toContain(`${name} is a setting Aurixa supplied, not a credential:`);
+      expect(hint).toContain("Nothing is billed on it.");
+      expect(hint).toContain("At handover nothing is withdrawn:");
+      expect(hint).toContain("Mark this row skipped, with evidence that the setting is kept.");
+      expect(hint).not.toContain(D6_KEEP_AND_BILL);
+      expect(hint).not.toMatch(BILLED_SAYS);
+      expect(hint).not.toContain("enters its own value");
+    }
+    // Each says what it is.
+    expect(hints.get("AIRTABLE_TABLE_NAME")).toContain(
+      "every fleet pass keeps it in step with Mission Control's own, and the clone's Integrations page refuses it",
+    );
+    expect(hints.get("DIDIT_WORKFLOW_ID")).toContain(
+      "the hosted-flow workflow of the fleet's shared Didit application",
+    );
+    expect(hints.get("GITHUB_APP_ID")).toContain(
+      "what the app may reach is decided by its installation, never by its id",
+    );
+  });
+
+  it("says the shared secret is shared fleet-wide, under audit item D3, and not billed", () => {
+    const hint = hints.get("DIDIT_WEBHOOK_SECRET") ?? "";
+    expect(hint).toContain(
+      "DIDIT_WEBHOOK_SECRET is a secret shared by every clone, not one of this clone's own: it signs Didit's callbacks",
+    );
+    expect(hint).toContain(
+      "so the client holds the value every other clone uses too: record that on this row",
+    );
+    expect(hint).toContain("Whether each clone gets its own is audit item D3");
+    expect(hint).toContain("Nothing is billed on it.");
+    expect(hint).not.toContain(D6_KEEP_AND_BILL);
+    expect(hint).not.toMatch(BILLED_SAYS);
+  });
+
+  it("says what it can of a value no rate bills and nobody has named", () => {
+    const [row] = planOf([{ name: "GOOGLE_MAPS_API_KEY", status: "inherited" }]);
+    expect(row.hint).toContain(
+      "GOOGLE_MAPS_API_KEY is a value Aurixa supplied that no rate bills: it has no billable row in api_provider_rates",
+    );
+    expect(row.hint).toContain(
+      "the client may bring its own on the clone's Integrations page, never directly on the project",
+    );
+    expect(row.hint).not.toContain(D6_KEEP_AND_BILL);
+    expect(row.hint).not.toMatch(/kept and billed|billed through/);
+  });
+
+  it("takes what is billed from the rate table alone", () => {
+    // A setting a billable rate covered would be billed, and say so: the rate is the record.
+    const [row] = planOf(
+      [{ name: "GITHUB_APP_ID", status: "inherited" }],
+      new Set(["GITHUB_APP_ID"]),
+    );
+    expect(row.hint).toContain(D6_KEEP_AND_BILL);
+    // And a key no rate covers does not say it is billed.
+    const [unrated] = planOf([{ name: "OPENAI_API_KEY", status: "minted" }], new Set());
+    expect(unrated.hint).not.toContain(D6_KEEP_AND_BILL);
   });
 });
 
@@ -200,5 +295,13 @@ describe("planning a handoff", () => {
 
   it("fails rather than planning without them when the ledger cannot be read", () => {
     expect(plan).toContain("if (lErr) throw new Error(");
+  });
+
+  it("reads what is billed from the rate table, and fails rather than guess", () => {
+    const rates = plan.indexOf('.from("api_provider_rates")');
+    expect(rates).toBeGreaterThan(-1);
+    expect(plan.slice(rates, rates + 200)).toContain('.eq("is_billable", true)');
+    expect(plan).toContain("if (rErr) throw new Error(");
+    expect(plan.indexOf("platformCredentialRotations(")).toBeGreaterThan(rates);
   });
 });

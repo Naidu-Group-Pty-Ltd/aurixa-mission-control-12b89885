@@ -22,6 +22,17 @@
  * supplied its own value through the clone's Integrations page, what replaced
  * Aurixa's and how Aurixa's was withdrawn.
  *
+ * ## Not everything Aurixa supplied is billed
+ *
+ * The ledger also carries settings Mission Control forwards (the Listings
+ * table name, the shared Didit application's workflow and thresholds, the
+ * GitHub App's id) and a secret every clone shares (the one that signs Didit's
+ * callbacks). They stay listed, because the handover record names everything
+ * Aurixa supplied, but nothing bills them, so their rows say what each is and
+ * what the operator does with it instead. What is billed is the rate table's
+ * to say (`api_provider_rates`, a billable row per key): measured 30 Oct 2026
+ * it rated the seven keys on every clone's plan and none of the six others.
+ *
  * ## The client's own value goes through the broker, never onto the project
  *
  * The Integrations page posts to Mission Control's broker
@@ -38,6 +49,7 @@
  * Pure: no I/O.
  */
 
+import { FLEET_CONFIGURATION } from "./cloneSecretForward.pure";
 import { tenantSecretRefusal } from "./integrationSecretBroker.pure";
 
 /** The ledger statuses whose value Aurixa supplied, and so must account for at handover. */
@@ -94,6 +106,91 @@ function platformHint(name: string, status: PlatformPaidStatus): string {
 
 const LINK_HINT = `The key that links this clone to Mission Control: usage reports, entitlements and the activation gate read it, and the usage forwarder that bills the platform keys after handover reports through it (${D6_KEEP_AND_BILL}). It is never withdrawn by default, and the client bringing its own keys does not withdraw it. Mark this row skipped, with evidence that the link is kept; withdrawing it is a separate decision to stop metering this clone.`;
 
+/**
+ * Platform names that are settings, not credentials: what each is, and why it
+ * needs nothing at handover. The Listings settings are `FLEET_CONFIGURATION`'s
+ * own; the rest are named by the fleet rows that forward them.
+ */
+const SHARED_DIDIT = "it configures the fleet's shared Didit application, and changes only with it";
+const SETTINGS: ReadonlyMap<string, { what: string; atHandover: string }> = new Map([
+  ...[...FLEET_CONFIGURATION].map(
+    (name) =>
+      [
+        name,
+        {
+          what: "the Listings configuration this clone asks Mission Control's broker with",
+          atHandover:
+            "every fleet pass keeps it in step with Mission Control's own, and the clone's Integrations page refuses it",
+        },
+      ] as const,
+  ),
+  [
+    "DIDIT_LIVENESS_THRESHOLD",
+    {
+      what: "compliance policy for the liveness check of the fleet's shared Didit application",
+      atHandover: SHARED_DIDIT,
+    },
+  ],
+  [
+    "DIDIT_FACE_MATCH_THRESHOLD",
+    {
+      what: "compliance policy for the face match of the fleet's shared Didit application",
+      atHandover: SHARED_DIDIT,
+    },
+  ],
+  [
+    "DIDIT_WORKFLOW_ID",
+    {
+      what: "the hosted-flow workflow of the fleet's shared Didit application",
+      atHandover: SHARED_DIDIT,
+    },
+  ],
+  [
+    "GITHUB_APP_ID",
+    {
+      what: "the id of Aurixa's GitHub App",
+      atHandover: "what the app may reach is decided by its installation, never by its id",
+    },
+  ],
+]);
+
+/**
+ * Platform names that are secrets every clone shares: not this clone's own,
+ * and not billed. Handing the clone over hands its client the value every
+ * other clone uses, which the operator records; whether each clone gets its
+ * own is the owner's decision still open.
+ */
+const SHARED_SECRETS: ReadonlyMap<string, { what: string; decision: string }> = new Map([
+  [
+    "DIDIT_WEBHOOK_SECRET",
+    {
+      what: "it signs Didit's callbacks, for the fleet's one Didit application",
+      decision:
+        "audit item D3, the owner's open decision on how Didit's callbacks are routed (docs/CLONE_MANAGEMENT_TOKEN.md)",
+    },
+  ],
+]);
+
+/** What the row says, by what the name is: a billed key, a setting, a shared secret, or none of those known. */
+function hintFor(name: string, status: PlatformPaidStatus, billed: ReadonlySet<string>): string {
+  if (billed.has(name)) return platformHint(name, status);
+  const setting = SETTINGS.get(name);
+  if (setting) {
+    return `${name} is a setting Aurixa supplied, not a credential: ${setting.what}. Nothing is billed on it. At handover nothing is withdrawn: ${setting.atHandover}. Mark this row skipped, with evidence that the setting is kept.`;
+  }
+  const shared = SHARED_SECRETS.get(name);
+  if (shared) {
+    return `${name} is a secret shared by every clone, not one of this clone's own: ${shared.what}. Nothing is billed on it. At handover it stays, so the client holds the value every other clone uses too: record that on this row. Whether each clone gets its own is ${shared.decision}. Mark this row skipped, with evidence that it is kept and that the sharing is recorded.`;
+  }
+  // Aurixa's, and no billable rate covers it: a credential whose rate is
+  // missing, or a setting nobody has named here. The row says which it can be.
+  const own =
+    tenantSecretRefusal(name) === null
+      ? `the client may bring its own on the clone's Integrations page, never directly on the project`
+      : `the clone's Integrations page refuses it, so the client cannot bring its own`;
+  return `${name} is a value Aurixa supplied that no rate bills: it has no billable row in api_provider_rates, so nothing is charged for it. It stays after handover. If it is a credential, its rate is missing and calls on it are charged to nobody, and ${own}; if it is a setting, nothing is withdrawn. Mark this row skipped, with evidence of which it is and that it is kept.`;
+}
+
 function isPlatformPaid(status: string): status is PlatformPaidStatus {
   return (PLATFORM_PAID_STATUSES as readonly string[]).includes(status);
 }
@@ -103,9 +200,13 @@ function isPlatformPaid(status: string): status is PlatformPaidStatus {
  * plus the Mission Control link whatever its status. A name whose value the
  * client brought (`set`) or that never reached the clone (`withheld`,
  * `authorised_no_value`) is not Aurixa's to account for.
+ *
+ * `billed` is every name a billable rate covers (`api_provider_rates`), the
+ * one record of what is billed; a row says it is billed only from there.
  */
 export function platformCredentialRotations(
   ledger: ReadonlyArray<{ name: string; status: string }>,
+  billed: ReadonlySet<string>,
 ): PlannedRotation[] {
   const rows: PlannedRotation[] = [];
   const names = new Set<string>();
@@ -116,7 +217,7 @@ export function platformCredentialRotations(
     rows.push({
       target: "other",
       key_ref: `platform.${entry.name}`,
-      hint: platformHint(entry.name, entry.status),
+      hint: hintFor(entry.name, entry.status, billed),
     });
   }
   rows.push({

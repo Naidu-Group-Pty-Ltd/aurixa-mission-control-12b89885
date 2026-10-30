@@ -635,9 +635,22 @@ export const planStandardRotations = createServerFn({ method: "POST" })
       .select("name, status")
       .eq("clone_id", handoff.clone_id);
     if (lErr) throw new Error(`The clone's key ledger could not be read: ${lErr.message}`);
+    // What is billed is the rate table's to say: a name with no billable rate
+    // is charged to nobody, so its row must not say it is billed. Unreadable,
+    // the plan fails, as it does for the ledger: guessing would print one
+    // answer or the other on every row.
+    const { data: rates, error: rErr } = await context.supabase
+      .from("api_provider_rates")
+      .select("secret_name")
+      .eq("is_billable", true);
+    if (rErr) throw new Error(`The provider rates could not be read: ${rErr.message}`);
+    const billed = new Set((rates ?? []).map((r) => r.secret_name));
     const plan = [
       ...DEFAULT_ROTATION_PLAN,
-      ...platformCredentialRotations((ledger ?? []) as Array<{ name: string; status: string }>),
+      ...platformCredentialRotations(
+        (ledger ?? []) as Array<{ name: string; status: string }>,
+        billed,
+      ),
     ];
     const { data: existing } = await context.supabase
       .from("handoff_secret_rotations")
