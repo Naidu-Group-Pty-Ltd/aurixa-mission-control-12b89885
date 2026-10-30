@@ -1373,16 +1373,16 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
     ],
   },
   {
-    migration: "20261030090000_aml_brings_partner_portals.sql",
-    version: "20261030090000",
-    assertions: [{ kind: "rows", table: "addon_modules", atLeast: 33 }],
-  },
-  {
     migration: "20261030090000_usage_charges_keep_currencies_apart.sql",
     version: "20261030090000",
     assertions: [
       { kind: "check", table: "api_usage_charges", column: "status", value: "below_threshold" },
       { kind: "rpc", fn: "close_api_usage_period" },
     ],
+  },
+  {
+    migration: "20261030100000_aml_brings_partner_portals.sql",
+    version: "20261030100000",
+    assertions: [{ kind: "rows", table: "addon_modules", atLeast: 33 }],
   },
 ];
