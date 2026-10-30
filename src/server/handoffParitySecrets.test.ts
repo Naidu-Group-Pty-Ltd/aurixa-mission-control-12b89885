@@ -57,6 +57,57 @@ describe("diffSecrets", () => {
     expect(d.target_count).toBe(1);
   });
 
+  describe("with the forward policy (PF-27)", () => {
+    // The demo's reading: a fleet-forwarded key, a tenant's own vendor key, a
+    // setting left unset on purpose, and a ledger-withheld token.
+    const prime = snap([
+      "RESEND_API_KEY",
+      "DOCUSIGN_INTEGRATION_KEY",
+      "STEP_UP_ENFORCED",
+      "AIRTABLE_TOKEN",
+    ]);
+
+    it("counts only what the policy sends, and lists the rest as information", () => {
+      const d = diffSecrets(
+        prime,
+        snap([]),
+        new Set(["AIRTABLE_TOKEN"]),
+        new Set(["RESEND_API_KEY"]),
+      );
+      expect(d.missing_in_target).toEqual(["RESEND_API_KEY"]);
+      expect(d.not_forwarded).toEqual(["DOCUSIGN_INTEGRATION_KEY", "STEP_UP_ENFORCED"]);
+      expect(d.withheld_by_policy).toEqual(["AIRTABLE_TOKEN"]);
+      expect(d.forward_policy).toBe("applied");
+    });
+
+    it("finds nothing missing when the clone holds everything the policy sends", () => {
+      const d = diffSecrets(
+        prime,
+        snap(["RESEND_API_KEY"]),
+        undefined,
+        new Set(["RESEND_API_KEY"]),
+      );
+      expect(d.missing_in_target).toEqual([]);
+      expect(d.not_forwarded).toEqual([
+        "AIRTABLE_TOKEN",
+        "DOCUSIGN_INTEGRATION_KEY",
+        "STEP_UP_ENFORCED",
+      ]);
+    });
+
+    it("counts every absent name when the policy could not be read, as before", () => {
+      // An unread policy is not "nothing is sent": it must not clear a real gap.
+      const d = diffSecrets(prime, snap([]), new Set(["AIRTABLE_TOKEN"]), null);
+      expect(d.missing_in_target).toEqual([
+        "DOCUSIGN_INTEGRATION_KEY",
+        "RESEND_API_KEY",
+        "STEP_UP_ENFORCED",
+      ]);
+      expect(d.not_forwarded).toEqual([]);
+      expect(d.forward_policy).toBe("not_read");
+    });
+  });
+
   it("still reports a clone-only secret as extra", () => {
     const d = diffSecrets(snap([]), snap(["TENANT_OWN_KEY"]));
     expect(d.extra_in_target).toEqual(["TENANT_OWN_KEY"]);

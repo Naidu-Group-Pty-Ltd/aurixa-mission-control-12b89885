@@ -542,6 +542,11 @@ export const runParityDryRun = createServerFn({ method: "POST" })
         const { readWithheldSecretNames } = await import("@/server/handoff-parity.server");
         return readWithheldSecretNames(context.supabase, handoff.clone_id);
       })(),
+      // A credential no forward policy sends is listed, not counted (PF-27).
+      forwardedSecretNames: await (async () => {
+        const { readForwardedSecretNames } = await import("@/server/handoff-parity.server");
+        return readForwardedSecretNames(context.supabase, handoff.clone_id);
+      })(),
     });
 
     const { data: row, error: insErr } = await context.supabase

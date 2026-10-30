@@ -156,11 +156,16 @@ export const Route = createFileRoute("/hooks/handoff-parity-refresh")({
               results.details.push({ id: h.id, reason: "no_target_backend" });
               continue;
             }
-            const { readCloneCrmMode } = await import("@/server/handoff-parity.server");
+            const { readCloneCrmMode, readWithheldSecretNames, readForwardedSecretNames } =
+              await import("@/server/handoff-parity.server");
             const parity = await computeParity(primeRef, targetRef, {
               declaredEdgeFunctions,
               migrationObjectIndex,
               crmMode: await readCloneCrmMode(supabaseAdmin, h.clone_id),
+              // As every other comparison: a withheld credential is not a gap,
+              // and one no forward policy sends is listed, not counted (PF-27).
+              withheldSecretNames: await readWithheldSecretNames(supabaseAdmin, h.clone_id),
+              forwardedSecretNames: await readForwardedSecretNames(supabaseAdmin, h.clone_id),
             });
             const { data: row, error: insErr } = await supabaseAdmin
               .from("handoff_parity_reports")
