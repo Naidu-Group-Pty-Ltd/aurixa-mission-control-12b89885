@@ -148,6 +148,7 @@ export function LiveAuditSettingsPanel({
   const submit = () =>
     save.mutate({
       claude_enabled: draft.claude_enabled === true,
+      audit_account: String(draft.audit_account ?? "").trim() || null,
       nightly_enabled: draft.nightly_enabled,
       mode: draft.mode,
       target_url: draft.target_url,
@@ -178,6 +179,32 @@ export function LiveAuditSettingsPanel({
           Read-only: an admin changes the live audit's settings.
         </p>
       )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">The audit account</CardTitle>
+          <CardDescription>
+            The Prime staff account the audit signs in as: an admin you create in Prime&apos;s User
+            Management (Create Sub-Admin) with the Read Only preset, for the audit alone. Prime
+            reads it at every run and refuses one that is inactive, a superadmin, or can edit or
+            delete anything, and the run and Engine health say why. Empty: runs see Prime&apos;s
+            signed-out pages only.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-1.5">
+          <Label htmlFor="la-account">Username on Prime</Label>
+          <Input
+            id="la-account"
+            value={draft.audit_account ?? ""}
+            onChange={(e) => set("audit_account", e.target.value)}
+            placeholder="live.audit"
+            autoComplete="off"
+            spellCheck={false}
+            className="max-w-sm font-mono"
+            disabled={disabled}
+          />
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>

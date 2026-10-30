@@ -16,7 +16,9 @@
 import { z } from "zod";
 
 export const LIVE_AUDIT_WORKFLOW_FILE = "live-audit.yml";
-export const LIVE_AUDIT_WORKFLOW_VERSION = 1;
+// Version 2 passes the run's settings to the `session` job, which mints the
+// session for the account they name (`audit_account`).
+export const LIVE_AUDIT_WORKFLOW_VERSION = 2;
 export const LIVE_AUDIT_RUNNER_VERSION = 1;
 /** The remediation workflow that first fixes a live-audit defect (`kind: "bug"`). */
 export const REMEDIATION_VERSION_FOR_DEFECTS = 5;

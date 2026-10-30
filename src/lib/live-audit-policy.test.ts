@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  AUDIT_ACCOUNT,
   AUTOFIX_MAX_ATTEMPTS,
   CLAUDE_MODEL_ID,
   DEFAULT_AUDIT_MODEL,
@@ -33,6 +34,7 @@ const candidate = (over: Partial<FixCandidate> = {}): FixCandidate => ({
 
 const settings: LiveAuditSettingsRow = {
   claude_enabled: true,
+  audit_account: null,
   audit_model: null,
   effort_scope: "high",
   effort_explore: "medium",
@@ -117,6 +119,19 @@ describe("what a run is sent", () => {
     expect(
       runSettingsFor({ ...settings, audit_model: "not-a-model" }, { kind: "nightly" }),
     ).not.toHaveProperty("audit_model");
+  });
+
+  it("names the audit account by its username, and nothing that is not one", () => {
+    expect(runSettingsFor(settings, { kind: "manual" })).not.toHaveProperty("audit_account");
+    expect(
+      runSettingsFor({ ...settings, audit_account: "live.audit" }, { kind: "manual" }),
+    ).toMatchObject({ audit_account: "live.audit" });
+    for (const bad of ["", "x", "live audit", "a'; drop", "a".repeat(81)]) {
+      expect(AUDIT_ACCOUNT.test(bad)).toBe(false);
+      expect(
+        runSettingsFor({ ...settings, audit_account: bad }, { kind: "manual" }),
+      ).not.toHaveProperty("audit_account");
+    }
   });
 
   it("carries a verification run's focus", () => {

@@ -154,6 +154,13 @@ export const LIVE_AUDIT_MODELS = [
 ] as const;
 export const DEFAULT_AUDIT_MODEL = "claude-opus-5-5";
 
+/**
+ * A Prime username, as the audit account is named by: the runner's
+ * `AUDIT_USERNAME` (lib/session.mjs on Prime) and the column's check
+ * (20261030193300) are the same pattern.
+ */
+export const AUDIT_ACCOUNT = /^[A-Za-z0-9._@+-]{2,80}$/;
+
 export const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 
 // ── What a run is sent ────────────────────────────────────────────────────
@@ -166,6 +173,12 @@ export type LiveAuditSettingsRow = {
    * and its presence is not the owner's consent to spend it here.
    */
   claude_enabled: boolean;
+  /**
+   * The Prime username the audit signs in as (migration 20261030193300).
+   * Prime resolves it at each run and refuses an account that can edit or
+   * delete anything; its repository variable LIVE_AUDIT_USER_ID wins.
+   */
+  audit_account: string | null;
   audit_model: string | null;
   effort_scope: string;
   effort_explore: string;
@@ -201,6 +214,10 @@ export function runSettingsFor(
     // browser alone, and says Claude was off.
     ...(s.claude_enabled ? {} : { ai: "off" }),
     ...(s.audit_model && CLAUDE_MODEL_ID.test(s.audit_model) ? { audit_model: s.audit_model } : {}),
+    // Read by Prime's `session` job alone (workflow version 2).
+    ...(s.audit_account && AUDIT_ACCOUNT.test(s.audit_account)
+      ? { audit_account: s.audit_account }
+      : {}),
     effort: { scope: s.effort_scope, explore: s.effort_explore, triage: s.effort_triage },
     budget_usd: Number(s.budget_usd),
     max_pages: s.max_pages,

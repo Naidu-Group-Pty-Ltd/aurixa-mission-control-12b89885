@@ -194,6 +194,12 @@ export function RunSheet({
   const coverage = (summary.coverage ?? {}) as Record<string, any>;
   const guard = (summary.guard ?? {}) as Record<string, any>;
   const heldBack = heldBackOf(summary);
+  // Prime's own words for how the run's sign-in went (a refused account says
+  // why: "can edit or delete in 2 modules; give it the Read Only preset").
+  const authDetail =
+    typeof summary.auth?.detail === "string" && summary.auth.state !== "verified"
+      ? (summary.auth.detail as string).slice(0, 300)
+      : null;
   const spend = (summary.anthropic ?? run?.anthropic ?? {}) as Record<string, any>;
   const m = modelOf(run?.anthropic ?? summary.anthropic);
   const open = run && ["queued", "dispatched", "running"].includes(run.status);
@@ -227,6 +233,7 @@ export function RunSheet({
                 {run.runner_version ? ` · runner v${run.runner_version}` : ""}
                 {run.auth_state ? ` · ${run.auth_state.replace(/_/g, " ")}` : ""}
               </SheetDescription>
+              {authDetail && <p className="text-xs text-muted-foreground">Sign-in: {authDetail}</p>}
               <div className="flex flex-wrap gap-2 pt-1">
                 {run.workflow_run_url && (
                   <a

@@ -29,7 +29,7 @@ primeOnlyFeatures.mjs` on Prime), so the cascade never carries it to a clone.
 | Findings      | Every defect, ranked by severity. A finding opens to how a person reaches it (the recorded steps), the screenshot, the console, the stack and the requests, the files and lines Claude's reading of the code points at, its fixes and its whole history. An admin asks Claude for a fix, re-tests it (a run with the finding's page first), triages it, or changes its severity — a person's severity sticks across later runs. |
 | Runs          | Each run: what it covered, what the guard held back (by call, with why, so the guard can be tuned — an admin allows a line, after a confirmation, as exactly the entry the runner named for it), which model it ran on and whether a person chose it, what it spent, and its timeline. An admin cancels a run in flight.                                                                                                        |
 | Fixes         | Every fix Claude drafted, its pull request, and whether a later complete run confirmed the defect gone.                                                                                                                                                                                                                                                                                                                         |
-| Settings      | Models, effort per phase, the nightly switch and time, budget and limits, viewports, screenshots, the guard's allow and block lists, automatic fixes.                                                                                                                                                                                                                                                                           |
+| Settings      | The audit account, models, effort per phase, the nightly switch and time, budget and limits, viewports, screenshots, the guard's allow and block lists, automatic fixes.                                                                                                                                                                                                                                                        |
 | Engine health | Every piece the audit needs and whether it is there, with what to do when it is not. Presence only, never a value.                                                                                                                                                                                                                                                                                                              |
 
 ## How a run goes
@@ -146,9 +146,15 @@ Each can be muted under **Settings → Notifications**.
    be on Prime's default branch to be dispatched). Apply the two migrations
    (`20261030133000_live_audit_notification_kinds.sql`,
    `20261030133100_live_audit.sql`).
-2. On Prime: create a **view-only admin** staff account for the audit and put
-   its user id in the repository variable `LIVE_AUDIT_USER_ID`. Without it,
-   runs see only the signed-out pages.
+2. On Prime: create an admin for the audit alone (User Management → **Create
+   Sub-Admin**, the **Read Only** preset) and enter its username under
+   **Settings → The audit account** (`live_audit_settings.audit_account`,
+   `20261030193300`). Each run sends it as `audit_account`, and Prime's
+   `session` job (workflow version 2) resolves it, refusing an account that
+   is deleted, inactive, a superadmin or able to edit or delete in any module;
+   the run and **Engine health** say why. Prime's repository variable
+   `LIVE_AUDIT_USER_ID` still wins when a GitHub admin sets it. Without an
+   account, runs see only the signed-out pages.
 3. Run one by hand, read **Runs → Held back by the guard**, and allow any
    call there you know only reads. Each line is a call as
    `fn:<function>:<action>` (`-` when it names none), why the guard held it
