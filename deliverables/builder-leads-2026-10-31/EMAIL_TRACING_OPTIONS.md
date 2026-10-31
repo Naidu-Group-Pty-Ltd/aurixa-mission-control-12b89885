@@ -14,11 +14,11 @@ Each extra pass now adds only dozens of addresses. Taking coverage much further 
 
 | Group                                        | Leads   | What can close it                                                                   |
 | -------------------------------------------- | ------- | ----------------------------------------------------------------------------------- |
-| No findable website (organisations)          | ~17,000 | Option 1: find each company's website from Google Places, then run the scraper on it. |
-| Website found, but only a contact form       | ~2,300  | Option 2: Hunter.io (addresses published elsewhere on the web), or option 5.         |
-| Website hides its email (Cloudflare protection) | ~660 | Option 5 (phone/form outreach). Don't decode these.                                 |
+| No findable website (organisations)          | 17,282  | Option 1: find each company's website from Google Places, then run the scraper on it. |
+| Website found, but only a contact form       | ~2,330  | Option 2: Hunter.io (addresses published elsewhere on the web), or option 5.         |
+| Website hides its email (Cloudflare protection) | 685 | Option 5 (phone/form outreach). Don't decode these.                                 |
 | Sole traders with no web presence            | ~6,400  | Options 5 and 6.                                                                     |
-| Every campaign address (before sending)      | ~7,900+ | Option 3: mailbox verification.                                                      |
+| Every campaign address (before sending)      | 8,034   | Option 3: mailbox verification.                                                      |
 
 ## Options, best value first
 
@@ -63,7 +63,7 @@ Upload the ABN-validated organisation list (Company, Website, State) for enrichm
 
 ### 5. Phone-first capture (best for compliance)
 
-About 2,400 leads with no email have a phone number. A short call or SMS ("Who should receive builder-partner information?") gives you an address with **express consent**, which is better than inferred consent. Mission Control's voice and SMS stack can run this.
+2,423 leads with no email have a phone number. A short call or SMS ("Who should receive builder-partner information?") gives you an address with **express consent**, which is better than inferred consent. Mission Control's voice and SMS stack can run this.
 
 ### 6. Reach members through the associations
 

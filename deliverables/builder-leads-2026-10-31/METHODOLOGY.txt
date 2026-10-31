@@ -47,7 +47,11 @@ EMAIL ADDRESSES (CAMPAIGN-READY)
   - JavaScript-built pages rendered in a headless browser, reading only the addresses the page visibly displays or links with mailto:;
   - more domain variants (.net.au, state-suffixed names, every registered business name);
   - for sole traders, personal-name domains, accepted only when the site shows the sole trader's ABN;
-  - web search (two rounds) to find the official sites of Enterprise and Large companies whose legal name doesn't match their brand domain.
+  - web search (three rounds) to find the official sites of Enterprise, Large and top Medium companies whose legal name doesn't match their brand domain.
+- Round 4: Common Crawl, an open archive of the public web (cc-main-2026-aug-sep-oct domain graph).
+  - Lead names were matched against its ~1.15M real .au domains and its ~616k .com domains containing building words. The matching uses distinctive name tokens (weighted by rarity) rather than exact spellings.
+  - Each candidate site must show the lead's ABN, or the full company name plus its state.
+  - A .com match that doesn't show the ABN must also carry an Australian marker (an Australian phone number, "Australia" or a state name), to rule out overseas namesakes.
 - Pages that use Cloudflare email protection (about 1 in 5 of the sites that showed no address) were skipped entirely. They are not decoded or rendered, because the owner has deliberately hidden the address from automated collection.
 - Opt-out check: every page an address came from was re-read for wording such as "no unsolicited emails". Addresses published with that wording are marked "Do not email" and are kept out of the campaign file.
 - Spam Act 2003: because the addresses were collected automatically, the list is a "harvested-address list" (Part 3). Use it only for messages that meet inferred consent from conspicuous publication (Schedule 2, clause 4):

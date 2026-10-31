@@ -1,0 +1,67 @@
+abn,company,website,confidence,evidence,note
+73602875436,SKYLINE BUILDING GROUP PTY LTD,https://www.skylinebg.com.au,high,"Homepage footer 'Skyline Building Group Pty Ltd', Abbotsford VIC; insurance builder; listed in AICLA directory",
+55085308845,WALSH BUILDING SERVICES PTY LTD,,none,Search returned only unrelated Walsh firms (UK/US/NZ),
+13083929248,HI CONSTRUCTIONS (AUST) PTY LTD,,none,Search found nothing on HI Constructions / Austravac / Drillwise,
+49653284890,TACTIC SPACES PTY LTD,,none,Search returned only directory listings of other QLD builders; no Tactic Spaces site found,
+48103747637,ADVANCE BUILDING GROUP PTY LIMITED,,none,"Search found only similarly named firms (Advec Building Group, Advance Building Projects/Services); none linked to this entity",
+46682796881,AUSTRALIAN ROOFING & MAKESAFES PTY LTD,,none,Search found only unrelated roofers (e.g. Makesafe Roofing Yandina); no link to this entity,
+65337498993,BUILTCRAFT PTY LTD,,none,Search found Buildcraft (buildcraft.com.au) but its footer says 'Buildcraft Group P/L' - different entity; no Builtcraft site found,
+49688368005,DAVID PAYNE BUILDING & CONSULTANCY PTY LTD,,none,"Search found David Payne Constructions (Dubbo NSW, Top4 lists davidpayne.com.au) but site returns 503 and link to this entity is unconfirmed","possible candidate davidpayne.com.au (unverified, site down)"
+88155319707,EFFECTIVE DESIGNS & CONSTRUCTION PTY LTD,,none,Search returned only unrelated overseas design/build firms,
+75097686130,FUGEN MASONRY CONTRACTORS (AUST) PTY LTD,,none,Search returned only unrelated German/US firms,likely masonry subcontractor rather than builder (from name)
+57601790774,HASHTAG CUSTOM BUILDS QLD1 PTY LTD,,none,Search found no Hashtag Custom Builds listing; only other QLD builders,
+27640794154,JIBRALTA PTY LTD,https://www.jibralta.com.au,high,"Distinctive name match; site describes Jibralta as head contract builder (govt/commercial <$10M, east coast footprint); Squarespace site state NSW",
+63164860100,MAL HAYMAN PTY LTD,,none,Search found nothing related (only unrelated Hayman people),
+98683557235,O'SULLIVAN GROUND ENGINEERING (QLD) PTY LTD,,none,Search found only LinkedIn/Seek mentions (piling & foundation D&C contractor); no official site in results,not a builder - piling/foundation (ground engineering) contractor
+98675803915,PROJECT ONE SERVICES PTY LTD,https://projectone.com.au,medium,"Search found Project One Group (Pyrmont NSW, fit-out/refurb head contractor; projectone.com.au via Mastt listing); name and NSW base match but site does not name 'Project One Services Pty Ltd' or ABN",entity link unconfirmed
+35694753172,ROBERT PLUMB BUILD QUEENSLAND PTY LTD,https://robertplumbbuild.com.au,high,"Homepage 'Robert Plumb Build - Architectural Construction, Sydney' (est. 2011, Botany NSW); entity is the Queensland arm of the same brand",parent brand site (Robert Plumb Collective)
+67155961149,SKYLINE DEVELOPMENTS & CONSTRUCTION PTY LTD,,none,"Search found only unrelated Skyline-named projects/firms (UK, NZ)",
+33117654476,TLF DEVELOPMENTS PTY LTD,,none,"Search found only similar-named developers (LFD Developments, Trezetto); no TLF Developments site",
+22664182450,ZENVIRON QLD PTY LTD,https://www.zenviron.com.au,high,Distinctive name; ASX (Monadelphous) announcement cites zenviron.com.au as Zenviron website; site fetch failed (503/TLS) so not opened,not a builder - renewable energy EPC contractor (Monadelphous JV)
+31625220653,4M-CRU PTY LTD,,none,Search returned nothing related to 4M-CRU,
+95604167026,A&L BUILDERS PTY LTD,,none,Search found only QCAT case references (A L Builders Pty Ltd v Fatseas) and unrelated A&L firms; no website,
+71002929017,MCCONNELL DOWELL CONSTRUCTORS (AUST) PTY LTD,https://www.mcconnelldowell.com,high,Official group site mcconnelldowell.com in results (About/History pages); McConnell Dowell Constructors (Aust) Pty Ltd is its Australian operating entity,"infrastructure/engineering contractor (civil, building)"
+90604247636,TIVOLI INTERNATIONAL (AUST) PTY LTD,,none,Search returned only historical Tivoli Theatre material; no company site,
+22168307793,AVI CONTRACTORS PTY LTD,,none,Search results were US (Washington state) AVI firms; no Australian AVI Contractors site found,
+85067052304,D J & L K DOYLE PTY. LTD.,,none,"Search found Doyle Group (Townsville civil group, doyle.com.au) but site does not mention D J & L K Doyle Pty Ltd; link unconfirmed",possible candidate doyle.com.au (unverified)
+88090128402,ABBTAY ENTERPRISES PTY LTD,,none,Search found no GKR Interiors site; only unrelated fitout firms,
+44169079449,AUSTRALIAN CONSTRUCTION AND DEVELOPMENT SERVICES PTY. LTD.,https://acads.com.au,medium,Top4 listing 'Australian Construction & Development Services' (Gold Coast QLD) links acads.com.au (acronym of name); could not open site,domain did not resolve at check time (possibly lapsed)
+68694134453,BRETT HARVEY CONSTRUCTIONS (QLD) PTY LIMITED,,none,Search found only a job listing for 'Brett Harvey Design Construction' (Lidcombe NSW); no official website in results,
+52607352590,DECOCORP CONSTRUCTIONS PTY LTD,https://www.decocorp.com.au,high,"Search noted Decocorp healthcare/commercial fitout builder; site 'Decocorp - Building Excellence Nationally', Rosebery NSW commercial construction (distinctive name, NSW base)",
+42662200437,EPTEC SERVICES (QLD) PTY LTD,https://eptec.com.au,high,"Eptec Group site (Sydney NSW head office, Lytton QLD office); Eptec Services is QLD arm with QLD govt contracts per search",not a builder - asset preservation/corrosion protection/concrete rehabilitation contractor
+67677998168,GENERAL BUILD (QLD) PTY LTD,,none,"Search found only 'General Built' (Manly NSW residential, generalbuilt.com.au - SSL broken) which is a different name; no link to General Build (QLD)",
+59634544700,IMED PLUS FIT-OUTS PTY LTD,,none,Search found no Doctors & Co Fitouts / iMed Plus site; only MedicalSearch marketplace listings of other medical fitters,
+49618461359,LANDCROSS PROJECTS QUEENSLAND PTY. LTD.,,none,Search returned only unrelated US Crossland results,
+62095388533,MCS GROUP HOLDINGS PTY. LTD.,https://www.mcsgroup.com.au,high,Homepage footer shows ABN 62 095 388 533 (exact match); found via AICLA supplier directory,not a builder - forensic/specialist engineers & building consultants (insurance reports)
+30645392543,O'SULLIVAN GROUND ENGINEERING PTY LTD,,none,Search found only LinkedIn reposts (O'Sullivan Group piling/foundations; mentions new group website but no URL); no official site in results,not a builder - piling/foundation (ground engineering) contractor
+36645708907,RAPTIN BUILDING PTY LIMITED,,none,"Search found nothing for Raptin Building (only Raptis Group results, different company)",
+47003664837,RSF COMMERCIAL INTERIORS PTY LIMITED,,none,Search found no RSF Commercial Interiors site; only other fitout firms,
+59672581565,T&T GROUP AUSTRALIA PTY LTD,,none,"Search returned only overseas T&T firms (Georgia, US, Vietnam); no Australian site",
+61068957488,TUFFY BUILDERS PTY LTD,,none,"Search found only similarly named firms (Tuff Built Constructions, Tuff Yards); no Tuffy Builders site",
+64072319709,2K CONSTRUCTIONS PTY LTD,,none,Search found no QLD 2K Constructions site (only UK 2K Construction Ltd),
+68119390831,A & C CONSTRUCTIONS NQ PTY LTD,,none,Search found no A & C Constructions NQ site; only other NQ builders,
+36148857774,A.C.N. 148 857 774 PTY LTD,,none,Numbered company with no trading name; search on ACN returned nothing,
+23144869643,SIMONDS QUEENSLAND CONSTRUCTIONS PTY LTD,https://www.simonds.com.au,high,"Official Simonds Homes site with QLD section (simonds.com.au/qld, Loganholme office); entity is Simonds Group's QLD construction subsidiary",parent group site
+21072530057,VICTORIAN ELEVATORS PTY. LTD.,https://www.fortelifts.com.au,high,Trading name Forte Lift Services; site 'Forte Lift Services' head office 1-3 Bloomburg St Abbotsford VIC with QLD office (matches directory listing found by search),not a builder - lift/elevator installer and servicer
+73037646279,The Trustee for THE FUTURE ENGINEERING AND COMMUNICATION UNIT TRUST,,none,Search returned only unrelated education/job results; trust has no trading name,
+57618006974,BEYOND BUILDING SOLUTIONS PTY LTD,,none,Search found no Beyond Building Solutions site; only other ACT builders,
+62166391939,AKALAN HEALTH PTY LIMITED,,none,Search returned nothing related to Akalan Health,
+86618155329,BENTANCORP PTY LTD,,none,Search returned nothing for Bentancorp (only unrelated US firms),
+51094137827,CADENCE AUSTRALIA PTY LTD,,none,"Search found Cadence & Co (Sydney D&B; its site lists other ABNs, not 51 094 137 827) and Cadence Property Group (investor); neither confirmed as this entity",
+36629678208,DREAMTIME PROJECTS CORP PTY LTD,,none,Search found nothing linking Build Connects / Trade Connex to Dreamtime Projects,
+75122021256,FRASE CONSTRUCTIONS PTY LTD,https://www.gjgardner.com.au/tweed-heads-home-builders,high,"Trading name G.J. Gardner Homes Tweed Heads; franchise office page on gjgardner.com.au (franchisee Peter Leotta, NSW licence 191221C, Tweed Heads/Ballina)",franchise page on parent site gjgardner.com.au
+17652003677,HALL GROUP QUEENSLAND PTY LTD,,none,Search found Hall Contracting (QLD civil/dredging) and Hall's Construction (Northern Beaches NSW); neither confirmed as Hall Group Queensland Pty Ltd,
+14659633913,JARL MODERN CONSTRUCTION PTY LTD,,none,Search (trading name Palace Supply Company Australia) returned nothing relevant,
+51606182503,MAINMARK GROUND ENGINEERING PTY LTD,https://mainmark.com,high,Homepage footer 'Mainmark Ground Engineering Pty Ltd ABN: 51 606 182 503' (exact match),"not a builder - ground engineering (re-levelling, ground improvement, void filling)"
+76098439493,MOJ PROJECTS PTY LTD,,none,"Search found only similar names (MOJO Homes, Mojo Building Designs); no MOJ Projects site",
+20611751556,PACIFIC DESIGN & CONSTRUCT PTY. LTD.,https://www.pacificconstruct.com.au,high,"Site 'Pacific Design and Construct' (PDC), Crows Nest NSW, commercial fitout/refurb across NSW and interstate; exact name match; founded 2016 consistent with ACN",
+89661392338,REAL RESOLUTIONS GROUP PTY LTD,,none,Search on trading names (Arco Fitouts / arco design & Construction / BRR Projects) found only unrelated US ARCO and ARRCO Group; no match,
+39104705320,SAFETY ANCHORS PTY LTD,https://www.safemaster.com.au,high,"Site names 'Safety Anchors Pty Ltd t/a Safemaster Height Safety Solutions', ABN 39 104 705 320 (exact match), Minto NSW; Modu-Form product line",not a builder - height safety systems supplier/installer
+78134961943,THELEM CONSULTING PTY LIMITED,,none,Search returned only French insurer Thelem assurances; no Australian site,
+46131668712,XTON CONSTRUCTIONS (QLD) PTY LIMITED,,none,Search found no Xton Constructions site,
+88163583775,4C CONSTRUCTION PTY LTD,,none,Search found no 4C Construction (QLD) site,
+18670101005,A&B BUILDER GROUP PTY LTD,,none,Search found no A&B Builder Group site; only other QLD fitout/maintenance firms,
+95610346953,ABBICON PROJECTS PTY LTD,,none,Search returned only the ABR entry; no website found,
+26672607779,WAMARRA (QLD) PTY LTD,https://wamarra.com.au,high,"Distinctive name; Wamarra (Spotswood VIC, Aboriginal-owned) works across VIC/NSW/QLD per search; site 'Wamarra - Building Better Futures'; entity is its QLD arm",parent site; civil contractor rather than general builder
+42650177245,TIG INDUSTRIAL PTY LTD,,none,Search returned only TIG welding product pages; no TIG Industrial site,
+88139882376,STERLING INFRASTRUCTURE PTY LTD,https://sterling.com.au,high,Trading name Sterling Infrastructure; site sterling.com.au 'Sterling Infrastructure' Melbourne VIC with Brisbane and Rockhampton QLD offices,"rail/infrastructure engineering, asset management and construction services"

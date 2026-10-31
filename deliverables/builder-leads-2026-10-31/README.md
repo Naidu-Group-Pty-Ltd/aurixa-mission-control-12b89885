@@ -2,7 +2,7 @@
 
 **Files:**
 
-- `Mission_Control_Campaign_List_2026-10-31.xlsx` — **upload this to a Mission Control campaign.** The first sheet holds 7,864 valid, de-duplicated addresses.
+- `Mission_Control_Campaign_List_2026-10-31.xlsx` — **upload this to a Mission Control campaign.** The first sheet holds 8,034 valid, de-duplicated addresses.
 - `Mission_Control_Campaign_List_VALID_2026-10-31.csv` — the same valid list as CSV.
 - `Builders_Developers_Validated_Leads_AU_2026-10-31.xlsx` — the full master list of 35,217 leads, with email status columns.
 
@@ -10,25 +10,25 @@
 
 | Sheet                        | Rows  | Use                                                                                                    |
 | ---------------------------- | ----- | ------------------------------------------------------------------------------------------------------ |
-| Campaign List - Valid        | 7,864 | Ready to send. One row per address (the importer reads this sheet and detects the `Email` heading)      |
-| Risky - review first         | 119   | No MX record, inconclusive DNS, or a probable parent/brand site. Review before adding                    |
+| Campaign List - Valid        | 8,034 | Ready to send. One row per address (the importer reads this sheet and detects the `Email` heading)      |
+| Risky - review first         | 124   | No MX record, inconclusive DNS, or a probable parent/brand site. Review before adding                    |
 | Members - ABN unconfirmed    | 49    | Master Builders members with a directory email whose ABN could not be confirmed (opt-in only)            |
 | Read me                      | —     | Merge fields, validation rules and the Spam Act conditions                                              |
 
-The list was checked with Mission Control's own parser (`src/lib/email/workbook.pure.ts` + `listProfile.pure.ts`, bundled and run against the file): 7,864 contacts, 0 invalid addresses, 0 duplicates.
+The list was checked with Mission Control's own parser (`src/lib/email/workbook.pure.ts` + `listProfile.pure.ts`, bundled and run against the file): 8,034 contacts, 0 invalid addresses, 0 duplicates.
 
 - **Merge fields:** `{{greeting_name}}`, `{{company}}`, `{{state}}`, `{{org_size_category}}`, `{{development_type}}`, `{{website}}` and more.
 - **Segments and quotas:** `state`, `org_size_category`, `priority`, `org_type` and `lead_type` are offered as controls.
 
-**Email coverage:** 8,165 leads have a Valid email (5,798 in the first version, 7,852 after round 2). Round 3 added schema.org structured data, sitemap-found contact pages, browser rendering of JS-built pages, capability-statement PDFs, more domain variants, and two rounds of web search for large companies.
+**Email coverage:** 8,363 leads have a Valid email (5,798 → 7,852 → 8,165 → 8,363 over four rounds). Round 4 matched names against Common Crawl's open list of ~1.15M `.au` domains and ~616k building-word `.com` domains, and ran a third web-search round. Round 3 added schema.org structured data, sitemap-found contact pages, browser rendering of JS-built pages, capability-statement PDFs, more domain variants, and two rounds of web search for large companies.
 
-**The remaining gap:** 26,918 leads have no email.
+**The remaining gap:** 26,713 leads have no email. See [EMAIL_TRACING_OPTIONS.md](EMAIL_TRACING_OPTIONS.md) for how to close it.
 
 | Group | Leads | Can an external tool help? |
 | --- | --- | --- |
-| Website found, no email published | 2,932 | Mostly no. About 2,270 offer only a contact form. 662 hide their address with Cloudflare email protection, which was deliberately not bypassed. |
-| No findable website, organisations | 17,564 | Yes, best target. Includes 2,809 Medium, 142 Large and 9 Enterprise. A places/search API that returns each business's website would let this pipeline read the email from that site. |
-| No findable website, sole traders | 6,422 | Little to gain. Most have no web presence. |
+| Website found, no email published | 3,017 | Mostly no. About 2,330 offer only a contact form. 685 hide their address with Cloudflare email protection, which was deliberately not bypassed. |
+| No findable website, organisations | 17,282 | Yes, best target. Includes 2,678 Medium, 125 Large and 9 Enterprise. Use the Google Places connector, which is built in. |
+| No findable website, sole traders | 6,414 | Little to gain. Most have no web presence. |
 
 **What "Valid" means:**
 
@@ -64,7 +64,7 @@ Individual mailboxes were not probed: outbound SMTP is blocked here. Mission Con
 | Excluded - Needs Review       | 3,109  | Organisations found in the sources that failed validation, with the reason (no ABN, ABN cancelled, deregistered, under administration, ambiguous name…)             |
 | Methodology & Sources         | —      | Exactly how "active", ABN validation and organisation size were determined                                                                                         |
 
-**Total validated leads: 35,217**. Of these, 8,165 have a Valid email, 10,487 have a phone or email, 10,897 have a confirmed company website and 935 are matched Master Builders members.
+**Total validated leads: 35,217**. Of these, 8,363 have a Valid email, 11,494 have a confirmed company website and 935 are matched Master Builders members.
 
 ## Organisation size
 
@@ -107,7 +107,11 @@ Members of those associations still appear when they hold a licence on a registe
 
 Contact details are business contact points published by the business itself or by its association directory. Apply your Spam Act 2003 / Privacy Act 1988 process (consent, identification, unsubscribe) before emailing.
 
-## Re-running
+## Re-running (the scraper)
+
+`bash pipeline/run_scraper.sh` runs every stage end to end, and each stage resumes where it stopped. Set `GOOGLE_PLACES_API_KEY`, `HUNTER_API_KEY` and/or `ZEROBOUNCE_API_KEY` (or `NEVERBOUNCE_API_KEY`) to switch on the paid connectors in `pipeline/connectors/`. Without a key, each one dry-runs.
+
+The individual stages, in order:
 
 `pipeline/core` contains the scripts that build the list. Run them in this order:
 
