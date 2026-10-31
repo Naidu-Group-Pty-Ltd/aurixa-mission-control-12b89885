@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
-import { buildApplySql, primeContactPayload, WHITELABEL_COLUMN_SOURCES } from "./sql";
+import {
+  buildApplySql,
+  primeContactPayload,
+  WHITELABEL_COLUMN_SOURCES,
+  workspaceColour,
+} from "./sql";
 import { BRAND_MARK_SLOTS, markLogoConfigSources, missingMarks } from "@/lib/brand/marks";
 import { CLONE_BRAND_BUCKET } from "./mirror";
 import { CLONE_DEFAULT_THEME } from "./workspaceAppearance";
@@ -49,6 +54,94 @@ describe("primeContactPayload", () => {
     });
     expect(sql).toContain('"abn":"12 345 678 901"');
     expect(sql).toContain('"name":"Acme Pty Ltd"');
+  });
+});
+
+describe("workspaceColour — the form the workspace reads", () => {
+  it("converts the demo brand's hex exactly as the workspace's own editor saves it", () => {
+    // Read back from tutorial-demo-orrimere-c158c7 on 31 Oct 2026, after these
+    // three were saved on its Branding page (the editor's `hexToHsl`).
+    expect(workspaceColour("#2F6B4F")).toBe("152 39% 30%");
+    expect(workspaceColour("#AD5631")).toBe("18 56% 44%");
+    expect(workspaceColour("#F2C29B")).toBe("27 77% 78%");
+  });
+
+  it("is case-insensitive, expands #RGB, and ignores surrounding space", () => {
+    expect(workspaceColour("#2f6b4f")).toBe("152 39% 30%");
+    expect(workspaceColour("#fff")).toBe("0 0% 100%");
+    expect(workspaceColour("#000")).toBe("0 0% 0%");
+    expect(workspaceColour("#abc")).toBe(workspaceColour("#aabbcc"));
+    expect(workspaceColour("#abc")).toBe("210 25% 73%");
+    expect(workspaceColour("  #2F6B4F ")).toBe("152 39% 30%");
+  });
+
+  it("passes a colour already in the workspace's form through unchanged", () => {
+    expect(workspaceColour("228 94% 45%")).toBe("228 94% 45%");
+  });
+
+  it("passes anything else through unchanged, so the trigger stays the judge", () => {
+    for (const v of [
+      "blue",
+      "",
+      "#12",
+      "#12345",
+      "#1234567",
+      "2F6B4F",
+      "rgb(47, 107, 79)",
+      null,
+      undefined,
+      42,
+    ]) {
+      expect(workspaceColour(v)).toBe(v);
+    }
+  });
+});
+
+describe("buildApplySql — colours", () => {
+  it("writes a hex bundle's colours in the workspace's form, never as hex", () => {
+    // The defect this closes: the row held "#2F6B4F", the resolver could not
+    // read it, and the clone's line palette drew the prime's colours instead.
+    const out = buildApplySql({
+      brand_config: {
+        brand_name: "Orrimere Property Advisory",
+        primary_color: "#2F6B4F",
+        accent_color: "#AD5631",
+      },
+      report_contact: {},
+      config_hash: "h-colours",
+    });
+    expect(out).toContain('"primary_color":"152 39% 30%"');
+    expect(out).toContain('"accent_color":"18 56% 44%"');
+    expect(out).not.toContain("#2F6B4F");
+    expect(out).not.toContain("#AD5631");
+    // Still bound out of the payload, never interpolated into an UPDATE.
+    expect(out).toContain("USING trim(_wl->>'primary_color'), _wl_id");
+    expect(out).not.toContain("SET primary_color = '152");
+  });
+
+  it("converts every colour column the map writes, and nothing else", () => {
+    const colourColumns = WHITELABEL_COLUMN_SOURCES.filter((s) => s.column.endsWith("_color")).map(
+      (s) => s.from,
+    );
+    expect(new Set(colourColumns)).toEqual(new Set(["primary_color", "accent_color"]));
+    const out = buildApplySql({
+      brand_config: { brand_name: "Acme", secondary_color: "#1F4A37", background_color: "#F7F4EE" },
+      report_contact: {},
+      config_hash: "h-other",
+    });
+    // A bundle field with no colour column travels as it is held.
+    expect(out).toContain('"secondary_color":"#1F4A37"');
+    expect(out).toContain('"background_color":"#F7F4EE"');
+  });
+
+  it("adds no colour key a bundle did not carry", () => {
+    const out = buildApplySql({
+      brand_config: { brand_name: "Acme" },
+      report_contact: {},
+      config_hash: "h-none",
+    });
+    expect(out).not.toContain('"primary_color"');
+    expect(out).not.toContain('"accent_color"');
   });
 });
 

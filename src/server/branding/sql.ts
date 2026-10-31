@@ -109,6 +109,81 @@ export const WHITELABEL_COLUMN_SOURCES: ReadonlyArray<{
   ...markColumnSources(),
 ];
 
+/**
+ * A colour in the form the workspace reads: `"H S% L%"`.
+ *
+ * Brand profiles hold colours as hex, because that is what a colour picker
+ * gives, and this cascade wrote them into `whitelabel_settings` as it found
+ * them. The table's trigger accepts hex, so nothing refused the write. But the
+ * workspace's token resolver (`normalizeHslString`) reads only `"H S% L%"` and
+ * falls back on anything else, and a clone's line palette
+ * (`src/branding/linePalette.ts`) then fills the gap with the prime's palette.
+ * Measured on `tutorial-demo-orrimere-c158c7`, 31 Oct 2026: the row held
+ * `#2F6B4F`, and every screen drew the prime's royal blue (`228 94% 45%`) and
+ * magenta under Orrimere's name. The workspace's own editor writes
+ * `"152 39% 30%"` for the same green.
+ *
+ * So the cascade converts here, the one place it writes a colour, with the
+ * editor's arithmetic (`hexToHsl` in the prime's `reportDesign/color.pure.ts`)
+ * and its rounding, so a colour reads back exactly as if it had been saved on
+ * the Branding page. `#RGB` is expanded first. A value already in `"H S% L%"`
+ * form is passed through, and so is anything else: the trigger stays the judge
+ * of what may be stored.
+ */
+export function workspaceColour(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const match = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(value.trim());
+  if (!match) return value;
+  const digits =
+    match[1].length === 3
+      ? match[1]
+          .split("")
+          .map((c) => c + c)
+          .join("")
+      : match[1];
+  const r = parseInt(digits.slice(0, 2), 16) / 255;
+  const g = parseInt(digits.slice(2, 4), 16) / 255;
+  const b = parseInt(digits.slice(4, 6), 16) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  let h = 0;
+  let s = 0;
+  const l = (max + min) / 2;
+  if (max !== min) {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    switch (max) {
+      case r:
+        h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+        break;
+      case g:
+        h = ((b - r) / d + 2) / 6;
+        break;
+      case b:
+        h = ((r - g) / d + 4) / 6;
+        break;
+    }
+  }
+  return `${Math.round(h * 360)} ${Math.round(s * 100)}% ${Math.round(l * 100)}%`;
+}
+
+/**
+ * The bundle fields that land in a colour column, read off the column map so a
+ * colour column added there is converted without a second list to forget.
+ */
+const COLOUR_FIELDS: ReadonlyArray<keyof BrandConfig & string> = WHITELABEL_COLUMN_SOURCES.filter(
+  ({ column }) => column.endsWith("_color"),
+).map(({ from }) => from);
+
+/** The bundle with every colour-column field in the workspace's form. */
+function withWorkspaceColours(config: BrandConfig): BrandConfig {
+  const out: BrandConfig = { ...config };
+  for (const field of COLOUR_FIELDS) {
+    if (field in out) out[field] = workspaceColour(out[field]);
+  }
+  return out;
+}
+
 /** `IF` guard that a column exists on a public table. */
 function ifColumn(table: string, column: string): string {
   return `IF EXISTS (SELECT 1 FROM information_schema.columns
@@ -129,7 +204,12 @@ export function buildApplySql(args: {
     throw new Error(`Not a workspace theme: ${String(CLONE_DEFAULT_THEME)}`);
   }
 
-  const wlPayload = jsonbLiteral({ ...brand_config, _aurixa_hash: config_hash });
+  // Colours travel in the form the workspace reads (`workspaceColour`); every
+  // other field travels as the bundle holds it.
+  const wlPayload = jsonbLiteral({
+    ...withWorkspaceColours(brand_config),
+    _aurixa_hash: config_hash,
+  });
   const rcPayload = jsonbLiteral(primeContactPayload(report_contact));
 
   // One guarded write per mapped column. `%I` quotes the identifier; the value
