@@ -54,6 +54,7 @@ import {
   isPrimeOnlyFunction,
 } from "./primeOnlyFeatures.pure";
 import { crmLineCronReason, isCrmLineWithheldFunction } from "./crmLineFeatures.pure";
+import { extensionSchemaSkew, extensionSchemaSkewWords } from "./extensionPlacement.pure";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 
@@ -97,19 +98,32 @@ const POLICIES_SQL = `
    order by tablename, policyname
 `;
 
+/*
+  An extension's own functions are left out, as the schema build leaves them
+  out (`schema-introspection.server.ts`): `create extension` installs them, and
+  they are compared on the extension itself, which is present or not, at a
+  version and in a schema (`diffExtensions`). Counted here they read as the
+  prime's or the tenant's when they are neither. Measured 31 Oct 2026 on the
+  tutorial demo: `btree_gist` in `public` where the prime keeps it in
+  `extensions`, and its 188 functions reported as clone-only, "the tenant's
+  own".
+*/
 const FUNCTIONS_SQL = `
   select n.nspname as schema, p.proname as name,
          pg_get_function_identity_arguments(p.oid) as args
     from pg_proc p
     join pg_namespace n on n.oid = p.pronamespace
+    left join pg_depend d on d.objid = p.oid and d.classid = 'pg_proc'::regclass and d.deptype = 'e'
    where n.nspname = 'public'
      and p.prokind = 'f'
+     and d.objid is null
    order by name, args
 `;
 
 const EXTENSIONS_SQL = `
-  select extname as name, extversion as version
-    from pg_extension
+  select e.extname as name, e.extversion as version, n.nspname as schema
+    from pg_extension e
+    join pg_namespace n on n.oid = e.extnamespace
    order by name
 `;
 
@@ -281,7 +295,13 @@ async function snapshotProject(ref: string) {
   for (const row of f) functionSigs.add(`${row.name}(${row.args})`);
 
   const extensions = new Map<string, string>();
-  for (const row of e) extensions.set(String(row.name), String(row.version ?? ""));
+  const extensionSchemas = new Map<string, string>();
+  for (const row of e) {
+    extensions.set(String(row.name), String(row.version ?? ""));
+    if (typeof row.schema === "string" && row.schema) {
+      extensionSchemas.set(String(row.name), row.schema);
+    }
+  }
 
   const bucketsById = new Map<string, StorageBucketConfig>();
   for (const b of buckets) bucketsById.set(b.id, b);
@@ -328,6 +348,7 @@ async function snapshotProject(ref: string) {
     policiesByTable,
     functionSigs,
     extensions,
+    extensionSchemas,
     bucketsById,
     cronByName,
     edgeFnSet,
@@ -430,7 +451,7 @@ function diffFunctions(prime: Snapshot, target: Snapshot) {
   return { missing_in_target: missing.sort(), extra_in_target: extra.sort() };
 }
 
-function diffExtensions(prime: Snapshot, target: Snapshot) {
+export function diffExtensions(prime: Snapshot, target: Snapshot) {
   const missing: string[] = [];
   const versionSkew: Array<{ name: string; prime: string; target: string }> = [];
   for (const [name, ver] of prime.extensions) {
@@ -438,7 +459,14 @@ function diffExtensions(prime: Snapshot, target: Snapshot) {
     if (t === undefined) missing.push(name);
     else if (t !== ver) versionSkew.push({ name, prime: ver, target: t });
   }
-  return { missing_in_target: missing.sort(), version_skew: versionSkew };
+  return {
+    missing_in_target: missing.sort(),
+    version_skew: versionSkew,
+    // Present, but not where the prime keeps it: a function that names its
+    // schema (`extensions.crypt`) finds nothing there. Medium, like a version
+    // skew. Nothing moves it: that is a decision about a live database.
+    schema_skew: extensionSchemaSkew(prime.extensionSchemas, target.extensionSchemas),
+  };
 }
 
 // ── G3 surfaces ───────────────────────────────────────────────────────
@@ -1246,6 +1274,7 @@ export async function computeParity(
   let risk: ParityResult["risk_level"] = "low";
   if (
     extensions.version_skew.length ||
+    extensions.schema_skew.length ||
     tables.extra_in_target.length ||
     buckets.config_drift.length ||
     cron.missing_in_target.length ||
@@ -1295,6 +1324,9 @@ export async function computeParity(
       ? ` · ${projectSettingsSummary(projectSettings)}`
       : "") +
     (origin.line ? ` · ${origin.line}` : "") +
+    (extensions.schema_skew.length > 0
+      ? ` · extensions not in the prime's schema=${extensionSchemaSkewWords(extensions.schema_skew)}`
+      : "") +
     // The prime's residue is reported wherever the shortfall is, or the
     // narrowing above is invisible and reads as a clone that matches.
     (edgeFns.prime_only_undeclared.length > 0

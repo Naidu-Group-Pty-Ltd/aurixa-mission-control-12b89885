@@ -381,6 +381,22 @@ difference until it is installed.
 `pg_extension` rather than hard-coding it. A hard-coded list drifts silently;
 the prime already knows the answer.
 
+**Follow-up, 31 Oct 2026: the schema as well as the name — FIXED.** Deriving
+the list took the prime's names and not where it keeps each one, and
+`create extension` with no schema puts a relocatable extension first on the
+search path: `public`. Measured read-only on both projects' `pg_extension`:
+the prime keeps `btree_gist` 1.7 in `extensions`; the tutorial demo, the first
+clone built after `btree_gist` reached the prime, had it in `public`, with its
+188 functions in the API schema. Parity counted them as clone-only and called
+them the tenant's own. The four older clones match, because they got it from
+the prime's migration, which says `with schema extensions`. The create now
+names the prime's schema wherever the clone has it
+(`extensionPlacement.pure.ts`). Parity compares an extension's schema beside
+its version (`schema_skew`, medium), and leaves an extension's own functions
+out of the function count, as the schema build does. An extension already
+in the wrong schema is reported, not moved. Moving one moves every function
+a tenant's code may call by its schema, so it is the owner's decision.
+
 ---
 
 ## 7 · Three things the DDL path has to do that a single pass does not — **FIXED** (all three implemented in `schema-introspection.server.ts`)

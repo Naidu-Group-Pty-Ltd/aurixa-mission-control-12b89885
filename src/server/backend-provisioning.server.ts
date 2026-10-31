@@ -65,6 +65,15 @@ import {
 } from "./retiredFunctions.pure";
 import { deployedVerifyJwt } from "./anonymousFunctionSlugs.pure";
 import {
+  extensionCreateSchema,
+  extensionCreateStatement,
+  extensionSchemaSkew,
+  extensionSchemaSkewWords,
+  isSchemaClauseRefusal,
+  type ExtensionSchemaSkew,
+  type ProjectExtension,
+} from "./extensionPlacement.pure";
+import {
   compressedUploadRequest,
   ESZIP_CONTENT_TYPE,
   isRawSizeRefusal,
@@ -2487,14 +2496,7 @@ export const REQUIRED_EXTENSION_FLOOR = [
 /** Shipped with every Postgres; `create extension` on it is noise, not safety. */
 const EXTENSIONS_ALWAYS_PRESENT = new Set(["plpgsql"]);
 
-/**
- * Quote an extension name for `create extension`. Most are bare identifiers,
- * but `uuid-ossp` contains a hyphen and is a syntax error unquoted — which is
- * the second reason a clone could end up without an extension the prime has.
- */
-export function quoteExtensionIdent(name: string): string {
-  return /^[a-z_][a-z0-9_]*$/.test(name) ? name : `"${name.replace(/"/g, '""')}"`;
-}
+export { quoteExtensionIdent } from "./extensionPlacement.pure";
 
 /**
  * The extensions to install on a clone: the floor, plus everything the prime
@@ -2518,20 +2520,63 @@ export type RequiredExtensionResult = {
   name: string;
   status: "installed" | "already_present" | "failed";
   error?: string;
+  /** The schema the clone holds it in, as read from the clone. Null: not read. */
+  schema?: string | null;
+  /** The schema the prime holds it in. Null: the prime does not run it, or was not read. */
+  primeSchema?: string | null;
+  /** Why the clone refused the create that named the prime's schema. */
+  schemaRefused?: string;
 };
 
-/** Every extension installed on a project, by name. */
-export async function fetchProjectExtensionNames(projectRef: string): Promise<string[]> {
+/**
+ * Every extension installed on a project, with the schema it is installed in.
+ * Empty when the project cannot be read.
+ */
+export async function fetchProjectExtensions(projectRef: string): Promise<ProjectExtension[]> {
   try {
     const rows = (await runSqlOnProject(
       projectRef,
-      `select extname from pg_extension order by extname`,
-    )) as Array<{ extname?: string }> | null;
+      `select e.extname, n.nspname as schema
+         from pg_extension e
+         join pg_namespace n on n.oid = e.extnamespace
+        order by e.extname`,
+    )) as Array<{ extname?: string; schema?: string }> | null;
     if (!Array.isArray(rows)) return [];
-    return rows.map((r) => String(r?.extname ?? "")).filter(Boolean);
+    return rows
+      .map((r) => ({
+        name: String(r?.extname ?? ""),
+        schema: typeof r?.schema === "string" && r.schema ? r.schema : null,
+      }))
+      .filter((r) => r.name);
   } catch {
     return [];
   }
+}
+
+/** The schemas a project has, by name. Empty when they cannot be read. */
+async function fetchProjectSchemaNames(projectRef: string): Promise<Set<string>> {
+  try {
+    const rows = (await runSqlOnProject(projectRef, `select nspname from pg_namespace`)) as Array<{
+      nspname?: string;
+    }> | null;
+    if (!Array.isArray(rows)) return new Set();
+    return new Set(rows.map((r) => String(r?.nspname ?? "")).filter(Boolean));
+  } catch {
+    return new Set();
+  }
+}
+
+/** The step's extensions held in a schema other than the prime's, by name. */
+export function misplacedRequiredExtensions(
+  results: readonly RequiredExtensionResult[],
+): ExtensionSchemaSkew[] {
+  const prime = new Map<string, string>();
+  const clone = new Map<string, string>();
+  for (const r of results) {
+    if (r.primeSchema) prime.set(r.name, r.primeSchema);
+    if (r.schema) clone.set(r.name, r.schema);
+  }
+  return extensionSchemaSkew(prime, clone);
 }
 
 /**
@@ -2558,35 +2603,78 @@ export async function fetchProjectExtensionNames(projectRef: string): Promise<st
  * A clone whose extension list cannot be read reports none, which puts every
  * extension back on the create path: the fallback does the work rather than
  * assuming it is done.
+ *
+ * Each one is created in the schema the prime keeps it in, where the clone has
+ * that schema (`extensionPlacement.pure.ts`); without it, a relocatable
+ * extension went to `public` whatever the prime did. The clone's schemas are
+ * read only when something is missing, and its extensions are read again only
+ * after something was created, so that where each one went is read from the
+ * clone rather than assumed from the statement. A converged clone still costs
+ * the two reads and nothing more.
  */
 export async function enforceRequiredExtensions(
   projectRef: string,
   primeRef?: string | null,
 ): Promise<RequiredExtensionResult[]> {
-  const [primeNames, cloneNames] = await Promise.all([
-    primeRef ? fetchProjectExtensionNames(primeRef) : Promise.resolve<string[]>([]),
-    fetchProjectExtensionNames(projectRef),
+  const [primeExtensions, cloneExtensions] = await Promise.all([
+    primeRef ? fetchProjectExtensions(primeRef) : Promise.resolve<ProjectExtension[]>([]),
+    fetchProjectExtensions(projectRef),
   ]);
-  const wanted = resolveRequiredExtensions(primeNames);
-  const present = new Set(cloneNames);
+  const primeSchemaOf = new Map(primeExtensions.map((e) => [e.name, e.schema]));
+  const cloneSchemaOf = new Map(cloneExtensions.map((e) => [e.name, e.schema]));
+  const wanted = resolveRequiredExtensions(primeExtensions.map((e) => e.name));
+  const cloneSchemas = wanted.some((name) => !cloneSchemaOf.has(name))
+    ? await fetchProjectSchemaNames(projectRef)
+    : new Set<string>();
   const results: RequiredExtensionResult[] = [];
   for (const name of wanted) {
-    if (present.has(name)) {
-      results.push({ name, status: "already_present" });
+    const primeSchema = primeSchemaOf.get(name) ?? null;
+    if (cloneSchemaOf.has(name)) {
+      results.push({
+        name,
+        status: "already_present",
+        schema: cloneSchemaOf.get(name) ?? null,
+        primeSchema,
+      });
       continue;
     }
+    const schema = extensionCreateSchema(primeSchema, cloneSchemas);
+    let schemaRefused: string | undefined;
     try {
-      await runSqlOnProject(
-        projectRef,
-        `create extension if not exists ${quoteExtensionIdent(name)};`,
-      );
-      results.push({ name, status: "installed" });
+      await runSqlOnProject(projectRef, extensionCreateStatement(name, schema));
+      results.push({ name, status: "installed", primeSchema });
+      continue;
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      if (schema === null || !isSchemaClauseRefusal(error)) {
+        results.push({ name, status: "failed", error, primeSchema });
+        continue;
+      }
+      schemaRefused = error;
+    }
+    // The clone refused the prime's schema for this one. The extension comes
+    // first: without `vector` the schema build cannot create the tables that
+    // use it, and without `pg_cron` the clone has no background jobs. Where it
+    // lands is read below and reported.
+    try {
+      await runSqlOnProject(projectRef, extensionCreateStatement(name, null));
+      results.push({ name, status: "installed", primeSchema, schemaRefused });
     } catch (err) {
       results.push({
         name,
         status: "failed",
         error: err instanceof Error ? err.message : String(err),
+        primeSchema,
+        schemaRefused,
       });
+    }
+  }
+  if (results.some((r) => r.status === "installed")) {
+    const landed = new Map(
+      (await fetchProjectExtensions(projectRef)).map((e) => [e.name, e.schema]),
+    );
+    for (const r of results) {
+      if (r.status === "installed") r.schema = landed.get(r.name) ?? null;
     }
   }
   return results;
@@ -6177,6 +6265,16 @@ export async function provisionCloneBackend(
       await onStatusUpdate?.(
         "migrating",
         `${failedExt.length}/${requiredExtensions.length} extension(s) failed to install — ${failedExt.map((e) => e.name).join(", ")}`,
+      );
+    }
+    // Said, not moved: an extension already on the clone stays where it is,
+    // because relocating one moves every function a tenant's code may call by
+    // its schema. Parity reports the same reading on every comparison.
+    const misplacedExt = misplacedRequiredExtensions(requiredExtensions);
+    if (misplacedExt.length > 0) {
+      await onStatusUpdate?.(
+        "migrating",
+        `${misplacedExt.length} extension(s) are not in the schema the prime keeps them in — ${extensionSchemaSkewWords(misplacedExt)}`,
       );
     }
   } catch (err) {
