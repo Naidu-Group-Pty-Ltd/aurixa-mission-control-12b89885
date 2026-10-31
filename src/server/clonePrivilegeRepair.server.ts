@@ -38,10 +38,11 @@
  * It reported only, by the owner's decision of 28 Oct 2026, until the owner
  * chose on 31 Oct 2026 to take the surplus back on every clone
  * (`tableGrantEnforcement.pure.ts`). On a clone `TABLE_GRANT_ENFORCEMENT`
- * reaches, a pass files the grants that would undo it, takes the surplus back,
- * and reads the clone again, so its report is what the catalogue says after,
- * not what the statements meant. On any other clone it reports, with the list
- * of what would be taken back.
+ * reaches (every clone since 31 Oct 2026, the demo first), a pass files the
+ * grants that would undo it, takes the surplus back, and reads the clone
+ * again, so its report is what the catalogue says after, not what the
+ * statements meant. On any clone a narrower scope leaves out it reports, with
+ * the list of what would be taken back.
  *
  * ## Budget
  *

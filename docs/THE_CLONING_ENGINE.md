@@ -1844,9 +1844,15 @@ The sweep now compares table privileges on each pass
   PUBLIC, and no role gains one; the undo puts the relation back exactly,
   column grants included. Both are checked on a model of the catalogue in
   the tests and were checked on 700 random relations on Postgres 16. It
-  reaches the demo first and every clone once the demo reads clean; a clone
-  not yet reached is reported with what each of its relations' statements
-  would revoke, PUBLIC's included (`wouldRevoke`).
+  reached the demo first (#472): the 13:37 UTC pass on 31 Oct took back 2,143
+  privileges on 139 relations, none failed, and read at 14:27 the demo's
+  browser roles' table and column grants were identical to the prime's. It
+  reaches every clone since, after each clone's list of what its statements
+  would revoke, PUBLIC's included (`wouldRevoke`), was reviewed: 991
+  privileges on the same 65 relations on the dashboard, NPC Test and
+  Preflight, 1,198 on those and 13 more on the CRM, no PUBLIC revoke and no
+  refusal. A scope short of `all` still reports a clone it leaves out with
+  that list.
 - **Where it says so.** Under `tables` in the hook's answer, in the
   `clone_privilege_reconcile_cron` audit row (filed on every scheduled pass
   while any clone holds a surplus or could not be read), and in a
