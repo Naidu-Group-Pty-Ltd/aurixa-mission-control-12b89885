@@ -68,6 +68,8 @@ async function runBackendProvisioning(
       retryable?: boolean;
       progressed?: boolean;
       upstreamLimited?: boolean;
+      /** How long the refusing API said to wait, when it said (a Management API 429). */
+      retryAfterMs?: number | null;
     }
 > {
   const updateStatus = async (status: string, detail: string) => {
@@ -1224,7 +1226,17 @@ async function runBackendProvisioning(
           `[backend-provisioning] could not record rate limit for clone ${input.cloneId}: ${limitWriteErr.message}`,
         );
       }
-      return { ok: false, error: msg, retryable: true, upstreamLimited: true };
+      // The API's own word on when its window reopens, where it gave one: the
+      // Management API's resets in under a minute, and holding a job for the
+      // quarter hour a GitHub quota needs would idle it for nothing.
+      const hinted = (e as { retryAfterMs?: unknown }).retryAfterMs;
+      return {
+        ok: false,
+        error: msg,
+        retryable: true,
+        upstreamLimited: true,
+        retryAfterMs: typeof hinted === "number" && Number.isFinite(hinted) ? hinted : null,
+      };
     }
 
     // The terminal write is the one that must not fail silently: if it does,
@@ -1289,6 +1301,7 @@ export async function runQueuedBackendProvisioning(input: {
       retryable?: boolean;
       progressed?: boolean;
       upstreamLimited?: boolean;
+      retryAfterMs?: number | null;
     }
 > {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");

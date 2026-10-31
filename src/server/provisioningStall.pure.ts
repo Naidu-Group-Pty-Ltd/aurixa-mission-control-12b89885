@@ -45,11 +45,13 @@ export const MAX_PROGRESS_HANDBACKS = 6;
 /**
  * A claim this old, whose row has not been written for as long, has no pass.
  *
- * A pass cannot outlive its request: pg_net stops waiting at 60 seconds
- * (`timeout_milliseconds := 60000` on `backend-provisioning-drain-1min`) and
- * the hosting runtime cancels a request's work once its client disconnects.
- * Five minutes is several times that, and the silence condition means a row
- * that is still being written is never taken from under a live pass.
+ * A pass cannot outlive its request: pg_net stops waiting at 150 seconds
+ * (`timeout_milliseconds := 150000` on `backend-provisioning-drain-1min`, since
+ * `20261031090000_backend_drain_http_patience.sql`) and the hosting runtime
+ * cancels a request's work once its client disconnects. Five minutes is twice
+ * that, and the silence condition means a row that is still being written is
+ * never taken from under a live pass. `backendDrainPatience.contract.test.ts`
+ * holds the two apart.
  */
 export const DEAD_PASS_SILENT_MINUTES = 5;
 

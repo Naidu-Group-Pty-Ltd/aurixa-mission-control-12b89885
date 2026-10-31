@@ -1871,3 +1871,111 @@ The rest, 1,003 on 66 relations (1,210 on 79 on the CRM), stay:
   TRIGGER for both roles. `finance_agent_contacts` keeps all eight for
   `authenticated`, under a `TO public USING (true)` policy, although the prime
   has given `authenticated` nothing there since `20260721141000`.
+
+---
+
+## Where a clone's build time went, and what now shortens it
+
+31 October 2026. Measured on the last clone built, `tutorial-demo-orrimere-c158c7`,
+from Mission Control's own records (`audit_log`, `deployment_events`,
+`notifications`) and the clone's `aurixa.ddl_failures`.
+
+| | |
+| --- | --- |
+| clone row written | 29 Oct 19:28 |
+| first schema pass | 19:44 – 20:10, failing on the then-missing domain stage |
+| backend failed, deployment failed behind it | before 20:58 |
+| schema verified | 22:11 |
+| fleet sync replayed old files into the half-built clone, failed it | 23:00 |
+| passes killed (memory, then time) | 22:13 – 00:51, and 01:55, 02:01 |
+| backend `ready` | 30 Oct 02:17, after a hand re-queue at 02:16 |
+| deployment `live` | 02:31 |
+
+Seven hours, and most of it was not work. The fleet-sync replay and the
+memory kills are already fixed (`provisioning_incomplete` in
+`fleetMigrationEligibility.pure.ts`, the streamed secret scan). What follows is
+what remained.
+
+### A kill is not a pause, and the drain left ten seconds between them
+
+The drain worked for 50 s against a job that waited 60 s, checking its budget
+only between units. The unit a pass was inside when the budget ran out had ten
+seconds to finish, and a run of repository commits does not fit in ten: the
+two passes at 01:55 and 02:01 both died re-pointing the clone's repository,
+each death a stall of minutes. `20261031090000_backend_drain_http_patience.sql`
+gives the job 150 s — the patience the fleet lane has run on since September —
+and the budget is derived from it (`BACKEND_DRAIN_PATIENCE_MS −
+BACKEND_DRAIN_HEADROOM_MS`, 60 s), so a unit that overruns now finishes
+instead of being killed. The budget grows only a little on purpose: pg_net
+starts its next batch of requests only once every request in the current one
+has answered, so a pass that ran for two minutes would hold every other
+one-minute hook for two minutes. `backendDrainPatience.contract.test.ts` holds
+the three numbers — the migration's timeout, the budget, the dead-pass
+silence — in step.
+
+### A deployment takes its next step in the same tick
+
+The deployment drain advanced one state per tick, so `pending` → `live` cost
+seven minutes of ticks even where each step took seconds (creating_project
+02:24:05, linking_repo 02:25:05, syncing_env 02:26:10, deploying 02:27:05).
+A step that ADVANCES into another claimable state now re-claims that one row
+through the same guard as the claim and runs the next step at once — within
+the first 25 s of the invocation (`DEPLOY_CHAIN_WINDOW_MS`) and at most four
+steps (`MAX_CHAINED_STEPS`). A step that waits (the build, DNS) ends the chain,
+and an overlapping tick that got the row first simply keeps it.
+
+### The edge functions deploy four at a time
+
+The longest stage. About 435 deploys, one after another, at roughly seven a
+minute: an hour of every build, while each pass fetched sixty bundles and
+reached a handful. `deployEdgeFunctions` now runs `EDGE_DEPLOY_CONCURRENCY`
+(4) deploys at once, checks the budget before starting each one, waits for
+those already started before it pauses, and returns results in input order. A
+failed deploy is recorded and the rest carry on, as before. The Management
+API allows 120 requests a minute per endpoint per project, so four in flight
+stays well inside it; `EDGE_DEPLOY_CONCURRENCY=1` restores the serial deploy.
+
+### A 429 from the Management API is waited out, not recorded as a failure
+
+Its body says "Too many requests" and never "rate limit", so nothing
+recognised it: the pass was written `failed`, its resume marker cleared and an
+attempt spent. `runSqlOnProject` now waits a 429 out from `X-RateLimit-Reset`
+(bounded, twice), and throws a `ManagementApiError` carrying the status when
+it outlasts that, so `isUpstreamRateLimit` hands the attempt back — and the
+job is held for the API's own minute, not the quarter hour a GitHub quota
+needs (`upstreamBackoffMs`). A gateway error or a dropped connection is retried
+only for statements safe to send twice: the introspection's catalogue reads
+and its re-appliable DDL batches. A migration is never sent twice.
+
+The same refusal had a worse effect in the fleet migration lane.
+`applyPrimeMigrations` asks `cloneSaidNothing` of every failed apply, and a
+migration the clone REFUSED blocks the clone out of the fleet sync until an
+operator repairs it. With no status on the error and no "rate limit" in the
+body, a 429 mid-replay read as the clone refusing the migration. It now reads
+as what it is — the clone said nothing — and the replay holds for the next
+pass with the clone still in the fleet (`managementApiRetry.test.ts`).
+
+### The schema stages send only what the clone lacks, by name
+
+- **Tables** are created where they are absent BY NAME. The count skipped
+  creation whenever the clone held at least as many tables as the prime, and a
+  clone keeps every table the prime has dropped, so a table the prime added
+  could be hidden by the surplus with nothing recorded.
+- **Constraints and policies** are digested by name (only equality skips the
+  stage) and filtered against the clone's own list. Every constraint used to be
+  sent, ~2,800 a build, and each primary key already in place answered
+  "multiple primary keys … are not allowed": 868 of the 1,379 rows in
+  Orrimere's failure ledger. The apply helper now counts that answer as
+  applied, as `isBenignDdlError` always read it.
+- **RLS** is digested by name as well, and switched on only where the clone
+  has not — the one class where a gap a surplus hid is an exposure: a table
+  whose RLS is off answers every API role its grants allow.
+- **Grants** are sent as one statement per relation and grantee carrying every
+  privilege (`groupGrants`), not one per privilege.
+- Cheap statements travel a hundred to a batch (`CHEAP_DDL_BATCH`).
+- A stage whose list is computed against the clone resumes at what is still
+  missing, never at a stored batch index (`DIFFED_STAGES`): its list shrinks
+  between passes, so "batch 10" of the next list is work that never landed.
+- The tables stage read its prefetched counts as bare numbers when they had
+  become probes (`{ n, digest }`), so it missed every time and paid two more
+  round trips each pass.

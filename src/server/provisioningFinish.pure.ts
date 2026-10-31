@@ -5,9 +5,10 @@
  * invocation: it re-points the clone's repository, deploys the functions the
  * clone carries itself, gives it an Anthropic workspace and model keys,
  * compares it with the prime, and marks it ready. None of that was budgeted.
- * It ran in whatever the pipeline had left of a request pg_net abandons at 60
- * seconds, and a pass cut off before the ready write leaves the backend
- * `migrating` with nothing recorded.
+ * It ran in whatever the pipeline had left of a request pg_net abandoned at 60
+ * seconds (150 since `20261031090000_backend_drain_http_patience.sql`), and a
+ * pass cut off before the ready write leaves the backend `migrating` with
+ * nothing recorded.
  *
  * Measured on `tutorial-demo-orrimere-c158c7`, 30 Oct 2026: a pipeline with
  * nothing left to do took 32 seconds, the re-point took most of the rest, and

@@ -489,13 +489,51 @@ export function parsePgArray(value: unknown): string[] {
     .filter(Boolean);
 }
 
+/**
+ * One GRANT for a relation and a grantee, carrying every privilege given.
+ *
+ * The prime's ~8,900 table privileges for the API roles were sent one
+ * statement each, so a clone's grants stage was ~150 batches of single-word
+ * GRANTs. A grantee usually holds several privileges on a relation, and one
+ * statement grants them all: the same ACL, a fraction of the statements and
+ * catalogue writes. Every privilege here is read from the prime's own ACL on
+ * the same relation, so the combination is one the relation accepts.
+ */
 export function buildGrantDdl(
   schema: string,
   table: string,
   grantee: string,
-  privilege: string,
+  privilege: string | readonly string[],
 ): string {
-  return `grant ${privilege.toLowerCase()} on ${quoteIdent(schema)}.${quoteIdent(table)} to ${quoteIdent(grantee)}`;
+  const privileges = (typeof privilege === "string" ? [privilege] : privilege)
+    .map((p) => p.toLowerCase())
+    .join(", ");
+  return `grant ${privileges} on ${quoteIdent(schema)}.${quoteIdent(table)} to ${quoteIdent(grantee)}`;
+}
+
+/**
+ * The privileges to grant, grouped by relation and grantee in first-seen order,
+ * each privilege once.
+ */
+export function groupGrants(
+  rows: ReadonlyArray<{ schema: string; table: string; grantee: string; privilege: string }>,
+): Array<{ schema: string; table: string; grantee: string; privileges: string[] }> {
+  const groups = new Map<
+    string,
+    { schema: string; table: string; grantee: string; privileges: string[] }
+  >();
+  for (const r of rows) {
+    const key = `${r.schema}\u0000${r.table}\u0000${r.grantee}`;
+    const g = groups.get(key) ?? {
+      schema: r.schema,
+      table: r.table,
+      grantee: r.grantee,
+      privileges: [],
+    };
+    if (!g.privileges.includes(r.privilege)) g.privileges.push(r.privilege);
+    groups.set(key, g);
+  }
+  return [...groups.values()];
 }
 
 /**
@@ -595,8 +633,12 @@ begin
       execute s;
       ok := ok + 1;
     exception when others then
+      -- "multiple primary keys" is a key already in place under the name the
+      -- table was created with; it is counted as applied, as isBenignDdlError
+      -- reads it, rather than written to the failure ledger as noise.
       if position('already exists' in lower(sqlerrm)) > 0
-         or position('duplicate' in lower(sqlerrm)) > 0 then
+         or position('duplicate' in lower(sqlerrm)) > 0
+         or position('multiple primary keys' in lower(sqlerrm)) > 0 then
         ok := ok + 1;
       else
         insert into aurixa.ddl_failures (stage, statement, error)
@@ -617,7 +659,8 @@ revoke execute on function aurixa.apply_ddl_batch(jsonb, text) from public, anon
 export type BatchApplyResult = { applied: number; failed: number; errors: string[] };
 
 async function ensureApplyHelper(cloneRef: string): Promise<void> {
-  await runSqlOnProject(cloneRef, APPLY_HELPER_SQL);
+  // `create … if not exists` and `create or replace`: safe to send again.
+  await runSqlOnProject(cloneRef, APPLY_HELPER_SQL, { idempotent: true });
 }
 
 /** Apply DDL statements to the clone in fault-isolated batches. */
@@ -664,9 +707,14 @@ export async function applyStatements(
     // claimed the job must move it, or recycling makes no progress at all.
     if (i > from) pauseIfDue?.(`${stage}: ${i}/${batches.length} batches applied`, i);
     const payload = sqlLiteral(JSON.stringify(batch));
+    // Every statement this module generates is written to be re-applied (an
+    // existing object answers `already exists`, which the helper counts as
+    // applied), so a batch whose answer was lost to a gateway error is sent
+    // again rather than failing the pass.
     const raw = await runSqlOnProject(
       cloneRef,
       `select aurixa.apply_ddl_batch(${payload}::jsonb, ${sqlLiteral(stage)}) as r`,
+      { idempotent: true },
     );
     const rows = toRows(raw);
     const r = (rows[0]?.r ?? {}) as { applied?: unknown; failures?: unknown };
@@ -768,6 +816,33 @@ const Q = {
                          join pg_class ic on ic.oid = c.conindid
                          join pg_namespace n on n.oid = ic.relnamespace
                          where n.nspname in (${SCHEMA_LIST})`,
+
+  /*
+    IDENTITY LISTS — what each side holds, by name and nothing else.
+
+    A count cannot say WHICH objects a clone holds, and a clone legitimately
+    holds a surplus (introspection creates and never drops), so `clone >=
+    prime` can reconcile while a named object is absent. The indexes stage
+    learnt that first (see DIGESTS); these give the tables, constraints and
+    policies stages the same footing: send only what the clone lacks, and never
+    let a surplus hide a gap. Cheap — names only, read from the catalogue.
+  */
+  tableKeys: `select n.nspname || '.' || c.relname as k
+                from pg_class c join pg_namespace n on n.oid = c.relnamespace
+               where c.relkind = 'r' and n.nspname in (${SCHEMA_LIST})`,
+
+  constraintKeys: `select n.nspname || '.' || rel.relname || '.' || c.conname as k
+                     from pg_constraint c
+                     join pg_class rel on rel.oid = c.conrelid
+                     join pg_namespace n on n.oid = rel.relnamespace
+                    where n.nspname in (${SCHEMA_LIST})`,
+
+  policyKeys: `select schemaname || '.' || tablename || '.' || policyname as k
+                 from pg_policies where schemaname in (${SCHEMA_LIST})`,
+
+  rlsKeys: `select n.nspname || '.' || c.relname as k
+              from pg_class c join pg_namespace n on n.oid = c.relnamespace
+             where c.relkind = 'r' and c.relrowsecurity and n.nspname in (${SCHEMA_LIST})`,
 
   /*
     The OPTIONS ride with the definition. `create or replace view` replaces a
@@ -949,8 +1024,48 @@ const COUNTS: Record<StageName, string> = {
   grants: `select count(*)::int as n from pg_class c join pg_namespace n on n.oid=c.relnamespace cross join lateral aclexplode(c.relacl) a join pg_roles r on r.oid=a.grantee where n.nspname in (${SCHEMA_LIST}) and c.relkind in ('r','v','m','p','f') and r.rolname in (${API_ROLE_LIST})`,
 };
 
+/**
+ * The identities a project holds for one class (`Q.tableKeys` and siblings), or
+ * an EMPTY set when they cannot be read — which puts every object back on the
+ * apply path. Unreadable means "do the work", never "assume it is done".
+ */
+async function heldKeys(ref: string, sql: string): Promise<Set<string>> {
+  const rows = await query(ref, sql).catch(() => [] as Array<Record<string, unknown>>);
+  return new Set(rows.map((r) => str(r.k)).filter(Boolean));
+}
+
+/**
+ * Batch size for statements that are cheap on a schema with no rows in it —
+ * constraints, indexes, RLS switches, policies, grants. Each batch is one
+ * Management API round trip, and the statements themselves take milliseconds,
+ * so the round trip was most of the cost at sixty a batch. Functions (large
+ * bodies, validated at creation) and tables keep their smaller batches.
+ */
+export const CHEAP_DDL_BATCH = 100;
+
+/**
+ * The stages whose statement list is computed against what the clone already
+ * holds, so a pass sends only what is missing.
+ *
+ * For these the list SHRINKS between passes, so a batch index stored by one
+ * pass describes a list the next pass does not have: resuming at "batch 10" of
+ * the shorter list skips ten batches of work that never landed. The diff is
+ * the resume point — what landed is no longer in the list — so the stored
+ * index is ignored for them, and a pause inside one records the stage alone.
+ */
+export const DIFFED_STAGES: ReadonlySet<StageName> = new Set<StageName>([
+  "tables",
+  "constraints",
+  "indexes",
+  "triggers",
+  "rls",
+  "policies",
+  "grants",
+]);
+
 async function query(ref: string, sql: string): Promise<Array<Record<string, unknown>>> {
-  return toRows(await runSqlOnProject(ref, assertReadOnlySourceQuery(sql)));
+  // Asserted read-only, so a lost answer is simply asked for again.
+  return toRows(await runSqlOnProject(ref, assertReadOnlySourceQuery(sql), { idempotent: true }));
 }
 
 async function countOn(ref: string, stage: StageName): Promise<number> {
@@ -1051,6 +1166,35 @@ const DIGESTS: Partial<Record<StageName, string>> = {
   */
   indexes: `select md5(coalesce(string_agg(i.indexname, E'\n' order by i.indexname), ''))
               from pg_indexes i where i.schemaname in (${SCHEMA_LIST})`,
+  /*
+    Constraints and policies are digested by NAME, for the reason indexes are:
+    a clone that holds a surplus reconciles on the count while a named one is
+    absent, and the stage was then skipped rather than attempted. Only
+    equality is conclusive; an unequal digest sends the stage on to compare
+    the name lists and send only what the clone lacks. Ordered under "C" so
+    two projects with different default collations still agree on equal sets.
+  */
+  constraints: `select md5(coalesce(string_agg(k, E'\n' order by k collate "C"), '')) from (
+                  select n.nspname || '.' || rel.relname || '.' || c.conname as k
+                    from pg_constraint c
+                    join pg_class rel on rel.oid = c.conrelid
+                    join pg_namespace n on n.oid = rel.relnamespace
+                   where n.nspname in (${SCHEMA_LIST})) g`,
+  policies: `select md5(coalesce(string_agg(k, E'\n' order by k collate "C"), '')) from (
+               select schemaname || '.' || tablename || '.' || policyname as k
+                 from pg_policies where schemaname in (${SCHEMA_LIST})) g`,
+  /*
+    Which tables have row level security switched on, by name. The one stage
+    where a masked gap is an EXPOSURE rather than a missing feature: a table
+    whose RLS is off answers every API role its grants allow. A surplus
+    RLS-enabled table on the clone balanced the count, so the prime switching
+    RLS on for a table could go unseen here. Entering re-sends the enables,
+    which are cheap and idempotent.
+  */
+  rls: `select md5(coalesce(string_agg(k, E'\n' order by k collate "C"), '')) from (
+          select n.nspname || '.' || c.relname as k
+            from pg_class c join pg_namespace n on n.oid = c.relnamespace
+           where c.relkind = 'r' and c.relrowsecurity and n.nspname in (${SCHEMA_LIST})) g`,
   triggers: `select md5(coalesce(string_agg(d, E'\n' order by d), '')) from (
                select pg_get_triggerdef(t.oid) as d
                  from pg_trigger t
@@ -1287,8 +1431,10 @@ export async function replicateSchemaByIntrospection(
    * index means nothing outside the statement list it was counted in.
    */
   let resumeBatch = resumeMarker.batch;
+  // A diffed stage resumes at what is still missing, never at an index into a
+  // list the previous pass computed (see DIFFED_STAGES).
   const takeResumeBatch = (stage: StageName): number =>
-    stage === resumeMarker.stage ? resumeBatch : 0;
+    stage === resumeMarker.stage && !DIFFED_STAGES.has(stage) ? resumeBatch : 0;
 
   const pauseIfDue = (about: string, batchIndex?: number) => {
     if (pastDeadline(options.deadlineAt)) {
@@ -1350,6 +1496,9 @@ export async function replicateSchemaByIntrospection(
     // at rather than at one it never reached.
     const startBatch = takeResumeBatch(stage);
     pauseIfDue(`introspection: ${stage} statements build resumes next tick`, startBatch);
+    // A diffed stage's pause records the stage alone: its next pass recomputes
+    // what is missing, which is the only position that means anything.
+    const stagePause = DIFFED_STAGES.has(stage) ? (about: string) => pauseIfDue(about) : pauseIfDue;
     return runStage(
       stage,
       primeRef,
@@ -1357,7 +1506,7 @@ export async function replicateSchemaByIntrospection(
       await statements(),
       batchSize,
       undefined,
-      pauseIfDue,
+      stagePause,
       startBatch,
     );
   };
@@ -1374,6 +1523,7 @@ export async function replicateSchemaByIntrospection(
   await runSqlOnProject(
     cloneRef,
     REPLICATED_SCHEMAS.map((s) => `create schema if not exists ${quoteIdent(s)};`).join("\n"),
+    { idempotent: true },
   );
 
   // 1. enum types
@@ -1488,9 +1638,6 @@ export async function replicateSchemaByIntrospection(
       grouped.set(key, entry);
     }
 
-    tableStmts = Array.from(grouped.values()).map((t) =>
-      buildCreateTableDdl(t.schema, t.table, t.cols),
-    );
     // Applying ~700 `create table if not exists` statements against a clone
     // that already holds every one of them is pure cost, and it is the cost
     // that deadlocked this pipeline: the tables stage consumed most of each
@@ -1498,38 +1645,52 @@ export async function replicateSchemaByIntrospection(
     // `partial`, and a partial pass may not proceed to the edge functions.
     // The engine could complete the schema and never get past it.
     //
-    // So skip the APPLICATION when the count already reconciles — and only
-    // the application. The column-drift repair below still runs, which is the
-    // whole reason this stage does not use `alreadyReconciled`: equal counts
-    // do not mean equal tables.
-    // From the prefetch where it has both sides — this is the same "is it
-    // already there" question every other stage asks, and on a complete
-    // schema it is the only question the pass has.
+    // So only the tables the clone LACKS, BY NAME, are created — and only the
+    // application is skipped. The column-drift repair below still runs, which
+    // is the whole reason this stage does not use `alreadyReconciled`: equal
+    // counts do not mean equal tables.
+    //
+    // By name rather than by count. The count skipped creation whenever the
+    // clone held at least as many tables as the prime, and a clone keeps every
+    // table the prime has since dropped — so a table the prime ADDED was never
+    // created while the surplus balanced the sum, and nothing was recorded,
+    // because the stage was skipped rather than failing. A clone whose list
+    // cannot be read is treated as holding none: every table goes back on the
+    // create path, which `if not exists` makes safe.
+    const allTables = Array.from(grouped.values());
+    const heldTables = await heldKeys(cloneRef, Q.tableKeys);
+    const absentTables = allTables.filter((t) => !heldTables.has(`${t.schema}.${t.table}`));
+    tableStmts = absentTables.map((t) => buildCreateTableDdl(t.schema, t.table, t.cols));
+    // From the prefetch where it has both sides — each side is a probe
+    // (`{ n, digest }`), and reading it as a bare number used to miss every
+    // time and pay two more round trips for counts the pass already held.
+    const prePrime = prefetch.prime.tables;
+    const preClone = prefetch.clone.tables;
     const tableCounts =
-      typeof prefetch.prime.tables === "number" && typeof prefetch.clone.tables === "number"
-        ? [prefetch.prime.tables, prefetch.clone.tables]
+      prePrime && preClone
+        ? [prePrime.n, preClone.n]
         : await Promise.all([countOn(primeRef, "tables"), countOn(cloneRef, "tables")]);
-    const tablesAlreadyPresent = reconcile(tableCounts[0], tableCounts[1]);
-    tableStage = tablesAlreadyPresent
-      ? {
-          stage: "tables",
-          primeCount: tableCounts[0],
-          cloneCount: tableCounts[1],
-          applied: 0,
-          failed: 0,
-          reconciled: true,
-          notes: ["every table present — creation skipped, drift still checked"],
-        }
-      : await runStage(
-          "tables",
-          primeRef,
-          cloneRef,
-          tableStmts,
-          60,
-          undefined,
-          pauseIfDue,
-          takeResumeBatch("tables"),
-        );
+    tableStage =
+      tableStmts.length === 0
+        ? {
+            stage: "tables",
+            primeCount: tableCounts[0],
+            cloneCount: tableCounts[1],
+            applied: 0,
+            failed: 0,
+            reconciled: reconcile(tableCounts[0], tableCounts[1]),
+            notes: ["every table present by name — creation skipped, drift still checked"],
+          }
+        : await runStage(
+            "tables",
+            primeRef,
+            cloneRef,
+            tableStmts,
+            60,
+            [`${tableStmts.length} of ${allTables.length} table(s) absent by name — created`],
+            (about: string) => pauseIfDue(about),
+            takeResumeBatch("tables"),
+          );
 
     // The single heaviest stage in the pipeline, and the one that has to be
     // interruptible from the inside: three catalog reads of ~10,000 rows plus
@@ -1706,21 +1867,36 @@ export async function replicateSchemaByIntrospection(
   }
 
   // 5. constraints, ordered p → u → c → f
+  //
+  // ASK THE CLONE WHICH IT HOLDS and send only the rest, as the indexes and
+  // triggers stages do. Every constraint used to be sent: ~2,800 statements a
+  // build, of which every primary key was already in place (the tables stage
+  // never declares one, but a second pass meets the first pass's), each
+  // answering "multiple primary keys … are not allowed" — 868 recorded
+  // failures on `tutorial-demo-orrimere-c158c7`, all of them noise, and every
+  // one a round trip the pass paid for. A clone whose list cannot be read is
+  // treated as holding NONE, which puts every constraint back on the apply path
+  // rather than assuming it is there.
   if (enterStage("constraints")) {
     await say("Replicating constraints...");
     stages.push(
       await stageOrSkip(
         "constraints",
         async () => {
-          const conRows = await query(primeRef, Q.constraints);
-          return conRows.map(
-            (r) =>
-              `alter table ${quoteIdent(str(r.schema))}.${quoteIdent(str(r.table_name))} add constraint ${quoteIdent(
-                str(r.name),
-              )} ${str(r.def)}`,
-          );
+          const [conRows, held] = await Promise.all([
+            query(primeRef, Q.constraints),
+            heldKeys(cloneRef, Q.constraintKeys),
+          ]);
+          return conRows
+            .filter((r) => !held.has(`${str(r.schema)}.${str(r.table_name)}.${str(r.name)}`))
+            .map(
+              (r) =>
+                `alter table ${quoteIdent(str(r.schema))}.${quoteIdent(str(r.table_name))} add constraint ${quoteIdent(
+                  str(r.name),
+                )} ${str(r.def)}`,
+            );
         },
-        60,
+        CHEAP_DDL_BATCH,
       ),
     );
   }
@@ -1956,36 +2132,55 @@ export async function replicateSchemaByIntrospection(
     stages.push(
       await stageOrSkip(
         "rls",
-        async () =>
-          (await query(primeRef, Q.rlsTables)).map(
-            (r) =>
-              `alter table ${quoteIdent(str(r.schema))}.${quoteIdent(str(r.name))} enable row level security`,
-          ),
+        async () => {
+          // Only the tables the clone has not switched on, by name.
+          const [rlsRows, held] = await Promise.all([
+            query(primeRef, Q.rlsTables),
+            heldKeys(cloneRef, Q.rlsKeys),
+          ]);
+          return rlsRows
+            .filter((r) => !held.has(`${str(r.schema)}.${str(r.name)}`))
+            .map(
+              (r) =>
+                `alter table ${quoteIdent(str(r.schema))}.${quoteIdent(str(r.name))} enable row level security`,
+            );
+        },
         60,
       ),
     );
   }
 
-  // 11. policies
+  // 11. policies — only the ones the clone lacks, by name, for the reason the
+  // constraints stage gives. A policy that exists answers "already exists"
+  // anyway, so this changes what is SENT, never what is created.
   if (enterStage("policies")) {
     await say("Replicating RLS policies...");
     stages.push(
       await stageOrSkip(
         "policies",
-        async () =>
-          (await query(primeRef, Q.policies)).map((r) =>
-            buildPolicyDdl({
-              schemaname: str(r.schemaname),
-              tablename: str(r.tablename),
-              policyname: str(r.policyname),
-              permissive: str(r.permissive),
-              roles: str(r.roles),
-              cmd: str(r.cmd),
-              qual: r.qual == null ? null : str(r.qual),
-              with_check: r.with_check == null ? null : str(r.with_check),
-            }),
-          ),
-        60,
+        async () => {
+          const [policyRows, held] = await Promise.all([
+            query(primeRef, Q.policies),
+            heldKeys(cloneRef, Q.policyKeys),
+          ]);
+          return policyRows
+            .filter(
+              (r) => !held.has(`${str(r.schemaname)}.${str(r.tablename)}.${str(r.policyname)}`),
+            )
+            .map((r) =>
+              buildPolicyDdl({
+                schemaname: str(r.schemaname),
+                tablename: str(r.tablename),
+                policyname: str(r.policyname),
+                permissive: str(r.permissive),
+                roles: str(r.roles),
+                cmd: str(r.cmd),
+                qual: r.qual == null ? null : str(r.qual),
+                with_check: r.with_check == null ? null : str(r.with_check),
+              }),
+            );
+        },
+        CHEAP_DDL_BATCH,
       ),
     );
   }
@@ -2022,16 +2217,18 @@ export async function replicateSchemaByIntrospection(
           const tableKey = (r: Record<string, unknown>) =>
             `${str(r.schema)}.${str(r.table_name)}|${str(r.grantee)}|${str(r.privilege_type)}`;
           const heldTables = await held(Q.grants, tableKey);
-          const tableDdl = (await query(primeRef, Q.grants))
-            .filter((r) => !heldTables.has(tableKey(r)))
-            .map((r) =>
-              buildGrantDdl(
-                str(r.schema),
-                str(r.table_name),
-                str(r.grantee),
-                str(r.privilege_type),
-              ),
-            );
+          // One statement per relation and grantee, carrying every privilege
+          // the clone lacks there (`groupGrants`).
+          const tableDdl = groupGrants(
+            (await query(primeRef, Q.grants))
+              .filter((r) => !heldTables.has(tableKey(r)))
+              .map((r) => ({
+                schema: str(r.schema),
+                table: str(r.table_name),
+                grantee: str(r.grantee),
+                privilege: str(r.privilege_type),
+              })),
+          ).map((g) => buildGrantDdl(g.schema, g.table, g.grantee, g.privileges));
 
           // 3. The DEFAULTS, so the next cascaded migration's table is not
           //    born unreachable and this deficit cannot re-open silently.
