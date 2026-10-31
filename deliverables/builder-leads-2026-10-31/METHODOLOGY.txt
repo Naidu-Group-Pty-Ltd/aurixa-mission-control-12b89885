@@ -1,0 +1,93 @@
+PURPOSE
+B2B lead list of active Australian builders and developers. Every lead in the two "Leads" sheets has an ABN that was checked against the Australian Business Register (ABR). Companies were also checked against the ASIC company register. Compiled 31 October 2026.
+
+WHAT "ACTIVE" MEANS IN THIS LIST
+1. The entity holds a current builder licence or registration on a state register. Or it is a current member, panel member or ranked builder in an industry or government source (Master Builders, UDIA, HIA Housing 100, the WA Housing Authority Builders Panel, the Tasmanian prequalification register).
+2. AND its ABN is Active in the ABR bulk extract dated 28 Oct 2026.
+3. AND, for companies, its ASIC status is "Registered" (REGD) in the ASIC company dataset (Oct 2026). Companies that are deregistered, being struck off (SOFF) or under external administration (EXAD) were removed.
+4. QLD licences on the QBCC suspended list for this financial year were removed, even if a suspension may since have been lifted.
+
+ABN VALIDATION STEPS (APPLIED TO EVERY LEAD)
+- ABN checksum (the ATO modulus-89 algorithm). Invalid ABNs were rejected.
+- ABN looked up in the full ABR bulk extract (about 20.6M ABNs): status, status date, entity type, GST registration, legal name, state and postcode.
+- Companies: the ABN-linked ACN was checked against the ASIC company dataset for status, type and registration date. The register's name was compared with the ABR and ASIC names by fuzzy match. A low score was accepted only when ASIC's name history shows the company was renamed.
+- Where a register gave no ABN, the ABN was found in this order: from the ACN (ASIC dataset, then ABR); from the ABN printed on the company's own website, with the name confirmed; by exact legal-name match; by a registered business name in the same state. The method used is shown in the "ABN Resolved Via" column.
+- QLD sole traders (individual licences) with no ABN on the register were matched to the ABR by exact name and postcode, unique matches only. Individual licences listed against a company ABN are mostly nominees or employees. They were excluded, because their company appears in its own right.
+- Each lead has an ABN Lookup link so anyone can re-check it at abr.business.gov.au.
+
+ORGANISATION SIZE CATEGORIES
+Enterprise (>$240M)   |   Large ($30M–$240M)   |   Medium ($3M–$30M)   |   Small ($0.8M–$3M)   |   Micro (<$0.8M)
+Bands are annual construction revenue. They match the QBCC financial categories, which are the only official revenue-based classification of builders published in Australia.
+The size is taken from the best available evidence, in this order:
+  HIGH confidence:
+  - QBCC financial category (QLD-licensed entities, including interstate companies that also hold a QLD licence). This is the maximum annual revenue QBCC allows based on audited net tangible assets: SC1 up to $200k, SC2 up to $800k, Cat 1 $0.8–3M, Cat 2 $3–12M, Cat 3 $12–30M, Cat 4 $30–60M, Cat 5 $60–120M, Cat 6 $120–240M, Cat 7 over $240M. It is a ceiling, so actual revenue can be lower. The "EMR" (estimated) categories are rated Medium confidence.
+  - HIA-COLORBOND Housing 100 rank: national top 20, or 1,000 or more starts, is Enterprise; any other Housing 100 builder is Large.
+  - ASIC listed public company: Enterprise.
+  LOW confidence (estimate):
+  - A points score from public signals. Public company +4; licensed in 2 or more states +2; unrestricted commercial class (VIC CB-U / QLD Open) +2; commercial-limited or medium-rise class +1; registered 25 years or more +2, 10–24 years +1; 4 or more registered business names +2, 2–3 names +1. Score 0 is Micro, 1–2 Small, 3–5 Medium, 6–7 Large, 8 or more Enterprise. Entities not registered for GST, and sole traders, are Micro.
+  - Calibration: tested on about 10,400 QLD companies with known QBCC categories, the score orders companies by size (higher scores are much more likely to be Medium or larger). It is still only an estimate. Treat Low-confidence sizes as a guide and confirm them on first contact.
+
+EMAIL ADDRESSES (CAMPAIGN-READY)
+- Sources, best first:
+  (1) the business's own website: homepage plus its contact, about, team, privacy and terms pages, fetched only where robots.txt allows;
+  (2) its Master Builders directory listing;
+  (3) your Top-10 list.
+- Websites are found from the legal name, every registered business name, ABR trading names, and common name variants such as "<name> builders" or "<name> homes". About 334,000 candidate domains were checked by DNS. A site is accepted only if it shows the lead's ABN, or the company name plus its state. Sites found only through a name variant must show the ABN or the full name.
+- An address is kept only if it is on the website's own domain, or is a mainstream mailbox (Gmail, Bigpond and similar) published on the business's own verified site. Third-party addresses (web designers, suppliers) are dropped.
+- Validation of every address:
+  (a) Mission Control's own address grammar (ported from src/lib/email/emailAddress.pure.ts);
+  (b) placeholder, system, no-reply, careers/HR, accounts-payable and media mailboxes removed;
+  (c) a live DNS check that the domain has a mail server (MX), done 31 Oct 2026. Domains that don't exist, or have a null or absent mail server, are marked Invalid and dropped. Domains with only an A record are marked Risky.
+- Email Status: Valid = all checks passed. Risky = deliverable in principle but no MX record, inconclusive DNS, or a domain different from the company website. Invalid = dropped.
+- Not checked: whether the individual mailbox exists. Outbound SMTP is blocked in this environment and mailbox probing was not attempted. Mission Control's bounce scan suppresses hard bounces automatically.
+- Deliberately NOT collected: addresses a site hides on purpose (Cloudflare email protection, "name [at] domain" text, images), and any directory whose robots.txt excludes Claude's crawler.
+- Deeper passes (round 3):
+  - up to 8 contact, about and team pages per site, found from links and from the site's sitemap.xml;
+  - schema.org "email" fields, i.e. structured data a site publishes for search engines;
+  - JavaScript-built pages rendered in a headless browser, reading only the addresses the page visibly displays or links with mailto:;
+  - more domain variants (.net.au, state-suffixed names, every registered business name);
+  - for sole traders, personal-name domains, accepted only when the site shows the sole trader's ABN;
+  - web search (three rounds) to find the official sites of Enterprise, Large and top Medium companies whose legal name doesn't match their brand domain.
+- Round 4: Common Crawl, an open archive of the public web (cc-main-2026-aug-sep-oct domain graph).
+  - Lead names were matched against its ~1.15M real .au domains and its ~616k .com domains containing building words. The matching uses distinctive name tokens (weighted by rarity) rather than exact spellings.
+  - Each candidate site must show the lead's ABN, or the full company name plus its state.
+  - A .com match that doesn't show the ABN must also carry an Australian marker (an Australian phone number, "Australia" or a state name), to rule out overseas namesakes.
+- Pages that use Cloudflare email protection (about 1 in 5 of the sites that showed no address) were skipped entirely. They are not decoded or rendered, because the owner has deliberately hidden the address from automated collection.
+- Opt-out check: every page an address came from was re-read for wording such as "no unsolicited emails". Addresses published with that wording are marked "Do not email" and are kept out of the campaign file.
+- Spam Act 2003: because the addresses were collected automatically, the list is a "harvested-address list" (Part 3). Use it only for messages that meet inferred consent from conspicuous publication (Schedule 2, clause 4):
+  (a) the address is conspicuously published;
+  (b) no opt-out statement accompanies it;
+  (c) the message relates directly to the recipient's business.
+  Always identify the sender and include a working unsubscribe. Get legal advice if unsure.
+
+CONTACT DETAILS
+- Licence registers do not publish phone or email. Contact details come from:
+  (a) Master Builders and other association directories, where the member published them; and
+  (b) the company's own website. The website was found from the legal and trading names and accepted only if the site shows the ABN (best), or the company name plus its state.
+- Only business contact points published by the business are included. For sole traders, the street address is left out on purpose.
+- The "Website Match" column shows how each website was confirmed. "Verified: ABN shown on website" is the strongest.
+- Before emailing anyone, check your obligations under the Spam Act 2003 and the Privacy Act 1988. Use a consent and unsubscribe process, and record the source of each contact (the Sources and Contact Source columns).
+
+PRIORITY (FOR CALL PLANNING)
+A = Medium or larger, with phone or email.   B = Medium or larger without contact details, OR Small with contact details, OR a Master Builders member.   C = all others.
+
+SOURCES
+- QBCC Licensed Contractors Register, Queensland Government open data (data.qld.gov.au), CKAN datastore, data as at 30 Oct 2026. Also the QBCC suspensions and cancellations lists (current financial year).
+- Building and Plumbing Commission (formerly VBA) Building Practitioner Register, data.vic.gov.au (BPR.csv), downloaded 31 Oct 2026. Current company registrations only.
+- ABN Bulk Extract, Australian Business Register (data.gov.au), extract dated 28 Oct 2026.
+- ASIC Company Dataset and ASIC Business Names Dataset (data.gov.au), October 2026 releases.
+- Master Builders "Find a Builder" member directories for WA, SA, ACT and NT: 1,167 builder and developer members (the public listings only, read at about 1 request per second). These sites permit this in robots.txt. Members were matched to an ABN by an ABN printed on the member's own website, or by legal or registered business name. Unmatched members are in the Excluded sheet with their directory contact details.
+- NOT used: Master Builders NSW and Queensland (browser challenge or 403), Master Builders Tasmania, and Master Builders Victoria. The Tasmanian and Victorian directories' robots.txt files exclude Claude's crawler, so their data was not collected or was discarded. Members of these associations still appear when they hold a current licence on a state register. Membership is then simply not flagged.
+- UDIA Queensland and UDIA Victoria member directories; HIA-COLORBOND Housing 100 press releases (2024/25 and 2025/26); WA Housing Authority Builders Panel (2026); Tasmanian Treasury Prequalification Register (30 Oct 2026); and the other public sources named in the Sources column.
+- WA Building Services Board register of building contractors: daily PDF (contenthub.demirs.wa.gov.au/downloads/cals/BuilderRegister.pdf), Section 1 current contractors, as at 30 Oct 2026. Registrations noted as having "no effect" (no nominated supervisor) were removed.
+- ACT construction occupations licences, Builder classes A/B/C (data.act.gov.au, dataset de4w-gbt3), Active only, as at 30 Oct 2026. Owner-builders and "employee/nominee only – not able to contract" licences were removed.
+- NT Building Practitioners Board register, building contractor categories (ntlis.nt.gov.au), ACTIVE status with a registration period not yet expired, as at 31 Oct 2026.
+- NSW Fair Trading contractor licence file, class Builder (onegov.nsw.gov.au Contractor Licence.xlsx, as at 4 Dec 2023), kept only where the licence expiry is after 31 Oct 2026. Also 210 records checked live on verify.licence.nsw.gov.au. The NSW live register blocks bulk access (Cloudflare), and the NSW licence API needs a registered key. So NSW licence status is taken from the 2023 file and flagged in the Validation column. ABN and ASIC status for NSW leads ARE current (Oct 2026).
+- SA (Consumer and Business Services) and TAS (CBOS) registers sit behind Cloudflare challenges or reCAPTCHA. They were not scraped. SA and TAS entities appear only via Master Builders SA, the TAS Treasury prequalification register, HIA rankings, or an interstate licence.
+
+LIMITATIONS
+- Coverage is deepest for QLD and VIC, which publish their full builder registers as open data, followed by WA, ACT and NT. NSW is based on the 2023 licence file (see above). SA and TAS coverage is thin because their registers block automated access.
+- Individual (sole-trader) licensees outside QLD were kept only when they matched a unique active individual ABN by name and postcode, or by name and state for the ACT, which publishes no address. Unmatched individuals are not listed anywhere, for privacy.
+- A licence shows the entity is legally able to build, not that it has a project under way right now. Directory membership and website presence are added as further activity signals.
+- Name-based ABN matches ("exact legal-name match", "registered business-name match") are reliable but not infallible. The ABN Lookup link lets you check any record in seconds.
+- "Excluded - Needs Review" lists organisations found in the sources that failed validation (no ABN found, ABN cancelled, deregistered and so on), with the reason. Use it to clean CRM data, or to research leads by hand.
