@@ -41,6 +41,14 @@ EMAIL ADDRESSES (CAMPAIGN-READY)
 - Email Status: Valid = all checks passed. Risky = deliverable in principle but no MX record, inconclusive DNS, or a domain different from the company website. Invalid = dropped.
 - Not checked: whether the individual mailbox exists. Outbound SMTP is blocked in this environment and mailbox probing was not attempted. Mission Control's bounce scan suppresses hard bounces automatically.
 - Deliberately NOT collected: addresses a site hides on purpose (Cloudflare email protection, "name [at] domain" text, images), and any directory whose robots.txt excludes Claude's crawler.
+- Deeper passes (round 3):
+  - up to 8 contact, about and team pages per site, found from links and from the site's sitemap.xml;
+  - schema.org "email" fields, i.e. structured data a site publishes for search engines;
+  - JavaScript-built pages rendered in a headless browser, reading only the addresses the page visibly displays or links with mailto:;
+  - more domain variants (.net.au, state-suffixed names, every registered business name);
+  - for sole traders, personal-name domains, accepted only when the site shows the sole trader's ABN;
+  - web search (two rounds) to find the official sites of Enterprise and Large companies whose legal name doesn't match their brand domain.
+- Pages that use Cloudflare email protection (about 1 in 5 of the sites that showed no address) were skipped entirely. They are not decoded or rendered, because the owner has deliberately hidden the address from automated collection.
 - Opt-out check: every page an address came from was re-read for wording such as "no unsolicited emails". Addresses published with that wording are marked "Do not email" and are kept out of the campaign file.
 - Spam Act 2003: because the addresses were collected automatically, the list is a "harvested-address list" (Part 3). Use it only for messages that meet inferred consent from conspicuous publication (Schedule 2, clause 4):
   (a) the address is conspicuously published;

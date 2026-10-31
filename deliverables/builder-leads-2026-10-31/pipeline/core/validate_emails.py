@@ -9,6 +9,7 @@ spec = importlib.util.spec_from_file_location('e2', '/tmp/leads/scripts/enrich_v
 W = '/tmp/leads/work'
 df = pd.read_pickle(f'{W}/final_df.pkl'); df['abn_raw'] = df.ABN.str.replace(' ', '')
 cand = {}   # abn -> list of dict(email, source, kind, page)
+ws2conf = json.load(open(f'{W}/v3/ws2_conf.json')) if os.path.exists(f'{W}/v3/ws2_conf.json') else {}
 BUILDKW = re.compile(r'(build|construct|home|renovat|reno|carpent|project|develop|roof|kitchen|bathroom|joiner|concret|deck|patio|extension|maint|propert|design|struct|frame|brick|plaster|til(e|ing)|inspect|cabinet|pool|landscap|fenc|shed|steel|glaz|window|door|floor|paint|plumb|electric|civil|excavat|earthwork|demoli|carport|granny|house|dwelling|living|residen|estate|architect|draft)', re.I)
 dropped_ind = []
 site_of = {}
@@ -22,7 +23,8 @@ for _, r in df.iterrows():
     if r.Email:
         src = r['Contact Source'] or 'existing'
         add(r.abn_raw, r.Email, 'Company website' if 'website' in src.lower() else src)
-for f, label in [(f'{W}/v2/out_site.jsonl', 'Company website (contact/about pages)'), (f'{W}/v2/out_disc.jsonl', 'Company website (newly found)'), (f'{W}/v2/out_ind.jsonl', 'Business website (newly found)')]:
+for f, label in [(f'{W}/v2/out_site.jsonl', 'Company website (contact/about pages)'), (f'{W}/v2/out_disc.jsonl', 'Company website (newly found)'), (f'{W}/v2/out_ind.jsonl', 'Business website (newly found)'),
+                 (f'{W}/v3/out_site.jsonl', 'Company website (deeper crawl: sitemap, structured data)'), (f'{W}/v3/out_disc.jsonl', 'Company website (newly found)'), (f'{W}/v3/out_ind.jsonl', 'Business website (newly found)'), (f'{W}/v3/out_ws2.jsonl', 'WS2'), (f'{W}/v3/out_pdf.jsonl', 'Company capability statement / brochure (PDF on own website)')]:
     if not os.path.exists(f): continue
     for l in open(f):
         j = json.loads(l)
@@ -30,7 +32,28 @@ for f, label in [(f'{W}/v2/out_site.jsonl', 'Company website (contact/about page
         if 'out_ind' in f and j.get('website') and not (j.get('web_conf', '').startswith('Verified') or BUILDKW.search(j['website'])):
             dropped_ind.append(j['website']); continue
         if j.get('website') and j['abn'] not in site_of: site_of[j['abn']] = j['website']
-        for em in j.get('emails') or []: add(j['abn'], em['email'], label, em['kind'], em.get('page', ''))
+        lab_ = label
+        if label == 'WS2': lab_ = 'Company website (official site found by web search)' if ws2conf.get(j['abn']) == 'high' else 'Parent/brand website (web search, medium confidence)'
+        for em in j.get('emails') or []: add(j['abn'], em['email'], lab_, em['kind'], em.get('page', ''))
+# browser-rendered pages: addresses the page displays once rendered
+if os.path.exists(f'{W}/v3/render_out.jsonl'):
+    rq_site = {}
+    for l in open(f'{W}/v3/render_queue.jsonl'):
+        j = json.loads(l); rq_site[j['url']] = j.get('website') or ''
+    for l in open(f'{W}/v3/render_out.jsonl'):
+        j = json.loads(l)
+        if j.get('status') != 'ok': continue
+        sd = e2.site_dom(rq_site.get(j['url']) or j['url'])
+        for raw in [x for m_ in (j.get('mailtos') or []) + (j.get('text_emails') or []) for x in re.split(r'[,;\s]+', m_) if x]:
+            e = raw.strip().strip('.').lower()
+            if not e2.mc_valid(e) or e2.JUNK.search(e) or e2.NOTSALES.match(e): continue
+            dom = e.split('@')[1]
+            kind = 'own-domain' if e2.same_org(dom, sd) else 'mailbox provider' if dom in e2.FREEMAIL else None
+            # a different domain shown on the company's own contact page is kept, but only as Risky (reviewed by a person)
+            if kind is None and re.search(r'contact|enquir|touch|connect|talk|reach', j['url'], re.I): kind = 'other-domain'
+            if kind:
+                if j['abn'] not in site_of and rq_site.get(j['url']): site_of[j['abn']] = rq_site[j['url']]
+                add(j['abn'], e, 'Company website (rendered page)', kind, j['url'])
 wsconf = json.load(open(f'{W}/v2/ws_conf.json')) if os.path.exists(f'{W}/v2/ws_conf.json') else {}
 if os.path.exists(f'{W}/v2/out_ws.jsonl'):
     for l in open(f'{W}/v2/out_ws.jsonl'):

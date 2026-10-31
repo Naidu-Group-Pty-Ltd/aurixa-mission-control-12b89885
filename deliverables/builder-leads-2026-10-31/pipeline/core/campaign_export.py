@@ -9,15 +9,16 @@ best = pd.read_pickle(f'{W}/v2/email_best.pkl')
 newsite = {}
 BUILDKW = re.compile(r'(build|construct|home|renovat|reno|carpent|project|develop|roof|kitchen|bathroom|joiner|concret|deck|patio|extension|maint|propert|design|struct|frame|brick|plaster|til(e|ing)|inspect|cabinet|pool|landscap|fenc|shed|steel|glaz|window|door|floor|paint|plumb|electric|civil|excavat|earthwork|demoli|carport|granny|house|dwelling|living|residen|estate|architect|draft)', re.I)
 notb = json.load(open(f'{W}/v2/not_builders.json')) if os.path.exists(f'{W}/v2/not_builders.json') else {}
+if os.path.exists(f'{W}/v3/not_builders2.json'): notb.update(json.load(open(f'{W}/v3/not_builders2.json')))
 for a_, note_ in notb.items():
     df.loc[df.abn_raw == a_, 'Org Type'] = 'Non-builder licence holder (' + re.sub(r'(?i)^not (a )?builders?\s*[-–:]?\s*', '', note_)[:40].strip() + ')'
-for f in ('out_site', 'out_disc', 'out_ind', 'out_ws'):
-    p = f'{W}/v2/{f}.jsonl'
+for f in ('out_site', 'out_disc', 'out_ind', 'out_ws', 'v3/out_site', 'v3/out_disc', 'v3/out_ind', 'v3/out_ws2'):
+    p = f'{W}/v2/{f}.jsonl' if '/' not in f else f'{W}/{f}.jsonl'
     if os.path.exists(p):
         for l in open(p):
             j = json.loads(l)
-            if f == 'out_ind' and j.get('website') and not ((j.get('web_conf') or '').startswith('Verified') or BUILDKW.search(j['website'])): continue
-            if j.get('website'): newsite[j['abn']] = (j['website'], j.get('web_conf') or '', j.get('phones') or [])
+            if f.endswith('out_ind') and j.get('website') and not ((j.get('web_conf') or '').startswith('Verified') or BUILDKW.search(j['website'])): continue
+            if j.get('website') and j['abn'] not in newsite: newsite[j['abn']] = (j['website'], j.get('web_conf') or '', j.get('phones') or [])
 def fmt_phone(p):
     if not p: return ''
     if p[:2] == '04' or p[:4] in ('1300', '1800'): return f'{p[:4]} {p[4:7]} {p[7:]}'
