@@ -1,6 +1,49 @@
 # Australian builders & developers — validated lead list (31 Oct 2026)
 
-**File:** `Builders_Developers_Validated_Leads_AU_2026-10-31.xlsx`
+**Files:**
+
+- `Mission_Control_Campaign_List_2026-10-31.xlsx` — **upload this to a Mission Control campaign.** The first sheet holds 7,593 valid, de-duplicated addresses.
+- `Mission_Control_Campaign_List_VALID_2026-10-31.csv` — the same valid list as CSV.
+- `Builders_Developers_Validated_Leads_AU_2026-10-31.xlsx` — the full master list of 35,217 leads, with email status columns.
+
+## Email campaign list
+
+| Sheet                        | Rows  | Use                                                                                                    |
+| ---------------------------- | ----- | ------------------------------------------------------------------------------------------------------ |
+| Campaign List - Valid        | 7,593 | Ready to send. One row per address (the importer reads this sheet and detects the `Email` heading)      |
+| Risky - review first         | 75    | No MX record, inconclusive DNS, or a probable parent/brand site. Review before adding                    |
+| Members - ABN unconfirmed    | 49    | Master Builders members with a directory email whose ABN could not be confirmed (opt-in only)            |
+| Read me                      | —     | Merge fields, validation rules and the Spam Act conditions                                              |
+
+The list was checked with Mission Control's own parser (`src/lib/email/workbook.pure.ts` + `listProfile.pure.ts`, bundled and run against the file): 7,593 contacts, 0 invalid addresses, 0 duplicates.
+
+- **Merge fields:** `{{greeting_name}}`, `{{company}}`, `{{state}}`, `{{org_size_category}}`, `{{development_type}}`, `{{website}}` and more.
+- **Segments and quotas:** `state`, `org_size_category`, `priority`, `org_type` and `lead_type` are offered as controls.
+
+**Email coverage:** 7,852 leads have a Valid email, up from 5,798 in the first version. 5,364 are role inboxes on the company domain (info@, admin@, sales@) and 1,712 are named people on the company domain.
+
+**What "Valid" means:**
+
+1. Passes Mission Control's own address grammar.
+2. Published by the business itself:
+   - on its own website, confirmed by the ABN shown on the site or by name plus state; or
+   - in its Master Builders listing; or
+   - in your list.
+3. The domain has a live mail server (MX record), checked 31 Oct 2026.
+4. Placeholder, system, no-reply, careers/HR, accounts-payable, media and third-party addresses are removed.
+5. The publishing page carries no "unsolicited email not wanted" statement.
+
+Individual mailboxes were not probed: outbound SMTP is blocked here. Mission Control's bounce scan suppresses hard bounces. Start with Priority A at a low daily cap (see `docs/EMAIL_WARMUP.md`).
+
+> **Spam Act 2003:** the addresses were collected automatically, so this is a "harvested-address list". Send only messages that meet inferred consent from conspicuous publication:
+>
+> - the message relates to the recipient's building or development business;
+> - it identifies the sender;
+> - it carries `{{unsubscribe_url}}`.
+>
+> The campaign file's Read me sheet has the detail.
+
+## Master list
 
 ## What is in it
 
@@ -13,7 +56,7 @@
 | Excluded - Needs Review       | 3,109  | Organisations found in the sources that failed validation, with the reason (no ABN, ABN cancelled, deregistered, under administration, ambiguous name…)             |
 | Methodology & Sources         | —      | Exactly how "active", ABN validation and organisation size were determined                                                                                         |
 
-**Total validated leads: 35,217**. Of these, 8,447 have a phone or email, 8,803 have a confirmed company website (1,531 verified by the ABN printed on the site) and 935 are matched Master Builders members.
+**Total validated leads: 35,217**. Of these, 7,852 have a Valid email, 10,487 have a phone or email, 10,897 have a confirmed company website and 935 are matched Master Builders members.
 
 ## Organisation size
 
@@ -64,6 +107,8 @@ Contact details are business contact points published by the business itself or 
 2. `norm_regs.py`, `resolve.py`, `validate.py`, `build_core.py`, `consolidate.py`
 3. `name_index.py`, `enrich_web.py`
 4. `regs_resolve.py`, `filter_mba.py`, then `ext_resolve.py` (once each for `mba` and `dev`)
-5. `assemble.py`, `side_sheets.py`, `write_xlsx.py`
+5. `assemble.py`
+6. Emails: `dns_prepass.py` and `enrich_v2.py` (site, discover and sole-trader passes), then `validate_emails.py`, `optout_check.py` and `campaign_export.py`
+7. `side_sheets.py`, `write_xlsx.py`
 
 `pipeline/collectors` holds the per-source collectors. The scripts expect a scratch workspace under `/tmp/leads`.

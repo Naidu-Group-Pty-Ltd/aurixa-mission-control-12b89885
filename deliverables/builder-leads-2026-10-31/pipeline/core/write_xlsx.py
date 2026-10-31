@@ -10,7 +10,7 @@ H = wb.add_format({'bold': True, 'bg_color': '#1F3864', 'font_color': 'white', '
 B = wb.add_format({'bold': True}); T = wb.add_format({'bold': True, 'font_size': 14}); WR = wb.add_format({'text_wrap': True, 'valign': 'top'})
 N = wb.add_format({'num_format': '#,##0'})
 WID = {'Priority': 8, 'State': 6, 'Company': 38, 'Trading / Business Names': 34, 'Org Type': 16, 'Development Type': 28, 'Org Size Category': 20, 'Size Basis': 45,
-       'Size Confidence': 10, 'Description': 50, 'Phone': 15, 'Email': 30, 'Website': 32, 'Contact Source': 26, 'Website Match': 24, 'Business Address': 40, 'Postcode (ABR)': 9,
+       'Size Confidence': 10, 'Description': 50, 'Phone': 15, 'Email': 30, 'Email Status': 9, 'Email Type': 30, 'Email Source': 30, 'Email Found On': 30, 'Email Check': 40, 'Alt Emails': 30, 'Email Shared By (leads)': 9, 'Website': 32, 'Contact Source': 26, 'Website Match': 24, 'Business Address': 40, 'Postcode (ABR)': 9,
        'ABN': 15, 'ABN Status (ABR)': 10, 'ABN Active Since': 11, 'Entity Type (ABR)': 26, 'GST Registered': 8, 'ACN': 12, 'ASIC Status': 12, 'ASIC Company Type': 18,
        'ASIC Registered': 11, 'ABN Resolved Via': 30, 'Validation': 40, 'Licence State(s)': 10, 'Licence Number(s)': 26, 'Licence Class(es)': 40, 'QBCC Financial Category': 10,
        'Master Builders Member': 10, 'MBA Directory Categories': 30, 'Staff Band (MBA)': 12, 'In Original List': 9, 'Sources': 40, 'ABN Lookup': 22, 'Notes': 40}
@@ -32,6 +32,11 @@ ws.write(3, 0, 'Total validated leads (organisations)', B); ws.write_number(3, 1
 ws.write(4, 0, 'Total validated leads (sole-trader builders)', B); ws.write_number(4, 1, len(ind), N)
 ws.write(5, 0, 'Grand total', B); ws.write_number(5, 1, len(df), N)
 ws.write(6, 0, 'Leads with phone or email', B); ws.write_number(6, 1, int(df._contact.sum()), N)
+ws.write(3, 3, 'EMAIL COVERAGE', B)
+ws.write(4, 3, 'Leads with a VALID email'); ws.write_number(4, 4, int((df['Email Status'] == 'Valid').sum()), N)
+ws.write(5, 3, 'Leads with a RISKY email'); ws.write_number(5, 4, int((df['Email Status'] == 'Risky').sum()), N)
+ws.write(7, 3, 'Removed: opt-out statement on page'); ws.write_number(7, 4, int((df['Email Status'] == 'Do not email').sum()), N)
+ws.write(6, 3, 'Unique valid addresses (campaign rows)'); ws.write_number(6, 4, int(df.loc[df['Email Status'] == 'Valid', 'Email'].nunique()), N)
 ws.write(7, 0, 'Leads with verified website', B); ws.write_number(7, 1, int((df.Website != '').sum()), N)
 ws.write(8, 0, 'Master Builders members (matched)', B); ws.write_number(8, 1, int((df['Master Builders Member'] == 'Yes').sum()), N)
 r = 10
@@ -46,6 +51,13 @@ for t in TIERS:
 r += 1; ws.write(r, 0, 'Total', B)
 for j, s in enumerate(states): ws.write_number(r, j + 1, int((df.State.replace('', 'Unknown') == s).sum()), N)
 ws.write_number(r, len(states) + 1, len(df), N)
+r += 2; ws.write(r, 0, 'Leads with a valid email, by size and state', B); r += 1
+ws.write(r, 0, 'Org Size Category', H)
+for j, s_ in enumerate(states + ['Total']): ws.write(r, j + 1, s_, H)
+for t in TIERS:
+    r += 1; ws.write(r, 0, t); m = (df['Org Size Category'] == t) & (df['Email Status'] == 'Valid')
+    for j, s_ in enumerate(states): ws.write_number(r, j + 1, int((m & (df.State.replace('', 'Unknown') == s_)).sum()), N)
+    ws.write_number(r, len(states) + 1, int(m.sum()), N)
 r += 2; ws.write(r, 0, 'Size confidence', B); r += 1
 for k, v in df['Size Confidence'].value_counts().items(): ws.write(r, 0, k); ws.write_number(r, 1, int(v), N); r += 1
 r += 1; ws.write(r, 0, 'Org type', B); r += 1

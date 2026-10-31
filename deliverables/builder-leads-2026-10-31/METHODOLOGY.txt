@@ -27,6 +27,27 @@ The size is taken from the best available evidence, in this order:
   - A points score from public signals. Public company +4; licensed in 2 or more states +2; unrestricted commercial class (VIC CB-U / QLD Open) +2; commercial-limited or medium-rise class +1; registered 25 years or more +2, 10–24 years +1; 4 or more registered business names +2, 2–3 names +1. Score 0 is Micro, 1–2 Small, 3–5 Medium, 6–7 Large, 8 or more Enterprise. Entities not registered for GST, and sole traders, are Micro.
   - Calibration: tested on about 10,400 QLD companies with known QBCC categories, the score orders companies by size (higher scores are much more likely to be Medium or larger). It is still only an estimate. Treat Low-confidence sizes as a guide and confirm them on first contact.
 
+EMAIL ADDRESSES (CAMPAIGN-READY)
+- Sources, best first:
+  (1) the business's own website: homepage plus its contact, about, team, privacy and terms pages, fetched only where robots.txt allows;
+  (2) its Master Builders directory listing;
+  (3) your Top-10 list.
+- Websites are found from the legal name, every registered business name, ABR trading names, and common name variants such as "<name> builders" or "<name> homes". About 334,000 candidate domains were checked by DNS. A site is accepted only if it shows the lead's ABN, or the company name plus its state. Sites found only through a name variant must show the ABN or the full name.
+- An address is kept only if it is on the website's own domain, or is a mainstream mailbox (Gmail, Bigpond and similar) published on the business's own verified site. Third-party addresses (web designers, suppliers) are dropped.
+- Validation of every address:
+  (a) Mission Control's own address grammar (ported from src/lib/email/emailAddress.pure.ts);
+  (b) placeholder, system, no-reply, careers/HR, accounts-payable and media mailboxes removed;
+  (c) a live DNS check that the domain has a mail server (MX), done 31 Oct 2026. Domains that don't exist, or have a null or absent mail server, are marked Invalid and dropped. Domains with only an A record are marked Risky.
+- Email Status: Valid = all checks passed. Risky = deliverable in principle but no MX record, inconclusive DNS, or a domain different from the company website. Invalid = dropped.
+- Not checked: whether the individual mailbox exists. Outbound SMTP is blocked in this environment and mailbox probing was not attempted. Mission Control's bounce scan suppresses hard bounces automatically.
+- Deliberately NOT collected: addresses a site hides on purpose (Cloudflare email protection, "name [at] domain" text, images), and any directory whose robots.txt excludes Claude's crawler.
+- Opt-out check: every page an address came from was re-read for wording such as "no unsolicited emails". Addresses published with that wording are marked "Do not email" and are kept out of the campaign file.
+- Spam Act 2003: because the addresses were collected automatically, the list is a "harvested-address list" (Part 3). Use it only for messages that meet inferred consent from conspicuous publication (Schedule 2, clause 4):
+  (a) the address is conspicuously published;
+  (b) no opt-out statement accompanies it;
+  (c) the message relates directly to the recipient's business.
+  Always identify the sender and include a working unsubscribe. Get legal advice if unsure.
+
 CONTACT DETAILS
 - Licence registers do not publish phone or email. Contact details come from:
   (a) Master Builders and other association directories, where the member published them; and
