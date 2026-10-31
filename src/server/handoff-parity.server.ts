@@ -828,7 +828,7 @@ function diffRealtime(prime: Snapshot, target: Snapshot) {
 // G5 — GRANT parity. Without GRANTs to anon/authenticated/service_role, RLS
 // alone leaves public tables unreachable via PostgREST. Blocking when a table
 // on the target is missing every one of the roles the prime had granted.
-function diffGrants(prime: Snapshot, target: Snapshot) {
+export function diffGrants(prime: Snapshot, target: Snapshot) {
   const drift: Array<{
     table: string;
     role: string;
@@ -857,6 +857,31 @@ function diffGrants(prime: Snapshot, target: Snapshot) {
       }
     }
   }
+
+  // A role the clone grants on a table the prime holds, and the prime grants
+  // that role nothing. The walk above starts from the prime's grantees, so it
+  // never reached one: measured 31 Oct 2026 on the tutorial demo, `anon` held
+  // every privilege on `client_fact_finds`, `mh_audit` and `mh_messages`,
+  // where the prime grants it none, and this reported nothing while the
+  // privilege sweep (`tablePrivileges.pure.ts`, the authority on table grants)
+  // counted them. A table the prime does not hold is the clone's surplus, not
+  // a grant difference.
+  for (const [tbl, targetRoles] of target.grantsByTable) {
+    if (!prime.columnsByTable.has(tbl)) continue;
+    const primeRoles = prime.grantsByTable.get(tbl);
+    for (const [role, targetPrivs] of targetRoles) {
+      if (primeRoles?.has(role) || targetPrivs.size === 0) continue;
+      drift.push({
+        table: tbl,
+        role,
+        missing_privileges: [],
+        extra_privileges: [...targetPrivs].sort(),
+      });
+    }
+  }
+  drift.sort((a, b) =>
+    a.table === b.table ? (a.role < b.role ? -1 : 1) : a.table < b.table ? -1 : 1,
+  );
   return { drift, missing_grantees };
 }
 
