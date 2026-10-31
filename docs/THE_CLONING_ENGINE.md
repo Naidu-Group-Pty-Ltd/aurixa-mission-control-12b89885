@@ -333,6 +333,37 @@ The prime and every clone that already exists are unaffected, by construction:
 a `clone_payment_gates` row IS the gate, this is the only code path that writes
 one, and a test asserts no migration backfills the table.
 
+### A new clone opens in dark mode (owner, 31 Oct 2026)
+
+A clone is built from the prime's catalogue with none of its rows, so its
+`whitelabel_settings` starts empty and the workspace draws its built-in light
+defaults. The last step of a build (step 8, after the admin seed and behind the
+return a repair takes) now establishes that row with
+`dark_mode_default = 'dark'` (`src/server/branding/workspaceAppearance.ts`).
+
+- **The theme default only.** Every other column takes its catalogue default.
+  `company_name` stays empty, the prime's own default since
+  `20260901001200_agreement_white_label_defaults.sql`, because a name written
+  there prints as the masthead of the workspace's agreements.
+- **An empty table only.** A row that exists keeps its own theme. A resumed
+  build that comes past step 8 again reads the row back and leaves it.
+- **One default, two writers.** The brand cascade establishes the same row when
+  it finds the table empty, from the same `CLONE_DEFAULT_THEME`.
+- **Kept, not narrated.** The read-back goes into the build's
+  `clone_backend.provisioned` audit row as `workspace_appearance`. A failure is
+  said, not thrown: the clone then opens light, and its White Label page sets it.
+
+The column took effect for nobody until the prime's BrandProvider stopped
+storing the theme in force on every visit (npc-property-dashbord#3451). Existing
+clones are untouched. Measured read-only that day:
+
+| Clone | Theme default |
+| --- | --- |
+| Orrimere demo | `light`, from the cascade's insert of 30 Oct; to be set dark on its own White Label page |
+| The prime | `system` |
+| npc-client-dashboard | `system` |
+| NPC Test, Preflight, CRM Independent | no row |
+
 ---
 
 ## Re-running a backend: two levers, and the state that had neither

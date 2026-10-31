@@ -1181,6 +1181,10 @@ async function runBackendProvisioning(
         secret_shells: result.secretShells.map((s) => ({ name: s.name, ok: s.success })),
         storage_buckets: result.storageBuckets,
         module_migrations: moduleApplyResults,
+        // What the build did to the workspace's appearance, as the clone read
+        // it back. The status line that said so is overwritten by the ready
+        // write, so this row is where it is kept.
+        workspace_appearance: result.workspaceAppearance ?? null,
       },
     });
 

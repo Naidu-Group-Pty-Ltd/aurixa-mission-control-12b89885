@@ -35,6 +35,7 @@
 // and those come from the fixed map below rather than from any input.
 import { markColumnSources, markLogoConfigSources } from "@/lib/brand/marks";
 import type { BrandConfig, ReportContact } from "./types";
+import { CLONE_DEFAULT_THEME, WORKSPACE_THEME_MODES } from "./workspaceAppearance";
 
 /**
  * Escape a JSON value for safe inlining inside a Postgres SQL string.
@@ -121,6 +122,13 @@ export function buildApplySql(args: {
 }): string {
   const { brand_config, report_contact, config_hash } = args;
 
+  // The one value in this block that is not bound: a constant of this module's
+  // own, one of the three the workspace's trigger accepts, checked here so a
+  // change to it can never put anything else into the SQL.
+  if (!(WORKSPACE_THEME_MODES as readonly string[]).includes(CLONE_DEFAULT_THEME)) {
+    throw new Error(`Not a workspace theme: ${String(CLONE_DEFAULT_THEME)}`);
+  }
+
   const wlPayload = jsonbLiteral({ ...brand_config, _aurixa_hash: config_hash });
   const rcPayload = jsonbLiteral(primeContactPayload(report_contact));
 
@@ -164,9 +172,16 @@ BEGIN
              WHERE table_schema='public' AND table_name='whitelabel_settings') THEN
     -- A clone is provisioned with this table EMPTY, so "update the newest row"
     -- updated nothing at all. Establish the singleton row first; every column
-    -- it needs is NOT NULL with a default.
+    -- it needs is NOT NULL with a default. It is established as a build
+    -- establishes it (workspaceAppearance.ts), with the platform's theme
+    -- default, so the two writers of a new row cannot disagree. A row that
+    -- exists keeps its own.
     IF NOT EXISTS (SELECT 1 FROM public.whitelabel_settings) THEN
-      INSERT INTO public.whitelabel_settings DEFAULT VALUES;
+      ${ifColumn("whitelabel_settings", "dark_mode_default")} THEN
+        INSERT INTO public.whitelabel_settings (dark_mode_default) VALUES ('${CLONE_DEFAULT_THEME}');
+      ELSE
+        INSERT INTO public.whitelabel_settings DEFAULT VALUES;
+      END IF;
     END IF;
     SELECT id INTO _wl_id FROM public.whitelabel_settings
       ORDER BY updated_at DESC NULLS LAST LIMIT 1;
