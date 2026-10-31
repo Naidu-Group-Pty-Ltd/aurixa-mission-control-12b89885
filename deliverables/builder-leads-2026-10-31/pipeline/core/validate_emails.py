@@ -10,6 +10,7 @@ W = '/tmp/leads/work'
 df = pd.read_pickle(f'{W}/final_df.pkl'); df['abn_raw'] = df.ABN.str.replace(' ', '')
 cand = {}   # abn -> list of dict(email, source, kind, page)
 ws2conf = json.load(open(f'{W}/v3/ws2_conf.json')) if os.path.exists(f'{W}/v3/ws2_conf.json') else {}
+if os.path.exists(f'{W}/v4/ws3_conf.json'): ws2conf.update(json.load(open(f'{W}/v4/ws3_conf.json')))
 BUILDKW = re.compile(r'(build|construct|home|renovat|reno|carpent|project|develop|roof|kitchen|bathroom|joiner|concret|deck|patio|extension|maint|propert|design|struct|frame|brick|plaster|til(e|ing)|inspect|cabinet|pool|landscap|fenc|shed|steel|glaz|window|door|floor|paint|plumb|electric|civil|excavat|earthwork|demoli|carport|granny|house|dwelling|living|residen|estate|architect|draft)', re.I)
 dropped_ind = []
 site_of = {}
@@ -24,7 +25,8 @@ for _, r in df.iterrows():
         src = r['Contact Source'] or 'existing'
         add(r.abn_raw, r.Email, 'Company website' if 'website' in src.lower() else src)
 for f, label in [(f'{W}/v2/out_site.jsonl', 'Company website (contact/about pages)'), (f'{W}/v2/out_disc.jsonl', 'Company website (newly found)'), (f'{W}/v2/out_ind.jsonl', 'Business website (newly found)'),
-                 (f'{W}/v3/out_site.jsonl', 'Company website (deeper crawl: sitemap, structured data)'), (f'{W}/v3/out_disc.jsonl', 'Company website (newly found)'), (f'{W}/v3/out_ind.jsonl', 'Business website (newly found)'), (f'{W}/v3/out_ws2.jsonl', 'WS2'), (f'{W}/v3/out_pdf.jsonl', 'Company capability statement / brochure (PDF on own website)')]:
+                 (f'{W}/v3/out_site.jsonl', 'Company website (deeper crawl: sitemap, structured data)'), (f'{W}/v3/out_disc.jsonl', 'Company website (newly found)'), (f'{W}/v3/out_ind.jsonl', 'Business website (newly found)'), (f'{W}/v3/out_ws2.jsonl', 'WS2'), (f'{W}/v3/out_pdf.jsonl', 'Company capability statement / brochure (PDF on own website)'),
+                 (f'{W}/v4/out_cc.jsonl', 'Company website (found via Common Crawl domain list)'), (f'{W}/v4/out_cc_com.jsonl', 'Company website (found via Common Crawl domain list)'), (f'{W}/v4/out_ws3.jsonl', 'WS3'), (f'{W}/v5/out_places.jsonl', 'Company website (via Google Places)')]:
     if not os.path.exists(f): continue
     for l in open(f):
         j = json.loads(l)
@@ -33,8 +35,14 @@ for f, label in [(f'{W}/v2/out_site.jsonl', 'Company website (contact/about page
             dropped_ind.append(j['website']); continue
         if j.get('website') and j['abn'] not in site_of: site_of[j['abn']] = j['website']
         lab_ = label
-        if label == 'WS2': lab_ = 'Company website (official site found by web search)' if ws2conf.get(j['abn']) == 'high' else 'Parent/brand website (web search, medium confidence)'
+        if label in ('WS2', 'WS3'): lab_ = 'Company website (official site found by web search)' if ws2conf.get(j['abn']) == 'high' else 'Parent/brand website (web search, medium confidence)'
         for em in j.get('emails') or []: add(j['abn'], em['email'], lab_, em['kind'], em.get('page', ''))
+# optional: Hunter.io domain search (connectors/hunter_domains.py) for contact-form-only sites
+if os.path.exists(f'{W}/v5/hunter_out.jsonl'):
+    for l in open(f'{W}/v5/hunter_out.jsonl'):
+        j = json.loads(l)
+        for em in j.get('emails') or []:
+            add(j['abn'], em['email'], 'Hunter.io domain search (address found published at: %s)' % ', '.join((em.get('sources') or [])[:1]), '', (em.get('sources') or [''])[0])
 # browser-rendered pages: addresses the page displays once rendered
 if os.path.exists(f'{W}/v3/render_out.jsonl'):
     rq_site = {}
@@ -110,6 +118,17 @@ for abn, lst in cand.items():
         role = bool(e2.ROLE.match(e))
         rows.append(dict(abn=abn, email=e, source=c['source'], kind=kind, mx=mx, status=status, reasons='; '.join(reasons), role=role, page=c['page']))
 ev = pd.DataFrame(rows)
+# optional: mailbox verification results (connectors/verify_mailboxes.py)
+if os.path.exists(f'{W}/v5/verify_out.jsonl'):
+    vr = {json.loads(l)['email']: json.loads(l) for l in open(f'{W}/v5/verify_out.jsonl')}
+    def _apply(r):
+        v = vr.get(r.email)
+        if not v or r.status == 'Invalid': return r
+        if v['result'] == 'valid': r['status'] = 'Valid'; r['reasons'] = (r.reasons + '; ' if r.reasons else '') + 'mailbox verified (' + v['provider'] + ')'
+        elif v['result'] in ('invalid', 'spamtrap', 'abuse', 'do_not_mail'): r['status'] = 'Invalid'; r['reasons'] = 'mailbox check: ' + v['result']
+        else: r['status'] = 'Risky'; r['reasons'] = (r.reasons + '; ' if r.reasons else '') + 'mailbox check: ' + v['result']
+        return r
+    ev = ev.apply(_apply, axis=1)
 rank_src = lambda s: 0 if 'website' in s.lower() else 1 if 'Master Builders' in s or 'register' in s.lower() else 2
 ev['_r'] = ev.apply(lambda r: ({'Valid': 0, 'Risky': 1, 'Invalid': 2}[r.status], {'own-domain': 0, 'mailbox provider': 1, 'other-domain': 2}.get(r.kind, 2), not r.role, rank_src(r.source), len(r.email)), axis=1)
 ev = ev.sort_values(['abn', '_r'])

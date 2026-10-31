@@ -10,9 +10,10 @@ newsite = {}
 BUILDKW = re.compile(r'(build|construct|home|renovat|reno|carpent|project|develop|roof|kitchen|bathroom|joiner|concret|deck|patio|extension|maint|propert|design|struct|frame|brick|plaster|til(e|ing)|inspect|cabinet|pool|landscap|fenc|shed|steel|glaz|window|door|floor|paint|plumb|electric|civil|excavat|earthwork|demoli|carport|granny|house|dwelling|living|residen|estate|architect|draft)', re.I)
 notb = json.load(open(f'{W}/v2/not_builders.json')) if os.path.exists(f'{W}/v2/not_builders.json') else {}
 if os.path.exists(f'{W}/v3/not_builders2.json'): notb.update(json.load(open(f'{W}/v3/not_builders2.json')))
+if os.path.exists(f'{W}/v4/not_builders3.json'): notb.update(json.load(open(f'{W}/v4/not_builders3.json')))
 for a_, note_ in notb.items():
     df.loc[df.abn_raw == a_, 'Org Type'] = 'Non-builder licence holder (' + re.sub(r'(?i)^not (a )?builders?\s*[-–:]?\s*', '', note_)[:40].strip() + ')'
-for f in ('out_site', 'out_disc', 'out_ind', 'out_ws', 'v3/out_site', 'v3/out_disc', 'v3/out_ind', 'v3/out_ws2'):
+for f in ('out_site', 'out_disc', 'out_ind', 'out_ws', 'v3/out_site', 'v3/out_disc', 'v3/out_ind', 'v3/out_ws2', 'v4/out_cc', 'v4/out_cc_com', 'v4/out_ws3', 'v5/out_places'):
     p = f'{W}/v2/{f}.jsonl' if '/' not in f else f'{W}/{f}.jsonl'
     if os.path.exists(p):
         for l in open(p):
