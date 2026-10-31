@@ -49,6 +49,7 @@ import { CloneDeploymentCard } from "@/components/clone-deployment-card";
 import { CloneEmailIdentityCard } from "@/components/clone-email-identity-card";
 import { CloneAccessCredentialsCard } from "@/components/clone-access-credentials-card";
 import { CloneTurnstileCard } from "@/components/clone-turnstile-card";
+import { CloneAccountResetCard } from "@/components/clone-account-reset-card";
 import { CloneCrmConversionCard } from "@/components/clone-crm-conversion-card";
 import { CloneVoiceAutomationCard } from "@/components/clone-voice-automation-card";
 import { CloneVoiceStackCard } from "@/components/clone-voice-stack-card";
@@ -485,6 +486,13 @@ function CloneDetail() {
         configured" — and one of those was true while the other was not.
       */}
       <CloneTurnstileCard cloneId={cloneId} />
+      {/*
+        The demo's other sign-in lever, beside the CAPTCHA's test pair and
+        refused where it is refused (`demoCloneRefusal`): a staff account set
+        back to a password the operator holds, when every copy of the old one
+        is gone and the product's own reset can only email a `.example` box.
+      */}
+      <CloneAccountResetCard cloneId={cloneId} />
       {/*
         The clone's own sending identity, beside the widget for the same
         reason. Both are per-clone credentials Mission Control mints, and this

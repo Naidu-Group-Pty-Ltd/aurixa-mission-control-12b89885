@@ -15,6 +15,7 @@
  * the next step is, when a secret may be rotated — can be asserted by name
  * without Cloudflare, Supabase, or a database.
  */
+import { demoCloneRefusal } from "./demoClone.pure";
 
 /** `clone_turnstile_identities` row, as the flow reads it. */
 export type TurnstileIdentityRow = {
@@ -136,37 +137,34 @@ export function isTestSiteKey(siteKey: string | null | undefined): boolean {
  * Why this clone may not be put on the test pair, or null when it may.
  *
  * The rule is the programme's: never the prime, never a workspace a customer
- * signs in to. The prime is refused where every clone-secret write is refused,
- * by `resolveCloneSecretTarget`. A customer is read from what Mission Control
- * records about money and entitlement — a Stripe customer, or a plan the clone
- * is entitled to — and the clone must also be marked a demo by its operator.
- * Measured 30 Oct 2026: every clone but the tutorial demo is entitled to a
- * plan, and the demo is tagged `demo`.
+ * signs in to. Who counts as a demo is `demoCloneRefusal`'s, shared with the
+ * account reset; the prime is refused where every clone-secret write is
+ * refused, by `resolveCloneSecretTarget`.
  */
 export function testPairRefusal(clone: {
   billing_stripe_customer_id: string | null;
   entitled_plan_slug: string | null;
   tags: readonly string[] | null;
 }): string | null {
-  if (clone.billing_stripe_customer_id) {
-    return (
-      "This clone has a Stripe customer, so it is somebody's workspace: its sign-in keeps a " +
-      "real security check."
-    );
+  const refusal = demoCloneRefusal(clone);
+  if (!refusal) return null;
+  switch (refusal.reason) {
+    case "stripe_customer":
+      return (
+        "This clone has a Stripe customer, so it is somebody's workspace: its sign-in keeps a " +
+        "real security check."
+      );
+    case "entitled_plan":
+      return (
+        `This clone is entitled to the ${refusal.plan} plan, so it is somebody's ` +
+        "workspace: its sign-in keeps a real security check."
+      );
+    case "not_tagged_demo":
+      return (
+        "Only a clone tagged demo may use the test pair, which turns its security check off. Tag " +
+        "it on the clone page first if it is one."
+      );
   }
-  if (clone.entitled_plan_slug) {
-    return (
-      `This clone is entitled to the ${clone.entitled_plan_slug} plan, so it is somebody's ` +
-      "workspace: its sign-in keeps a real security check."
-    );
-  }
-  if (!(clone.tags ?? []).includes("demo")) {
-    return (
-      "Only a clone tagged demo may use the test pair, which turns its security check off. Tag " +
-      "it on the clone page first if it is one."
-    );
-  }
-  return null;
 }
 
 // ─── Readiness — the server owns "what next" ─────────────────────────
