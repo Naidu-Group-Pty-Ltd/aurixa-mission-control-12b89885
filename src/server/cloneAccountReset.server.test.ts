@@ -106,13 +106,16 @@ describe("resetCloneDemoAccount", () => {
 
   it("withholds the password from a failed statement's error", async () => {
     h.runSqlOnProject.mockRejectedValue(
-      new Error("SQL execution failed on demoref: 400 — near crypt('N3w-pass''word-xyz'"),
+      new Error(
+        'SQL execution failed on demoref: 400 — {"message":"Failed to run sql query: ERROR:  42601: ' +
+          "near crypt('N3w-pass''word-xyz'\"}",
+      ),
     );
     const res = await reset();
-    expect(res.ok).toBe(false);
-    const error = res.ok ? "" : res.error;
-    expect(error).toMatch(/did not run/);
-    expect(error).not.toContain("N3w-pass");
+    expect(res).toEqual({
+      ok: false,
+      error: "The reset did not run: the clone refused the statement (HTTP 400, SQLSTATE 42601).",
+    });
   });
 
   it("says which account was not found, and changed nothing", async () => {

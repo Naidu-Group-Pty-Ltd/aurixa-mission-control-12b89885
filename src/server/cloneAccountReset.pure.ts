@@ -42,8 +42,9 @@
  *   workspace's decision, and a reset is not the way round it.
  * - Keep the password. It reaches the clone inside one statement and is
  *   checked there against the hash it made. Mission Control never stores,
- *   logs, audits or returns it, and an error that quotes the statement is
- *   scrubbed of it ({@link scrubCredential}).
+ *   logs, audits or returns it. A failed statement is reported by its status
+ *   and SQLSTATE, never by the error body that can quote it
+ *   ({@link resetFailureLine}).
  */
 import { sqlCredentialLiteral } from "./cloneAdminIdentity.pure";
 import { demoCloneRefusal } from "./demoClone.pure";
@@ -156,6 +157,17 @@ const CLEAR_AUTHENTICATOR = `
 `;
 
 /**
+ * A dollar-quote tag that appears in none of `values`: `$reset$`, or the
+ * first of `$reset1$`, `$reset2$`, … that does not.
+ */
+export function dollarQuoteTag(values: readonly string[]): string {
+  for (let n = 0; ; n++) {
+    const tag = `$reset${n === 0 ? "" : n}$`;
+    if (!values.some((v) => v.includes(tag))) return tag;
+  }
+}
+
+/**
  * The reset, as one statement for the clone.
  *
  * Every decision is made on the clone, in one transaction, so nothing is half
@@ -165,12 +177,19 @@ const CLEAR_AUTHENTICATOR = `
  * because a block cannot return rows. Each run sets every setting before
  * reading any, so a pooled connection that ran an earlier reset is never read
  * as this one.
+ *
+ * The block is dollar-quoted, and PostgreSQL ends a dollar-quoted body at the
+ * first copy of its tag, even inside a quoted literal within it. So the tag
+ * is chosen to appear in nothing the block carries ({@link dollarQuoteTag}):
+ * a fixed `$reset$` let a password holding those seven characters end the
+ * block early, and what followed ran as SQL.
  */
 export function buildAccountResetSql(req: AccountResetRequest): string {
   const account = sqlCredentialLiteral(req.account.trim().toLowerCase());
   const password = sqlCredentialLiteral(req.password);
+  const tag = dollarQuoteTag([account, password]);
   return `
-do $reset$
+do ${tag}
 declare
   v_ids uuid[];
   v_id uuid;
@@ -227,7 +246,7 @@ ${req.clearAuthenticator ? CLEAR_AUTHENTICATOR : ""}
   perform set_config('aurixa.account_reset_sessions', v_sessions::text, false);
   perform set_config('aurixa.account_reset', 'reset', false);
 end
-$reset$;
+${tag};
 select current_setting('aurixa.account_reset', true) as outcome,
        current_setting('aurixa.account_reset_verifies', true) as password_verifies,
        current_setting('aurixa.account_reset_authenticator_clear', true) as authenticator_clear,
@@ -296,17 +315,46 @@ export function accountResetMissLine(
 }
 
 /**
+ * What the operator is told when the statement fails.
+ *
+ * `runSqlOnProject` throws with the Management API's raw error body, which can
+ * quote the statement, and so the password, in whatever escaping its encoder
+ * chose. That body is never passed on: a statement failure is reported by its
+ * HTTP status and SQLSTATE, which say what kind of failure it was. Any other
+ * error (the network, a missing token) carries no statement, and is passed on
+ * scrubbed all the same.
+ */
+export function resetFailureLine(error: string, password: string): string {
+  const http = /^SQL execution failed on [^:]+: (\d{3})/.exec(error);
+  if (!http) return scrubCredential(error, password);
+  const sqlstate = /ERROR:\s+([0-9A-Z]{5}):/.exec(error)?.[1];
+  return `the clone refused the statement (HTTP ${http[1]}${sqlstate ? `, SQLSTATE ${sqlstate}` : ""}).`;
+}
+
+/**
  * The text of an error, with the password taken out.
  *
  * A failed statement's error can quote the statement, which holds the
- * password in a SQL literal, with its quotes doubled. Both spellings are
- * replaced before the text reaches a log, the audit row or the operator.
+ * password in a SQL literal with its single quotes doubled. And the error
+ * reaches here as the Management API's raw JSON body (`runSqlOnProject`), in
+ * which a double quote is `\"` and a tab `\t`, possibly escaped twice where
+ * one JSON string carries another. Every one of those spellings is replaced
+ * before the text reaches a log, the audit row or the operator: a password
+ * that survives in one of them is recoverable from the audit row.
  */
 export function scrubCredential(text: string, password: string): string {
   if (!password) return text;
+  const json = (s: string) => JSON.stringify(s).slice(1, -1);
+  const forms = new Set<string>();
+  for (const plain of [password, password.replace(/'/g, "''")]) {
+    forms.add(plain);
+    forms.add(json(plain));
+    forms.add(json(json(plain)));
+  }
   let out = text;
-  for (const form of new Set([password, password.replace(/'/g, "''")])) {
-    out = out.split(form).join("[password withheld]");
+  // Longest first, so an escaped form is never left half replaced by a shorter one.
+  for (const form of [...forms].sort((a, b) => b.length - a.length)) {
+    if (form) out = out.split(form).join("[password withheld]");
   }
   return out;
 }

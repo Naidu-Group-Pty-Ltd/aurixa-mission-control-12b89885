@@ -14,8 +14,8 @@ import {
   accountResetRefusal,
   buildAccountResetSql,
   readAccountResetOutcome,
+  resetFailureLine,
   resetPasswordRefusal,
-  scrubCredential,
   type AccountResetRequest,
 } from "./cloneAccountReset.pure";
 import { resolveCloneSecretTarget } from "./cloneAllowedOrigins.server";
@@ -93,7 +93,7 @@ export async function resetCloneDemoAccount(
   try {
     rows = await runSqlOnProject(eligibility.projectRef, buildAccountResetSql({ ...req, account }));
   } catch (e) {
-    return { ok: false, error: `The reset did not run: ${scrubCredential(msg(e), req.password)}` };
+    return { ok: false, error: `The reset did not run: ${resetFailureLine(msg(e), req.password)}` };
   }
 
   const outcome = readAccountResetOutcome(rows);

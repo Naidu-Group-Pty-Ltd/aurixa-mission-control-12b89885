@@ -9,7 +9,9 @@ import {
   accountResetMissLine,
   accountResetRefusal,
   buildAccountResetSql,
+  dollarQuoteTag,
   readAccountResetOutcome,
+  resetFailureLine,
   resetPasswordRefusal,
   scrubCredential,
 } from "./cloneAccountReset.pure";
@@ -175,6 +177,25 @@ describe("what the clone says happened", () => {
   });
 });
 
+describe("the block's quoting cannot be ended by what it carries", () => {
+  it("uses $reset$ unless a value holds it, then the first tag none holds", () => {
+    expect(dollarQuoteTag(["'alex'", "'Abcd-efgh-1234'"])).toBe("$reset$");
+    expect(dollarQuoteTag(["'Abcd$reset$1234'"])).toBe("$reset1$");
+    expect(dollarQuoteTag(["'a$reset$b$reset1$c'"])).toBe("$reset2$");
+  });
+
+  it("wraps a password holding $reset$ in a tag it does not hold", () => {
+    const s = buildAccountResetSql({
+      account: "alex.morgan",
+      password: "Abcd$reset$1234",
+      clearAuthenticator: false,
+    });
+    expect(s.startsWith("do $reset1$")).toBe(true);
+    expect(s).toContain("end\n$reset1$;");
+    expect(s).toContain("extensions.crypt('Abcd$reset$1234', extensions.gen_salt('bf', 10))");
+  });
+});
+
 describe("the password never leaves in an error", () => {
   it("is withheld as typed and as quoted in the statement", () => {
     const password = "N3w-pass'word-xyz";
@@ -183,5 +204,27 @@ describe("the password never leaves in an error", () => {
     const out = scrubCredential(error, password);
     expect(out).not.toContain("N3w-pass");
     expect(out).toContain("[password withheld]");
+  });
+
+  it("is withheld as JSON escaped it, once and twice", () => {
+    const password = 'Abcd"efgh\t1234';
+    const once = JSON.stringify(password).slice(1, -1);
+    const twice = JSON.stringify(once).slice(1, -1);
+    const out = scrubCredential(`{"message":"near ${once}"} and ${twice}`, password);
+    expect(out).not.toContain("efgh");
+  });
+
+  it("a failed statement is told by its status and SQLSTATE, never its body", () => {
+    const body =
+      'SQL execution failed on demoref: 400 — {"message":"Failed to run sql query: ERROR:  42601: ' +
+      'syntax error at or near \\"x\\"\\nLINE 3: crypt(\'Abcd\\"efgh1234\', ...)"}';
+    const line = resetFailureLine(body, 'Abcd"efgh1234');
+    expect(line).toBe("the clone refused the statement (HTTP 400, SQLSTATE 42601).");
+  });
+
+  it("any other failure is passed on, scrubbed", () => {
+    expect(resetFailureLine("fetch failed: Abcd-efgh-1234 timed out", "Abcd-efgh-1234")).toBe(
+      "fetch failed: [password withheld] timed out",
+    );
   });
 });
