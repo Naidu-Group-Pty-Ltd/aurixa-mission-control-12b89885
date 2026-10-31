@@ -44,8 +44,13 @@ vi.mock("./tablePrivileges.pure", async (importOriginal) => {
   return { ...real, compareTableGrants: pure.compareTableGrants };
 });
 
-const { TABLE_GRANT_REVOKE_ACTION, privilegeSweepIsNoteworthy, reconcileClonePrivileges, rotate } =
-  await import("./clonePrivilegeRepair.server");
+const {
+  TABLE_GRANT_RELATIONS_PER_PASS,
+  TABLE_GRANT_REVOKE_ACTION,
+  privilegeSweepIsNoteworthy,
+  reconcileClonePrivileges,
+  rotate,
+} = await import("./clonePrivilegeRepair.server");
 const { RELATION_ACL_QUERY, isReadOnlySourceQuery } = await import("./schema-introspection.server");
 const { TABLE_GRANT_NOTICE_SOURCE } = await import("./tablePrivileges.pure");
 const { TABLE_GRANT_ENFORCEMENT } = await import("./tableGrantEnforcement.pure");
@@ -508,8 +513,22 @@ describe("taking the surplus back (the owner, 31 Oct 2026)", () => {
     entitled_plan_slug: "launch",
     tags: [],
   };
+  /**
+   * What a project was sent that writes. `isReadOnlySourceQuery` reads
+   * `select aurixa.apply_ddl_batch('[…]')` as a read when the statements in
+   * it name no keyword it looks for (a revoke of SELECT alone), so the helper
+   * call and any grant or revoke count here whatever the classifier says.
+   */
   const writesTo = (ref: string) =>
-    sent.filter((s) => s.ref === ref && !isReadOnlySourceQuery(s.sql)).map((s) => s.sql);
+    sent
+      .filter(
+        (s) =>
+          s.ref === ref &&
+          (!isReadOnlySourceQuery(s.sql) ||
+            s.sql.includes("apply_ddl_batch(") ||
+            /\b(grant|revoke)\b/i.test(s.sql)),
+      )
+      .map((s) => s.sql);
   const revokeRows = () =>
     audit.writeAuditLog.mock.calls
       .map((c) => c[0] as Record<string, unknown>)
@@ -662,6 +681,78 @@ describe("taking the surplus back (the owner, 31 Oct 2026)", () => {
         errors: [expect.stringContaining("could not be read after")],
       },
     });
+  });
+
+  it("sends a pass's whole plan in one call, and reads the clone after it", async () => {
+    // Codex on #472: batches with the budget checked between them could commit
+    // the first, stop, and report the reading from before as if nothing ran.
+    const many = Array.from({ length: 60 }, (_, i) => `t${String(i).padStart(2, "0")}`);
+    tables[PRIME] = many.map((n) => rel(n));
+    tables[DASHBOARD.projectRef] = many.map((n) => rel(n, { anon: "SELECT" }));
+    onApply = (ref) => {
+      tables[ref] = many.map((n) => rel(n));
+    };
+    const report = await run(fakeSupabase(), { tableGrantScope: "all" });
+
+    const batches = writesTo(DASHBOARD.projectRef).filter((t) =>
+      t.startsWith("select aurixa.apply_ddl_batch("),
+    );
+    expect(batches).toHaveLength(1);
+    expect(report.tables.clones[0]).toMatchObject({
+      read: "ok",
+      surplus: 0,
+      enforcement: { done: "revoked", relations: 60, applied: 60 },
+    });
+  });
+
+  it("files and sends nothing when the budget runs out before it starts", async () => {
+    // The clock passes the deadline while the clone is read, after the loop's
+    // own check and before the one taking back makes.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const start = Date.now();
+      const answer = sql.runSqlOnProject.getMockImplementation()!;
+      sql.runSqlOnProject.mockImplementation(async (ref: string, text: string) => {
+        const out = await answer(ref, text);
+        if (ref === DASHBOARD.projectRef && text === RELATION_ACL_QUERY) {
+          vi.setSystemTime(start + 120_000);
+        }
+        return out;
+      });
+      const report = await reconcileClonePrivileges(fakeSupabase().client, {
+        deadlineAt: start + 60_000,
+        now: 0,
+        tableGrantScope: "all",
+      });
+      expect(report.tables.clones.find((c) => c.cloneId === "c1")).toMatchObject({
+        read: "ok",
+        surplus: 24,
+        enforcement: { done: "withheld", why: expect.stringContaining("no time was left") },
+      });
+      expect(writesTo(DASHBOARD.projectRef)).toEqual([]);
+      expect(revokeRows()).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("carries at most a pass's worth of relations, worst first, and says how many wait", async () => {
+    const count = TABLE_GRANT_RELATIONS_PER_PASS + 10;
+    const many = Array.from({ length: count }, (_, i) => `r${String(i).padStart(3, "0")}`);
+    tables[PRIME] = many.map((n) => rel(n));
+    tables[DASHBOARD.projectRef] = many.map((n) => rel(n, { anon: "SELECT" }));
+    onApply = () => {};
+    const report = await run(fakeSupabase(), { tableGrantScope: "all" });
+    expect(report.tables.clones[0]).toMatchObject({
+      enforcement: {
+        done: "revoked",
+        relations: TABLE_GRANT_RELATIONS_PER_PASS,
+        deferred: 10,
+      },
+    });
+    const planned = revokeRows()[0].metadata as { relations: unknown[]; deferred: number };
+    expect(planned.relations).toHaveLength(TABLE_GRANT_RELATIONS_PER_PASS);
+    expect(planned.deferred).toBe(10);
   });
 
   it("reaches every clone at `all`, and leaves one already matching alone", async () => {

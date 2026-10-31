@@ -154,6 +154,37 @@ describe("planTableGrantRevokes", () => {
     ]);
   });
 
+  it("leaves a role the prime's column grants when the clone gave it the privilege only through PUBLIC", () => {
+    // Codex on #472: the clone gives everyone UPDATE through PUBLIC, and the
+    // prime gives `authenticated` UPDATE on one column. Revoking PUBLIC's
+    // UPDATE alone would leave `authenticated` nothing.
+    const p = plan(
+      [
+        rel("public.notes", {
+          grants: { anon: [], authenticated: ["SELECT"], PUBLIC: [] },
+          columnGrants: [{ grantee: "authenticated", privilege: "UPDATE", column: "body" }],
+        }),
+      ],
+      [
+        rel("public.notes", {
+          grants: { anon: [], authenticated: ["SELECT"], PUBLIC: ["UPDATE"] },
+        }),
+      ],
+    );
+    const [r] = p.relations;
+    expect(r.revoke).toEqual({ anon: [], authenticated: [], PUBLIC: ["UPDATE"] });
+    expect(r.regrantColumns).toEqual([
+      { grantee: "authenticated", privilege: "UPDATE", columns: ["body"] },
+    ]);
+    expect(r.statement).toContain("revoke UPDATE on public.notes from public;");
+    expect(r.statement).toContain('grant UPDATE ("body") on public.notes to authenticated;');
+    // Undone exactly: the column grant this added is taken away again.
+    expect(r.inverse).toEqual([
+      'revoke UPDATE ("body") on public.notes from authenticated;',
+      "grant UPDATE on public.notes to public;",
+    ]);
+  });
+
   it("leaves MAINTAIN alone where either server lacks it", () => {
     const p = plan(
       [rel("public.t")],

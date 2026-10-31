@@ -90,6 +90,13 @@ import {
 /** The audit action that files a clone's revoke plan, and the grants that undo it, before it runs. */
 export const TABLE_GRANT_REVOKE_ACTION = "clone_table_privileges_revoked";
 
+/**
+ * At most this many relations a clone a pass, worst first, so one pass's
+ * statements always go in one call. The widest clone measured, the tutorial
+ * demo, had 139 on 31 Oct 2026.
+ */
+export const TABLE_GRANT_RELATIONS_PER_PASS = 200;
+
 type Db = SupabaseClient<Database>;
 
 export type ClonePrivilegeOutcome = {
@@ -126,6 +133,8 @@ export type TableGrantEnforcementOutcome =
       errors?: string[];
       /** The reading the plan was made from. The report itself is the reading after. */
       before: { surplus: number; relations: number };
+      /** Relations left for the next pass, past `TABLE_GRANT_RELATIONS_PER_PASS`. */
+      deferred?: number;
       refused?: Array<{ relation: string; why: string }>;
     }
   | {
@@ -395,20 +404,12 @@ export async function reconcileClonePrivileges(
           });
         } catch (e) {
           // A fault in taking back is this clone's, and said as one: the
-          // function work and every other clone are still reported.
-          if (e instanceof BudgetPause) {
-            out.pausedAt = cloneId;
-            paused = true;
-          }
+          // function work and every other clone are still reported. The call
+          // that writes is one transaction, so a fault leaves none of it half
+          // done; the planned row filed before it says what was attempted.
           report = {
             ...ok,
-            enforcement: {
-              done: "withheld",
-              why:
-                e instanceof BudgetPause
-                  ? `stopped by the budget: ${e.message}`
-                  : `taking back failed: ${msg(e).slice(0, 300)}`,
-            },
+            enforcement: { done: "withheld", why: `taking back failed: ${msg(e).slice(0, 300)}` },
           };
         }
       }
@@ -491,14 +492,17 @@ type OkReport = Extract<CloneTableGrantReport, { read: "ok" }>;
  *   2. file the plan and the grants that undo it in the audit log. A plan that
  *      could not be filed is not run: once the privileges are gone, that row
  *      is the only record of what they were;
- *   3. run it, one subtransaction a relation, the budget checked between
- *      batches;
+ *   3. run it, one subtransaction a relation, all in one call to the batch
+ *      helper, which is one transaction: the clone holds the whole pass's work
+ *      or none of it. The budget is checked before anything is filed, never
+ *      between batches, and one pass carries at most
+ *      `TABLE_GRANT_RELATIONS_PER_PASS` relations, worst first;
  *   4. read the clone again and compare, so the report is the catalogue after
  *      and never the statements' intent. A clone that cannot be read after
  *      keeps the reading before, said as such.
  *
- * A dry run stops after the plan and answers with a sample. Throws only
- * `BudgetPause`, and faults of its own, which the sweep reports per clone.
+ * A dry run stops after the plan and answers with a sample. A fault of its
+ * own is thrown, and the sweep reports it for this clone.
  */
 async function enforceCloneTableGrants(
   cloneId: string,
@@ -542,6 +546,24 @@ async function enforceCloneTableGrants(
     };
   }
 
+  // Nothing is filed or sent once the budget is spent: the next pass plans it
+  // again from both catalogues.
+  if (pastDeadline(opts.deadlineAt)) {
+    return {
+      ...before,
+      enforcement: {
+        done: "withheld",
+        why: "no time was left in this pass; the next pass plans it again",
+      },
+    };
+  }
+  const thisPass = plan.relations.slice(0, TABLE_GRANT_RELATIONS_PER_PASS);
+  const deferred = plan.relations.length - thisPass.length;
+  const privileges = thisPass.reduce(
+    (n, r) => n + r.revoke.anon.length + r.revoke.authenticated.length + r.revoke.PUBLIC.length,
+    0,
+  );
+
   const filed = await writeAuditLog({
     action: TABLE_GRANT_REVOKE_ACTION,
     entityType: "clone",
@@ -549,9 +571,10 @@ async function enforceCloneTableGrants(
     metadata: {
       stage: "planned",
       scope: opts.scope,
-      privileges: plan.privileges,
+      privileges,
       surplusBefore: before.surplus,
-      relations: plan.relations.map(({ statement: _statement, ...r }) => r),
+      relations: thisPass.map(({ statement: _statement, ...r }) => r),
+      ...(deferred > 0 ? { deferred } : {}),
       ...refused,
     },
   });
@@ -568,18 +591,18 @@ async function enforceCloneTableGrants(
   const { applyTableGrantRevokes } = await import("./schema-introspection.server");
   const applied = await applyTableGrantRevokes(
     before.projectRef,
-    plan.relations.map((r) => r.statement),
-    opts.deadlineAt,
+    thisPass.map((r) => r.statement),
   );
 
   const outcome: TableGrantEnforcementOutcome = {
     done: "revoked",
-    privileges: plan.privileges,
-    relations: plan.relations.length,
+    privileges,
+    relations: thisPass.length,
     applied: applied.applied,
     failed: applied.failed,
     ...(applied.errors.length ? { errors: applied.errors.slice(0, 10) } : {}),
     before: { surplus: before.surplus, relations: before.relations },
+    ...(deferred > 0 ? { deferred } : {}),
     ...refused,
   };
 
@@ -609,8 +632,8 @@ async function enforceCloneTableGrants(
     metadata: {
       stage: "applied",
       scope: opts.scope,
-      privileges: plan.privileges,
-      relations: plan.relations.length,
+      privileges,
+      relations: thisPass.length,
       applied: applied.applied,
       failed: applied.failed,
       errors: outcome.errors ?? [],
