@@ -2,8 +2,9 @@
  * The invocation budget for long-running provisioning work.
  *
  * Backend provisioning runs inside a pg_cron-invoked HTTP request whose
- * lifetime is NOT the pipeline's: pg_net stops waiting at 60 seconds and the
- * hosting runtime reclaims the worker soon after. The pipeline takes minutes.
+ * lifetime is NOT the pipeline's: pg_net stops waiting at the drain's patience
+ * (`BACKEND_DRAIN_PATIENCE_MS`, 150 seconds) and the hosting runtime reclaims
+ * the worker soon after. The pipeline takes minutes.
  * The first engine-provisioned clone (30 Aug 2026 dry run) proved what that
  * mismatch does: three consecutive invocations died mid
  * "Snapshotting backend architecture", each one restarted from zero, and the
@@ -131,6 +132,31 @@ export function isUpstreamRateLimit(error: unknown): boolean {
   if (typeof message !== "string") return false;
 
   return messageNamesUpstreamRateLimit(message);
+}
+
+/**
+ * The shortest hold after a refusal that said when to come back.
+ *
+ * The Supabase Management API's window is a minute (`X-RateLimit-Reset`), and
+ * `runSqlOnProject` already waits a 429 out inside the call before giving up;
+ * one that outlasts that is held for at least a tick — never for the quarter
+ * hour GitHub's rolling hour needs, which would idle a clone's build for
+ * nothing.
+ */
+export const UPSTREAM_HINTED_MIN_BACKOFF_MS = 60 * 1000;
+
+/**
+ * How long to hold a job a quota refused: the refusal's own word, bounded to
+ * [a minute, `fallbackMs`], or `fallbackMs` where it gave none.
+ */
+export function upstreamBackoffMs(
+  retryAfterMs: number | null | undefined,
+  fallbackMs: number,
+): number {
+  if (typeof retryAfterMs !== "number" || !Number.isFinite(retryAfterMs) || retryAfterMs <= 0) {
+    return fallbackMs;
+  }
+  return Math.min(fallbackMs, Math.max(UPSTREAM_HINTED_MIN_BACKOFF_MS, retryAfterMs));
 }
 
 /**

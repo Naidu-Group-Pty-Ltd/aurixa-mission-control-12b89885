@@ -68,6 +68,8 @@ async function runBackendProvisioning(
       retryable?: boolean;
       progressed?: boolean;
       upstreamLimited?: boolean;
+      /** How long the refusing API said to wait, when it said (a Management API 429). */
+      retryAfterMs?: number | null;
     }
 > {
   const updateStatus = async (status: string, detail: string) => {
@@ -1120,7 +1122,44 @@ async function runBackendProvisioning(
         dependencies: (m.dependencies ?? []) as string[],
         applyOnInstall: m.apply_on_install !== false,
       }));
-      moduleApplyResults = await applyModuleMigrations(result.projectRef, inputs, updateStatus);
+      // AFTER the `ready` write, so the callback writes the DETAIL alone.
+      //
+      // It was handed `updateStatus`, which writes `status` too, and
+      // `applyModuleMigrations` reports each module as `migrating` — so a
+      // backend this pass had just marked `ready` was put back to `migrating`
+      // and nothing wrote `ready` again: the drain stamps `worker_finished_at`
+      // on success, every reclaim skips a finished row, the fleet lane reads
+      // `migrating` as in flight and withholds every later prime migration,
+      // and repair and add-modules both require `ready`. Latent only because
+      // no module carries `clone_migration_sql` today (0 of 159, measured
+      // 31 Oct 2026); the add-modules path already passed a detail-only
+      // callback for this reason.
+      const moduleProgress = async (_status: string, detail: string) => {
+        const { error: detailErr } = await supabase
+          .from("clone_backends")
+          .update({ status_detail: detail })
+          .eq("clone_id", input.cloneId);
+        if (detailErr) {
+          console.error(
+            `[backend-provisioning] could not record "${detail}" for clone ${input.cloneId}: ${detailErr.message}`,
+          );
+        }
+      };
+      // And a module that cannot be applied is a module result, never a
+      // provisioning failure: the backend is finished and marked ready, and the
+      // outer catch would write `failed` over it.
+      try {
+        moduleApplyResults = await applyModuleMigrations(result.projectRef, inputs, moduleProgress);
+      } catch (moduleErr) {
+        const why = moduleErr instanceof Error ? moduleErr.message : String(moduleErr);
+        moduleApplyResults = inputs.map((m) => ({
+          id: m.id,
+          name: m.name,
+          ok: false,
+          error: `Module migrations could not run: ${why}`,
+        }));
+        await moduleProgress("ready", `Backend ready — module migrations could not run: ${why}`);
+      }
     }
 
     const failedModules = moduleApplyResults.filter((r) => !r.ok);
@@ -1224,7 +1263,17 @@ async function runBackendProvisioning(
           `[backend-provisioning] could not record rate limit for clone ${input.cloneId}: ${limitWriteErr.message}`,
         );
       }
-      return { ok: false, error: msg, retryable: true, upstreamLimited: true };
+      // The API's own word on when its window reopens, where it gave one: the
+      // Management API's resets in under a minute, and holding a job for the
+      // quarter hour a GitHub quota needs would idle it for nothing.
+      const hinted = (e as { retryAfterMs?: unknown }).retryAfterMs;
+      return {
+        ok: false,
+        error: msg,
+        retryable: true,
+        upstreamLimited: true,
+        retryAfterMs: typeof hinted === "number" && Number.isFinite(hinted) ? hinted : null,
+      };
     }
 
     // The terminal write is the one that must not fail silently: if it does,
@@ -1289,6 +1338,7 @@ export async function runQueuedBackendProvisioning(input: {
       retryable?: boolean;
       progressed?: boolean;
       upstreamLimited?: boolean;
+      retryAfterMs?: number | null;
     }
 > {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");

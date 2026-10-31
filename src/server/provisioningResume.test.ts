@@ -14,7 +14,11 @@ import {
   parseResumeMarker,
   pastDeadline,
 } from "./provisioningBudget";
-import { STAGE_SEQUENCE, toReplaceableTriggerDdl } from "./schema-introspection.server";
+import {
+  DIFFED_STAGES,
+  STAGE_SEQUENCE,
+  toReplaceableTriggerDdl,
+} from "./schema-introspection.server";
 import { SEED_ASSET_BUCKETS, planCloneSecrets } from "./backend-provisioning.server";
 import { declaredFunctionSlugsFromPaths } from "./prime-backend.server";
 import { classifyEdgeFunctionShortfall } from "./handoff-parity.server";
@@ -850,8 +854,24 @@ describe("a stage larger than one budget can still finish", () => {
     /* A batch index means nothing outside the statement list it was counted
        in, so carrying it into the next stage would skip real work. */
     const src = introspection();
-    expect(src).toMatch(/stage === resumeMarker\.stage \? resumeBatch : 0/);
+    expect(src).toMatch(
+      /stage === resumeMarker\.stage && !DIFFED_STAGES\.has\(stage\) \? resumeBatch : 0/,
+    );
     expect(src).toMatch(/if \(stage !== resumeMarker\.stage\) resumeBatch = 0;/);
+  });
+
+  it("a stage that sends only what is missing resumes at what is missing, not at an index", () => {
+    /* Its list shrinks between passes, so "batch 10" of the next pass's list
+       is ten batches of work that never landed. The diff is the position. */
+    expect([...DIFFED_STAGES].sort()).toEqual(
+      ["constraints", "grants", "indexes", "policies", "rls", "tables", "triggers"].sort(),
+    );
+    const src = introspection();
+    const fn = src.slice(src.indexOf("const stageOrSkip = async ("));
+    const body = fn.slice(0, fn.indexOf("\n  };") + 4);
+    expect(body).toMatch(
+      /DIFFED_STAGES\.has\(stage\)\s*\?\s*\(about: string\) => pauseIfDue\(about\)/,
+    );
   });
 
   it("the stages that need it are handed it", () => {
@@ -1011,12 +1031,19 @@ describe("a schema that is already built costs almost nothing to verify", () => 
      most of each invocation, so a full pass never finished the schema, always
      ended `partial` — and a partial pass may not proceed to the edge
      functions. The engine could complete the schema and never get past it. */
-  it("skips the creation when every table is present, and says so", () => {
+  it("creates only the tables absent by name, skips when none is, and says so", () => {
+    /* By NAME, not by count: a clone keeps every table the prime has dropped,
+       so a count that balances can hide a table the prime added. */
     const src = introspection();
+    expect(src).toMatch(/const heldTables = await heldKeys\(cloneRef, Q\.tableKeys\)/);
     expect(src).toMatch(
-      /const tablesAlreadyPresent = reconcile\(tableCounts\[0\], tableCounts\[1\]\)/,
+      /const absentTables = allTables\.filter\(\(t\) => !heldTables\.has\(`\$\{t\.schema\}\.\$\{t\.table\}`\)\)/,
     );
-    expect(src).toMatch(/every table present — creation skipped, drift still checked/);
+    expect(src).toMatch(/tableStmts\.length === 0/);
+    expect(src).toMatch(/every table present by name — creation skipped, drift still checked/);
+    /* The prefetch holds probes; reading one as a bare number missed every time. */
+    expect(src).not.toMatch(/typeof prefetch\.prime\.tables === "number"/);
+    expect(src).toMatch(/\[prePrime\.n, preClone\.n\]/);
   });
 
   it("but the column-drift repair still runs, which is the point of the stage", () => {
@@ -1027,7 +1054,7 @@ describe("a schema that is already built costs almost nothing to verify", () => 
     const src = introspection();
     const stageAt = src.indexOf('if (enterStage("tables"))');
     const driftAt = src.indexOf("diffMissingColumns(primeInfo", stageAt);
-    const skipAt = src.indexOf("tablesAlreadyPresent", stageAt);
+    const skipAt = src.indexOf("tableStmts.length === 0", stageAt);
     expect(skipAt).toBeGreaterThan(-1);
     expect(driftAt).toBeGreaterThan(skipAt);
     /* The drift read must not be inside the skip branch. */
@@ -1339,7 +1366,13 @@ describe("every per-item step in the tail is budgeted, not just guarded in front
     // path does not use. A known gap on an unused path, named rather than
     // hidden; budget it before that strategy is made default again.
     applyPrimeMigrations: "legacy migration-replay path, not the default strategy",
-    applyModuleMigrations: "legacy migration-replay path, not the default strategy",
+    // NOT the legacy path, whatever this used to say: it runs on every
+    // strategy, after the ready write. Bounded by the clone's installed modules
+    // that carry `clone_migration_sql` — measured 31 Oct 2026, 0 of 159 — and
+    // its progress writes the detail only (`moduleProgress`), so a pass it
+    // outlives has already recorded the backend ready.
+    applyModuleMigrations:
+      "bounded by installed modules carrying clone SQL — none today, after the ready write",
     // Bounded by the register: it acts only on the jobs `primeOnlyCronJobsIn`
     // names. Measured 27 Sep 2026: one on each of the four clones.
     sweepPrimeOnlyCronJobs: "bounded by the register — one job on each clone, measured",

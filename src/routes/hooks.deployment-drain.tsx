@@ -52,6 +52,24 @@ import { VercelError } from "@/server/hosting/vercel-client";
 const admin = supabaseAdmin;
 
 const MAX_ROWS_PER_RUN = 6;
+
+/**
+ * How far into an invocation a deployment that just advanced may take its next
+ * step at once, rather than wait a minute for the next tick.
+ *
+ * This lane advanced one state per tick, so the seven states between `pending`
+ * and `live` cost seven minutes even where each took seconds. Measured on
+ * `tutorial-demo-orrimere-c158c7`, 30 Oct 2026: creating_project 02:24:05,
+ * linking_repo 02:25:05, syncing_env 02:26:10, deploying 02:27:05 — four
+ * minutes of ticks for four quick calls, then three more after the build.
+ *
+ * Twenty-five seconds of a sixty-second request: a step started inside it has
+ * the rest of the request to finish, and the sweeps after the rows still run.
+ * A step that waits (a build, DNS) ends the chain, as does the cap below.
+ */
+const DEPLOY_CHAIN_WINDOW_MS = 25_000;
+/** At most this many further steps for one deployment in one invocation. */
+const MAX_CHAINED_STEPS = 4;
 /** A build or a DNS propagation that has not resolved in this long is stuck. */
 const STUCK_HOURS = 6;
 
@@ -143,6 +161,33 @@ async function claim(limit: number): Promise<DeploymentRow[]> {
     throw new Error(`claim: could not claim ${ids.length} row(s): ${claimError.message}`);
   }
   return (claimed ?? []) as DeploymentRow[];
+}
+
+/**
+ * Claim ONE deployment again for its next step, in the same invocation.
+ *
+ * `finalize` releases the claim and makes the next state due at once, so the
+ * row is claimable the moment its step has advanced. Taken through the same
+ * guarded update as `claim`: a tick that overlaps this one and got there first
+ * keeps it, this returns null, and the chain simply ends.
+ */
+async function claimNextStep(cloneId: string): Promise<DeploymentRow | null> {
+  const nowIso = new Date().toISOString();
+  const { data: claimed, error: claimError } = await admin
+    .from("clone_deployments")
+    .update({ worker_started_at: nowIso })
+    .eq("clone_id", cloneId)
+    .is("worker_started_at", null)
+    .in("status", CLAIMABLE)
+    .lte("next_attempt_at", nowIso)
+    .select(
+      "clone_id, provider_slug, status, project_id, project_name, team_id, latest_deployment_id, provider_origin, domain, dns_target_type, dns_target_value, domain_verification, env_digest, env_synced_at, last_deployed_at, attempts, max_attempts, created_at, status_since",
+    )
+    .maybeSingle();
+  if (claimError) {
+    throw new Error(`claimNextStep: could not claim ${cloneId}: ${claimError.message}`);
+  }
+  return (claimed ?? null) as DeploymentRow | null;
 }
 
 /**
@@ -1506,6 +1551,7 @@ async function sweepBundleIdentity() {
 }
 
 async function drain() {
+  const startedAt = Date.now();
   // The reclaim first and unconditionally: it is database-only, and it is what
   // releases a row a terminated Worker left held. Yielding it would make a
   // starved window look like a queue with nothing in it.
@@ -1532,11 +1578,35 @@ async function drain() {
   // rate-limited calls on the provider's side, and this queue is measured in
   // clones, not in thousands of rows.
   for (const row of rows) {
-    const outcome = await runOne(row);
-    await finalize(row, outcome);
-    if (outcome.kind === "advance" || outcome.kind === "done") advanced++;
-    else if (outcome.kind === "wait") waiting++;
-    else failed++;
+    let current: DeploymentRow | null = row;
+    let chained = 0;
+    while (current) {
+      const outcome = await runOne(current);
+      await finalize(current, outcome);
+      if (outcome.kind === "advance" || outcome.kind === "done") advanced++;
+      else if (outcome.kind === "wait") waiting++;
+      else failed++;
+      // A step that advanced into another claimable state takes it now, while
+      // the invocation has room (DEPLOY_CHAIN_WINDOW_MS). Still one row at a
+      // time, still serial: only the minute between states is saved.
+      const mayChain =
+        outcome.kind === "advance" &&
+        chained < MAX_CHAINED_STEPS &&
+        Date.now() - startedAt < DEPLOY_CHAIN_WINDOW_MS;
+      // A chain that cannot be taken is the next tick's: this step landed and
+      // released its row, and the rows still held behind it must not be left
+      // claimed by a throw here. Said, never swallowed.
+      current = mayChain
+        ? await claimNextStep(current.clone_id).catch((e: unknown) => {
+            console.error(
+              `[deployment-drain] could not chain the next step for ${row.clone_id}:`,
+              e instanceof Error ? e.message : String(e),
+            );
+            return null;
+          })
+        : null;
+      chained++;
+    }
   }
   const sweep = await sweepLiveBuilds();
   const bundles = await sweepBundleIdentity();

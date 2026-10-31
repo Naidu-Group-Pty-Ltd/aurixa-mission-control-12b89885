@@ -193,8 +193,10 @@ describe("a reclaim returns rows to the shape its own claim reads", () => {
        frequency for the quota it was waiting on. */
     const src = read("hooks.backend-provisioning-drain.tsx");
     expect(src).toContain("UPSTREAM_LIMIT_BACKOFF_MS");
+    /* The quarter hour stays the default; a refusal that names its own window
+       (the Supabase Management API's is a minute) is held for that, bounded. */
     expect(bodyOf(src, "drainOne")).toMatch(
-      /retry_after: new Date\(Date\.now\(\) \+ UPSTREAM_LIMIT_BACKOFF_MS\)/,
+      /retry_after: new Date\(\s*Date\.now\(\) \+\s*upstreamBackoffMs\([^)]*UPSTREAM_LIMIT_BACKOFF_MS,?\s*\)/,
     );
     const claim = bodyOf(src, "claimOne");
     /* Filtered in JS, never as a composed PostgREST `.or()` string — one of

@@ -406,21 +406,120 @@ export function getProjectUrl(projectRef: string): string {
 // ─── Database Queries ────────────────────────────────────────────────
 
 /**
+ * A Management API answer that was not a success, carrying its status.
+ *
+ * The message is exactly what `runSqlOnProject` always threw — several readers
+ * parse it (the dry-run and probe readers, the fleet lane's failure record) —
+ * and the status rides beside it, so `isUpstreamRateLimit` can tell a quota
+ * from a fault without reading prose.
+ */
+export class ManagementApiError extends Error {
+  readonly status: number;
+  /** For a 429: how long the API said to wait, in ms. Null otherwise. */
+  readonly retryAfterMs: number | null;
+  constructor(message: string, status: number, retryAfterMs: number | null = null) {
+    super(message);
+    this.name = "ManagementApiError";
+    this.status = status;
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+export type SqlCallOptions = {
+  /**
+   * Safe to send again after an answer that may have come AFTER the SQL ran:
+   * a read, or DDL written to be re-applied (the introspection batches). A
+   * gateway error or a dropped connection is then retried; otherwise it is
+   * thrown, because sending a migration twice is how a clone comes to refuse
+   * its own ledger. A 429 is retried whatever this says — it is a refusal
+   * before anything ran.
+   */
+  idempotent?: boolean;
+};
+
+/**
+ * How the Management API's refusals are retried.
+ *
+ * Its limit is 120 requests a minute per endpoint per project
+ * (supabase.com/docs/reference/api/introduction), and the PRIME's query
+ * endpoint is shared by every sweep that reads the prime's catalogue. A 429
+ * used to fail a provisioning pass outright: the body says "Too many
+ * requests" and never "rate limit", so nothing recognised it as a quota, the
+ * pass was written `failed`, its resume marker cleared and an attempt spent —
+ * three in a row and a clone's build was over. The API says when its window
+ * resets (`X-RateLimit-Reset`, seconds), so it is waited out, briefly and
+ * boundedly; a refusal that outlasts the retries is thrown with its status.
+ */
+const SQL_RATE_LIMIT_RETRIES = 2;
+const SQL_RATE_LIMIT_MAX_WAIT_MS = 15_000;
+const SQL_TRANSIENT_BACKOFF_MS = [1_000, 3_000] as const;
+
+/** Statuses a gateway answers with when the request may simply be retried. */
+function isTransientStatus(status: number): boolean {
+  return status === 502 || status === 503 || status === 504;
+}
+
+/** How long a 429 asks us to wait, from its own headers, bounded. */
+export function rateLimitWaitMs(h: Headers): number {
+  const reset = Number.parseFloat(h.get("x-ratelimit-reset") ?? "");
+  const retryAfter = Number.parseFloat(h.get("retry-after") ?? "");
+  const seconds =
+    Number.isFinite(reset) && reset >= 0 ? reset : Number.isFinite(retryAfter) ? retryAfter : 2;
+  return Math.min(SQL_RATE_LIMIT_MAX_WAIT_MS, Math.max(1_000, Math.ceil(seconds * 1000) + 250));
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
  * Run a SQL query against a project's database via the Management API.
  */
-export async function runSqlOnProject(projectRef: string, sql: string): Promise<unknown> {
-  const res = await fetch(`${MGMT_API}/projects/${projectRef}/database/query`, {
-    method: "POST",
-    headers: headers(),
-    body: JSON.stringify({ query: sql }),
-  });
+export async function runSqlOnProject(
+  projectRef: string,
+  sql: string,
+  opts?: SqlCallOptions,
+): Promise<unknown> {
+  let rateLimited = 0;
+  let transient = 0;
+  for (;;) {
+    let res: Response;
+    try {
+      res = await fetch(`${MGMT_API}/projects/${projectRef}/database/query`, {
+        method: "POST",
+        headers: headers(),
+        body: JSON.stringify({ query: sql }),
+      });
+    } catch (e) {
+      // The connection failed: the statement may or may not have reached the
+      // database, so only a statement that is safe to repeat is sent again.
+      if (opts?.idempotent && transient < SQL_TRANSIENT_BACKOFF_MS.length) {
+        await sleep(SQL_TRANSIENT_BACKOFF_MS[transient++]);
+        continue;
+      }
+      throw e;
+    }
 
-  if (!res.ok) {
+    if (res.ok) return res.json();
+
     const body = await res.text();
-    throw new Error(`SQL execution failed on ${projectRef}: ${res.status} — ${body}`);
+    if (res.status === 429 && rateLimited < SQL_RATE_LIMIT_RETRIES) {
+      rateLimited += 1;
+      await sleep(rateLimitWaitMs(res.headers));
+      continue;
+    }
+    if (
+      opts?.idempotent &&
+      isTransientStatus(res.status) &&
+      transient < SQL_TRANSIENT_BACKOFF_MS.length
+    ) {
+      await sleep(SQL_TRANSIENT_BACKOFF_MS[transient++]);
+      continue;
+    }
+    throw new ManagementApiError(
+      `SQL execution failed on ${projectRef}: ${res.status} — ${body}`,
+      res.status,
+      res.status === 429 ? rateLimitWaitMs(res.headers) : null,
+    );
   }
-
-  return res.json();
 }
 
 /**
@@ -4889,51 +4988,102 @@ async function deployRawSource(
   return readDeployedCopy(await res.json().catch(() => null));
 }
 
+/**
+ * How many edge-function deploys run at once.
+ *
+ * The deploys were strictly one after another, and they are the longest stage
+ * in the pipeline: each is a server-side bundle that takes seconds, and the
+ * prime declares ~435 of them. Measured on `npc-crm-independent-6505dc`,
+ * 19 Sep 2026: about seven a minute, so roughly an hour of a clone's build was
+ * spent waiting on one deploy at a time — while the pass held sixty fetched
+ * bundles it never reached and fetched again on the next pass.
+ *
+ * Each deploy is a different function, so they are independent of one
+ * another, and the Management API allows 120 requests a minute per endpoint
+ * per project (supabase.com/docs/reference/api/introduction): four in flight
+ * at a few seconds each stays well inside it. A deploy that fails is recorded
+ * and the rest carry on, exactly as before.
+ *
+ * `EDGE_DEPLOY_CONCURRENCY` overrides it (1–8) without a code change; 1
+ * restores the serial deploy.
+ */
+export const EDGE_DEPLOY_CONCURRENCY = 4;
+
+export function edgeDeployConcurrency(env: Record<string, string | undefined>): number {
+  const n = Number.parseInt(env.EDGE_DEPLOY_CONCURRENCY ?? "", 10);
+  return Number.isFinite(n) && n >= 1 ? Math.min(8, n) : EDGE_DEPLOY_CONCURRENCY;
+}
+
 export async function deployEdgeFunctions(
   projectRef: string,
   functions: Array<Parameters<typeof deployEdgeFunction>[1]>,
   onStatusUpdate?: (status: string, detail: string) => Promise<void>,
   deadlineAt?: number | null,
-  opts?: { compressed?: CompressedRoute },
+  opts?: { compressed?: CompressedRoute; concurrency?: number },
 ): Promise<EdgeFunctionDeployResult[]> {
-  const results: EdgeFunctionDeployResult[] = [];
-  for (let i = 0; i < functions.length; i++) {
-    // Hundreds of functions × one Management API call each is the longest
-    // stage in the pipeline, so the invocation budget is checked between
-    // deploys. Pausing throws away this pass's partial `results` on purpose:
-    // the resumed run asks the project which slugs it already holds and skips
-    // them, so the record is recovered from the target rather than a diary.
-    if (i > 0 && pastDeadline(deadlineAt)) {
-      throw new BudgetPause(
-        `deployed ${i}/${functions.length} edge functions this pass — the rest resume next tick`,
-      );
-    }
+  const width = Math.max(
+    1,
+    Math.min(opts?.concurrency ?? edgeDeployConcurrency(process.env), functions.length || 1),
+  );
+  // In INPUT order, whatever order the deploys finish in.
+  const results: EdgeFunctionDeployResult[] = new Array(functions.length);
+  const inFlight = new Set<Promise<void>>();
+  const deployOne = async (i: number): Promise<void> => {
     const fn = functions[i];
-    await onStatusUpdate?.(
-      "migrating",
-      `Deploying edge function ${i + 1}/${functions.length}: ${fn.slug}`,
-    );
     try {
       const { verifyJwt, overrideReason, deployed } = await deployEdgeFunction(
         projectRef,
         fn,
         opts,
       );
-      results.push({
+      results[i] = {
         slug: fn.slug,
         success: true,
         verifyJwt,
         ...(overrideReason ? { verifyJwtOverrideReason: overrideReason } : {}),
         ...(deployed ? { functionId: deployed.id, functionVersion: deployed.version } : {}),
-      });
+      };
     } catch (e) {
       // Non-fatal: record and continue so one broken function doesn't block the rest
-      results.push({
+      results[i] = {
         slug: fn.slug,
         success: false,
         error: e instanceof Error ? e.message : "deploy failed",
-      });
+      };
     }
+  };
+  let stoppedAt: number | null = null;
+  for (let i = 0; i < functions.length; i++) {
+    // A free slot first, so the clock is read when this deploy would start.
+    if (inFlight.size >= width) await Promise.race(inFlight);
+    // Hundreds of functions × one Management API call each is the longest
+    // stage in the pipeline, so the invocation budget is checked before each
+    // deploy is STARTED. The first always starts: a claimed job must move.
+    // Pausing throws away this pass's partial `results` on purpose: the
+    // resumed run asks the project which slugs it already holds and skips
+    // them, so the record is recovered from the target rather than a diary.
+    if (i > 0 && pastDeadline(deadlineAt)) {
+      stoppedAt = i;
+      break;
+    }
+    const fn = functions[i];
+    await onStatusUpdate?.(
+      "migrating",
+      `Deploying edge function ${i + 1}/${functions.length}: ${fn.slug}`,
+    );
+    const task: Promise<void> = deployOne(i).finally(() => {
+      inFlight.delete(task);
+    });
+    inFlight.add(task);
+  }
+  // Deploys already started are waited for, never abandoned: each is a
+  // request the project is acting on, and a pass that left before it answered
+  // would only make the next pass ask the project what landed.
+  await Promise.all(inFlight);
+  if (stoppedAt !== null) {
+    throw new BudgetPause(
+      `deployed ${stoppedAt}/${functions.length} edge functions this pass — the rest resume next tick`,
+    );
   }
   return results;
 }
@@ -6362,8 +6512,14 @@ export async function provisionCloneBackend(
       stampMigrationLedgerFromPrime,
       verifyCloneIsEmpty,
       readCloneMigrationFrontier,
+      readPrimeLedgerMark,
+      primeLedgerMoved,
     } = await import("./schema-introspection.server");
     const primeRef = input.primeBackendRef;
+    // Where the prime's ledger stands BEFORE the catalogue is walked, so the
+    // stamp at the end of the pass can be checked against it (see
+    // `primeLedgerMoved` below).
+    const ledgerBeforeWalk = await readPrimeLedgerMark(primeRef);
     const result = await replicateSchemaByIntrospection(projectRef, {
       primeRef,
       onStatusUpdate,
@@ -6454,6 +6610,25 @@ export async function provisionCloneBackend(
         ? "Catalog introspection reconciled; migration ledger already stamped"
         : `Catalog introspection reconciled; stamped ${stamp.stamped} migration ID(s)`,
     );
+    // The prime recorded a migration while this pass walked its catalogue: the
+    // stamp has just copied that version onto the clone as run, and the walk
+    // may have read the catalogue before its objects existed. Verifying now
+    // would make every later pass skip introspection, so the gap could never
+    // close — the fleet lane will not send a version the clone's ledger
+    // already holds. So the pass pauses unverified, clearing the marker, and
+    // the next tick walks the catalogue again from the first stage; every
+    // finished stage answers in one round trip, and the stamp is idempotent.
+    if (
+      primeLedgerMoved(ledgerBeforeWalk, {
+        count: stamp.primeLedgerCount,
+        top: stamp.primeLedgerTop,
+      })
+    ) {
+      throw new BudgetPause(
+        "the prime recorded a migration while this pass verified the schema — verifying again from the first stage next tick",
+        "",
+      );
+    }
     // Both halves are now true — a full pass reconciled every stage, and the
     // ledger is stamped. Recorded HERE and nowhere earlier: a pass that died
     // between the two would otherwise teach the next one to skip a stamp that

@@ -1459,4 +1459,9 @@ export const MIGRATION_CLAIMS: readonly MigrationClaims[] = [
       { kind: "none", reason: "file's and executable by service_role alone." },
     ],
   },
+  {
+    migration: "20261031090000_backend_drain_http_patience.sql",
+    version: "20261031090000",
+    assertions: [{ kind: "cron", jobname: "backend-provisioning-drain-1min" }],
+  },
 ];

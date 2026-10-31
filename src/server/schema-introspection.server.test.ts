@@ -22,7 +22,12 @@ import {
   MAX_FUNCTION_PASSES,
   buildGrantDdl,
   buildViewDdl,
+  groupGrants,
+  CHEAP_DDL_BATCH,
 } from "./schema-introspection.server";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { stripComments } from "./sourceComments.pure";
 
 describe("read-only source-query assertion", () => {
   it("accepts catalog reads", () => {
@@ -365,6 +370,97 @@ describe("buildGrantDdl", () => {
     expect(buildGrantDdl("public", "notes", "authenticated", "SELECT")).toBe(
       `grant select on "public"."notes" to "authenticated"`,
     );
+  });
+
+  it("carries several privileges in one statement", () => {
+    expect(buildGrantDdl("public", "notes", "anon", ["SELECT", "INSERT", "UPDATE"])).toBe(
+      `grant select, insert, update on "public"."notes" to "anon"`,
+    );
+  });
+});
+
+describe("groupGrants", () => {
+  it("one group per relation and grantee, in first-seen order, each privilege once", () => {
+    const rows = [
+      { schema: "public", table: "a", grantee: "anon", privilege: "SELECT" },
+      { schema: "public", table: "a", grantee: "authenticated", privilege: "SELECT" },
+      { schema: "public", table: "a", grantee: "anon", privilege: "INSERT" },
+      { schema: "public", table: "a", grantee: "anon", privilege: "SELECT" },
+      { schema: "aml", table: "a", grantee: "anon", privilege: "SELECT" },
+    ];
+    expect(groupGrants(rows)).toEqual([
+      { schema: "public", table: "a", grantee: "anon", privileges: ["SELECT", "INSERT"] },
+      { schema: "public", table: "a", grantee: "authenticated", privileges: ["SELECT"] },
+      { schema: "aml", table: "a", grantee: "anon", privileges: ["SELECT"] },
+    ]);
+  });
+
+  it("a name that contains a dot never merges two relations", () => {
+    const rows = [
+      { schema: "public", table: "a.b", grantee: "anon", privilege: "SELECT" },
+      { schema: "public.a", table: "b", grantee: "anon", privilege: "INSERT" },
+    ];
+    expect(groupGrants(rows)).toHaveLength(2);
+  });
+
+  it("nothing to grant is no statement", () => {
+    expect(groupGrants([])).toEqual([]);
+  });
+});
+
+describe("the definitional stages send only what the clone lacks", () => {
+  const src = stripComments(
+    readFileSync(join(process.cwd(), "src/server/schema-introspection.server.ts"), "utf8"),
+  );
+  const stage = (name: string) => {
+    const at = src.indexOf(`if (enterStage("${name}"))`);
+    expect(at, `stage ${name} not found`).toBeGreaterThan(-1);
+    return src.slice(at, src.indexOf("if (enterStage(", at + 10));
+  };
+
+  it("constraints are filtered by what the clone holds, by name", () => {
+    const body = stage("constraints");
+    expect(body).toMatch(/heldKeys\(cloneRef, Q\.constraintKeys\)/);
+    expect(body).toMatch(
+      /!held\.has\(`\$\{str\(r\.schema\)\}\.\$\{str\(r\.table_name\)\}\.\$\{str\(r\.name\)\}`\)/,
+    );
+    expect(body).toContain("CHEAP_DDL_BATCH");
+  });
+
+  it("policies are filtered by what the clone holds, by name", () => {
+    const body = stage("policies");
+    expect(body).toMatch(/heldKeys\(cloneRef, Q\.policyKeys\)/);
+    expect(body).toContain("CHEAP_DDL_BATCH");
+  });
+
+  it("constraints, policies and RLS are digested by name, so a surplus cannot hide a gap", () => {
+    const digests = src.slice(src.indexOf("const DIGESTS"));
+    const body = digests.slice(0, digests.indexOf("\n};"));
+    expect(body).toContain("constraints:");
+    expect(body).toContain("policies:");
+    expect(body).toContain("rls:");
+  });
+
+  it("RLS is switched on only where the clone has not, by name", () => {
+    const body = stage("rls");
+    expect(body).toMatch(/heldKeys\(cloneRef, Q\.rlsKeys\)/);
+  });
+
+  it("an unreadable clone list means do the work, never assume it is done", () => {
+    expect(src).toMatch(
+      /async function heldKeys[\s\S]{0,200}\.catch\(\(\) => \[\] as Array<Record<string, unknown>>\)/,
+    );
+  });
+
+  it("the grants stage sends one statement per relation and grantee", () => {
+    const body = stage("grants");
+    expect(body).toMatch(/groupGrants\(/);
+    expect(body).toMatch(/buildGrantDdl\(g\.schema, g\.table, g\.grantee, g\.privileges\)/);
+  });
+
+  it("cheap statements travel in larger batches", () => {
+    expect(CHEAP_DDL_BATCH).toBeGreaterThan(60);
+    expect(CHEAP_DDL_BATCH).toBeLessThanOrEqual(200);
   });
 });
 

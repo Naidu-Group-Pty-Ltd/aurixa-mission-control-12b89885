@@ -23,6 +23,7 @@ import { beginGithubLane } from "@/server/githubUsageMeter";
 import { decryptSecret } from "@/server/crypto.server";
 import { runQueuedBackendProvisioning } from "@/lib/backend-provisioning.functions";
 import { decideSpend } from "@/server/cascade/githubBudget.pure";
+import { upstreamBackoffMs } from "@/server/provisioningBudget";
 import { readGitHubRemaining } from "@/server/githubAllowance.server";
 import {
   DEAD_PASS_SILENT_MINUTES,
@@ -40,14 +41,56 @@ const admin = supabaseAdmin;
 const MAX_JOBS_PER_RUN = 2;
 const MAX_ATTEMPTS = 3;
 
+/**
+ * How long the scheduled request waits for this route to answer.
+ *
+ * Set on `backend-provisioning-drain-1min` by
+ * `20261031090000_backend_drain_http_patience.sql`, and named here because the
+ * budget below is derived from it: `backendDrainPatience.contract.test.ts`
+ * reads that migration to hold the two in step. A budget computed from a
+ * patience the cron job no longer has is how a pass outlives the request that
+ * asked for it — and a pass the request stopped waiting for is KILLED, not
+ * paused: the runtime cancels its work once the client disconnects, and the
+ * claim stands until `isDeadPass` judges it dead minutes later.
+ *
+ * It was 60 s, ten seconds above the budget, and that was not enough for the
+ * unit a pass happens to be inside when the budget runs out. Measured on
+ * `tutorial-demo-orrimere-c158c7`, 30 Oct 2026: two passes in a row died
+ * re-pointing the clone's repository (a run of GitHub commits), and the job
+ * finished only after a hand re-queue.
+ */
+const BACKEND_DRAIN_PATIENCE_MS = 150_000;
+
+/**
+ * What a pass leaves between its budget and that patience: room for the unit
+ * it is inside when the budget runs out — a run of repository commits, a
+ * function-source snapshot, an edge-function deploy, the finishing writes —
+ * plus the requeue and the response. Measured units run to a few tens of
+ * seconds; a hundred leaves room for a slow one several times over.
+ */
+const BACKEND_DRAIN_HEADROOM_MS = 100_000;
+
 // How long ONE invocation of this route may work before the pipeline pauses
-// at a stage boundary. pg_net stops waiting at 60s and the hosting runtime
-// reclaims the worker soon after, so an unbudgeted run dies mid-write with no
-// record — which is exactly how the first engine-provisioned clone burned all
-// three attempts on one step. A pause is requeued as forward progress
-// (attempts reset to 0); only a hard death costs an attempt, and only at a
-// point the job has died at before (`judgeDeadPass`).
-const INVOCATION_BUDGET_MS = 50_000;
+// at a stage boundary. An unbudgeted run dies mid-write with no record —
+// which is exactly how the first engine-provisioned clone burned all three
+// attempts on one step. A pause is requeued as forward progress (attempts
+// reset to 0); only a hard death costs an attempt, and only at a point the job
+// has died at before (`judgeDeadPass`).
+//
+// Fifty seconds, as it has always been, and deliberately not most of the
+// patience. pg_net sends a batch of requests and starts the next batch only
+// once every request in this one has answered
+// (`20261029160000_library_follow_patience.sql`), so a pass that ran for two
+// minutes would hold every other one-minute hook — voice calls, cascades,
+// other clones' deployments — for two minutes, every minute, for as long as a
+// clone builds. The patience is there for the overrun, not for the work.
+//
+// And unchanged so that the order this ships in cannot matter: if the code
+// reaches production before the migration reaches the database, the drain
+// still works fifty seconds against the old sixty, exactly as before.
+// Raising the budget is a separate decision, to take once the patience is
+// measured in place.
+const INVOCATION_BUDGET_MS = BACKEND_DRAIN_PATIENCE_MS - BACKEND_DRAIN_HEADROOM_MS;
 
 // The two bounds the attempt-neutral recycling answers to. They ask DIFFERENT
 // QUESTIONS, which is why one of them cannot do both jobs.
@@ -641,7 +684,13 @@ async function drainOne(deadlineAt: number): Promise<{
             // sixty seconds and spends another refused call, sixty times an
             // hour — the engine competing with its own retry frequency for
             // the quota it is waiting on.
-            retry_after: new Date(Date.now() + UPSTREAM_LIMIT_BACKOFF_MS).toISOString(),
+            retry_after: new Date(
+              Date.now() +
+                upstreamBackoffMs(
+                  result.ok ? null : result.retryAfterMs,
+                  UPSTREAM_LIMIT_BACKOFF_MS,
+                ),
+            ).toISOString(),
           }
         : {}),
     })
