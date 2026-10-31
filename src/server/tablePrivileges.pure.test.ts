@@ -2,7 +2,6 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  ENFORCE_TABLE_GRANTS,
   TABLE_PRIVILEGES,
   WORST_RELATIONS_CAP,
   compareTableGrants,
@@ -453,7 +452,7 @@ describe("decideTableGrantNotice", () => {
 describe("describeTableGrantNotice", () => {
   const s = summariseTableGrants(compare(Object.values(PRIME), Object.values(CLONE)));
 
-  it("names the relations worst first, and says nothing was revoked", () => {
+  it("names the relations worst first, and says nothing was revoked when reporting only", () => {
     const n = describeTableGrantNotice("NPC Test", s, "surplus");
     expect(n.severity).toBe("warning");
     expect(n.title).toBe(
@@ -469,6 +468,22 @@ describe("describeTableGrantNotice", () => {
     );
   });
 
+  it("says what the pass did on a clone the enforcement reaches, and on one it does not yet", () => {
+    const taken = describeTableGrantNotice("Tutorial Demo", s, "surplus", {
+      mode: "enforcing_demo",
+      enforcedHere: true,
+    });
+    expect(taken.body).toContain("The sweep took the surplus back on this clone and read it again");
+    expect(taken.body).not.toContain("Report only");
+
+    const waiting = describeTableGrantNotice("NPC Test", s, "surplus", {
+      mode: "enforcing_demo",
+      enforcedHere: false,
+    });
+    expect(waiting.body).toContain("Not taken back on this clone yet");
+    expect(waiting.body).toContain("the owner, 31 Oct 2026");
+  });
+
   it("says when it has cleared", () => {
     const n = describeTableGrantNotice("NPC Test", { ...s, compared: 610 }, "cleared");
     expect(n.severity).toBe("success");
@@ -477,16 +492,16 @@ describe("describeTableGrantNotice", () => {
   });
 });
 
-describe("the enforcement switch", () => {
-  it("is off, and the sweep calls itself report-only", () => {
-    expect(ENFORCE_TABLE_GRANTS).toBe(false);
-    expect(tableGrantMode()).toBe("report_only");
+describe("the mode a report calls itself", () => {
+  it("names the scope the owner's decision set", () => {
+    expect(tableGrantMode("off")).toBe("report_only");
+    expect(tableGrantMode("demo")).toBe("enforcing_demo");
+    expect(tableGrantMode("all")).toBe("enforcing_all");
   });
 
-  it("would not pretend to enforce: nothing that writes a grant is built behind it", () => {
-    expect(tableGrantMode(true)).toBe("enforcement_not_built");
+  it("still renders no statement: the comparison only compares", () => {
     const source = readFileSync(join(__dirname, "tablePrivileges.pure.ts"), "utf8");
-    // No statement is rendered anywhere in the comparison.
+    // Statements are planned in tableGrantEnforcement.pure.ts, never here.
     expect(source).not.toMatch(/`\s*(revoke|grant|alter)\s/i);
   });
 });

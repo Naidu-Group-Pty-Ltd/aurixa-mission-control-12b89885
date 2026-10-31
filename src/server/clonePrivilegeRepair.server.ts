@@ -24,7 +24,7 @@
  * nothing else can be planned (see `routinePrivileges.pure.ts`). No row is
  * read or written.
  *
- * ## Table privileges: compared, reported, never taken back
+ * ## Table privileges: compared, reported, and taken back where enforced
  *
  * On 28 Oct 2026 every clone gave `anon` SELECT, INSERT, UPDATE and DELETE on
  * 24 tables whose policies are `TO public USING (true)`, because a clone is
@@ -35,10 +35,13 @@
  * (`tablePrivileges.pure.ts`), and says what differs: in its result, in its
  * audit row, and in a notice for a person when a clone's surplus changes.
  *
- * It revokes nothing. The owner decided on 28 Oct 2026 to have it report for a
- * week and to review the reports before anything is enforced, and
- * `ENFORCE_TABLE_GRANTS` is off with nothing behind it. The table stage only
- * reads: the comparison returns counts and names, never a statement.
+ * It reported only, by the owner's decision of 28 Oct 2026, until the owner
+ * chose on 31 Oct 2026 to take the surplus back on every clone
+ * (`tableGrantEnforcement.pure.ts`). On a clone `TABLE_GRANT_ENFORCEMENT`
+ * reaches, a pass files the grants that would undo it, takes the surplus back,
+ * and reads the clone again, so its report is what the catalogue says after,
+ * not what the statements meant. On any other clone it reports, with the list
+ * of what would be taken back.
  *
  * ## Budget
  *
@@ -69,10 +72,30 @@ import {
   describeTableGrantNotice,
   summariseTableGrants,
   tableGrantMode,
+  type RelationAcl,
   type RelationAclReading,
+  type TableGrantComparison,
   type TableGrantMode,
   type TableGrantSummary,
 } from "./tablePrivileges.pure";
+import {
+  TABLE_GRANT_ENFORCEMENT,
+  enforcesTableGrants,
+  planTableGrantRevokes,
+  revokeLines,
+  type EnforcementCandidate,
+  type TableGrantEnforcementScope,
+} from "./tableGrantEnforcement.pure";
+
+/** The audit action that files a clone's revoke plan, and the grants that undo it, before it runs. */
+export const TABLE_GRANT_REVOKE_ACTION = "clone_table_privileges_revoked";
+
+/**
+ * At most this many relations a clone a pass, worst first, so one pass's
+ * statements always go in one call. The widest clone measured, the tutorial
+ * demo, had 139 on 31 Oct 2026.
+ */
+export const TABLE_GRANT_RELATIONS_PER_PASS = 200;
 
 type Db = SupabaseClient<Database>;
 
@@ -98,8 +121,50 @@ export type ClonePrivilegeOutcome = {
  * has one, so a clone that could not be compared says why and is never read as
  * a clone with nothing to report.
  */
+/** What a pass did about one clone's surplus, beside the reading after it. */
+export type TableGrantEnforcementOutcome =
+  | {
+      done: "revoked";
+      /** Table-level privileges the plan took back, and on how many relations. */
+      privileges: number;
+      relations: number;
+      applied: number;
+      failed: number;
+      errors?: string[];
+      /** The reading the plan was made from. The report itself is the reading after. */
+      before: { surplus: number; relations: number };
+      /** Relations left for the next pass, past `TABLE_GRANT_RELATIONS_PER_PASS`. */
+      deferred?: number;
+      refused?: Array<{ relation: string; why: string }>;
+    }
+  | {
+      done: "planned";
+      /** A dry run: what a pass would take back, and the first statements. */
+      privileges: number;
+      relations: number;
+      sample: string[];
+      refused?: Array<{ relation: string; why: string }>;
+    }
+  | {
+      done: "withheld";
+      /** Nothing was taken back, and why. */
+      why: string;
+    };
+
 export type CloneTableGrantReport =
-  | ({ cloneId: string; cloneName: string; projectRef: string; read: "ok" } & TableGrantSummary)
+  | ({
+      cloneId: string;
+      cloneName: string;
+      projectRef: string;
+      read: "ok";
+      /** Present where the pass took the surplus back, or would have. */
+      enforcement?: TableGrantEnforcementOutcome;
+      /**
+       * Out of scope: what a pass would revoke on each relation, PUBLIC's
+       * included, for the review before the scope widens (`revokeLines`).
+       */
+      wouldRevoke?: string[];
+    } & TableGrantSummary)
   | {
       cloneId: string;
       cloneName: string;
@@ -120,8 +185,11 @@ export type CloneTableGrantReport =
   | { cloneId: string; read: "not_read"; why: string };
 
 export type TableGrantSweep = {
-  /** `report_only`: nothing is revoked (the owner, 28 Oct 2026). */
+  /** Whether a pass takes anything back, and on which clones (`TABLE_GRANT_ENFORCEMENT`). */
   mode: TableGrantMode;
+  scope: TableGrantEnforcementScope;
+  /** Set when the clones' records, which decide the demo scope, could not be read. */
+  scopeUnread?: string;
   clones: CloneTableGrantReport[];
   /** Clones the budget stopped the pass before. This pass says nothing about them. */
   notReached: string[];
@@ -170,9 +238,17 @@ function settle<T>(run: () => Promise<T>): Promise<Settled<T>> {
 
 export async function reconcileClonePrivileges(
   supabase: Db,
-  opts: { deadlineAt: number; dryRun?: boolean; cloneId?: string; now?: number },
+  opts: {
+    deadlineAt: number;
+    dryRun?: boolean;
+    cloneId?: string;
+    now?: number;
+    /** Which clones a pass takes the surplus back on. `TABLE_GRANT_ENFORCEMENT` when absent. */
+    tableGrantScope?: TableGrantEnforcementScope;
+  },
 ): Promise<ClonePrivilegeReconcileResult> {
   const dryRun = Boolean(opts.dryRun);
+  const scope = opts.tableGrantScope ?? TABLE_GRANT_ENFORCEMENT;
   let q = supabase
     .from("clone_backends")
     .select("clone_id, supabase_project_ref")
@@ -195,13 +271,32 @@ export async function reconcileClonePrivileges(
     pausedAt: null,
     refused: [],
     tables: {
-      mode: tableGrantMode(),
+      mode: tableGrantMode(scope),
+      scope,
       clones: [],
       notReached: [],
       notices: { raised: 0, failed: 0, ledger: "nothing_read" },
     },
   };
   if (candidates.length === 0) return out;
+
+  // Who is a demo is read from Mission Control's own records, once a pass. A
+  // read that fails puts no clone in the demo scope: taking privileges back is
+  // the write, and a guess must never decide one.
+  const records = new Map<string, EnforcementCandidate>();
+  if (scope === "demo") {
+    const { data: rows, error: recordsError } = await supabase
+      .from("clones")
+      .select("id, billing_stripe_customer_id, entitled_plan_slug, tags")
+      .in("id", candidates);
+    if (recordsError) {
+      out.tables.scopeUnread = recordsError.message;
+    } else {
+      for (const r of (rows ?? []) as Array<EnforcementCandidate & { id: string }>) {
+        records.set(r.id, r);
+      }
+    }
+  }
 
   const { resolvePrimeBackendRef } = await import("./prime-backend.server");
   // Unset is fatal here, as it is for provisioning: with no prime there is no
@@ -290,16 +385,62 @@ export async function reconcileClonePrivileges(
 
     // A read only, so it is kept even when the function pass on the same
     // clone was stopped or refused: the two are independent questions.
-    out.tables.clones.push(await tables);
+    const surveyed = await tables;
+    let report: CloneTableGrantReport = surveyed.report;
+    const ok = surveyed.report.read === "ok" ? surveyed.report : null;
+    if (ok && surveyed.detail && ok.relations > 0) {
+      if (!enforcesTableGrants(scope, records.get(cloneId) ?? null)) {
+        const { comparison, prime, clone, maintainOnBoth } = surveyed.detail;
+        report = {
+          ...ok,
+          wouldRevoke: revokeLines(
+            planTableGrantRevokes({ entries: comparison.entries, prime, clone, maintainOnBoth }),
+          ),
+        };
+      } else if (paused) {
+        // The budget is spent; the next pass re-plans from both catalogues.
+        report = {
+          ...ok,
+          enforcement: { done: "withheld", why: "the pass ran out of time on this clone" },
+        };
+      } else {
+        try {
+          report = await enforceCloneTableGrants(cloneId, ok, surveyed.detail, {
+            scope,
+            dryRun,
+            deadlineAt: opts.deadlineAt,
+            readClone: () => readRelationAcls(cloneRef),
+          });
+        } catch (e) {
+          // A fault in taking back is this clone's, and said as one: the
+          // function work and every other clone are still reported. The call
+          // that writes is one transaction, so a fault leaves none of it half
+          // done; the planned row filed before it says what was attempted.
+          report = {
+            ...ok,
+            enforcement: { done: "withheld", why: `taking back failed: ${msg(e).slice(0, 300)}` },
+          };
+        }
+      }
+    }
+    out.tables.clones.push(report);
     if (paused) {
       out.tables.notReached = order.slice(i + 1);
       break;
     }
   }
 
-  out.tables.notices = await announceTableGrantChanges(supabase, out.tables.clones, dryRun);
+  out.tables.notices = await announceTableGrantChanges(supabase, out.tables.clones, dryRun, scope);
   return out;
 }
+
+/** What a survey compared, kept for the pass that takes the surplus back. */
+type SurveyDetail = {
+  comparison: TableGrantComparison;
+  prime: readonly RelationAcl[];
+  clone: readonly RelationAcl[];
+  maintainOnBoth: boolean;
+};
 
 /**
  * One clone's table privileges against the prime's. Reads only, and never
@@ -309,18 +450,15 @@ async function surveyCloneTableGrants(
   target: { cloneId: string; cloneName: string; projectRef: string },
   prime: Promise<Settled<RelationAclReading>>,
   readClone: () => Promise<RelationAclReading>,
-): Promise<CloneTableGrantReport> {
+): Promise<{ report: CloneTableGrantReport; detail?: SurveyDetail }> {
   const [p, c] = await Promise.all([prime, settle(readClone)]);
   const base = {
     cloneId: target.cloneId,
     cloneName: target.cloneName,
     projectRef: target.projectRef,
   };
-  const unreadable = (side: "prime" | "clone", error: string): CloneTableGrantReport => ({
-    ...base,
-    read: "unreadable",
-    side,
-    error,
+  const unreadable = (side: "prime" | "clone", error: string) => ({
+    report: { ...base, read: "unreadable" as const, side, error },
   });
   if (!p.ok) return unreadable("prime", p.error);
   if (!c.ok) return unreadable("clone", c.error);
@@ -338,15 +476,181 @@ async function surveyCloneTableGrants(
   // for this clone rather than failing the pass: the function work on every
   // clone is still reported.
   try {
+    const maintainOnBoth = p.value.maintain && c.value.maintain;
     const comparison = compareTableGrants({
       prime: p.value.relations,
       clone: c.value.relations,
-      maintainOnBoth: p.value.maintain && c.value.maintain,
+      maintainOnBoth,
     });
-    return { ...base, read: "ok", ...summariseTableGrants(comparison) };
+    return {
+      report: { ...base, read: "ok", ...summariseTableGrants(comparison) },
+      detail: { comparison, prime: p.value.relations, clone: c.value.relations, maintainOnBoth },
+    };
   } catch (e) {
-    return { ...base, read: "failed", error: msg(e).slice(0, 300) };
+    return { report: { ...base, read: "failed", error: msg(e).slice(0, 300) } };
   }
+}
+
+type OkReport = Extract<CloneTableGrantReport, { read: "ok" }>;
+
+/**
+ * Take one clone's surplus back, and say what its catalogue holds after.
+ *
+ * In order, and each step only when the one before it held:
+ *   1. plan from the comparison and both readings (`planTableGrantRevokes`);
+ *   2. file the plan and the grants that undo it in the audit log. A plan that
+ *      could not be filed is not run: once the privileges are gone, that row
+ *      is the only record of what they were;
+ *   3. run it, one subtransaction a relation, all in one call to the batch
+ *      helper, which is one transaction: the clone holds the whole pass's work
+ *      or none of it. The budget is checked before anything is filed, never
+ *      between batches, and one pass carries at most
+ *      `TABLE_GRANT_RELATIONS_PER_PASS` relations, worst first;
+ *   4. read the clone again and compare, so the report is the catalogue after
+ *      and never the statements' intent. A clone that cannot be read after
+ *      keeps the reading before, said as such.
+ *
+ * A dry run stops after the plan and answers with a sample. A fault of its
+ * own is thrown, and the sweep reports it for this clone.
+ */
+async function enforceCloneTableGrants(
+  cloneId: string,
+  before: OkReport,
+  detail: SurveyDetail,
+  opts: {
+    scope: TableGrantEnforcementScope;
+    dryRun: boolean;
+    deadlineAt: number;
+    readClone: () => Promise<RelationAclReading>;
+  },
+): Promise<CloneTableGrantReport> {
+  const plan = planTableGrantRevokes({
+    entries: detail.comparison.entries,
+    prime: detail.prime,
+    clone: detail.clone,
+    maintainOnBoth: detail.maintainOnBoth,
+  });
+  const refused = plan.refused.length ? { refused: plan.refused } : {};
+  if (opts.dryRun) {
+    return {
+      ...before,
+      enforcement: {
+        done: "planned",
+        privileges: plan.privileges,
+        relations: plan.relations.length,
+        sample: plan.relations.slice(0, 10).map((r) => r.statement),
+        ...refused,
+      },
+    };
+  }
+  if (plan.relations.length === 0) {
+    return {
+      ...before,
+      enforcement: {
+        done: "withheld",
+        why: plan.refused.length
+          ? `no relation could be planned: ${plan.refused.map((r) => `${r.relation} (${r.why})`).join("; ")}`
+          : "the surplus is all held through grants this sweep does not take back",
+      },
+    };
+  }
+
+  // Nothing is filed or sent once the budget is spent: the next pass plans it
+  // again from both catalogues.
+  if (pastDeadline(opts.deadlineAt)) {
+    return {
+      ...before,
+      enforcement: {
+        done: "withheld",
+        why: "no time was left in this pass; the next pass plans it again",
+      },
+    };
+  }
+  const thisPass = plan.relations.slice(0, TABLE_GRANT_RELATIONS_PER_PASS);
+  const deferred = plan.relations.length - thisPass.length;
+  const privileges = thisPass.reduce(
+    (n, r) => n + r.revoke.anon.length + r.revoke.authenticated.length + r.revoke.PUBLIC.length,
+    0,
+  );
+
+  const filed = await writeAuditLog({
+    action: TABLE_GRANT_REVOKE_ACTION,
+    entityType: "clone",
+    entityId: cloneId,
+    metadata: {
+      stage: "planned",
+      scope: opts.scope,
+      privileges,
+      surplusBefore: before.surplus,
+      relations: thisPass.map(({ statement: _statement, ...r }) => r),
+      ...(deferred > 0 ? { deferred } : {}),
+      ...refused,
+    },
+  });
+  if (!filed) {
+    return {
+      ...before,
+      enforcement: {
+        done: "withheld",
+        why: "the plan and the grants that undo it could not be filed in the audit log, so nothing was taken back",
+      },
+    };
+  }
+
+  const { applyTableGrantRevokes } = await import("./schema-introspection.server");
+  const applied = await applyTableGrantRevokes(
+    before.projectRef,
+    thisPass.map((r) => r.statement),
+  );
+
+  const outcome: TableGrantEnforcementOutcome = {
+    done: "revoked",
+    privileges,
+    relations: thisPass.length,
+    applied: applied.applied,
+    failed: applied.failed,
+    ...(applied.errors.length ? { errors: applied.errors.slice(0, 10) } : {}),
+    before: { surplus: before.surplus, relations: before.relations },
+    ...(deferred > 0 ? { deferred } : {}),
+    ...refused,
+  };
+
+  // By effect: what the clone's catalogue says now.
+  const reread = await settle(opts.readClone);
+  let after: CloneTableGrantReport = { ...before, enforcement: outcome };
+  if (reread.ok && reread.value.relations.length > 0) {
+    const maintainOnBoth = detail.maintainOnBoth && reread.value.maintain;
+    after = {
+      ...before,
+      ...summariseTableGrants(
+        compareTableGrants({ prime: detail.prime, clone: reread.value.relations, maintainOnBoth }),
+      ),
+      enforcement: outcome,
+    };
+  } else {
+    outcome.errors = [
+      ...(outcome.errors ?? []),
+      `the clone could not be read after: ${reread.ok ? "it answered no relation" : reread.error}; the reading shown is from before`,
+    ];
+  }
+
+  await writeAuditLog({
+    action: TABLE_GRANT_REVOKE_ACTION,
+    entityType: "clone",
+    entityId: cloneId,
+    metadata: {
+      stage: "applied",
+      scope: opts.scope,
+      privileges,
+      relations: thisPass.length,
+      applied: applied.applied,
+      failed: applied.failed,
+      errors: outcome.errors ?? [],
+      surplusBefore: before.surplus,
+      surplusAfter: after.read === "ok" ? after.surplus : null,
+    },
+  });
+  return after;
 }
 
 /**
@@ -368,6 +672,7 @@ async function announceTableGrantChanges(
   supabase: Db,
   reports: readonly CloneTableGrantReport[],
   dryRun: boolean,
+  scope: TableGrantEnforcementScope,
 ): Promise<TableGrantSweep["notices"]> {
   const read = reports.filter(
     (r): r is Extract<CloneTableGrantReport, { read: "ok" }> => r.read === "ok",
@@ -412,7 +717,10 @@ async function announceTableGrantChanges(
   for (const r of read) {
     const decision = decideTableGrantNotice({ previous: last.get(r.cloneId) ?? null, current: r });
     if (!decision.notify) continue;
-    const notice = describeTableGrantNotice(r.cloneName, r, decision.kind);
+    const notice = describeTableGrantNotice(r.cloneName, r, decision.kind, {
+      mode: tableGrantMode(scope),
+      enforcedHere: r.enforcement?.done === "revoked",
+    });
     const landed = await notifyOperators({
       kind: "drift_medium",
       severity: notice.severity,
@@ -423,7 +731,7 @@ async function announceTableGrantChanges(
       metadata: {
         source: TABLE_GRANT_NOTICE_SOURCE,
         fingerprint: decision.fingerprint,
-        mode: tableGrantMode(),
+        mode: tableGrantMode(scope),
         surplus: r.surplus,
         relations: r.relations,
         columnSurplus: r.columnSurplus,
@@ -443,7 +751,7 @@ async function announceTableGrantChanges(
       metadata: {
         fingerprint: decision.fingerprint,
         kind: decision.kind,
-        mode: tableGrantMode(),
+        mode: tableGrantMode(scope),
         surplus: r.surplus,
         relations: r.relations,
         columnSurplus: r.columnSurplus,
@@ -464,8 +772,14 @@ async function announceTableGrantChanges(
  * the prime the sweep is quiet again. A dry run answers its caller instead.
  */
 export function privilegeSweepIsNoteworthy(report: ClonePrivilegeReconcileResult): boolean {
-  const wrote = report.changed.some((c) => c.applied > 0 || c.failed > 0);
-  if (wrote || report.refused.length > 0) return true;
+  const wrote =
+    report.changed.some((c) => c.applied > 0 || c.failed > 0) ||
+    report.tables.clones.some(
+      (c) =>
+        c.read === "ok" &&
+        (c.enforcement?.done === "revoked" || c.enforcement?.done === "withheld"),
+    );
+  if (wrote || report.refused.length > 0 || report.tables.scopeUnread) return true;
   if (report.dryRun) return false;
   if (report.pausedAt) return true;
   const t = report.tables;

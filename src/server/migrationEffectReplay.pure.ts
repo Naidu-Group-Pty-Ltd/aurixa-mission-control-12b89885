@@ -25,9 +25,9 @@
  * `MIGRATION_WITHDRAWN.json` and is held to its kinds by the prime's own gate
  * (`scripts/security/check-migration-effect-replays.mjs`, through
  * `scripts/ops/migrationEffectReplays.pure.mjs`). Every other probe is only
- * reported. The wider table-privilege surplus stays report-only
- * (`tablePrivileges.pure.ts`, `ENFORCE_TABLE_GRANTS` off) until the owner's
- * review.
+ * reported. The wider table-privilege surplus is taken back by the privilege
+ * sweep, on the clones the owner's decision of 31 Oct 2026 reaches
+ * (`tableGrantEnforcement.pure.ts`).
  *
  * ## For each listed file
  *

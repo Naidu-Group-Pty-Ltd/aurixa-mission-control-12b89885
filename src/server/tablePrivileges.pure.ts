@@ -22,13 +22,15 @@
  * 20270205090000 restates 124 more relations. A clone built later starts open
  * again, and this is what sees it.
  *
- * ## Report first
+ * ## Report first, then taken back
  *
- * The owner's decision of 28 Oct 2026: "Sweep tables, report first". The sweep
- * reports for a week, and the owner reviews the reports before anything is
- * enforced. So nothing here plans a statement: every output is a count, a
- * ranked list or a fingerprint. `ENFORCE_TABLE_GRANTS` is the switch an
- * enforcement would sit behind. It is off, and nothing is behind it yet.
+ * The owner's decision of 28 Oct 2026 was "Sweep tables, report first": the
+ * sweep reported, and the owner was to review the reports before anything was
+ * enforced. On 31 Oct 2026 the owner chose to take the surplus back on every
+ * clone. Nothing here plans a statement: every output is a count, a ranked
+ * list or a fingerprint, and the statements are planned from this comparison
+ * in `tableGrantEnforcement.pure.ts`, whose `TABLE_GRANT_ENFORCEMENT` says
+ * which clones a pass reaches.
  *
  * ## The rules of the comparison
  *
@@ -110,22 +112,15 @@ export const WRITE_PRIVILEGES: readonly TablePrivilege[] = [
 ];
 
 /**
- * The switch a table-grant enforcement would sit behind. OFF.
- *
- * "Sweep tables, report first" (the owner, 28 Oct 2026): a week of reports,
- * then the owner reviews them before anything is enforced. Nothing reads this
- * to write, because nothing that writes a grant is built: turning it on before
- * then changes what the report calls itself (`tableGrantMode`) and nothing
- * else. Enforcing is a change of its own, made after the review, that builds
- * the revoke and turns this on together.
+ * What the sweep's table stage does, said in every report and notice: report
+ * only, or take the surplus back on the demo, or on every clone. The scope is
+ * `TABLE_GRANT_ENFORCEMENT` in `tableGrantEnforcement.pure.ts`; it is passed
+ * in here, so this module never imports the one that writes.
  */
-export const ENFORCE_TABLE_GRANTS = false as const;
+export type TableGrantMode = "report_only" | "enforcing_demo" | "enforcing_all";
 
-export type TableGrantMode = "report_only" | "enforcement_not_built";
-
-/** What the sweep's table comparison is, said in every report. */
-export function tableGrantMode(enforce: boolean = ENFORCE_TABLE_GRANTS): TableGrantMode {
-  return enforce ? "enforcement_not_built" : "report_only";
+export function tableGrantMode(scope: "off" | "demo" | "all"): TableGrantMode {
+  return scope === "all" ? "enforcing_all" : scope === "demo" ? "enforcing_demo" : "report_only";
 }
 
 /** One relation as read from a project's catalogue. */
@@ -601,11 +596,31 @@ const KIND_NOUN: Record<string, string> = {
 const plural = (n: number, one: string, many = `${one}s`) =>
   `${n.toLocaleString("en-AU")} ${n === 1 ? one : many}`;
 
+/** One sentence on what was done about the surplus a notice lists. */
+function tableGrantStanding(taken: { mode: TableGrantMode; enforcedHere: boolean }): string {
+  if (taken.mode === "report_only") return "Report only: nothing was revoked.";
+  if (taken.enforcedHere) {
+    return (
+      "The sweep took the surplus back on this clone and read it again: what is listed " +
+      "is what still stands, and the next pass tries it again."
+    );
+  }
+  return (
+    "Not taken back on this clone yet: the sweep takes the surplus back on the tutorial " +
+    "demo first, and on every clone once the demo reads clean (the owner, 31 Oct 2026)."
+  );
+}
+
 /** The notice's words. Named in full, because nothing else on the page says which relation. */
 export function describeTableGrantNotice(
   cloneName: string,
   summary: TableGrantSummary,
   kind: "surplus" | "cleared",
+  /** What this pass did about the surplus on this clone. */
+  taken: { mode: TableGrantMode; enforcedHere: boolean } = {
+    mode: "report_only",
+    enforcedHere: false,
+  },
 ): { title: string; body: string; severity: "warning" | "success" } {
   if (kind === "cleared") {
     return {
@@ -642,8 +657,7 @@ export function describeTableGrantNotice(
       `Compared with the prime's live ACLs on ${plural(summary.compared, "relation")} both hold: ` +
       `anon ${summary.byRole.anon.toLocaleString("en-AU")}, ` +
       `authenticated ${summary.byRole.authenticated.toLocaleString("en-AU")}.${columns} ` +
-      "Report only: nothing was revoked, and nothing will be until the owner has reviewed " +
-      "a week of these.\n\nWorst first:\n" +
+      `${tableGrantStanding(taken)}\n\nWorst first:\n` +
       lines.join("\n"),
   };
 }

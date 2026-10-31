@@ -893,7 +893,16 @@ describe("no bulk apply runs without a budget check", () => {
     /* The definition itself is not a call site. */
     const callSites = calls.filter((c) => !c.includes("cloneRef: string"));
     expect(callSites.length).toBeGreaterThan(0);
-    const unguarded = callSites.filter((c) => !/pause/i.test(c));
+    /* Exempt only where the apply is ONE call, which nothing inside can pause:
+       the table-privilege revoke sends a pass's whole plan to the helper at
+       once, in one transaction, and checks the budget before it starts
+       (`applyTableGrantRevokes`). Batched with a pause between them, a pass
+       committed revokes its report, read from before, still showed held
+       (Codex on #472). The pattern holds it to a batch the size of the list. */
+    const ONE_CALL = [/"table_privileges", statements, statements\.length$/];
+    const unguarded = callSites.filter(
+      (c) => !/pause/i.test(c) && !ONE_CALL.some((r) => r.test(c.trim())),
+    );
     expect(unguarded, `applies with no budget check: ${unguarded.join(" | ")}`).toEqual([]);
   });
 

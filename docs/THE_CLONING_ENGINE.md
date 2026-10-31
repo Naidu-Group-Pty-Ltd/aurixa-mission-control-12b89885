@@ -1834,9 +1834,19 @@ The sweep now compares table privileges on each pass
   columns says so, because a table-level revoke would take them.
 - **MAINTAIN** is compared where both servers have it (all five run 17), and
   dropped from both sides where one does not.
-- **Report only.** By the owner's decision of 28 Oct 2026, nothing is revoked
-  until the owner has reviewed a week of reports. `ENFORCE_TABLE_GRANTS` is off
-  and nothing that writes a grant is built behind it.
+- **Report first, then taken back.** By the owner's decision of 28 Oct 2026
+  the sweep reported only. On 31 Oct 2026 the owner chose "Build enforcement,
+  all clones" (`tableGrantEnforcement.pure.ts`): on a clone
+  `TABLE_GRANT_ENFORCEMENT` reaches, a pass files the plan and the grants that
+  undo it in the audit log (`clone_table_privileges_revoked`), takes the
+  surplus back in one statement a relation, and reads the clone again. Each
+  role keeps every column it held and the prime gives it, itself or through
+  PUBLIC, and no role gains one; the undo puts the relation back exactly,
+  column grants included. Both are checked on a model of the catalogue in
+  the tests and were checked on 700 random relations on Postgres 16. It
+  reaches the demo first and every clone once the demo reads clean; a clone
+  not yet reached is reported with what each of its relations' statements
+  would revoke, PUBLIC's included (`wouldRevoke`).
 - **Where it says so.** Under `tables` in the hook's answer, in the
   `clone_privilege_reconcile_cron` audit row (filed on every scheduled pass
   while any clone holds a surplus or could not be read), and in a
