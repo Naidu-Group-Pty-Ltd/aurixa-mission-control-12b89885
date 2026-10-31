@@ -87,6 +87,12 @@ import {
   readProjectFunctionCopies,
   type ProjectFunctionCopy,
 } from "./projectFunctionCopies.pure";
+import {
+  buildWorkspaceAppearanceSeedSql,
+  describeWorkspaceAppearanceSeed,
+  readWorkspaceAppearanceSeed,
+  type WorkspaceAppearanceSeed,
+} from "./branding/workspaceAppearance";
 
 const MGMT_API = "https://api.supabase.com/v1";
 
@@ -6252,6 +6258,27 @@ export type IntrospectionSummary = {
   nonEmptyTables: string[];
 };
 
+/**
+ * Establish a new workspace's appearance on its clone and read back what it
+ * holds (`branding/workspaceAppearance.ts`). Never throws: whatever happens is
+ * the outcome, and a call that failed says why.
+ *
+ * Safe to send again after an answer that may have come after it ran, because
+ * it writes only into an empty table.
+ */
+export async function seedWorkspaceAppearance(
+  projectRef: string,
+): Promise<WorkspaceAppearanceSeed> {
+  try {
+    const rows = await runSqlOnProject(projectRef, buildWorkspaceAppearanceSeedSql(), {
+      idempotent: true,
+    });
+    return readWorkspaceAppearanceSeed(rows);
+  } catch (err) {
+    return { outcome: "failed", error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 export type ProvisionBackendResult = {
   projectRef: string;
   projectUrl: string;
@@ -6267,6 +6294,12 @@ export type ProvisionBackendResult = {
    * came to look finished once already.
    */
   adminSeed: AdminSeedReport | null;
+  /**
+   * What the build did to the workspace's appearance (`workspaceAppearance.ts`),
+   * read back from the clone. Null when the pass did not run it, which is a
+   * repair; the same "not attempted" the admin seed's null means.
+   */
+  workspaceAppearance?: WorkspaceAppearanceSeed | null;
   migrationsApplied: PrimeMigrationResult[];
   /**
    * What `clone_backends.migration_version` may be set to, and whether it may
@@ -7295,6 +7328,7 @@ export async function provisionCloneBackend(
       dbPass,
       adminUserId: null,
       adminSeed: null,
+      workspaceAppearance: null,
       migrationsApplied,
       latestMigration: migrationFrontier,
       introspection,
@@ -7339,6 +7373,18 @@ export async function provisionCloneBackend(
     [describeSeed(adminSeed, input.adminEmail), ...adminSeed.notes].join(" "),
   );
 
+  // Step 8: The workspace's first appearance, in dark (owner, 31 Oct 2026).
+  //
+  // Behind the repair return above, as the admin seed is, so it runs on a build
+  // and never over a handed-over tenant. It writes only into an empty table, so
+  // a resumed build that comes past here again leaves the row as the first
+  // pass wrote it, and never overwrites a workspace's own settings. A failure
+  // is said rather than thrown: the schema, the functions and the admin are all
+  // real, and a workspace that opens in light is usable and is set right from
+  // its own White Label page.
+  const workspaceAppearance = await seedWorkspaceAppearance(projectRef);
+  await onStatusUpdate?.("seeding_admin", describeWorkspaceAppearanceSeed(workspaceAppearance));
+
   return {
     projectRef,
     projectUrl,
@@ -7347,6 +7393,7 @@ export async function provisionCloneBackend(
     dbPass,
     adminUserId,
     adminSeed,
+    workspaceAppearance,
     migrationsApplied,
     latestMigration: migrationFrontier,
     introspection,

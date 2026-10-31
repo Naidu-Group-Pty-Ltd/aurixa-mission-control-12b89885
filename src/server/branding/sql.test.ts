@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { buildApplySql, primeContactPayload, WHITELABEL_COLUMN_SOURCES } from "./sql";
 import { BRAND_MARK_SLOTS, markLogoConfigSources, missingMarks } from "@/lib/brand/marks";
 import { CLONE_BRAND_BUCKET } from "./mirror";
+import { CLONE_DEFAULT_THEME } from "./workspaceAppearance";
 
 describe("primeContactPayload", () => {
   it("maps the bundle's contact_* keys onto the keys the prime reads", () => {
@@ -133,6 +134,25 @@ describe("buildApplySql — against the schema that actually exists", () => {
     // a bare SQL string literal in an UPDATE.
     expect(out).not.toContain("SET company_name = 'O''Brien");
     expect(out).toContain("USING trim(_wl->>'brand_name'), _wl_id");
+  });
+
+  it("establishes an empty table's row with the platform's theme default, as a build does", () => {
+    // The cascade is the second writer of a new row (workspaceAppearance.ts is
+    // the first). Both read the default from one constant, and both write it
+    // only into an empty table: a row that exists keeps its own theme.
+    const out = sql();
+    const establish = out.slice(
+      out.indexOf("IF NOT EXISTS (SELECT 1 FROM public.whitelabel_settings) THEN"),
+      out.indexOf("SELECT id INTO _wl_id"),
+    );
+    expect(establish).toContain(
+      `INSERT INTO public.whitelabel_settings (dark_mode_default) VALUES ('${CLONE_DEFAULT_THEME}')`,
+    );
+    // A clone whose table predates the column still gets its row.
+    expect(establish).toContain("INSERT INTO public.whitelabel_settings DEFAULT VALUES");
+    // And nothing anywhere writes the theme over a row that exists.
+    expect(out).not.toMatch(/SET\s+dark_mode_default/);
+    expect(WHITELABEL_COLUMN_SOURCES.map((s) => s.column)).not.toContain("dark_mode_default");
   });
 
   it("still does not write theme_config", () => {
