@@ -1979,3 +1979,18 @@ pass with the clone still in the fleet (`managementApiRetry.test.ts`).
 - The tables stage read its prefetched counts as bare numbers when they had
   become probes (`{ n, digest }`), so it missed every time and paid two more
   round trips each pass.
+
+### Project settings were never judged, on any clone
+
+`projectSettingsParity.server.ts` read the Management API token as
+`SUPABASE_ACCESS_TOKEN` — a name Lovable reserves and this deployment cannot
+set — while every other caller reads `SB_MGMT_API_TOKEN`. So every parity
+report on every clone said the prime's exposed schemas and upload limit
+"could not be read (no Management API token is configured for Mission
+Control)", on the same deployment that was creating projects with the token.
+The exposed schemas are the setting whose absence answered `PGRST106 Invalid
+schema: aml` on every clone; the section built to catch that had never run.
+It reads `SB_MGMT_API_TOKEN` now (the old name stays as a local fallback).
+Measured 31 Oct 2026 before the change: the newest clone's PostgREST exposes
+`public, graphql_public, aml`, as the prime's does, so the first real reading
+is expected to be clean.

@@ -11,15 +11,31 @@
  * database sections are still worth having — but it must not report the
  * settings as matching either, which is what an uncaught null would become.
  */
-import {
-  type ProjectSettingsSnapshot,
-  type SettingReading,
-} from "./projectSettingsParity.pure";
+import { type ProjectSettingsSnapshot, type SettingReading } from "./projectSettingsParity.pure";
 
 const MGMT_API = "https://api.supabase.com/v1";
 
+/**
+ * The Management API token, read under the name every other caller in Mission
+ * Control reads it: `SB_MGMT_API_TOKEN` (`backend-provisioning.server.ts`).
+ *
+ * This module alone read `SUPABASE_ACCESS_TOKEN` — a name Lovable reserves
+ * (its `SUPABASE_` prefix cannot be set on this deployment) — so on Mission
+ * Control it was always empty, and every parity report on every clone said
+ * "not judged: the prime's exposed schemas could not be read (no Management
+ * API token is configured for Mission Control)" while provisioning, on the
+ * same deployment, was creating projects with the token. The settings this
+ * section exists to judge — the exposed schemas whose absence answered
+ * `PGRST106 Invalid schema: aml` on every clone, and the upload limit that
+ * refused two buckets — were never compared once. The old name is kept as a
+ * fallback for a local environment that sets it.
+ */
+export function managementApiToken(env: Record<string, string | undefined>): string {
+  return (env.SB_MGMT_API_TOKEN ?? "").trim() || (env.SUPABASE_ACCESS_TOKEN ?? "").trim();
+}
+
 function headers(): Record<string, string> {
-  const token = process.env.SUPABASE_ACCESS_TOKEN ?? "";
+  const token = managementApiToken(process.env);
   return { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
 }
 
@@ -61,7 +77,7 @@ export async function readProjectSettings(projectRef: string): Promise<ProjectSe
  * says "not judged: no Management API token" rather than a bare 401.
  */
 export function managementApiUnavailable(): ProjectSettingsSnapshot | null {
-  if ((process.env.SUPABASE_ACCESS_TOKEN ?? "").trim().length > 0) return null;
+  if (managementApiToken(process.env).length > 0) return null;
   const reason: SettingReading<never> = {
     state: "unavailable",
     error: "no Management API token is configured for Mission Control",
