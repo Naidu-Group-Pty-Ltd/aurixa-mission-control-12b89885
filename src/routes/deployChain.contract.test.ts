@@ -43,8 +43,13 @@ describe("deployment step chaining", () => {
     const drain = bodyOf("drain");
     expect(drain).toMatch(/const startedAt = Date\.now\(\);/);
     expect(drain).toMatch(
-      /outcome\.kind === "advance" &&\s*chained < MAX_CHAINED_STEPS &&\s*Date\.now\(\) - startedAt < DEPLOY_CHAIN_WINDOW_MS\s*\?\s*await claimNextStep\(current\.clone_id\)\s*:\s*null/,
+      /const mayChain =\s*outcome\.kind === "advance" &&\s*chained < MAX_CHAINED_STEPS &&\s*Date\.now\(\) - startedAt < DEPLOY_CHAIN_WINDOW_MS;/,
     );
+    expect(drain).toMatch(
+      /current = mayChain\s*\?\s*await claimNextStep\(current\.clone_id\)\.catch\(/,
+    );
+    // A chain that cannot be taken ends the chain; it never fails the tick.
+    expect(drain).toMatch(/\.catch\(\(e: unknown\) => \{[\s\S]{0,240}return null;/);
     // Every step, chained or not, is finalized: the status is written in one place.
     const loopAt = drain.indexOf("while (current)");
     expect(loopAt).toBeGreaterThan(-1);

@@ -2597,10 +2597,50 @@ export async function verifyCloneIsEmpty(
  * migration ledger is empty — so future INCREMENTAL migrations would try to
  * replay history that is already present. Stamp the prime's applied IDs.
  */
+/**
+ * Where the prime's migration ledger stands: how many versions it records and
+ * the highest. Read-only.
+ *
+ * Taken BEFORE a verification pass walks the catalogue, and compared with what
+ * the stamp copies AFTER it (`primeLedgerMoved`). The stamp reads the prime's
+ * ledger at the end of the pass, so a migration the prime recorded while the
+ * catalogue was being walked is stamped onto the clone as run while the walk
+ * may have missed its objects — and the verification that follows makes the
+ * pass skip introspection for good, so nothing would ever carry them.
+ */
+export type PrimeLedgerMark = { count: number; top: string | null };
+
+export async function readPrimeLedgerMark(primeRef: string): Promise<PrimeLedgerMark | null> {
+  const rows = await query(
+    primeRef,
+    `select count(*)::int as n, max(version) as top from supabase_migrations.schema_migrations`,
+  ).catch(() => null);
+  if (!rows || rows.length === 0) return null;
+  const top = rows[0].top == null ? null : str(rows[0].top);
+  return { count: num(rows[0].n), top: top || null };
+}
+
+/**
+ * Whether the prime's ledger moved between the mark taken before the walk and
+ * the reading the stamp took after it. An unreadable mark says nothing — the
+ * pass goes on as it always has, because refusing on it every time would be a
+ * verification that can never complete.
+ */
+export function primeLedgerMoved(before: PrimeLedgerMark | null, after: PrimeLedgerMark): boolean {
+  if (!before) return false;
+  return before.count !== after.count || before.top !== after.top;
+}
+
 export async function stampMigrationLedgerFromPrime(
   cloneRef: string,
   primeRef: string,
-): Promise<{ stamped: number; reconciled: boolean; primeLedgerTop: string | null }> {
+): Promise<{
+  stamped: number;
+  reconciled: boolean;
+  primeLedgerTop: string | null;
+  /** How many versions the prime's ledger held when the stamp read it. */
+  primeLedgerCount: number;
+}> {
   const ref = primeRef;
   const rows = await query(
     ref,
@@ -2651,7 +2691,7 @@ export async function stampMigrationLedgerFromPrime(
   const primeLedgerTop = str(rows.at(-1)?.version) || null;
 
   if (reconcile(rows.length, num(cloneLedger[0]?.n))) {
-    return { stamped: 0, reconciled: true, primeLedgerTop };
+    return { stamped: 0, reconciled: true, primeLedgerTop, primeLedgerCount: rows.length };
   }
 
   let stamped = 0;
@@ -2666,7 +2706,7 @@ export async function stampMigrationLedgerFromPrime(
     );
     stamped += group.length;
   }
-  return { stamped, reconciled: false, primeLedgerTop };
+  return { stamped, reconciled: false, primeLedgerTop, primeLedgerCount: rows.length };
 }
 
 /**

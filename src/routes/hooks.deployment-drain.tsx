@@ -1589,12 +1589,22 @@ async function drain() {
       // A step that advanced into another claimable state takes it now, while
       // the invocation has room (DEPLOY_CHAIN_WINDOW_MS). Still one row at a
       // time, still serial: only the minute between states is saved.
-      current =
+      const mayChain =
         outcome.kind === "advance" &&
         chained < MAX_CHAINED_STEPS &&
-        Date.now() - startedAt < DEPLOY_CHAIN_WINDOW_MS
-          ? await claimNextStep(current.clone_id)
-          : null;
+        Date.now() - startedAt < DEPLOY_CHAIN_WINDOW_MS;
+      // A chain that cannot be taken is the next tick's: this step landed and
+      // released its row, and the rows still held behind it must not be left
+      // claimed by a throw here. Said, never swallowed.
+      current = mayChain
+        ? await claimNextStep(current.clone_id).catch((e: unknown) => {
+            console.error(
+              `[deployment-drain] could not chain the next step for ${row.clone_id}:`,
+              e instanceof Error ? e.message : String(e),
+            );
+            return null;
+          })
+        : null;
       chained++;
     }
   }

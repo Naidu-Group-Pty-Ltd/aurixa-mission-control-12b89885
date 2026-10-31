@@ -44,7 +44,7 @@ import {
   openPrimeMigrationCorpus,
   resolvePrimeSource,
 } from "./prime-backend.server";
-import { runSqlOnProject } from "./backend-provisioning.server";
+import { readCloneMigrationLedger, runSqlOnProject } from "./backend-provisioning.server";
 import {
   CloneSecretTargetError,
   resolveCloneSecretTarget,
@@ -68,6 +68,7 @@ import {
   EFFECT_REPLAY_AUDIT_ACTION,
   admitBody,
   admitEntry,
+  admitForLedger,
   applyStatement,
   buildEffectReport,
   decideEffectNotice,
@@ -89,6 +90,7 @@ import {
   reportComplete,
   settledEarlier,
   type BodiesNotRead,
+  type CloneLedgerReading,
   type EffectExposure,
   type EffectReplayEntry,
   type EffectReplayReading,
@@ -332,9 +334,23 @@ async function replayEffectsOnClone(
 ): Promise<CloneEffectRun> {
   const outcomes: ReplayOutcome[] = [];
   const ready: Array<Extract<Candidate, { ok: true }>> = [];
+  // This clone's own ledger, read once, and only when there is a file to act
+  // on: a file is run only where the ledger already lists it (`admitForLedger`).
+  let ledger: CloneLedgerReading | null = null;
   for (const c of prime.candidates) {
-    if (c.ok) ready.push(c);
-    else outcomes.push(c.outcome);
+    if (!c.ok) {
+      outcomes.push(c.outcome);
+      continue;
+    }
+    if (!ledger) {
+      const read = await readCloneMigrationLedger(target.projectRef);
+      ledger = read.ok
+        ? { read: true, versions: new Set(read.rows.map((r) => r.version)) }
+        : { read: false, why: read.error };
+    }
+    const listed = admitForLedger(c.entry, c.version, ledger);
+    if (listed.ok) ready.push(c);
+    else outcomes.push(listed.outcome);
   }
 
   let stopped = false;

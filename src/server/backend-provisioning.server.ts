@@ -6414,8 +6414,14 @@ export async function provisionCloneBackend(
       stampMigrationLedgerFromPrime,
       verifyCloneIsEmpty,
       readCloneMigrationFrontier,
+      readPrimeLedgerMark,
+      primeLedgerMoved,
     } = await import("./schema-introspection.server");
     const primeRef = input.primeBackendRef;
+    // Where the prime's ledger stands BEFORE the catalogue is walked, so the
+    // stamp at the end of the pass can be checked against it (see
+    // `primeLedgerMoved` below).
+    const ledgerBeforeWalk = await readPrimeLedgerMark(primeRef);
     const result = await replicateSchemaByIntrospection(projectRef, {
       primeRef,
       onStatusUpdate,
@@ -6506,6 +6512,25 @@ export async function provisionCloneBackend(
         ? "Catalog introspection reconciled; migration ledger already stamped"
         : `Catalog introspection reconciled; stamped ${stamp.stamped} migration ID(s)`,
     );
+    // The prime recorded a migration while this pass walked its catalogue: the
+    // stamp has just copied that version onto the clone as run, and the walk
+    // may have read the catalogue before its objects existed. Verifying now
+    // would make every later pass skip introspection, so the gap could never
+    // close — the fleet lane will not send a version the clone's ledger
+    // already holds. So the pass pauses unverified, clearing the marker, and
+    // the next tick walks the catalogue again from the first stage; every
+    // finished stage answers in one round trip, and the stamp is idempotent.
+    if (
+      primeLedgerMoved(ledgerBeforeWalk, {
+        count: stamp.primeLedgerCount,
+        top: stamp.primeLedgerTop,
+      })
+    ) {
+      throw new BudgetPause(
+        "the prime recorded a migration while this pass verified the schema — verifying again from the first stage next tick",
+        "",
+      );
+    }
     // Both halves are now true — a full pass reconciled every stage, and the
     // ledger is stamped. Recorded HERE and nowhere earlier: a pass that died
     // between the two would otherwise teach the next one to skip a stamp that

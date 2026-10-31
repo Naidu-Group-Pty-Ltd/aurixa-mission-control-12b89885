@@ -1364,7 +1364,13 @@ describe("every per-item step in the tail is budgeted, not just guarded in front
     // path does not use. A known gap on an unused path, named rather than
     // hidden; budget it before that strategy is made default again.
     applyPrimeMigrations: "legacy migration-replay path, not the default strategy",
-    applyModuleMigrations: "legacy migration-replay path, not the default strategy",
+    // NOT the legacy path, whatever this used to say: it runs on every
+    // strategy, after the ready write. Bounded by the clone's installed modules
+    // that carry `clone_migration_sql` — measured 31 Oct 2026, 0 of 159 — and
+    // its progress writes the detail only (`moduleProgress`), so a pass it
+    // outlives has already recorded the backend ready.
+    applyModuleMigrations:
+      "bounded by installed modules carrying clone SQL — none today, after the ready write",
     // Bounded by the register: it acts only on the jobs `primeOnlyCronJobsIn`
     // names. Measured 27 Sep 2026: one on each of the four clones.
     sweepPrimeOnlyCronJobs: "bounded by the register — one job on each clone, measured",

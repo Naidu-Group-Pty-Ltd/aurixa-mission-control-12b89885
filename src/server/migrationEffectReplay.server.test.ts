@@ -16,6 +16,18 @@ const sql = vi.hoisted(() => ({ runSqlOnProject: vi.fn() }));
 vi.mock("./backend-provisioning.server", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./backend-provisioning.server")>()),
   runSqlOnProject: sql.runSqlOnProject,
+  // Through the same fake clone, so the ledger it reads is the one the test set.
+  readCloneMigrationLedger: async (ref: string) => {
+    try {
+      const rows = (await sql.runSqlOnProject(
+        ref,
+        "select version, name from supabase_migrations.schema_migrations",
+      )) as Array<{ version: string; name: string | null }>;
+      return { ok: true as const, rows };
+    } catch (e) {
+      return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
 }));
 
 const prime = vi.hoisted(() => ({
@@ -106,6 +118,10 @@ const REFRESH = {
 
 let inEffect: Set<string>;
 let raising: Set<string>;
+/** Files whose version this clone's ledger does NOT list. */
+let unstamped: Set<string>;
+/** Whether the clone's ledger read fails. */
+let ledgerUnreadable: boolean;
 let sent: string[];
 let onApply: (key: string) => void;
 
@@ -118,6 +134,13 @@ function fakeClone(files: File[]) {
   const all = [...files.map((f) => f.key), REFRESH.key];
   sql.runSqlOnProject.mockImplementation(async (_ref: string, text: string) => {
     sent.push(text);
+    // The clone's own ledger: every file's version unless marked unstamped.
+    if (/from supabase_migrations\.schema_migrations/.test(text)) {
+      if (ledgerUnreadable) throw new Error("SQL execution failed: 503 — upstream");
+      return files
+        .filter((f) => !unstamped.has(f.key))
+        .map((f) => ({ version: f.name.slice(0, 14), name: f.name.slice(15, -4) }));
+    }
     if (text.startsWith("do $mc_effect_probes")) {
       const asked = all
         .map((key) => ({ key, at: text.indexOf(probeOf(key)) }))
@@ -298,18 +321,23 @@ const noticesRaised = () =>
     (c) => c[0],
   );
 
+/** What was sent, by kind — the one read of the clone's ledger is not a step. */
 const kinds = () =>
-  sent.map((s) =>
-    s.startsWith("do $mc_effect_probes")
-      ? "probes"
-      : s.startsWith("do $mc_effect_dry_run")
-        ? `dry:${/-- body:(\w+)/.exec(s)?.[1]}`
-        : `apply:${/-- body:(\w+)/.exec(s)?.[1]}`,
-  );
+  sent
+    .filter((s) => !/from supabase_migrations\.schema_migrations/.test(s))
+    .map((s) =>
+      s.startsWith("do $mc_effect_probes")
+        ? "probes"
+        : s.startsWith("do $mc_effect_dry_run")
+          ? `dry:${/-- body:(\w+)/.exec(s)?.[1]}`
+          : `apply:${/-- body:(\w+)/.exec(s)?.[1]}`,
+    );
 
 beforeEach(() => {
   inEffect = new Set();
   raising = new Set();
+  unstamped = new Set();
+  ledgerUnreadable = false;
   sent = [];
   onApply = () => {};
   vi.clearAllMocks();
@@ -337,12 +365,52 @@ describe("the provisioning stage on a new clone", () => {
     expect(r.line).toContain("2 replayed, 1 already in effect");
   });
 
-  it("never touches the migration ledger", async () => {
+  it("never writes the migration ledger — it only reads which versions it lists", async () => {
     fakeClone([A, C]);
     fakePrime([A, C]);
     await runEffectReplayStage(fakeSupabase(), stageInput());
     expect(sent.length).toBeGreaterThan(0);
-    for (const s of sent) expect(s).not.toMatch(/schema_migrations|migration_provenance/);
+    for (const s of sent) {
+      expect(s).not.toMatch(/(insert\s+into|update|delete\s+from)\s+supabase_migrations/i);
+      expect(s).not.toMatch(/migration_provenance/);
+    }
+    // Read once per run, however many files there are.
+    expect(sent.filter((s) => /from supabase_migrations\.schema_migrations/.test(s))).toHaveLength(
+      1,
+    );
+  });
+
+  it("never runs a file this clone's ledger does not list, and says which lane delivers it", async () => {
+    // The manifest is read at the prime's repository head; the stamp copied the
+    // prime's DATABASE ledger. A file run here that the clone's ledger does not
+    // list would be sent again by the fleet lane once the prime records it.
+    unstamped = new Set(["a"]);
+    fakeClone([A, C]);
+    fakePrime([A, C]);
+    const r = await runEffectReplayStage(fakeSupabase(), stageInput());
+    const a = r.run?.outcomes.find((o) => o.file === A.name);
+    expect(a).toMatchObject({ status: "refused" });
+    expect(a?.why).toMatch(/does not list 20270204090000.*fleet migration lane/);
+    expect(a?.transient).toBeUndefined();
+    // Neither probed for a dry run nor applied.
+    expect(sent.some((s) => s.includes(`-- body:${A.key}`))).toBe(false);
+    // A deliberate refusal settles the stamp; it is not asked again.
+    expect(r.settled).toBe(true);
+  });
+
+  it("a ledger that cannot be read runs nothing and leaves the stage owed", async () => {
+    ledgerUnreadable = true;
+    fakeClone([A, C]);
+    fakePrime([A, C]);
+    const r = await runEffectReplayStage(fakeSupabase(), stageInput());
+    for (const f of [A, C]) {
+      expect(r.run?.outcomes.find((o) => o.file === f.name)).toMatchObject({
+        status: "refused",
+        transient: true,
+      });
+      expect(sent.some((s) => s.includes(`-- body:${f.key}`))).toBe(false);
+    }
+    expect(r.settled).toBe(false);
   });
 
   it("records the run under the stage's action, keyed to the project and the stamp", async () => {

@@ -325,6 +325,60 @@ export function admitEntry(
 }
 
 /**
+ * What a clone's own migration ledger says, read once per run.
+ */
+export type CloneLedgerReading =
+  | { read: true; versions: ReadonlySet<string> }
+  | { read: false; why: string };
+
+/**
+ * Whether THIS clone's ledger lists the entry's version — the precondition
+ * step 3 above states and nothing used to check.
+ *
+ * The stage exists for files the stamp recorded as run while their effect is
+ * absent, so it runs a file "never writing the migration ledger, which already
+ * lists the version". But the manifest and the files are read at the prime's
+ * repository head, and the stamp copies the prime's DATABASE ledger, which
+ * does not hold every version the repository does. A file run here that the
+ * clone's ledger does not list is sent again by the fleet migration lane once
+ * the prime records it: harmless for a GRANT, and for a `create policy` with
+ * no `drop` before it a refusal that blocks the clone out of the fleet sync,
+ * where the block clears only when the version reaches a ledger the blocked
+ * lane can no longer write. So such a file is refused, by name and with the
+ * lane that does deliver it. A ledger that could not be read cannot say either
+ * way, and is asked again on the next pass.
+ */
+export function admitForLedger(
+  entry: EffectReplayEntry,
+  version: string,
+  ledger: CloneLedgerReading,
+): { ok: true } | { ok: false; outcome: ReplayOutcome } {
+  const base = { file: entry.file, version, kind: entry.kind, status: "refused" as const };
+  if (!ledger.read) {
+    return {
+      ok: false,
+      outcome: {
+        ...base,
+        why: `this clone's migration ledger could not be read (${ledger.why.slice(0, 160)}), so whether it lists ${version} cannot be told`,
+        transient: true,
+      },
+    };
+  }
+  if (!ledger.versions.has(version)) {
+    return {
+      ok: false,
+      outcome: {
+        ...base,
+        why:
+          `this clone's migration ledger does not list ${version}, so the fleet migration lane ` +
+          "sends it once the prime records it; running it here too would send it twice",
+      },
+    };
+  }
+  return { ok: true };
+}
+
+/**
  * Whether a listed file's body may be dry-run here, and its probe.
  *
  * The probe is the prime's (`effectProbeIn`), refused as the prime refuses it

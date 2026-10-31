@@ -1994,3 +1994,54 @@ It reads `SB_MGMT_API_TOKEN` now (the old name stays as a local fallback).
 Measured 31 Oct 2026 before the change: the newest clone's PostgREST exposes
 `public, graphql_public, aml`, as the prime's does, so the first real reading
 is expected to be clean.
+
+### Three faults in the SQL migration path a new clone walks
+
+Found by reading the path end to end on 31 Oct 2026; none had yet bitten a
+clone, and each would have the first time its condition held.
+
+- **Module migrations put a finished backend back to `migrating`.** They run
+  after the `ready` write and were handed the runner's status writer, which
+  `applyModuleMigrations` calls with `migrating` for each module — and nothing
+  wrote `ready` again. The drain had already stamped the job finished, so no
+  sweep would touch it; the fleet lane reads `migrating` as in flight and
+  withholds every later prime migration; repair and add-modules both require
+  `ready`. Latent only because no module carries `clone_migration_sql` today
+  (0 of 159). Progress now writes the detail alone, as the add-modules path
+  already did, and a module that cannot run is a module result rather than a
+  `failed` written over a ready backend.
+- **A prime migration recorded mid-verification was stamped as run.** The
+  stamp reads the prime's ledger at the END of the pass, after the catalogue
+  walk, and the verification it enables makes every later pass skip
+  introspection — so an object the walk missed could never arrive, and the
+  fleet lane never sends a version the clone's ledger holds. The pass now takes
+  a ledger mark before the walk (`readPrimeLedgerMark`) and, where the stamp's
+  reading differs (`primeLedgerMoved`), pauses unverified and walks again next
+  tick.
+- **The effect stage could run a file the clone's ledger does not list.** Its
+  own design runs a file "never writing the migration ledger, which already
+  lists the version", but nothing checked: the manifest is read at the prime's
+  repository head and the stamp copies the prime's database ledger. A file run
+  here and not listed would be sent again by the fleet lane once the prime
+  records it — for a `create policy` with no `drop`, a refusal that blocks the
+  clone out of the fleet. Such a file is now refused by name
+  (`admitForLedger`), naming the lane that delivers it; an unreadable ledger
+  leaves the stage owed.
+
+Left as found, and named so they are not rediscovered: the stage's dry-run and
+apply statements set a lock timeout and no statement timeout; a 429 retry in
+`runSqlOnProject` may wait up to thirty seconds without consulting the pass's
+deadline (inside the ninety seconds of headroom the patience now leaves); and
+after a budget stop the stage reports later files `not_reached` even where its
+first probe already found them in effect.
+
+### What no code change here can fix
+
+Every clone built by introspection reports "waiting on N versions … which the
+prime's ledger does not record" (178 on 31 Oct 2026). Those are files in the
+prime's repository that its own ledger never recorded, mostly applied by hand;
+`scopeCorpusToPrime` withholds them from every clone by design, because the
+ledger is the authority on what the schema is. They clear only when each is
+recorded on the prime with `apply-migration.yml` and `record_version: true` —
+a per-file judgement against production, and the owner's to make (see
+"Landing it is two acts" above).
