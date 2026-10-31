@@ -82,7 +82,7 @@ import {
   TABLE_GRANT_ENFORCEMENT,
   enforcesTableGrants,
   planTableGrantRevokes,
-  surplusLines,
+  revokeLines,
   type EnforcementCandidate,
   type TableGrantEnforcementScope,
 } from "./tableGrantEnforcement.pure";
@@ -159,7 +159,10 @@ export type CloneTableGrantReport =
       read: "ok";
       /** Present where the pass took the surplus back, or would have. */
       enforcement?: TableGrantEnforcementOutcome;
-      /** Out of scope: every relation's surplus, for the review before the scope widens. */
+      /**
+       * Out of scope: what a pass would revoke on each relation, PUBLIC's
+       * included, for the review before the scope widens (`revokeLines`).
+       */
       wouldRevoke?: string[];
     } & TableGrantSummary)
   | {
@@ -387,7 +390,13 @@ export async function reconcileClonePrivileges(
     const ok = surveyed.report.read === "ok" ? surveyed.report : null;
     if (ok && surveyed.detail && ok.relations > 0) {
       if (!enforcesTableGrants(scope, records.get(cloneId) ?? null)) {
-        report = { ...ok, wouldRevoke: surplusLines(surveyed.detail.comparison.entries) };
+        const { comparison, prime, clone, maintainOnBoth } = surveyed.detail;
+        report = {
+          ...ok,
+          wouldRevoke: revokeLines(
+            planTableGrantRevokes({ entries: comparison.entries, prime, clone, maintainOnBoth }),
+          ),
+        };
       } else if (paused) {
         // The budget is spent; the next pass re-plans from both catalogues.
         report = {

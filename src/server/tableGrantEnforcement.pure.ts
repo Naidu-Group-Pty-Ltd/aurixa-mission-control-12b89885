@@ -37,15 +37,24 @@ import {
  *   - a privilege a browser role holds directly and the prime's does not, by
  *     `REVOKE … FROM anon` or `authenticated`;
  *   - one the clone grants PUBLIC and the prime does not, by
- *     `REVOKE … FROM PUBLIC`: the prime grants PUBLIC none of them, so no role
- *     loses there what it holds on the prime. Where the prime gives a browser
- *     role that privilege directly and the clone gave it only through PUBLIC,
- *     it is granted directly, as the prime grants it;
- *   - a table-level REVOKE takes the grantee's column grants of that privilege
- *     with it, so the prime's are granted back on their columns
+ *     `REVOKE … FROM PUBLIC`: the prime grants PUBLIC none of them at table
+ *     level. Where the prime gives a browser role that privilege directly and
+ *     the clone gave it only through PUBLIC, it is granted directly, as the
+ *     prime grants it. A role outside the browser roles that held it only
+ *     through PUBLIC loses it; the demo grants PUBLIC nothing on any relation
+ *     (read 31 Oct 2026), and a clone's list (`revokeLines`) names each
+ *     PUBLIC revoke before the scope widens to it;
+ *   - columns, which a role can lose three ways: a table-level REVOKE takes
+ *     the grantee's column grants of that privilege with it; a role held the
+ *     privilege through PUBLIC's; or the prime gives a role a column through
+ *     PUBLIC where the clone gave it the whole table on its own. So the
+ *     grantee's column grants the prime gives it are granted back, PUBLIC's
+ *     included, and then each browser role is granted, on its own, any column
+ *     it held here, the prime gives it, and it would otherwise lose
  *     (`template_comments` gives `authenticated` UPDATE on three columns on
- *     every project). A column grant the clone held and the prime does not is
- *     gone with it, and recorded as removed.
+ *     every project). Every column granted is one its grantee held before, so
+ *     nobody gains one. A column grant a revoke takes that neither rule grants
+ *     again is gone, and recorded as removed.
  *
  * MAINTAIN only where both servers have it, `service_role` never (it is the
  * backend's own key), and only relations both sides hold: one only the clone
@@ -60,8 +69,9 @@ import {
  *
  * ## Reversible
  *
- * Every relation's plan carries the grants that undo it (`inverse`), and the
- * sweep files them in the audit log before it may be called done.
+ * Every relation's plan carries the statements that undo it exactly
+ * (`inverse`), column grants included, and the sweep files them in the audit
+ * log before it may be called done.
  *
  * Pure: no network, no database.
  */
@@ -99,6 +109,9 @@ export function enforcesTableGrants(
   return demoCloneRefusal(clone) === null;
 }
 
+/** Every grantee a statement here names, in the order its lines are written. */
+const GRANTEES: readonly BrowserGrantee[] = [...BROWSER_ROLES, "PUBLIC"];
+
 /** A grantee as SQL: `PUBLIC` is a keyword, the roles are bare identifiers. */
 const granteeSql = (g: BrowserGrantee) => (g === "PUBLIC" ? "public" : g);
 
@@ -117,9 +130,13 @@ export type RelationRevoke = {
   revoke: Record<BrowserGrantee, TablePrivilege[]>;
   /** Granted directly because the prime grants it so and PUBLIC carried it here. */
   grantDirect: Array<{ grantee: BrowserGrantee; privileges: TablePrivilege[] }>;
-  /** The prime's column grants a table-level revoke removes, granted back. */
+  /**
+   * Column grants made after the revokes, so no role loses a column it held
+   * here and the prime gives it: per grantee and privilege, in GRANTEES and
+   * TABLE_PRIVILEGES order.
+   */
   regrantColumns: Array<{ grantee: BrowserGrantee; privilege: TablePrivilege; columns: string[] }>;
-  /** Column grants the clone held, the revoke removes, and the prime does not give. */
+  /** Column grants the clone held that the revokes take and nothing grants again. */
   removedColumnGrants: Array<{
     grantee: BrowserGrantee;
     privilege: TablePrivilege;
@@ -196,60 +213,89 @@ export function planTableGrantRevokes(input: {
       if (lose.length) grantDirect.push({ grantee: role, privileges: lose });
     }
 
-    // Column grants. A table-level REVOKE takes the grantee's own column grants
-    // of that privilege with it, so the prime's are granted back, and one only
-    // the clone held is gone and recorded. A browser role that loses a
-    // privilege because PUBLIC's is revoked is given the prime's column grants
-    // of it too: the prime may give `authenticated` UPDATE on three columns
-    // where the clone gave everyone UPDATE through PUBLIC, and nothing else
-    // would leave it what the prime gives it.
-    const lost = new Map<
-      string,
-      { grantee: BrowserGrantee; privilege: TablePrivilege; ownRevoked: boolean }
-    >();
-    for (const grantee of [...BROWSER_ROLES, "PUBLIC"] as const) {
-      for (const x of revoke[grantee]) {
-        lost.set(`${grantee}|${x}`, { grantee, privilege: x, ownRevoked: true });
+    // Column grants, which `attacl` holds apart from the table's ACL. A role
+    // can lose a column the prime gives it three ways here: its own
+    // table-level grant is revoked, which takes its column grants of that
+    // privilege too; PUBLIC's is, which it held the privilege through; or the
+    // prime gives it the column through PUBLIC and the clone gave it the
+    // whole table on its own. So, per privilege a revoke touches:
+    //   1. a grantee whose table-level privilege is revoked is granted back
+    //      the column grants the prime gives that grantee, PUBLIC included,
+    //      so a role outside the browser roles keeps what PUBLIC gives it;
+    //   2. then each browser role is granted, on its own, every column it
+    //      held here, the prime gives it (itself or through PUBLIC), and it
+    //      would otherwise no longer hold.
+    // Each column granted is one its grantee held before, through the
+    // table-level grant revoked, so nobody gains a column (Codex on #472).
+    const touched = ordered([...BROWSER_ROLES.flatMap((r) => revoke[r]), ...revoke.PUBLIC]);
+    const columnsOf = (acl: RelationAcl, grantee: BrowserGrantee, x: TablePrivilege) =>
+      [
+        ...new Set(
+          acl.columnGrants
+            .filter((g) => g.grantee === grantee && g.privilege === x)
+            .map((g) => g.column),
+        ),
+      ].sort();
+    const columnKey = (g: BrowserGrantee, x: TablePrivilege) => `${g}|${x}`;
+    // Each grantee's own column grants of each touched privilege, before and after.
+    const heldBefore = new Map<string, string[]>();
+    const heldAfter = new Map<string, Set<string>>();
+    for (const x of touched) {
+      for (const g of GRANTEES) {
+        const had = columnsOf(c, g, x);
+        heldBefore.set(columnKey(g, x), had);
+        heldAfter.set(columnKey(g, x), new Set(revoke[g].includes(x) ? columnsOf(p, g, x) : had));
       }
-    }
-    for (const x of revoke.PUBLIC) {
       for (const role of BROWSER_ROLES) {
-        if (!lost.has(`${role}|${x}`)) {
-          lost.set(`${role}|${x}`, { grantee: role, privilege: x, ownRevoked: false });
+        const tableBefore = c.grants[role].includes(x) || c.grants.PUBLIC.includes(x);
+        const tableAfter =
+          (c.grants[role].includes(x) && !revoke[role].includes(x)) ||
+          (c.grants.PUBLIC.includes(x) && !revoke.PUBLIC.includes(x)) ||
+          grantDirect.some((d) => d.grantee === role && d.privileges.includes(x));
+        if (tableAfter) continue;
+        const own = heldAfter.get(columnKey(role, x))!;
+        const viaPublic = heldAfter.get(columnKey("PUBLIC", x))!;
+        const ownBefore = heldBefore.get(columnKey(role, x))!;
+        const publicBefore = heldBefore.get(columnKey("PUBLIC", x))!;
+        const primeGives = new Set([...columnsOf(p, role, x), ...columnsOf(p, "PUBLIC", x)]);
+        for (const col of [...primeGives].sort()) {
+          const had = tableBefore || ownBefore.includes(col) || publicBefore.includes(col);
+          if (had && !own.has(col) && !viaPublic.has(col)) own.add(col);
         }
       }
     }
+    // What the statement grants on columns, what it takes for good, and what
+    // it adds that the clone did not hold, which undoing takes away again.
     const regrantColumns: RelationRevoke["regrantColumns"] = [];
     const removedColumnGrants: RelationRevoke["removedColumnGrants"] = [];
-    // The prime's column grants the clone did not hold, which undoing takes away.
     const addedColumnGrants: RelationRevoke["regrantColumns"] = [];
-    for (const { grantee, privilege: x, ownRevoked } of lost.values()) {
-      const columnsOf = (acl: RelationAcl) =>
-        [
-          ...new Set(
-            acl.columnGrants
-              .filter((g) => g.grantee === grantee && g.privilege === x)
-              .map((g) => g.column),
-          ),
-        ].sort();
-      const primeCols = columnsOf(p);
-      const cloneCols = columnsOf(c);
-      if (primeCols.length) {
-        regrantColumns.push({ grantee, privilege: x, columns: primeCols });
-        const added = primeCols.filter((col) => !cloneCols.includes(col));
-        if (added.length) addedColumnGrants.push({ grantee, privilege: x, columns: added });
-      }
-      if (ownRevoked) {
-        for (const column of cloneCols) {
-          if (!primeCols.includes(column)) {
-            removedColumnGrants.push({ grantee, privilege: x, column });
-          }
+    for (const g of GRANTEES) {
+      for (const x of touched) {
+        const before = heldBefore.get(columnKey(g, x))!;
+        const after = [...heldAfter.get(columnKey(g, x))!].sort();
+        const granted = revoke[g].includes(x)
+          ? after
+          : after.filter((col) => !before.includes(col));
+        if (granted.length) regrantColumns.push({ grantee: g, privilege: x, columns: granted });
+        const added = after.filter((col) => !before.includes(col));
+        if (added.length) addedColumnGrants.push({ grantee: g, privilege: x, columns: added });
+        for (const column of before) {
+          if (!after.includes(column))
+            removedColumnGrants.push({ grantee: g, privilege: x, column });
         }
       }
     }
 
+    const columnSql = (
+      verb: "grant" | "revoke",
+      g: BrowserGrantee,
+      x: TablePrivilege,
+      cols: readonly string[],
+    ) =>
+      `${verb} ${x} (${cols.map(quoteColumn).join(", ")}) on ${e.relation} ${verb === "grant" ? "to" : "from"} ${granteeSql(g)};`;
+
     const lines: string[] = [];
-    for (const grantee of [...BROWSER_ROLES, "PUBLIC"] as const) {
+    for (const grantee of GRANTEES) {
       if (revoke[grantee].length) {
         lines.push(
           `revoke ${revoke[grantee].join(", ")} on ${e.relation} from ${granteeSql(grantee)};`,
@@ -259,43 +305,47 @@ export function planTableGrantRevokes(input: {
     for (const g of grantDirect) {
       lines.push(`grant ${g.privileges.join(", ")} on ${e.relation} to ${granteeSql(g.grantee)};`);
     }
-    for (const g of regrantColumns) {
-      lines.push(
-        `grant ${g.privilege} (${g.columns.map(quoteColumn).join(", ")}) on ${e.relation} to ${granteeSql(g.grantee)};`,
-      );
-    }
+    for (const g of regrantColumns)
+      lines.push(columnSql("grant", g.grantee, g.privilege, g.columns));
     if (lines.length === 0) continue;
 
     const body = lines.map((l) => `  ${l}`).join("\n");
     const tag = dollarTag("table_grants", [body]);
     const statement = `do ${tag}\nbegin\n${body}\nend\n${tag}`;
 
-    // Undoing it: the column grants this added taken away, the revoked
-    // privileges back, then the clone's own column grants the revoke took. A
-    // direct grant made for a PUBLIC one is taken back last, so the relation
-    // ends as it began.
+    // Undoing it, in order: the column grants this made that the clone did
+    // not hold are taken away; the table-level privileges are granted back,
+    // then the column grants the revokes took. A direct grant made for a
+    // PUBLIC one is taken back last, and as that revoke takes the role's
+    // column grants of the privilege with it, the ones it held before are
+    // granted again (Codex on #472). The relation ends as it began.
     const inverse: string[] = [];
     for (const g of addedColumnGrants) {
-      inverse.push(
-        `revoke ${g.privilege} (${g.columns.map(quoteColumn).join(", ")}) on ${e.relation} from ${granteeSql(g.grantee)};`,
-      );
+      inverse.push(columnSql("revoke", g.grantee, g.privilege, g.columns));
     }
-    for (const grantee of [...BROWSER_ROLES, "PUBLIC"] as const) {
+    for (const grantee of GRANTEES) {
       if (revoke[grantee].length) {
         inverse.push(
           `grant ${revoke[grantee].join(", ")} on ${e.relation} to ${granteeSql(grantee)};`,
         );
       }
     }
-    for (const g of removedColumnGrants) {
-      inverse.push(
-        `grant ${g.privilege} (${quoteColumn(g.column)}) on ${e.relation} to ${granteeSql(g.grantee)};`,
-      );
+    for (const g of GRANTEES) {
+      for (const x of touched) {
+        const cols = removedColumnGrants
+          .filter((r) => r.grantee === g && r.privilege === x)
+          .map((r) => r.column);
+        if (cols.length) inverse.push(columnSql("grant", g, x, cols));
+      }
     }
-    for (const g of grantDirect) {
+    for (const d of grantDirect) {
       inverse.push(
-        `revoke ${g.privileges.join(", ")} on ${e.relation} from ${granteeSql(g.grantee)};`,
+        `revoke ${d.privileges.join(", ")} on ${e.relation} from ${granteeSql(d.grantee)};`,
       );
+      for (const x of d.privileges) {
+        const cols = heldBefore.get(columnKey(d.grantee, x)) ?? [];
+        if (cols.length) inverse.push(columnSql("grant", d.grantee, x, cols));
+      }
     }
 
     plan.privileges += revoke.anon.length + revoke.authenticated.length + revoke.PUBLIC.length;
@@ -313,14 +363,20 @@ export function planTableGrantRevokes(input: {
 }
 
 /**
- * A clone's surplus as lines a person reviews before the scope widens to it:
- * `public.t: anon INSERT, UPDATE; authenticated DELETE`.
+ * What a pass would take back on a clone, as lines a person reviews before the
+ * scope widens to it: `public.t: anon INSERT, UPDATE; authenticated DELETE`,
+ * with `PUBLIC SELECT` where the revoke is PUBLIC's, which every role held it
+ * through. Read from the plan, so it is what the statements would do, and a
+ * relation the plan refused says so.
  */
-export function surplusLines(entries: readonly SurplusEntry[]): string[] {
-  return entries.map((e) => {
-    const held = BROWSER_ROLES.filter((r) => e.surplus[r].length)
-      .map((r) => `${r} ${e.surplus[r].join(", ")}`)
-      .join("; ");
-    return `${e.relation}: ${held}`;
-  });
+export function revokeLines(plan: TableGrantRevokePlan): string[] {
+  return [
+    ...plan.relations.map(
+      (r) =>
+        `${r.relation}: ${GRANTEES.filter((g) => r.revoke[g].length)
+          .map((g) => `${g} ${r.revoke[g].join(", ")}`)
+          .join("; ")}`,
+    ),
+    ...plan.refused.map((r) => `${r.relation}: refused, ${r.why}`),
+  ];
 }

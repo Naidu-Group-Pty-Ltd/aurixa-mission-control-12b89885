@@ -1839,10 +1839,14 @@ The sweep now compares table privileges on each pass
   all clones" (`tableGrantEnforcement.pure.ts`): on a clone
   `TABLE_GRANT_ENFORCEMENT` reaches, a pass files the plan and the grants that
   undo it in the audit log (`clone_table_privileges_revoked`), takes the
-  surplus back in one statement a relation, and reads the clone again. It
+  surplus back in one statement a relation, and reads the clone again. Each
+  role keeps every column it held and the prime gives it, itself or through
+  PUBLIC, and no role gains one; the undo puts the relation back exactly,
+  column grants included. Both are checked on a model of the catalogue in
+  the tests and were checked on 700 random relations on Postgres 16. It
   reaches the demo first and every clone once the demo reads clean; a clone
-  not yet reached is reported with every relation it would change
-  (`wouldRevoke`).
+  not yet reached is reported with what each of its relations' statements
+  would revoke, PUBLIC's included (`wouldRevoke`).
 - **Where it says so.** Under `tables` in the hook's answer, in the
   `clone_privilege_reconcile_cron` audit row (filed on every scheduled pass
   while any clone holds a surplus or could not be read), and in a
