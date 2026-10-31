@@ -1905,13 +1905,15 @@ two passes at 01:55 and 02:01 both died re-pointing the clone's repository,
 each death a stall of minutes. `20261031090000_backend_drain_http_patience.sql`
 gives the job 150 s — the patience the fleet lane has run on since September —
 and the budget is derived from it (`BACKEND_DRAIN_PATIENCE_MS −
-BACKEND_DRAIN_HEADROOM_MS`, 60 s), so a unit that overruns now finishes
-instead of being killed. The budget grows only a little on purpose: pg_net
-starts its next batch of requests only once every request in the current one
-has answered, so a pass that ran for two minutes would hold every other
-one-minute hook for two minutes. `backendDrainPatience.contract.test.ts` holds
-the three numbers — the migration's timeout, the budget, the dead-pass
-silence — in step.
+BACKEND_DRAIN_HEADROOM_MS`), so a unit that overruns now finishes instead of
+being killed. The budget itself stays at 50 s, for two reasons: pg_net starts
+its next batch of requests only once every request in the current one has
+answered, so a pass that ran for two minutes would hold every other one-minute
+hook for two minutes; and a budget no larger than the old one means the order
+this ships in cannot matter — code that reaches production before the
+migration reaches the database behaves exactly as before.
+`backendDrainPatience.contract.test.ts` holds the three numbers — the
+migration's timeout, the budget, the dead-pass silence — in step.
 
 ### A deployment takes its next step in the same tick
 

@@ -30,10 +30,12 @@
 -- in `hooks.backend-provisioning-drain.tsx`, which
 -- `backendDrainPatience.contract.test.ts` holds in step with this file), so a
 -- pass is no longer than before except where the old patience would have
--- killed it. The budget is raised only a little, because pg_net sends a batch
--- of requests and starts the next batch only once every request of this one
--- has answered (see `20261029160000_library_follow_patience.sql`): a pass that
--- ran far longer would slow every other one-minute hook while a clone builds.
+-- killed it. The budget is NOT raised, because pg_net sends a batch of
+-- requests and starts the next batch only once every request of this one has
+-- answered (see `20261029160000_library_follow_patience.sql`): a pass that ran
+-- far longer would slow every other one-minute hook while a clone builds. And
+-- so the order this lands in cannot matter: before it is applied, the drain
+-- works exactly as it did.
 --
 -- ASSERTED BY EFFECT, NOT BY CONFIGURATION. Re-running this is a no-op once the
 -- stored command carries the larger timeout — the guard reads the COMMAND, so

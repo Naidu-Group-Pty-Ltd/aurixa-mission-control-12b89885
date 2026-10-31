@@ -66,9 +66,9 @@ const BACKEND_DRAIN_PATIENCE_MS = 150_000;
  * it is inside when the budget runs out — a run of repository commits, a
  * function-source snapshot, an edge-function deploy, the finishing writes —
  * plus the requeue and the response. Measured units run to a few tens of
- * seconds; ninety leaves room for a slow one several times over.
+ * seconds; a hundred leaves room for a slow one several times over.
  */
-const BACKEND_DRAIN_HEADROOM_MS = 90_000;
+const BACKEND_DRAIN_HEADROOM_MS = 100_000;
 
 // How long ONE invocation of this route may work before the pipeline pauses
 // at a stage boundary. An unbudgeted run dies mid-write with no record —
@@ -77,13 +77,19 @@ const BACKEND_DRAIN_HEADROOM_MS = 90_000;
 // reset to 0); only a hard death costs an attempt, and only at a point the job
 // has died at before (`judgeDeadPass`).
 //
-// Sixty seconds, ten more than it was, and deliberately not most of the
+// Fifty seconds, as it has always been, and deliberately not most of the
 // patience. pg_net sends a batch of requests and starts the next batch only
 // once every request in this one has answered
 // (`20261029160000_library_follow_patience.sql`), so a pass that ran for two
 // minutes would hold every other one-minute hook — voice calls, cascades,
 // other clones' deployments — for two minutes, every minute, for as long as a
 // clone builds. The patience is there for the overrun, not for the work.
+//
+// And unchanged so that the order this ships in cannot matter: if the code
+// reaches production before the migration reaches the database, the drain
+// still works fifty seconds against the old sixty, exactly as before.
+// Raising the budget is a separate decision, to take once the patience is
+// measured in place.
 const INVOCATION_BUDGET_MS = BACKEND_DRAIN_PATIENCE_MS - BACKEND_DRAIN_HEADROOM_MS;
 
 // The two bounds the attempt-neutral recycling answers to. They ask DIFFERENT

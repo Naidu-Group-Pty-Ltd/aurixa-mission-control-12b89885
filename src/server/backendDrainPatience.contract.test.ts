@@ -73,11 +73,13 @@ describe("the backend drain is budgeted against the patience its job has", () =>
     expect(HEADROOM_MS).toBeGreaterThanOrEqual(60_000);
   });
 
-  it("works a little longer than it did, and not long enough to hold every other hook", () => {
-    // pg_net starts its next batch only when every request in this one has
-    // answered, so a long pass every minute would delay every one-minute hook.
-    expect(BUDGET_MS).toBeGreaterThanOrEqual(50_000);
-    expect(BUDGET_MS).toBeLessThanOrEqual(75_000);
+  it("works no longer than the old patience allowed, so the shipping order cannot matter", () => {
+    // If the code ships before the migration is applied, the job still waits
+    // only 60 s: a budget above the old 50 s would then leave no headroom.
+    // pg_net also starts its next batch only when every request in this one
+    // has answered, so a long pass every minute would delay every other hook.
+    expect(BUDGET_MS).toBeLessThanOrEqual(50_000);
+    expect(BUDGET_MS).toBeGreaterThanOrEqual(45_000);
   });
 
   it("a pass that is still running can never be judged dead", () => {
