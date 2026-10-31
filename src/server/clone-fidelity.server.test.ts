@@ -8,12 +8,14 @@ import {
 import { classRefusalFor, decideFleetForward } from "./cloneSecretForward.pure";
 import {
   enforceRequiredExtensions,
+  misplacedRequiredExtensions,
   quoteExtensionIdent,
   resolveRequiredExtensions,
   REQUIRED_EXTENSION_FLOOR,
   planCloneSecrets,
   cloneAllowedOrigins,
 } from "./backend-provisioning.server";
+import type { ProjectExtension } from "./extensionPlacement.pure";
 
 /**
  * Fidelity rules for cloning a prime, each one learned from a clone that was
@@ -141,7 +143,7 @@ describe("enforceRequiredExtensions", () => {
   });
 
   it("puts every extension back on the create path when the clone cannot be read", async () => {
-    // `fetchProjectExtensionNames` swallows its error and answers []. Reading
+    // `fetchProjectExtensions` swallows its error and answers []. Reading
     // that as "nothing is installed" is the safe direction: the fallback does
     // the work rather than assuming it is already done.
     const wanted = resolveRequiredExtensions(PRIME_EXTENSIONS);
@@ -188,6 +190,289 @@ describe("enforceRequiredExtensions", () => {
     expect(vector?.status).toBe("failed");
     expect(vector?.error).toContain("no such extension");
     expect(results.some((r) => r.status === "installed")).toBe(true);
+  });
+});
+
+describe("enforceRequiredExtensions — the schema each one goes in", () => {
+  // Measured 31 Oct 2026, read-only, on both projects' pg_extension: the prime
+  // keeps btree_gist 1.7 in `extensions`; the tutorial demo, the first clone
+  // built after btree_gist reached the prime, held it in `public`, with its
+  // 188 functions in the clone's API schema. The create named no schema, and
+  // a relocatable extension goes to the first schema on the search path.
+
+  const originalFetch = globalThis.fetch;
+  const originalToken = process.env.SB_MGMT_API_TOKEN;
+
+  /** The prime's extensions and their schemas, as measured on 31 Oct 2026. */
+  const PRIME: ProjectExtension[] = [
+    { name: "btree_gist", schema: "extensions" },
+    { name: "pg_cron", schema: "pg_catalog" },
+    { name: "pg_net", schema: "public" },
+    { name: "pg_stat_statements", schema: "extensions" },
+    { name: "pgcrypto", schema: "extensions" },
+    { name: "plpgsql", schema: "pg_catalog" },
+    { name: "supabase_vault", schema: "vault" },
+    { name: "uuid-ossp", schema: "extensions" },
+    { name: "vector", schema: "public" },
+  ];
+
+  /** The floor's one extension the prime does not run, so every clone has it. */
+  const FLOOR_ONLY: ProjectExtension[] = [{ name: "pg_graphql", schema: "graphql" }];
+  /** The prime's extensions, where the prime keeps them, but for one. */
+  const primeWithout = (name: string): ProjectExtension[] => [
+    ...PRIME.filter((e) => e.name !== name),
+    ...FLOOR_ONLY,
+  ];
+
+  const wire = (sqlstate: string, message: string) =>
+    JSON.stringify({ message: `Failed to run sql query: ERROR:  ${sqlstate}: ${message}\n` });
+
+  const answer = (status: number, rows: unknown) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => rows,
+    text: async () => (typeof rows === "string" ? rows : JSON.stringify(rows)),
+  });
+
+  /**
+   * A clone that places an extension as Postgres does: in the schema the
+   * create names, which must exist; else in the one its control file fixes,
+   * which Postgres creates; else first on the search path, `public`. It
+   * records what it was sent.
+   */
+  function simulatedClone(opts: {
+    installed: ProjectExtension[];
+    schemas: string[];
+    /** Control files that fix a schema. */
+    fixed?: Record<string, string>;
+    /** Refuse a statement before Postgres would run it. */
+    refuse?: (sql: string) => { status: number; body: string } | null;
+  }) {
+    const installed = new Map(opts.installed.map((e) => [e.name, e.schema]));
+    const schemas = new Set(opts.schemas);
+    const sent: string[] = [];
+    globalThis.fetch = (async (url: unknown, init?: { body?: string }) => {
+      const sql = init?.body ? String(JSON.parse(String(init.body)).query ?? "") : "";
+      if (!String(url).includes("/projects/clone-ref/")) {
+        return answer(
+          200,
+          /from pg_extension/.test(sql)
+            ? PRIME.map((e) => ({ extname: e.name, schema: e.schema }))
+            : [],
+        );
+      }
+      sent.push(sql);
+      if (/from pg_extension/.test(sql)) {
+        return answer(
+          200,
+          [...installed].map(([extname, schema]) => ({ extname, schema })),
+        );
+      }
+      if (/from pg_namespace/.test(sql)) {
+        return answer(
+          200,
+          [...schemas].map((nspname) => ({ nspname })),
+        );
+      }
+      const create =
+        /^create extension if not exists ("?)([^"\s;]+)\1(?: with schema ("?)([^"\s;]+)\3)?;$/.exec(
+          sql.trim(),
+        );
+      if (!create) return answer(200, []);
+      const refused = opts.refuse?.(sql);
+      if (refused) return answer(refused.status, refused.body);
+      const [, , name, , named] = create;
+      const fixed = opts.fixed?.[name];
+      if (named && !schemas.has(named)) {
+        return answer(400, wire("3F000", `schema "${named}" does not exist`));
+      }
+      if (named && fixed && fixed !== named) {
+        return answer(
+          400,
+          wire("0A000", `extension "${name}" must be installed in schema "${fixed}"`),
+        );
+      }
+      const where = named ?? fixed ?? "public";
+      schemas.add(where);
+      installed.set(name, where);
+      return answer(200, []);
+    }) as unknown as typeof fetch;
+    return { sent, installed };
+  }
+
+  const creates = (sent: readonly string[]) => sent.filter((s) => /create extension/i.test(s));
+
+  beforeEach(() => {
+    process.env.SB_MGMT_API_TOKEN = "test-token";
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    if (originalToken === undefined) delete process.env.SB_MGMT_API_TOKEN;
+    else process.env.SB_MGMT_API_TOKEN = originalToken;
+  });
+
+  it("creates btree_gist in `extensions`, where the prime keeps it: the demo's case", async () => {
+    const clone = simulatedClone({
+      installed: primeWithout("btree_gist"),
+      schemas: ["public", "extensions", "pg_catalog", "vault", "graphql"],
+    });
+
+    const results = await enforceRequiredExtensions("clone-ref", "prime-ref");
+
+    expect(creates(clone.sent)).toEqual([
+      "create extension if not exists btree_gist with schema extensions;",
+    ]);
+    expect(clone.installed.get("btree_gist")).toBe("extensions");
+    expect(results.find((r) => r.name === "btree_gist")).toMatchObject({
+      status: "installed",
+      schema: "extensions",
+      primeSchema: "extensions",
+    });
+    expect(misplacedRequiredExtensions(results)).toEqual([]);
+  });
+
+  it("gives a fresh clone each missing extension in the prime's schema", async () => {
+    // What a new Supabase project already holds, and nothing else.
+    const clone = simulatedClone({
+      installed: [
+        { name: "plpgsql", schema: "pg_catalog" },
+        { name: "pgcrypto", schema: "extensions" },
+        { name: "uuid-ossp", schema: "extensions" },
+        { name: "pg_stat_statements", schema: "extensions" },
+        { name: "supabase_vault", schema: "vault" },
+        ...FLOOR_ONLY,
+      ],
+      schemas: ["public", "extensions", "pg_catalog", "vault", "graphql"],
+    });
+
+    const results = await enforceRequiredExtensions("clone-ref", "prime-ref");
+
+    for (const e of PRIME) expect(clone.installed.get(e.name), e.name).toBe(e.schema);
+    expect(misplacedRequiredExtensions(results)).toEqual([]);
+  });
+
+  it("writes the create without a schema the clone lacks, and the control file's schema applies", async () => {
+    // Naming `vault` before it exists refuses the create; left unnamed,
+    // Postgres creates the schema the control file fixes.
+    const clone = simulatedClone({
+      installed: primeWithout("supabase_vault"),
+      schemas: ["public", "extensions", "pg_catalog", "graphql"],
+      fixed: { supabase_vault: "vault" },
+    });
+
+    const results = await enforceRequiredExtensions("clone-ref", "prime-ref");
+
+    expect(creates(clone.sent)).toEqual(["create extension if not exists supabase_vault;"]);
+    expect(results.find((r) => r.name === "supabase_vault")).toMatchObject({
+      status: "installed",
+      schema: "vault",
+      primeSchema: "vault",
+    });
+  });
+
+  it("installs it without the schema when the clone refuses the prime's, and says where it went", async () => {
+    const clone = simulatedClone({
+      installed: primeWithout("btree_gist"),
+      schemas: ["public", "extensions", "pg_catalog", "vault", "graphql"],
+      refuse: (sql) =>
+        /btree_gist with schema/.test(sql)
+          ? { status: 400, body: wire("42501", "permission denied for schema extensions") }
+          : null,
+    });
+
+    const results = await enforceRequiredExtensions("clone-ref", "prime-ref");
+
+    expect(creates(clone.sent)).toEqual([
+      "create extension if not exists btree_gist with schema extensions;",
+      "create extension if not exists btree_gist;",
+    ]);
+    const gist = results.find((r) => r.name === "btree_gist");
+    expect(gist).toMatchObject({
+      status: "installed",
+      schema: "public",
+      primeSchema: "extensions",
+    });
+    expect(gist?.schemaRefused).toContain("42501");
+    expect(misplacedRequiredExtensions(results)).toEqual([
+      { name: "btree_gist", prime: "extensions", target: "public" },
+    ]);
+  });
+
+  it("follows a control file that fixes another schema than the prime's, and reports it", async () => {
+    // A later pg_net that fixes its own schema, against a prime still on one
+    // that does not.
+    const clone = simulatedClone({
+      installed: primeWithout("pg_net"),
+      schemas: ["public", "extensions", "pg_catalog", "vault", "graphql"],
+      fixed: { pg_net: "net" },
+    });
+
+    const results = await enforceRequiredExtensions("clone-ref", "prime-ref");
+
+    expect(creates(clone.sent)).toEqual([
+      "create extension if not exists pg_net with schema public;",
+      "create extension if not exists pg_net;",
+    ]);
+    expect(results.find((r) => r.name === "pg_net")).toMatchObject({
+      status: "installed",
+      schema: "net",
+    });
+    expect(misplacedRequiredExtensions(results)).toEqual([
+      { name: "pg_net", prime: "public", target: "net" },
+    ]);
+  });
+
+  it("does not retry a failure that is not the schema's doing", async () => {
+    // A gateway failure written again without the schema could succeed, and
+    // put the extension in `public` for a reason that had nothing to do with
+    // where it goes. It is reported, and the next pass tries again.
+    const clone = simulatedClone({
+      installed: primeWithout("btree_gist"),
+      schemas: ["public", "extensions", "pg_catalog", "vault", "graphql"],
+      refuse: (sql) => (/btree_gist/.test(sql) ? { status: 503, body: "upstream timeout" } : null),
+    });
+
+    const results = await enforceRequiredExtensions("clone-ref", "prime-ref");
+
+    expect(creates(clone.sent)).toHaveLength(1);
+    const gist = results.find((r) => r.name === "btree_gist");
+    expect(gist?.status).toBe("failed");
+    expect(gist?.error).toContain("503");
+    expect(clone.installed.has("btree_gist")).toBe(false);
+  });
+
+  it("reports an extension already in another schema, and does not move it", async () => {
+    // The demo as it stands. Moving an extension moves every function a
+    // tenant's code may call by its schema: a decision, not a repair.
+    const clone = simulatedClone({
+      installed: [...primeWithout("btree_gist"), { name: "btree_gist", schema: "public" }],
+      schemas: ["public", "extensions", "pg_catalog", "vault", "graphql"],
+    });
+
+    const results = await enforceRequiredExtensions("clone-ref", "prime-ref");
+
+    expect(clone.sent.filter((s) => /create extension|alter extension/i.test(s))).toEqual([]);
+    expect(results.find((r) => r.name === "btree_gist")).toMatchObject({
+      status: "already_present",
+      schema: "public",
+      primeSchema: "extensions",
+    });
+    expect(misplacedRequiredExtensions(results)).toEqual([
+      { name: "btree_gist", prime: "extensions", target: "public" },
+    ]);
+  });
+
+  it("reads the clone's schemas only when something is missing", async () => {
+    const clone = simulatedClone({
+      installed: [...PRIME, ...FLOOR_ONLY],
+      schemas: ["public", "extensions", "pg_catalog", "vault", "graphql"],
+    });
+
+    await enforceRequiredExtensions("clone-ref", "prime-ref");
+
+    expect(clone.sent).toHaveLength(1);
+    expect(clone.sent[0]).toMatch(/from pg_extension/);
   });
 });
 
