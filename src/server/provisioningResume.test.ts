@@ -1355,7 +1355,9 @@ describe("every per-item step in the tail is budgeted, not just guarded in front
     deployEdgeFunction: "inner helper — its caller holds the budget",
     // Bounded by the prime's own extension set (9 today), and it reads the
     // clone's set once and writes only what is missing, so a converged clone
-    // does no writes at all.
+    // does no writes at all. A missing one costs a read of the clone's
+    // schemas, at most two creates (the second only when the clone refused
+    // the prime's schema) and one read of where it landed.
     enforceRequiredExtensions: "bounded by the prime's extension set, writes only what is absent",
     // Bounded by its own query: only functions whose source names the prime
     // ref are selected. Measured on the prime, 4 September 2026: four.
