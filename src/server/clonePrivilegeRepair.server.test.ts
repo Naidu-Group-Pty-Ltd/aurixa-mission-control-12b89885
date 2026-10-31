@@ -303,8 +303,8 @@ describe("the sweep compares table privileges, and takes none back", () => {
     expect(privilegeSweepIsNoteworthy(report)).toBe(true);
   });
 
-  it("ships taking back on the demo first (the owner, 31 Oct 2026)", () => {
-    expect(TABLE_GRANT_ENFORCEMENT).toBe("demo");
+  it("ships taking back on every clone, the demo having gone first (the owner, 31 Oct 2026)", () => {
+    expect(TABLE_GRANT_ENFORCEMENT).toBe("all");
   });
 });
 

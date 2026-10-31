@@ -25,10 +25,17 @@ import {
  * 139 on the tutorial demo, where `anon` held every privilege on `mh_audit`,
  * `mh_messages` and `client_fact_finds` and the prime grants it none.
  *
- * It reaches the clones in two steps, `TABLE_GRANT_ENFORCEMENT`: the demo
- * first, which holds no client's data, and every clone once the demo reads
- * back clean. Until a clone is in scope its report lists what would be taken
- * back, so the widening is reviewed against the list rather than a count.
+ * It reached the clones in two steps, `TABLE_GRANT_ENFORCEMENT`: the demo
+ * first, which holds no client's data (#472), and every clone once the demo
+ * read back clean. The demo's first pass, at 13:37 UTC on 31 Oct 2026, took
+ * back 2,143 privileges on 139 relations in one transaction, none failed.
+ * Read at 14:27, its browser roles' table and column grants were identical
+ * to the prime's, fingerprint for fingerprint. Each other clone's report had
+ * listed what its pass would take back (`wouldRevoke`): the same 65 relations
+ * on NPC Client Dashboard, NPC Test and Preflight, those and 13 more on NPC
+ * CRM Independent, with no PUBLIC revoke and no refusal on any of them. A
+ * scope short of `all` still lists, so a future narrowing is reviewed the
+ * same way.
  *
  * ## What is taken back, and what is kept
  *
@@ -80,10 +87,11 @@ import {
 export type TableGrantEnforcementScope = "off" | "demo" | "all";
 
 /**
- * The demo first (31 Oct 2026). `all` once the demo's report reads no
- * surplus after a pass, which is what widening is checked against.
+ * Every clone (31 Oct 2026), after the demo, first under `demo` (#472), read
+ * back identical to the prime and each other clone's `wouldRevoke` list was
+ * reviewed (the header above).
  */
-export const TABLE_GRANT_ENFORCEMENT: TableGrantEnforcementScope = "demo";
+export const TABLE_GRANT_ENFORCEMENT: TableGrantEnforcementScope = "all";
 
 /** What the sweep needs to know of a clone to decide. */
 export type EnforcementCandidate = {

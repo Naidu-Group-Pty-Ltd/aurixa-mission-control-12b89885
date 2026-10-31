@@ -324,8 +324,8 @@ describe("enforcesTableGrants", () => {
     expect(enforcesTableGrants("off", demo)).toBe(false);
   });
 
-  it("ships at `demo`", () => {
-    expect(TABLE_GRANT_ENFORCEMENT).toBe("demo");
+  it("ships at `all`, once the demo read back clean", () => {
+    expect(TABLE_GRANT_ENFORCEMENT).toBe("all");
   });
 });
 
