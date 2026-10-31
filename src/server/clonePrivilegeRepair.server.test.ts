@@ -32,7 +32,7 @@ vi.mock("./cloneAllowedOrigins.server", async (importOriginal) => ({
 
 const audit = vi.hoisted(() => ({
   notifyOperators: vi.fn(async (_n: Record<string, unknown>) => true),
-  writeAuditLog: vi.fn(async () => {}),
+  writeAuditLog: vi.fn(async (_e: Record<string, unknown>) => true),
 }));
 vi.mock("./audit.server", () => audit);
 
@@ -44,10 +44,11 @@ vi.mock("./tablePrivileges.pure", async (importOriginal) => {
   return { ...real, compareTableGrants: pure.compareTableGrants };
 });
 
-const { privilegeSweepIsNoteworthy, reconcileClonePrivileges, rotate } =
+const { TABLE_GRANT_REVOKE_ACTION, privilegeSweepIsNoteworthy, reconcileClonePrivileges, rotate } =
   await import("./clonePrivilegeRepair.server");
 const { RELATION_ACL_QUERY, isReadOnlySourceQuery } = await import("./schema-introspection.server");
-const { ENFORCE_TABLE_GRANTS, TABLE_GRANT_NOTICE_SOURCE } = await import("./tablePrivileges.pure");
+const { TABLE_GRANT_NOTICE_SOURCE } = await import("./tablePrivileges.pure");
+const { TABLE_GRANT_ENFORCEMENT } = await import("./tableGrantEnforcement.pure");
 
 const PRIME = "primeprimeprimeprime";
 const DASHBOARD = {
@@ -92,8 +93,14 @@ const OPEN_CLONE = [
 type Answer = unknown | Error;
 let tables: Record<string, Answer>;
 let sent: Array<{ ref: string; sql: string }>;
+/** What a batch of statements does to a project's catalogue, when a test says. */
+let onApply: ((ref: string, statements: string[]) => void) | undefined;
 
-/** The Management API: relation ACLs per project, and no function or view anywhere. */
+/**
+ * The Management API: relation ACLs per project, and no function or view
+ * anywhere. The batch helper answers as the clone's would, each statement
+ * applied, and a test may change the catalogue as the statements would.
+ */
 function wireCatalogues() {
   sql.runSqlOnProject.mockImplementation(async (ref: string, text: string) => {
     sent.push({ ref, sql: text });
@@ -101,6 +108,12 @@ function wireCatalogues() {
       const answer = tables[ref];
       if (answer instanceof Error) throw answer;
       return answer ?? [];
+    }
+    const batch = /select aurixa\.apply_ddl_batch\('(.*)'::jsonb/s.exec(text);
+    if (batch) {
+      const statements = JSON.parse(batch[1].replace(/''/g, "'")) as string[];
+      onApply?.(ref, statements);
+      return [{ r: { applied: statements.length, failures: [] } }];
     }
     return [];
   });
@@ -111,7 +124,9 @@ function wireCatalogues() {
  * the notices already delivered, newest first, answered as PostgREST would:
  * only the rows the filters match, and no more than the limit.
  */
-function fakeSupabase(opts: { ledger?: Row[]; ledgerError?: string } = {}) {
+function fakeSupabase(
+  opts: { ledger?: Row[]; ledgerError?: string; clones?: Row[]; clonesError?: string } = {},
+) {
   const reads: Array<{ table: string; filters: Array<[string, unknown]> }> = [];
   const from = (table: string) => {
     const filters: Array<[string, unknown]> = [];
@@ -125,6 +140,10 @@ function fakeSupabase(opts: { ledger?: Row[]; ledgerError?: string } = {}) {
           })),
           error: null,
         };
+      }
+      if (table === "clones") {
+        if (opts.clonesError) return { data: null, error: { message: opts.clonesError } };
+        return { data: opts.clones ?? [], error: null };
       }
       if (table === "audit_log") {
         if (opts.ledgerError) return { data: null, error: { message: opts.ledgerError } };
@@ -154,16 +173,21 @@ function fakeSupabase(opts: { ledger?: Row[]; ledgerError?: string } = {}) {
   return { client: { from } as never, reads };
 }
 
-const run = (supabase: ReturnType<typeof fakeSupabase>, extra: { dryRun?: boolean } = {}) =>
+const run = (
+  supabase: ReturnType<typeof fakeSupabase>,
+  extra: { dryRun?: boolean; tableGrantScope?: "off" | "demo" | "all" } = {},
+) =>
   reconcileClonePrivileges(supabase.client, {
     deadlineAt: Date.now() + 60_000,
     now: 0,
+    tableGrantScope: "off",
     ...extra,
   });
 
 beforeEach(() => {
   vi.clearAllMocks();
   sent = [];
+  onApply = undefined;
   tables = {
     [PRIME]: PRIME_TABLES,
     [DASHBOARD.projectRef]: OPEN_CLONE,
@@ -274,8 +298,8 @@ describe("the sweep compares table privileges, and takes none back", () => {
     expect(privilegeSweepIsNoteworthy(report)).toBe(true);
   });
 
-  it("is off: the switch an enforcement would sit behind", () => {
-    expect(ENFORCE_TABLE_GRANTS).toBe(false);
+  it("ships taking back on the demo first (the owner, 31 Oct 2026)", () => {
+    expect(TABLE_GRANT_ENFORCEMENT).toBe("demo");
   });
 });
 
@@ -467,5 +491,185 @@ describe("privilegeSweepIsNoteworthy", () => {
     const report = await run(fakeSupabase());
     expect(report.tables.clones.every((c) => c.read === "ok" && c.surplus === 0)).toBe(true);
     expect(privilegeSweepIsNoteworthy(report)).toBe(false);
+  });
+});
+
+describe("taking the surplus back (the owner, 31 Oct 2026)", () => {
+  /** NPC Client Dashboard tagged as the demo: no Stripe customer, no plan. */
+  const DEMO_RECORD = {
+    id: DASHBOARD.cloneId,
+    billing_stripe_customer_id: null,
+    entitled_plan_slug: null,
+    tags: ["demo"],
+  };
+  const CUSTOMER_RECORD = {
+    id: TEST.cloneId,
+    billing_stripe_customer_id: "cus_123",
+    entitled_plan_slug: "launch",
+    tags: [],
+  };
+  const writesTo = (ref: string) =>
+    sent.filter((s) => s.ref === ref && !isReadOnlySourceQuery(s.sql)).map((s) => s.sql);
+  const revokeRows = () =>
+    audit.writeAuditLog.mock.calls
+      .map((c) => c[0] as Record<string, unknown>)
+      .filter((e) => e.action === TABLE_GRANT_REVOKE_ACTION);
+
+  beforeEach(() => {
+    // `clearAllMocks` keeps an implementation a test set; this block's tests
+    // each start from an audit log that files every row.
+    audit.writeAuditLog.mockImplementation(async () => true);
+    // The statements do what they say: the clone ends holding what the prime holds.
+    onApply = (ref) => {
+      tables[ref] = PRIME_TABLES;
+    };
+  });
+
+  it("takes a demo's surplus back, files the undo first, and reports the reading after", async () => {
+    const report = await run(fakeSupabase({ clones: [DEMO_RECORD, CUSTOMER_RECORD] }), {
+      tableGrantScope: "demo",
+    });
+
+    expect(report.tables.mode).toBe("enforcing_demo");
+    const dashboard = report.tables.clones[0];
+    expect(dashboard).toMatchObject({
+      cloneId: "c1",
+      read: "ok",
+      surplus: 0,
+      relations: 0,
+      enforcement: {
+        done: "revoked",
+        privileges: 24,
+        relations: 2,
+        applied: 2,
+        failed: 0,
+        before: { surplus: 24, relations: 2 },
+      },
+    });
+
+    // One statement a relation, each a `do` block, revoking only the surplus.
+    const batch = writesTo(DASHBOARD.projectRef).find((t) =>
+      t.startsWith("select aurixa.apply_ddl_batch("),
+    );
+    expect(batch).toBeDefined();
+    expect(batch).toContain(
+      "revoke INSERT, UPDATE, DELETE, TRUNCATE, SELECT, REFERENCES, TRIGGER, MAINTAIN on public.client_address_history from anon;",
+    );
+    expect(batch).toContain(
+      "revoke INSERT, UPDATE, DELETE, TRUNCATE on public.suburb_directory from authenticated;",
+    );
+    expect(batch).not.toMatch(/suburb_directory from anon;[^"]*SELECT/);
+
+    // The undo is filed before anything is sent, and the outcome after.
+    const rows = revokeRows();
+    expect(rows.map((r) => (r.metadata as { stage: string }).stage)).toEqual([
+      "planned",
+      "applied",
+    ]);
+    const planned = rows[0].metadata as {
+      relations: Array<{ relation: string; inverse: string[] }>;
+    };
+    expect(planned.relations.map((r) => r.relation).sort()).toEqual([
+      "public.client_address_history",
+      "public.suburb_directory",
+    ]);
+    expect(planned.relations[0].inverse[0]).toMatch(/^grant .* to anon;$/);
+    const plannedAt =
+      audit.writeAuditLog.mock.invocationCallOrder[
+        audit.writeAuditLog.mock.calls.findIndex(
+          (c) => (c[0] as { metadata?: { stage?: string } }).metadata?.stage === "planned",
+        )
+      ];
+    const firstBatchAt =
+      sql.runSqlOnProject.mock.invocationCallOrder[
+        sql.runSqlOnProject.mock.calls.findIndex((c) =>
+          String(c[1]).startsWith("select aurixa.apply_ddl_batch("),
+        )
+      ];
+    expect(plannedAt).toBeLessThan(firstBatchAt);
+
+    // The customer is not a demo: it is read, listed, and sent nothing.
+    expect(writesTo(TEST.projectRef)).toEqual([]);
+    expect(privilegeSweepIsNoteworthy(report)).toBe(true);
+  });
+
+  it("lists what would be taken back on a clone outside the scope, and sends it nothing", async () => {
+    const report = await run(
+      fakeSupabase({ clones: [{ ...DEMO_RECORD, tags: [] }, CUSTOMER_RECORD] }),
+      { tableGrantScope: "demo" },
+    );
+    const dashboard = report.tables.clones[0];
+    expect(dashboard).toMatchObject({ read: "ok", surplus: 24 });
+    expect(dashboard.read === "ok" && dashboard.wouldRevoke).toEqual([
+      "public.client_address_history: anon INSERT, UPDATE, DELETE, TRUNCATE, SELECT, REFERENCES, TRIGGER, MAINTAIN; authenticated INSERT, UPDATE, DELETE, TRUNCATE, SELECT, REFERENCES, TRIGGER, MAINTAIN",
+      "public.suburb_directory: anon INSERT, UPDATE, DELETE, TRUNCATE; authenticated INSERT, UPDATE, DELETE, TRUNCATE",
+    ]);
+    expect(dashboard.read === "ok" && dashboard.enforcement).toBeUndefined();
+    expect(writesTo(DASHBOARD.projectRef)).toEqual([]);
+    expect(revokeRows()).toEqual([]);
+  });
+
+  it("takes nothing back when the records that decide the demo scope cannot be read", async () => {
+    const report = await run(
+      fakeSupabase({ clones: [DEMO_RECORD], clonesError: "permission denied" }),
+      { tableGrantScope: "demo" },
+    );
+    expect(report.tables.scopeUnread).toBe("permission denied");
+    expect(writesTo(DASHBOARD.projectRef)).toEqual([]);
+    expect(privilegeSweepIsNoteworthy(report)).toBe(true);
+  });
+
+  it("takes nothing back when the undo cannot be filed", async () => {
+    audit.writeAuditLog.mockImplementation(async (e: Record<string, unknown>) =>
+      e.action === TABLE_GRANT_REVOKE_ACTION ? false : true,
+    );
+    const report = await run(fakeSupabase(), { tableGrantScope: "all" });
+    expect(report.tables.clones[0]).toMatchObject({
+      read: "ok",
+      surplus: 24,
+      enforcement: { done: "withheld", why: expect.stringContaining("could not be filed") },
+    });
+    expect(writesTo(DASHBOARD.projectRef)).toEqual([]);
+  });
+
+  it("plans and sends nothing on a dry run", async () => {
+    const report = await run(fakeSupabase(), { tableGrantScope: "all", dryRun: true });
+    expect(report.tables.clones[0]).toMatchObject({
+      read: "ok",
+      surplus: 24,
+      enforcement: { done: "planned", privileges: 24, relations: 2 },
+    });
+    const planned = report.tables.clones[0];
+    expect(
+      planned.read === "ok" &&
+        planned.enforcement?.done === "planned" &&
+        planned.enforcement.sample[0],
+    ).toMatch(/^do \$mc_table_grants\$/);
+    for (const s of sent) expect(isReadOnlySourceQuery(s.sql), s.sql.slice(0, 60)).toBe(true);
+    expect(revokeRows()).toEqual([]);
+  });
+
+  it("keeps the reading before, and says so, when the clone cannot be read after", async () => {
+    onApply = (ref) => {
+      tables[ref] = new Error("SQL execution failed: 503");
+    };
+    const report = await run(fakeSupabase(), { tableGrantScope: "all" });
+    expect(report.tables.clones[0]).toMatchObject({
+      read: "ok",
+      surplus: 24,
+      enforcement: {
+        done: "revoked",
+        errors: [expect.stringContaining("could not be read after")],
+      },
+    });
+  });
+
+  it("reaches every clone at `all`, and leaves one already matching alone", async () => {
+    const report = await run(fakeSupabase(), { tableGrantScope: "all" });
+    expect(report.tables.mode).toBe("enforcing_all");
+    expect(report.tables.clones[0]).toMatchObject({ cloneId: "c1", surplus: 0 });
+    expect(report.tables.clones[1]).toMatchObject({ cloneId: "c2", surplus: 0 });
+    expect(report.tables.clones[1]).not.toHaveProperty("enforcement");
+    expect(writesTo(TEST.projectRef)).toEqual([]);
   });
 });

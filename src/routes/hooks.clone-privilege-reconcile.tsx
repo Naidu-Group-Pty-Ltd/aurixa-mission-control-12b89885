@@ -17,8 +17,9 @@ import { verifyCronAuth } from "@/server/cron-auth.server";
 //
 // It also compares the TABLE privileges of `anon` and `authenticated` on each
 // clone with the prime's, and reports what the clone gives and the prime does
-// not under `tables`. Report-only, by the owner's decision of 28 Oct 2026: it
-// revokes nothing (`tablePrivileges.pure.ts`).
+// not under `tables`. It reported only, by the owner's decision of 28 Oct 2026,
+// until the owner chose on 31 Oct 2026 to take the surplus back: on the demo
+// first, then on every clone (`tableGrantEnforcement.pure.ts`).
 //
 // Body (all optional): `{ "dryRun": true }` plans without writing and returns
 // a sample of the statements; `{ "cloneId": "…" }` limits the run to one clone.

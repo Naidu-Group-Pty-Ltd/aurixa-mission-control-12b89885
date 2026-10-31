@@ -2237,6 +2237,31 @@ export async function convergeClonePrivileges(
   return result;
 }
 
+/**
+ * Run the statements that take a clone's surplus table privileges back
+ * (`tableGrantEnforcement.pure.ts`): one `do` block a relation, each in a
+ * subtransaction of its own through the batch helper, and the budget checked
+ * between batches. The plan is re-derived from both catalogues on every pass,
+ * so a pass the budget stops loses nothing.
+ */
+export async function applyTableGrantRevokes(
+  cloneRef: string,
+  statements: readonly string[],
+  deadlineAt?: number | null,
+): Promise<BatchApplyResult> {
+  const own = ownProjectRef();
+  if (own && cloneRef.toLowerCase() === own) {
+    throw new Error(
+      `Refusing to revoke table privileges on this deployment's own project (${own}).`,
+    );
+  }
+  if (statements.length === 0) return { applied: 0, failed: 0, errors: [] };
+  await ensureApplyHelper(cloneRef);
+  return applyStatements(cloneRef, "table_privileges", statements, 50, (about) => {
+    if (pastDeadline(deadlineAt)) throw new BudgetPause(about);
+  });
+}
+
 // ─── Table privileges, read for the sweep's report ───────────────────
 
 /**
